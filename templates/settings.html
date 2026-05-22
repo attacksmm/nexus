@@ -294,13 +294,14 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
         <div class="env-info panel">
           <p class="env-info__text">
             Значения переменных <strong>никогда не передаются</strong> клиенту — только имена ключей.<br>
-            Загрузите <code>.env</code> файл для обновления. После изменения <code>NEXUS_SECRET</code> требуется перезапуск сервиса.
+            Принимается любой текстовый файл — скачайте шаблон, заполните, загрузите обратно без переименования.<br>
+            Все переменные применяются <strong>сразу без перезапуска</strong> сервиса.
           </p>
         </div>
         <div class="settings-upload-block">
           <label class="upload-zone" id="envUploadZone">
-            <input type="file" id="envFileInput" accept=".env,text/plain" hidden />
-            <span id="envZoneText">Перетащите .env файл или нажмите для выбора</span>
+            <input type="file" id="envFileInput" hidden />
+            <span id="envZoneText">Перетащите файл или нажмите для выбора</span>
           </label>
           <p id="envStatus" class="status-line"></p>
           <div style="display:flex;gap:8px;margin-top:8px">
@@ -308,10 +309,11 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
             <button id="envTemplateBtn" class="btn btn--ghost" type="button">↓ Шаблон .env</button>
           </div>
         </div>
-        <div style="margin-top:16px">
-          <p class="eyebrow" style="margin-bottom:8px">Текущие ключи</p>
-          <div id="envKeysList" class="env-keys"></div>
+        <div style="margin-top:16px;display:flex;align-items:baseline;gap:12px;margin-bottom:8px">
+          <p class="eyebrow" style="margin:0">Текущие ключи</p>
+          <span id="envLastUpdated" style="color:var(--text-subtle);font-size:.76rem"></span>
         </div>
+        <div id="envKeysList" class="env-keys"></div>
       </section>
 
     </main>
@@ -541,9 +543,15 @@ let envFile = null;
 
 async function loadEnvKeys() {
   const res = await fetch(RP + "/api/settings/env");
+  if (res.status === 401) { location.href = RP + "/login"; return; }
   const data = await res.json();
   const el = document.getElementById("envKeysList");
-  if (!data.keys?.length) { el.innerHTML = '<span style="color:var(--text-subtle);font-size:.82rem">Нет переменных</span>'; return; }
+  const lu = document.getElementById("envLastUpdated");
+  lu.textContent = data.last_updated ? `Обновлено: ${data.last_updated}` : "";
+  if (!data.keys?.length) {
+    el.innerHTML = '<span style="color:var(--text-subtle);font-size:.82rem">Нет переменных</span>';
+    return;
+  }
   el.innerHTML = data.keys.map(k => `<span class="env-key">${esc(k)}</span>`).join("");
 }
 
@@ -574,12 +582,28 @@ document.getElementById("envUploadBtn").addEventListener("click", async () => {
   fd.append("file", envFile);
   const st = document.getElementById("envStatus");
   st.textContent = "Применяю...";
+  st.className = "status-line";
+
   const res = await fetch(RP + "/api/settings/env/upload", { method: "POST", body: fd });
   const data = await res.json();
-  if (!res.ok) { st.textContent = data.error; st.className = "status-line status-line--err"; return; }
+  if (!res.ok) {
+    st.textContent = data.error;
+    st.className = "status-line status-line--err";
+    return;
+  }
+
+  const changedSecret = data.keys.includes("NEXUS_SECRET");
+  if (changedSecret) {
+    // Сессия аннулирована — новый секрет, старый JWT невалиден
+    st.textContent = `Применено ${data.count} переменных. NEXUS_SECRET изменён — войдите заново.`;
+    st.className = "status-line status-line--ok";
+    setTimeout(() => { location.href = RP + "/login"; }, 2500);
+    return;
+  }
+
   st.textContent = `Применено ${data.count} переменных: ${data.keys.join(", ")}`;
   st.className = "status-line status-line--ok";
-  loadEnvKeys();
+  await loadEnvKeys();
 });
 
 // ── Utils ─────────────────────────────────────────────────────────────────────

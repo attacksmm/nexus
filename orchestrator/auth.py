@@ -194,51 +194,100 @@ async def api_env_list(request: Request):
     if not require_admin(user):
         return _forbidden()
     keys = _parse_env_keys()
-    return {"keys": keys}
+    last_updated = None
+    if ENV_PATH.exists():
+        import datetime
+        mtime = ENV_PATH.stat().st_mtime
+        last_updated = datetime.datetime.fromtimestamp(
+            mtime, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+    return {"keys": keys, "last_updated": last_updated}
 
 
 @router.post("/api/settings/env/upload")
 async def api_env_upload(request: Request):
-    """Upload a .env file — values never returned to client."""
+    """Принимает любой текстовый .env файл (любое имя/расширение).
+    Значения никогда не возвращаются клиенту.
+    """
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
-    from fastapi import File, UploadFile
     form = await request.form()
     file = form.get("file")
     if not file:
         return _err("Файл не передан")
+
     content = (await file.read()).decode("utf-8", errors="replace")
-    lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
-    parsed = {}
-    for line in lines:
-        if "=" in line:
-            k, _, v = line.partition("=")
-            parsed[k.strip()] = v.strip().strip('"').strip("'")
+    parsed = _parse_env_content(content)
+
     if not parsed:
-        return _err("Файл пустой или не содержит переменных")
-    # write
-    with open(ENV_PATH, "w") as f:
+        return _err("Файл не содержит переменных формата KEY=value")
+
+    # перезаписываем .env (чисто, без комментариев и пустых строк)
+    with open(ENV_PATH, "w", encoding="utf-8") as f:
         for k, v in parsed.items():
             f.write(f"{k}={v}\n")
-    # применяем все переменные без перезапуска
-    # NEXUS_SECRET тоже применяется — _secret() читает os.environ динамически
+
+    # применяем к процессу без перезапуска
     import os
     for k, v in parsed.items():
         os.environ[k] = v
+
     return {"ok": True, "count": len(parsed), "keys": list(parsed.keys())}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _parse_env_content(content: str) -> dict[str, str]:
+    """Парсит .env файл любого формата:
+    - Игнорирует строки-комментарии (начинаются с #)
+    - Убирает инлайн-комментарии: KEY=value  # описание → value
+    - Обрабатывает кавычки: KEY="value" → value
+    - Пропускает строки без '='
+    - Пропускает ключи с пустым значением
+    """
+    parsed = {}
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, rest = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        # убираем инлайн-комментарий (не внутри кавычек)
+        value = _strip_inline_comment(rest)
+        # убираем кавычки
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        # пропускаем пустые значения (незаполненные строки шаблона)
+        if not value:
+            continue
+        parsed[key] = value
+    return parsed
+
+
+def _strip_inline_comment(s: str) -> str:
+    """Убирает # комментарий в конце значения если он вне кавычек."""
+    s = s.strip()
+    in_q = None
+    for i, ch in enumerate(s):
+        if ch in ('"', "'"):
+            if in_q is None:
+                in_q = ch
+            elif in_q == ch:
+                in_q = None
+        elif ch == "#" and in_q is None:
+            return s[:i].strip()
+    return s
+
+
 def _parse_env_keys() -> list[str]:
     if not ENV_PATH.exists():
         return []
-    keys = []
-    for line in ENV_PATH.read_text().splitlines():
-        if line.strip() and not line.startswith("#") and "=" in line:
-            keys.append(line.partition("=")[0].strip())
-    return keys
+    return list(_parse_env_content(ENV_PATH.read_text(encoding="utf-8")).keys())
 
 
 async def _get_user_by_id(uid: int) -> str | None:
