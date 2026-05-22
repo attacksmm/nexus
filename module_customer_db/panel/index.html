@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>База клиентов</title>
+  <style>
+    :root {
+      font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --bg:           #060606;
+      --panel:        #101010;
+      --panel-strong: #171717;
+      --panel-soft:   #1d1d1d;
+      --text:         #f2f2f2;
+      --text-muted:   #bababa;
+      --text-subtle:  #848484;
+      --border:       #2d2d2d;
+      --border-mid:   #3a3a3a;
+      --border-strong:#545454;
+      --accent-bg:    #f4f4f4;
+      --accent-text:  #080808;
+      --ok:    #9fe0aa;
+      --ok-bg: #102417;
+      --ok-bd: #315f3a;
+      --bad:    #ffc2ca;
+      --bad-bg: #251315;
+      --bad-bd: #5f3137;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; }
+    button, input, textarea, select { font: inherit; }
+
+    .shell {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* toolbar */
+    .toolbar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+    }
+    .toolbar__stats { margin-left: auto; color: var(--text-subtle); font-size: 0.78rem; }
+
+    .search-input {
+      flex: 1;
+      max-width: 280px;
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 1px solid var(--border-strong);
+      background: #090909;
+      color: var(--text);
+    }
+
+    /* table */
+    .table-wrap {
+      flex: 1;
+      overflow: auto;
+      scrollbar-color: var(--border-strong) #080808;
+      scrollbar-width: thin;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { color: var(--text-subtle); font-weight: 500; background: var(--panel); position: sticky; top: 0; }
+    tr:hover td { background: var(--panel-strong); }
+    td .tag { display:inline-block; padding:1px 6px; border:1px solid var(--border-mid); color:var(--text-subtle); font-size:0.72rem; margin:0 2px 2px 0; }
+    .td-actions { display:flex; gap:4px; }
+
+    /* buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 30px; padding: 5px 11px;
+      border: 1px solid var(--border-strong); background: var(--panel-strong);
+      color: var(--text); cursor: pointer; font-size: 0.82rem; white-space: nowrap;
+    }
+    .btn:disabled { opacity: 0.35; cursor: default; }
+    .btn--primary { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-bg); }
+    .btn--danger  { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad); }
+    .btn--xs { min-height: 24px; padding: 2px 7px; font-size: 0.76rem; }
+
+    /* pagination */
+    .pagination {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-top: 1px solid var(--border);
+      background: var(--panel); font-size: 0.8rem; color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .pagination__spacer { flex: 1; }
+
+    /* overlay */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.72);
+      display: grid; place-items: center; padding: 16px; z-index: 50;
+    }
+    .dialog {
+      width: min(480px, 100%); background: var(--panel);
+      border: 1px solid var(--border-strong);
+      box-shadow: 0 24px 80px rgba(0,0,0,.55);
+    }
+    .dialog__head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border);
+    }
+    .dialog__head h2 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+    .dialog__body { padding: 14px; display: grid; gap: 10px; }
+    .dialog__foot {
+      padding: 10px 14px; border-top: 1px solid var(--border);
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    .form-label { display: grid; gap: 4px; color: var(--text-muted); font-size: 0.8rem; }
+    .form-input {
+      width: 100%; min-height: 34px; padding: 6px 9px;
+      border: 1px solid var(--border-strong); background: #090909; color: var(--text);
+    }
+    .form-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .status-line { margin: 0; color: var(--text-subtle); font-size: 0.78rem; min-height: 16px; }
+    .status-line--ok  { color: var(--ok); }
+    .status-line--err { color: var(--bad); }
+
+    .eyebrow { margin: 0 0 2px; color: var(--text-subtle); text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.64rem; }
+
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="toolbar">
+    <button id="addBtn" class="btn btn--primary" type="button">+ Добавить</button>
+    <input id="searchInput" class="search-input" type="search" placeholder="Поиск по имени, телефону, email, тегам…" />
+    <button id="searchBtn" class="btn" type="button">Найти</button>
+    <button id="refreshBtn" class="btn" type="button">↻</button>
+    <span id="statsLine" class="toolbar__stats"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Имя</th>
+          <th>Телефон</th>
+          <th>Email</th>
+          <th>Источник</th>
+          <th>Теги</th>
+          <th>Создан</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <button id="prevBtn" class="btn btn--xs" type="button" disabled>‹</button>
+    <span id="pageInfo">—</span>
+    <button id="nextBtn" class="btn btn--xs" type="button" disabled>›</button>
+    <span class="pagination__spacer"></span>
+    <span id="totalInfo"></span>
+  </div>
+</div>
+
+<div id="formOverlay" class="overlay" hidden>
+  <div class="dialog">
+    <div class="dialog__head">
+      <div>
+        <p class="eyebrow">Клиент</p>
+        <h2 id="formTitle">Новый клиент</h2>
+      </div>
+      <button id="formCloseBtn" class="btn btn--xs" type="button">×</button>
+    </div>
+    <div class="dialog__body">
+      <input id="formId" type="hidden" />
+      <div class="form-2col">
+        <label class="form-label">Имя <input id="fName" class="form-input" placeholder="Иван Иванов" required /></label>
+        <label class="form-label">Телефон <input id="fPhone" class="form-input" placeholder="+7 999 000 00 00" /></label>
+      </div>
+      <div class="form-2col">
+        <label class="form-label">Email <input id="fEmail" class="form-input" type="email" placeholder="ivan@example.com" /></label>
+        <label class="form-label">Источник <input id="fSource" class="form-input" placeholder="ВКонтакте" /></label>
+      </div>
+      <label class="form-label">Теги (через запятую) <input id="fTags" class="form-input" placeholder="vip, hot, new" /></label>
+      <label class="form-label">Примечание <textarea id="fNotes" class="form-input" rows="3" style="resize:vertical;"></textarea></label>
+      <p id="formStatus" class="status-line"></p>
+    </div>
+    <div class="dialog__foot">
+      <button id="formSaveBtn" class="btn btn--primary" type="button">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "/m/customer-db/api";
+const LIMIT = 50;
+let offset = 0, total = 0, query = "";
+
+const $ = id => document.getElementById(id);
+
+// ── Load & render ──────────────────────────────────────────────
+
+async function load() {
+  const url = `${API}/customers?limit=${LIMIT}&offset=${offset}&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  total = data.total;
+
+  const tbody = $("tableBody");
+  if (!data.items.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-subtle);text-align:center;padding:24px;">Нет данных</td></tr>';
+  } else {
+    tbody.innerHTML = data.items.map(c => `
+      <tr>
+        <td style="color:var(--text-subtle)">${c.id}</td>
+        <td>${esc(c.name)}</td>
+        <td>${esc(c.phone)}</td>
+        <td>${esc(c.email)}</td>
+        <td>${esc(c.source)}</td>
+        <td>${c.tags ? c.tags.split(",").map(t => `<span class="tag">${esc(t.trim())}</span>`).join("") : ""}</td>
+        <td style="color:var(--text-subtle)">${c.created.slice(0,10)}</td>
+        <td class="td-actions">
+          <button class="btn btn--xs" onclick="editCustomer(${c.id})">✎</button>
+          <button class="btn btn--xs btn--danger" onclick="delCustomer(${c.id})">×</button>
+        </td>
+      </tr>`).join("");
+  }
+
+  $("pageInfo").textContent = `${offset + 1}–${Math.min(offset + LIMIT, total)}`;
+  $("totalInfo").textContent = `Всего: ${total}`;
+  $("prevBtn").disabled = offset === 0;
+  $("nextBtn").disabled = offset + LIMIT >= total;
+  loadStats();
+}
+
+async function loadStats() {
+  const res = await fetch(`${API}/stats`);
+  const s = await res.json();
+  $("statsLine").textContent = `Всего: ${s.total} · Сегодня: ${s.today}`;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ── Pagination ─────────────────────────────────────────────────
+
+$("prevBtn").addEventListener("click", () => { offset = Math.max(0, offset - LIMIT); load(); });
+$("nextBtn").addEventListener("click", () => { offset += LIMIT; load(); });
+
+// ── Search ─────────────────────────────────────────────────────
+
+$("searchBtn").addEventListener("click", () => { query = $("searchInput").value.trim(); offset = 0; load(); });
+$("searchInput").addEventListener("keydown", e => { if (e.key === "Enter") { query = $("searchInput").value.trim(); offset = 0; load(); } });
+$("refreshBtn").addEventListener("click", load);
+
+// ── Form dialog ────────────────────────────────────────────────
+
+$("addBtn").addEventListener("click", openForm);
+$("formCloseBtn").addEventListener("click", closeForm);
+$("formOverlay").addEventListener("click", e => { if (e.target === $("formOverlay")) closeForm(); });
+
+function openForm(customer = null) {
+  $("formId").value  = customer?.id ?? "";
+  $("fName").value   = customer?.name  ?? "";
+  $("fPhone").value  = customer?.phone ?? "";
+  $("fEmail").value  = customer?.email ?? "";
+  $("fSource").value = customer?.source ?? "";
+  $("fTags").value   = customer?.tags  ?? "";
+  $("fNotes").value  = customer?.notes ?? "";
+  $("formTitle").textContent = customer ? `Клиент #${customer.id}` : "Новый клиент";
+  $("formStatus").textContent = "";
+  $("formStatus").className = "status-line";
+  $("formOverlay").hidden = false;
+  $("fName").focus();
+}
+
+function closeForm() { $("formOverlay").hidden = true; }
+
+async function editCustomer(id) {
+  const res = await fetch(`${API}/customers/${id}`);
+  if (!res.ok) return;
+  openForm(await res.json());
+}
+
+async function delCustomer(id) {
+  if (!confirm("Удалить клиента?")) return;
+  await fetch(`${API}/customers/${id}`, { method: "DELETE" });
+  load();
+}
+
+$("formSaveBtn").addEventListener("click", async () => {
+  const id = $("formId").value;
+  const name = $("fName").value.trim();
+  if (!name) { $("fName").focus(); return; }
+
+  const body = {
+    name, phone: $("fPhone").value.trim(), email: $("fEmail").value.trim(),
+    source: $("fSource").value.trim(), tags: $("fTags").value.trim(),
+    notes: $("fNotes").value.trim(),
+  };
+
+  const url = id ? `${API}/customers/${id}` : `${API}/customers`;
+  const method = id ? "PUT" : "POST";
+
+  const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    $("formStatus").textContent = e.detail || "Ошибка сохранения";
+    $("formStatus").className = "status-line status-line--err";
+    return;
+  }
+  closeForm();
+  load();
+});
+
+// init
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "id": "customer-db",
+  "name": "База клиентов",
+  "version": "1.0.0",
+  "description": "Управление базой данных клиентов с REST API"
+}
