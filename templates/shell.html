@@ -3,23 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="rp" content="{{ rp }}" />
   <title>Nexus</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23060606'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23f2f2f2' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23f2f2f2'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="/static/styles.css?v=1" />
+  <link rel="stylesheet" href="{{ rp }}/static/styles.css?v=2" />
 </head>
 <body>
 <div class="app-shell">
 
   <header class="topbar">
     <div class="topbar__path">
-      <span class="topbar__brand">Nexus</span>
+      <a class="topbar__brand" href="{{ rp }}/">Nexus</a>
       <span class="topbar__sep">/</span>
       <span id="topbarCrumb" class="topbar__crumb">Оркестратор</span>
     </div>
     <div class="topbar__actions">
+      {% if user.role == 'admin' %}
+      <a href="{{ rp }}/settings" class="btn btn--sm btn--ghost" title="Настройки">⚙</a>
+      {% endif %}
       <button id="uploadBtn" class="btn btn--sm" type="button" title="Загрузить модуль">+ Модуль</button>
-      <form method="post" action="/logout" style="display:inline">
-        <button class="btn btn--sm btn--ghost" type="submit" title="Выйти">{{ user }} ×</button>
+      <form method="post" action="{{ rp }}/logout" style="display:inline">
+        <button class="btn btn--sm btn--ghost" type="submit" title="Выйти">{{ user.username }} ×</button>
       </form>
     </div>
   </header>
@@ -32,7 +36,8 @@
       </div>
       <div id="moduleList" class="module-list">
         {% for m in modules %}
-        <button class="module-item" data-id="{{ m.id }}" data-status="{{ m.status }}" type="button">
+        <button class="module-item" data-id="{{ m.id }}" data-status="{{ m.status }}"
+                data-name="{{ m.name }}" data-version="{{ m.version }}" type="button">
           <span class="module-item__dot module-item__dot--{{ m.status }}"></span>
           <span class="module-item__name">{{ m.name }}</span>
           <span class="module-item__ver">v{{ m.version }}</span>
@@ -53,14 +58,15 @@
       </div>
 
       <div id="contentModule" class="module-view" hidden>
-        <div class="module-toolbar" id="moduleToolbar">
+        <div class="module-toolbar">
           <div class="module-toolbar__info">
+            <button id="mtDocs" class="btn btn--icon btn--sm" type="button" title="Документация модуля">?</button>
             <span id="mtName" class="module-toolbar__name"></span>
             <span id="mtVersion" class="module-toolbar__ver"></span>
             <span id="mtStatus" class="module-toolbar__status"></span>
           </div>
           <div class="module-toolbar__actions">
-            <button id="mtPause" class="btn btn--sm" type="button">Пауза</button>
+            <button id="mtPause"  class="btn btn--sm" type="button">Пауза</button>
             <button id="mtResume" class="btn btn--sm" type="button" hidden>Возобновить</button>
             <button id="mtUnload" class="btn btn--sm btn--danger" type="button">Выгрузить</button>
           </div>
@@ -72,13 +78,11 @@
   </div>
 </div>
 
+<!-- Upload dialog -->
 <div id="uploadOverlay" class="overlay" hidden>
   <div class="dialog">
     <div class="dialog__head">
-      <div>
-        <p class="eyebrow">Загрузка</p>
-        <h2>Новый модуль</h2>
-      </div>
+      <div><p class="eyebrow">Загрузка</p><h2>Новый модуль</h2></div>
       <button id="uploadCloseBtn" class="btn btn--sm btn--ghost" type="button">×</button>
     </div>
     <div class="dialog__body">
@@ -94,6 +98,17 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=1" type="module"></script>
+<!-- Docs dialog -->
+<div id="docsOverlay" class="overlay" hidden>
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <div><p class="eyebrow">Документация</p><h2 id="docsTitle">Модуль</h2></div>
+      <button id="docsCloseBtn" class="btn btn--sm btn--ghost" type="button">×</button>
+    </div>
+    <div class="dialog__body dialog__body--scroll" id="docsBody"></div>
+  </div>
+</div>
+
+<script src="{{ rp }}/static/app.js?v=2" type="module"></script>
 </body>
 </html>

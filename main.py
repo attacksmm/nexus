@@ -1,4 +1,3 @@
-import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,7 +7,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from orchestrator.auth import ensure_default_user, router as auth_router, verify_token_from_request
+from orchestrator.auth import (
+    ensure_default_users, require_admin,
+    router as auth_router, verify_token_from_request,
+)
 from orchestrator.core import ModuleManager, UPLOADS_DIR
 from orchestrator.db import init_db, update_module_status
 
@@ -22,7 +24,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await ensure_default_user()
+    await ensure_default_users()
     await manager.restore_active_modules(app)
     yield
 
@@ -32,34 +34,58 @@ app.include_router(auth_router)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
-def _auth_redirect():
-    return RedirectResponse("/login", status_code=303)
+def _rp(request: Request) -> str:
+    return request.scope.get("root_path", "")
 
 
-# ── Pages ──────────────────────────────────────────────────────────────────────
+def _auth_redirect(request: Request):
+    return RedirectResponse(_rp(request) + "/login", status_code=303)
+
+
+def _unauth_json():
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+
+# ── Pages ───────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     user = await verify_token_from_request(request)
     if not user:
-        return _auth_redirect()
+        return _auth_redirect(request)
     modules = await manager.list_modules()
-    return templates.TemplateResponse("shell.html", {"request": request, "user": user, "modules": modules})
+    return templates.TemplateResponse("shell.html", {
+        "request": request, "user": user, "modules": modules, "rp": _rp(request),
+    })
 
 
-# ── API ────────────────────────────────────────────────────────────────────────
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    user = await verify_token_from_request(request)
+    if not user:
+        return _auth_redirect(request)
+    if not require_admin(user):
+        return RedirectResponse(_rp(request) + "/", status_code=303)
+    return templates.TemplateResponse("settings.html", {
+        "request": request, "user": user, "rp": _rp(request),
+    })
+
+
+# ── Modules API ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/modules")
 async def api_list(request: Request):
-    if not await verify_token_from_request(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user = await verify_token_from_request(request)
+    if not user:
+        return _unauth_json()
     return await manager.list_modules()
 
 
 @app.post("/api/modules/upload")
 async def api_upload(request: Request, file: UploadFile = File(...)):
-    if not await verify_token_from_request(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user = await verify_token_from_request(request)
+    if not user or user["role"] not in ("admin", "editor"):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     if not file.filename.endswith(".zip"):
         return JSONResponse({"error": "Только .zip файлы"}, status_code=400)
 
@@ -80,8 +106,9 @@ async def api_upload(request: Request, file: UploadFile = File(...)):
 
 @app.post("/api/modules/{module_id}/unload")
 async def api_unload(module_id: str, request: Request):
-    if not await verify_token_from_request(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     try:
         await manager.unload(module_id, app)
     except Exception as e:
@@ -91,8 +118,9 @@ async def api_unload(module_id: str, request: Request):
 
 @app.post("/api/modules/{module_id}/pause")
 async def api_pause(module_id: str, request: Request):
-    if not await verify_token_from_request(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user = await verify_token_from_request(request)
+    if not user or user["role"] not in ("admin", "editor"):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     try:
         await manager.pause(module_id, app)
     except Exception as e:
@@ -102,8 +130,9 @@ async def api_pause(module_id: str, request: Request):
 
 @app.post("/api/modules/{module_id}/resume")
 async def api_resume(module_id: str, request: Request):
-    if not await verify_token_from_request(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user = await verify_token_from_request(request)
+    if not user or user["role"] not in ("admin", "editor"):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     try:
         await manager.resume(module_id, app)
     except Exception as e:

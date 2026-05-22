@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Документация customer-db</title></head>
+<body>
+<h2>База клиентов v2.0.0</h2>
+<p>Модуль для хранения клиентов в SQLite. Поддерживает несколько изолированных таблиц. Каждая запись содержит три поля: <code>id</code>, <code>platform_id</code>, <code>custom_fields</code>.</p>
+
+<h2>Структура записи</h2>
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>id</code></td><td>INTEGER</td><td>Автоинкремент, уникальный номер строки</td></tr>
+  <tr><td><code>platform_id</code></td><td>TEXT</td><td>ID клиента на внешней платформе (ВКонтакте, Telegram, CRM и т.д.)</td></tr>
+  <tr><td><code>custom_fields</code></td><td>JSON</td><td>Произвольные поля: имя, телефон, email, теги — любые ключ-значение</td></tr>
+  <tr><td><code>created_at</code></td><td>TEXT</td><td>ISO-дата создания</td></tr>
+  <tr><td><code>updated_at</code></td><td>TEXT</td><td>ISO-дата последнего изменения</td></tr>
+</table>
+
+<h2>Таблицы</h2>
+<p>Один модуль может содержать несколько таблиц (например, отдельно для каждой платформы). Таблица <code>default</code> создаётся автоматически и не удаляется.</p>
+
+<h2>REST API</h2>
+<p>Базовый путь: <code>/nexus/customer-db/api</code></p>
+
+<h3>Таблицы</h3>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/tables</code></td><td>Список всех таблиц</td></tr>
+  <tr><td>POST</td><td><code>/tables</code></td><td>Создать таблицу <code>{name, display_name, description}</code></td></tr>
+  <tr><td>DELETE</td><td><code>/tables/{name}</code></td><td>Удалить таблицу (кроме default)</td></tr>
+  <tr><td>GET</td><td><code>/stats</code></td><td>Количество записей по всем таблицам</td></tr>
+</table>
+
+<h3>Записи</h3>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/tables/{table}/records</code></td><td>Список записей. Параметры: <code>q</code>, <code>limit</code>, <code>offset</code></td></tr>
+  <tr><td>POST</td><td><code>/tables/{table}/records</code></td><td>Создать запись <code>{platform_id, custom_fields}</code></td></tr>
+  <tr><td>GET</td><td><code>/tables/{table}/records/{id}</code></td><td>Одна запись по id</td></tr>
+  <tr><td>PUT</td><td><code>/tables/{table}/records/{id}</code></td><td>Обновить запись</td></tr>
+  <tr><td>DELETE</td><td><code>/tables/{table}/records/{id}</code></td><td>Удалить запись</td></tr>
+  <tr><td>GET</td><td><code>/tables/{table}/stats</code></td><td>Итого и сегодня</td></tr>
+</table>
+
+<h3>Пример запроса</h3>
+<pre><code>POST /nexus/customer-db/api/tables/default/records
+Content-Type: application/json
+
+{
+  "platform_id": "vk_123456",
+  "custom_fields": {
+    "name": "Иван Иванов",
+    "phone": "+7 999 000 11 22",
+    "email": "ivan@example.com",
+    "source": "ВКонтакте"
+  }
+}</code></pre>
+
+<h2>Архитектура модуля</h2>
+<pre><code>customer-db/
+├── manifest.json       — метаданные модуля
+├── router.py           — FastAPI APIRouter + setup(ctx)
+└── panel/
+    ├── index.html      — веб-интерфейс
+    └── docs.html       — эта документация</code></pre>
+
+<h2>Безопасность</h2>
+<p>Модуль доступен только авторизованным пользователям Nexus. API не требует отдельной авторизации внутри iframe (сессия унаследована от оркестратора). Для внешних запросов к API используйте cookie <code>nexus_token</code>.</p>
+</body>
+</html>

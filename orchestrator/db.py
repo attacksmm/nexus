@@ -15,7 +15,11 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                module_access TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                active INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS modules (
                 id TEXT PRIMARY KEY,
@@ -27,8 +31,21 @@ async def init_db():
                 manifest_json TEXT NOT NULL DEFAULT '{}'
             );
         """)
+        # migrations — add columns that may be missing in old DBs
+        for col, ddl in [
+            ("role",          "TEXT NOT NULL DEFAULT 'viewer'"),
+            ("module_access", "TEXT NOT NULL DEFAULT '[]'"),
+            ("created_at",    "TEXT NOT NULL DEFAULT ''"),
+            ("active",        "INTEGER NOT NULL DEFAULT 1"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
         await db.commit()
 
+
+# ── Modules ───────────────────────────────────────────────────────────────────
 
 async def get_modules_by_status(status: str | None = None) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -68,4 +85,54 @@ async def update_module_status(module_id: str, status: str):
 async def delete_module(module_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM modules WHERE id = ?", (module_id,))
+        await db.commit()
+
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+async def get_all_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, username, role, module_access, created_at, active FROM users ORDER BY id"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM users WHERE username = ? AND active = 1", (username,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def create_user(username: str, password_hash: str, role: str = "viewer", module_access: str = "[]") -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO users (username, password_hash, role, module_access) VALUES (?, ?, ?, ?)",
+            (username, password_hash, role, module_access),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def update_user(user_id: int, role: str, module_access: str, active: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET role = ?, module_access = ?, active = ? WHERE id = ?",
+            (role, module_access, active, user_id),
+        )
+        await db.commit()
+
+
+async def update_user_password(user_id: int, password_hash: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+        await db.commit()
+
+
+async def delete_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
         await db.commit()
