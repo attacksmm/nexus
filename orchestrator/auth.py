@@ -13,9 +13,14 @@ from orchestrator.db import (
     update_user, update_user_password,
 )
 
-SECRET_KEY = os.environ.get("NEXUS_SECRET", "change-me-in-production-please-use-env")
+_FALLBACK_SECRET = "change-me-in-production-please-use-env"
 ALGORITHM = "HS256"
 TOKEN_TTL_HOURS = 24 * 7
+
+
+def _secret() -> str:
+    """Читает NEXUS_SECRET из окружения каждый раз — обновляется без перезапуска."""
+    return os.environ.get("NEXUS_SECRET") or _FALLBACK_SECRET
 
 pwd_ctx = CryptContext(schemes=["argon2"], deprecated="auto")
 router = APIRouter()
@@ -28,12 +33,12 @@ templates = Jinja2Templates(directory=_tpl_dir)
 
 def _make_token(username: str) -> str:
     exp = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)
-    return jwt.encode({"sub": username, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({"sub": username, "exp": exp}, _secret(), algorithm=ALGORITHM)
 
 
 def _verify_token(token: str) -> str | None:
     try:
-        data = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        data = jwt.decode(token, _secret(), algorithms=[ALGORITHM])
         return data.get("sub")
     except JWTError:
         return None
@@ -216,11 +221,11 @@ async def api_env_upload(request: Request):
     with open(ENV_PATH, "w") as f:
         for k, v in parsed.items():
             f.write(f"{k}={v}\n")
-    # apply to current process (non-secret vars)
+    # применяем все переменные без перезапуска
+    # NEXUS_SECRET тоже применяется — _secret() читает os.environ динамически
     import os
     for k, v in parsed.items():
-        if k != "NEXUS_SECRET":  # secret требует рестарта
-            os.environ[k] = v
+        os.environ[k] = v
     return {"ok": True, "count": len(parsed), "keys": list(parsed.keys())}
 
 

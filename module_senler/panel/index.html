@@ -193,10 +193,10 @@
   <div class="view" id="viewScript">
     <div class="settings-body" style="max-width:100%">
       <p class="eyebrow">JS-скрипт для вставки на сайт</p>
-      <p style="color:var(--text-muted);font-size:.82rem;margin:0 0 8px">
-        Вставьте в <code style="color:var(--warn)">&lt;head&gt;</code> или перед <code style="color:var(--warn)">&lt;/body&gt;</code>.
-        Скрипт определяет URL страницы и параметры, отправляет в Nexus трекер.
-        Первое посещение (ваше) зарегистрирует страницу — потом создайте связку.
+      <p style="color:var(--text-muted);font-size:.82rem;margin:0 0 8px;line-height:1.6">
+        Вставьте в <code style="color:var(--warn)">&lt;head&gt;</code> или перед <code style="color:var(--warn)">&lt;/body&gt;</code>.<br>
+        <strong style="color:var(--text)">Безопасность:</strong> скрипт не изменяет DOM, не блокирует рендеринг, не бросает ошибок, защищён от двойного выполнения.<br>
+        <strong style="color:var(--text)">Первый шаг:</strong> посетите страницу сами — она появится в списке «Страницы». Потом создайте связку.
       </p>
       <pre class="script-box" id="scriptBox"></pre>
       <button id="copyScriptBtn" class="btn" type="button">Скопировать</button>
@@ -381,23 +381,40 @@ document.getElementById('testBtn').addEventListener('click', async () => {
 
 // ── Script ────────────────────────────────────────────────────────────────────
 function renderScript() {
-  const script = `<!-- Nexus Senler Tracker -->
+  const script = `<!-- Nexus Senler Tracker v1 -->
 <script>
 (function() {
+  'use strict';
+  // Защита от двойной загрузки
+  if (window.__nxt) return;
+  window.__nxt = 1;
   try {
     var url = location.origin + location.pathname;
     var params = {};
-    location.search.slice(1).split('&').forEach(function(p) {
-      var s = p.split('=');
-      if (s[0]) params[decodeURIComponent(s[0])] = decodeURIComponent(s[1] || '');
-    });
-    fetch('${TRACK_URL}', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url, params: params }),
-      mode: 'cors'
-    }).catch(function(){});
-  } catch(e) {}
+    var qs = location.search.slice(1);
+    if (qs) {
+      qs.split('&').forEach(function(p) {
+        var idx = p.indexOf('=');
+        if (idx < 1) return;
+        try {
+          var k = decodeURIComponent(p.slice(0, idx));
+          var v = decodeURIComponent(p.slice(idx + 1));
+          if (k) params[k] = v;
+        } catch (e) {}
+      });
+    }
+    // keepalive — запрос не прерывается при уходе со страницы
+    if (typeof fetch === 'function') {
+      fetch('${TRACK_URL}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url, params: params }),
+        keepalive: true,
+        mode: 'cors'
+      }).catch(function() {});
+    }
+  } catch (e) {}
+  // Скрипт не изменяет DOM, не блокирует рендеринг, не бросает ошибок
 })();
 <\/script>`;
   document.getElementById('scriptBox').textContent = script;
