@@ -82,7 +82,7 @@ async def list_tables():
     return rows
 
 
-class TableIn(BaseModel):
+class TableIn(BaseModel):  # type: ignore[override]
     name: str
     display_name: str
     description: str = ""

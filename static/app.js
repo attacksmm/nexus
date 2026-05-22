@@ -1,32 +1,83 @@
-// Nexus Orchestrator UI
+// Nexus Orchestrator UI v3
 const RP = document.querySelector("meta[name=rp]")?.content ?? "";
 
 let activeModuleId = null;
 let modulesCache = {};
+let sortOrder = [];  // localStorage порядок
 
 const $ = id => document.getElementById(id);
 
-// ── Module list ───────────────────────────────────────────────────────────────
+// ── LocalStorage order ────────────────────────────────────────────────────────
+
+function loadOrder() {
+  try { return JSON.parse(localStorage.getItem("nexus_order") || "[]"); } catch { return []; }
+}
+function saveOrder(ids) {
+  localStorage.setItem("nexus_order", JSON.stringify(ids));
+}
+function applyOrder(list) {
+  const order = loadOrder();
+  if (!order.length) return list;
+  const map = Object.fromEntries(list.map(m => [m.id, m]));
+  const ordered = order.filter(id => map[id]).map(id => map[id]);
+  const rest = list.filter(m => !order.includes(m.id));
+  return [...ordered, ...rest];
+}
+
+// ── Hash routing ──────────────────────────────────────────────────────────────
+
+function getHashModule() {
+  const h = location.hash.slice(1);
+  return h || null;
+}
+function setHashModule(id) {
+  history.pushState({module: id}, "", RP + "/#" + id);
+  document.title = id ? `Nexus / ${modulesCache[id]?.name ?? id}` : "Nexus";
+}
+
+window.addEventListener("popstate", () => {
+  const id = getHashModule();
+  if (id && modulesCache[id]) selectModule(id, false);
+  else if (!id) {
+    activeModuleId = null;
+    $("contentWelcome").hidden = false;
+    $("contentModule").hidden = true;
+    $("topbarCrumb").textContent = "Оркестратор";
+    document.title = "Nexus";
+    document.querySelectorAll(".module-item").forEach(b => b.classList.remove("module-item--active"));
+  }
+});
+
+// ── Module list render ────────────────────────────────────────────────────────
 
 function renderModules(list) {
   modulesCache = {};
+  const ordered = applyOrder(list);
   const el = $("moduleList");
   el.innerHTML = "";
-  if (!list.length) {
+
+  if (!ordered.length) {
     el.innerHTML = '<p class="sidebar__empty">Нет модулей</p>';
     return;
   }
-  for (const m of list) {
+
+  for (const m of ordered) {
     modulesCache[m.id] = m;
     const btn = document.createElement("button");
     btn.className = "module-item" + (m.id === activeModuleId ? " module-item--active" : "");
     btn.dataset.id = m.id;
     btn.type = "button";
+    btn.draggable = true;
     btn.innerHTML = `
+      <span class="module-item__drag" title="Перетащить">⠿</span>
       <span class="module-item__dot module-item__dot--${m.status}"></span>
       <span class="module-item__name">${esc(m.name)}</span>
       <span class="module-item__ver">v${esc(m.version)}</span>`;
-    btn.addEventListener("click", () => selectModule(m.id));
+    btn.addEventListener("click", e => {
+      if (e.target.classList.contains("module-item__drag")) return;
+      selectModule(m.id);
+    });
+    attachDrag(btn);
     el.appendChild(btn);
   }
 }
@@ -38,22 +89,63 @@ async function refreshModules() {
   if (activeModuleId && modulesCache[activeModuleId]) updateToolbar(modulesCache[activeModuleId]);
 }
 
+// ── Drag & drop ───────────────────────────────────────────────────────────────
+
+let _dragSrc = null;
+
+function attachDrag(el) {
+  el.addEventListener("dragstart", e => {
+    _dragSrc = el;
+    el.classList.add("module-item--dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", el.dataset.id);
+  });
+  el.addEventListener("dragend", () => {
+    el.classList.remove("module-item--dragging");
+    document.querySelectorAll(".module-item--dragover").forEach(x => x.classList.remove("module-item--dragover"));
+    // сохраняем порядок
+    const ids = [...$("moduleList").querySelectorAll(".module-item")].map(b => b.dataset.id);
+    saveOrder(ids);
+  });
+  el.addEventListener("dragover", e => {
+    e.preventDefault();
+    if (_dragSrc && _dragSrc !== el) {
+      document.querySelectorAll(".module-item--dragover").forEach(x => x.classList.remove("module-item--dragover"));
+      el.classList.add("module-item--dragover");
+    }
+  });
+  el.addEventListener("drop", e => {
+    e.preventDefault();
+    el.classList.remove("module-item--dragover");
+    if (!_dragSrc || _dragSrc === el) return;
+    const list = $("moduleList");
+    const items = [...list.querySelectorAll(".module-item")];
+    const srcIdx = items.indexOf(_dragSrc);
+    const dstIdx = items.indexOf(el);
+    if (srcIdx < dstIdx) list.insertBefore(_dragSrc, el.nextSibling);
+    else list.insertBefore(_dragSrc, el);
+    const ids = [...list.querySelectorAll(".module-item")].map(b => b.dataset.id);
+    saveOrder(ids);
+  });
+}
+
 // ── Select module ─────────────────────────────────────────────────────────────
 
-function selectModule(id) {
+function selectModule(id, pushHistory = true) {
   activeModuleId = id;
   const m = modulesCache[id];
   if (!m) return;
 
-  document.querySelectorAll(".module-item").forEach(b => b.classList.toggle("module-item--active", b.dataset.id === id));
-  $("topbarCrumb").textContent = m.name;
-  updateToolbar(m);
+  document.querySelectorAll(".module-item").forEach(b =>
+    b.classList.toggle("module-item--active", b.dataset.id === id));
 
+  $("topbarCrumb").textContent = m.name;
+  if (pushHistory) setHashModule(id);
+
+  updateToolbar(m);
   $("contentWelcome").hidden = true;
   $("contentModule").hidden = false;
-
-  const frame = $("moduleFrame");
-  frame.src = m.status === "active" ? `${RP}/${id}/panel/index.html` : "about:blank";
+  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html` : "about:blank";
 }
 
 function updateToolbar(m) {
@@ -75,39 +167,38 @@ async function moduleAction(action) {
   const res = await fetch(`${RP}/api/modules/${activeModuleId}/${action}`, { method: "POST" });
   if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || "Ошибка"); return; }
   if (action === "unload") {
+    history.pushState({}, "", RP + "/");
+    document.title = "Nexus";
     activeModuleId = null;
     $("contentWelcome").hidden = false;
     $("contentModule").hidden = true;
     $("topbarCrumb").textContent = "Оркестратор";
   }
   await refreshModules();
-  if (activeModuleId && modulesCache[activeModuleId]) selectModule(activeModuleId);
+  if (activeModuleId && modulesCache[activeModuleId]) selectModule(activeModuleId, false);
 }
 
 $("mtPause").addEventListener("click",  () => moduleAction("pause"));
 $("mtResume").addEventListener("click", () => moduleAction("resume"));
 $("mtUnload").addEventListener("click", () => {
-  if (confirm(`Выгрузить модуль «${modulesCache[activeModuleId]?.name}»? Файлы будут удалены.`)) moduleAction("unload");
+  if (confirm(`Выгрузить модуль «${modulesCache[activeModuleId]?.name}»? Файлы будут удалены.`))
+    moduleAction("unload");
 });
 
-// ── Docs ──────────────────────────────────────────────────────────────────────
+// ── Docs dialog ───────────────────────────────────────────────────────────────
 
 $("mtDocs").addEventListener("click", async () => {
   if (!activeModuleId) return;
   const m = modulesCache[activeModuleId];
   $("docsTitle").textContent = m?.name ?? activeModuleId;
 
-  const docsUrl = `${RP}/${activeModuleId}/panel/docs.html`;
-  const res = await fetch(docsUrl).catch(() => null);
+  const res = await fetch(`${RP}/${activeModuleId}/panel/docs.html`).catch(() => null);
   const body = $("docsBody");
-
   if (res?.ok) {
     const html = await res.text();
-    // извлекаем <body> если есть
     const match = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     body.innerHTML = `<div class="docs-body">${match ? match[1] : html}</div>`;
   } else {
-    // fallback — из manifest
     const manifest = JSON.parse(m?.manifest_json || "{}");
     body.innerHTML = `<div class="docs-body">
       <h2>${esc(m?.name)} v${esc(m?.version)}</h2>
@@ -156,7 +247,6 @@ $("uploadSubmitBtn").addEventListener("click", async () => {
   $("uploadSubmitBtn").disabled = true;
   $("uploadStatus").textContent = "Загрузка...";
   $("uploadStatus").className = "status-line";
-
   const fd = new FormData();
   fd.append("file", selectedFile);
   try {
@@ -189,5 +279,13 @@ function esc(s) {
 
 (async () => {
   const res = await fetch(RP + "/api/modules");
-  if (res.ok) renderModules(await res.json());
+  if (!res.ok) return;
+  const list = await res.json();
+  renderModules(list);
+
+  // hash routing — открыть модуль из URL
+  const hashId = getHashModule();
+  if (hashId && modulesCache[hashId]) {
+    selectModule(hashId, false);
+  }
 })();

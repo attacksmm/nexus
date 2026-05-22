@@ -2,5 +2,6 @@
   "id": "customer-db",
   "name": "База клиентов",
   "version": "2.0.0",
-  "description": "Мульти-таблица клиентов: id, platform_id, custom_fields (JSON). Полный CRUD REST API."
+  "description": "Мульти-таблица клиентов: id, platform_id, custom_fields (JSON). Полный CRUD REST API.",
+  "env_vars": {}
 }

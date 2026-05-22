@@ -47,6 +47,9 @@
         <button class="module-item" data-tab="env" type="button">
           <span class="module-item__name">Окружение</span>
         </button>
+        <button class="module-item" data-tab="docs" type="button">
+          <span class="module-item__name">Документация</span>
+        </button>
       </div>
     </aside>
 
@@ -75,6 +78,181 @@
               <tbody id="statsModuleTable"></tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      <!-- Документация -->
+      <section id="tabDocs" class="settings-section" hidden style="overflow-y:auto">
+        <div class="docs-body" style="max-width:860px;padding-bottom:32px">
+          <h2>Nexus Orchestrator — Документация для разработчика</h2>
+          <p>Версия: <strong>2.0.0</strong> · Стек: Python 3.12 · FastAPI · SQLite · Jinja2 · Vanilla JS<br>
+          Сервер: <code>89.169.179.92</code> · Путь: <code>/home/attack/nexus/</code> · Порт: <code>8080</code> (за nginx → <code>junior.sobakovod.pro/nexus/</code>)</p>
+
+          <h2>Архитектура</h2>
+          <pre><code>/home/attack/nexus/
+├── main.py                   # FastAPI приложение, корневые роуты
+├── orchestrator/
+│   ├── core.py               # ModuleManager — установка/удаление/монтирование
+│   ├── auth.py               # JWT-авторизация, роли, управление пользователями, ENV
+│   └── db.py                 # SQLite (nexus.db): modules, users
+├── templates/
+│   ├── login.html            # Страница входа
+│   ├── shell.html            # Главная: topbar + sidebar + iframe модуля
+│   └── settings.html         # Настройки: сервер, пользователи, ENV, эта страница
+├── static/
+│   ├── styles.css            # Дизайн-система (CSS переменные, все компоненты)
+│   └── app.js                # Логика UI: модули, drag&drop, hash-routing, upload
+├── modules/                  # Распакованные ZIP-модули (создаётся автоматически)
+├── uploads/                  # Временные ZIP при загрузке (очищается после)
+├── data/nexus.db             # Основная БД оркестратора
+├── requirements.txt
+├── nexus.service             # systemd unit
+└── .env                      # NEXUS_SECRET и другие переменные</code></pre>
+
+          <h2>Архитектура модуля (ZIP)</h2>
+          <p>Модуль — это ZIP-архив со строгой структурой. Минимальный набор: <code>manifest.json</code> + <code>router.py</code>.</p>
+          <pre><code>my-module.zip
+├── manifest.json             # ОБЯЗАТЕЛЬНО — метаданные модуля
+├── router.py                 # ОБЯЗАТЕЛЬНО — FastAPI APIRouter
+├── panel/
+│   ├── index.html            # ОБЯЗАТЕЛЬНО — UI панели управления (iframe)
+│   └── docs.html             # РЕКОМЕНДУЕТСЯ — документация модуля (кнопка ?)
+└── static/                   # Опционально — CSS/JS/изображения</code></pre>
+
+          <h3>manifest.json — обязательные поля</h3>
+          <pre><code>{
+  "id": "my-module",           // Уникальный ID: только a-z, 0-9, дефис. Используется в URL.
+  "name": "Мой модуль",        // Отображаемое имя в sidebar
+  "version": "1.0.0",          // Семантическая версия
+  "description": "..."         // Краткое описание (отображается в UI)
+}</code></pre>
+
+          <h3>router.py — контракт</h3>
+          <pre><code>from fastapi import APIRouter
+import aiosqlite
+
+router = APIRouter()  # ОБЯЗАТЕЛЬНО — именно это имя
+
+def setup(ctx):
+    """Вызывается оркестратором при монтировании модуля.
+    Может быть async def setup(ctx).
+    Ошибки внутри setup() логируются и переводят модуль в статус 'error'.
+    """
+    # ctx.module_id  : str      — ID модуля ("my-module")
+    # ctx.module_dir : Path     — путь к распакованному ZIP (/nexus/modules/my-module/)
+    # ctx.data_dir   : Path     — /nexus/modules/my-module/data/ (создаётся автоматически)
+    # ctx.db_path    : Path     — /nexus/modules/my-module/data/my-module.db (SQLite для модуля)
+    # ctx.logger     : Logger   — Python logger → пишет в data/logs/module.log
+
+@router.get("/status")
+async def status():
+    return {"ok": True}
+
+# Все роуты монтируются на /nexus/{module_id}/api/
+# Пример: GET /nexus/my-module/api/status</code></pre>
+
+          <h3>panel/index.html — UI модуля</h3>
+          <p>Загружается в <code>&lt;iframe&gt;</code>. URL: <code>/nexus/{id}/panel/index.html</code>.</p>
+          <p>Для запросов к API модуля используйте относительный путь, вычисляя базу из URL страницы:</p>
+          <pre><code>const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const API = parts.slice(0, panelIdx).join('/') + '/api';
+// Результат: /nexus/my-module/api</code></pre>
+
+          <h3>panel/docs.html — документация модуля</h3>
+          <p>Открывается кнопкой <strong>?</strong> в toolbar. Должна содержать:</p>
+          <ul>
+            <li>Назначение модуля</li>
+            <li>Полный список API-эндпоинтов (метод, путь, параметры, ответ)</li>
+            <li>Структуру БД (таблицы, поля, типы)</li>
+            <li>Примеры запросов</li>
+            <li>Настройки и зависимости</li>
+          </ul>
+
+          <h2>Пути и URL</h2>
+          <table>
+            <tr><th>Ресурс</th><th>URL</th></tr>
+            <tr><td>Главная</td><td><code>/nexus/</code> или <code>/nexus/#module-id</code></td></tr>
+            <tr><td>Прямая ссылка на модуль</td><td><code>/nexus/#customer-db</code></td></tr>
+            <tr><td>API оркестратора</td><td><code>/nexus/api/modules</code></td></tr>
+            <tr><td>API модуля</td><td><code>/nexus/{id}/api/...</code></td></tr>
+            <tr><td>Панель модуля</td><td><code>/nexus/{id}/panel/index.html</code></td></tr>
+            <tr><td>Документация модуля</td><td><code>/nexus/{id}/panel/docs.html</code></td></tr>
+            <tr><td>Статика модуля</td><td><code>/nexus/{id}/static/...</code></td></tr>
+            <tr><td>Настройки</td><td><code>/nexus/settings</code></td></tr>
+          </table>
+
+          <h2>API оркестратора</h2>
+          <table>
+            <tr><th>Метод</th><th>Путь</th><th>Доступ</th><th>Описание</th></tr>
+            <tr><td>GET</td><td><code>/nexus/api/modules</code></td><td>все</td><td>Список модулей</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/modules/upload</code></td><td>editor+</td><td>Установить ZIP</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/modules/{id}/pause</code></td><td>editor+</td><td>Пауза</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/modules/{id}/resume</code></td><td>editor+</td><td>Возобновить</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/modules/{id}/unload</code></td><td>admin</td><td>Выгрузить (удалить)</td></tr>
+            <tr><td>GET</td><td><code>/nexus/api/server/stats</code></td><td>все</td><td>CPU/RAM/Disk/Uptime</td></tr>
+            <tr><td>GET</td><td><code>/nexus/api/settings/users</code></td><td>admin</td><td>Список пользователей</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/settings/users</code></td><td>admin</td><td>Создать пользователя</td></tr>
+            <tr><td>PUT</td><td><code>/nexus/api/settings/users/{id}</code></td><td>admin</td><td>Обновить пользователя</td></tr>
+            <tr><td>DELETE</td><td><code>/nexus/api/settings/users/{id}</code></td><td>admin</td><td>Удалить пользователя</td></tr>
+            <tr><td>GET</td><td><code>/nexus/api/settings/env</code></td><td>admin</td><td>Ключи ENV (без значений)</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/settings/env/upload</code></td><td>admin</td><td>Загрузить .env файл</td></tr>
+          </table>
+
+          <h2>Роли пользователей</h2>
+          <table>
+            <tr><th>Роль</th><th>Права</th></tr>
+            <tr><td><code>admin</code></td><td>Полный доступ: управление пользователями, ENV, выгрузка модулей</td></tr>
+            <tr><td><code>editor</code></td><td>Загрузка модулей, пауза/возобновление</td></tr>
+            <tr><td><code>viewer</code></td><td>Только просмотр разрешённых модулей</td></tr>
+          </table>
+          <p><code>module_access</code> — JSON-массив ID модулей. Пустой массив (<code>[]</code>) = доступ ко всем.</p>
+
+          <h2>Деплой / обновление</h2>
+          <pre><code># Локально внести изменения в /home/attack/develop/nexus/
+# Деплой на сервер:
+rsync -az -e "ssh -i ~/.ssh/id_ed25519" \
+  --exclude '.venv' --exclude '__pycache__' --exclude 'data' \
+  --exclude 'modules' --exclude 'uploads' --exclude '*.pyc' --exclude '.git' \
+  /home/attack/develop/nexus/ attack@89.169.179.92:/home/attack/nexus/
+
+ssh -i ~/.ssh/id_ed25519 attack@89.169.179.92 \
+  "echo '55365536' | sudo -S systemctl restart nexus"</code></pre>
+
+          <h2>Разработка нового модуля</h2>
+          <pre><code># 1. Создать директорию
+mkdir -p module_mymod/panel
+
+# 2. manifest.json — id должен быть уникальным
+# 3. router.py — APIRouter + setup(ctx)
+# 4. panel/index.html — UI (самодостаточный HTML)
+# 5. panel/docs.html — документация
+
+# 6. Упаковать
+cd module_mymod && zip -r ../mymod.zip manifest.json router.py panel/
+
+# 7. Загрузить через UI (кнопка + Модуль) или curl:
+curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/modules/upload</code></pre>
+
+          <h2>Требования к docs.html</h2>
+          <p>Файл <code>panel/docs.html</code> должен быть написан так, чтобы его было достаточно для полного понимания модуля — в том числе ИИ-ассистентом. Обязательные разделы:</p>
+          <ol>
+            <li><strong>Назначение</strong> — что делает модуль, для кого, в каком контексте</li>
+            <li><strong>Принцип работы</strong> — архитектура, поток данных</li>
+            <li><strong>Структура БД</strong> — все таблицы, поля, типы, индексы</li>
+            <li><strong>REST API</strong> — метод, путь, параметры, пример запроса, пример ответа</li>
+            <li><strong>Зависимости</strong> — внешние библиотеки, API, сервисы</li>
+            <li><strong>Настройки</strong> — конфигурационные параметры и как их получить</li>
+          </ol>
+
+          <h2>Технические ограничения</h2>
+          <ul>
+            <li>Модуль монтируется динамически через <code>importlib</code> — нельзя использовать <code>__file__</code> для путей; используйте <code>ctx.module_dir</code></li>
+            <li>Все async операции в <code>setup()</code> должны запускаться через <code>asyncio.get_event_loop().create_task()</code></li>
+            <li>Модуль получает изолированную SQLite БД в <code>ctx.db_path</code></li>
+            <li>Логи модуля: <code>ctx.logger</code> → файл <code>data/logs/module.log</code> (ротация 5MB×3)</li>
+            <li>При выгрузке удаляется вся папка <code>modules/{id}/</code> включая данные</li>
+          </ul>
         </div>
       </section>
 
@@ -127,6 +305,7 @@
           <p id="envStatus" class="status-line"></p>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button id="envUploadBtn" class="btn btn--primary" type="button" disabled>Применить</button>
+            <button id="envTemplateBtn" class="btn btn--ghost" type="button">↓ Шаблон .env</button>
           </div>
         </div>
         <div style="margin-top:16px">
@@ -380,6 +559,13 @@ document.getElementById("envUploadZone").addEventListener("drop", e => {
   envFile = e.dataTransfer.files[0];
   document.getElementById("envZoneText").textContent = envFile?.name ?? "Выбрать файл";
   document.getElementById("envUploadBtn").disabled = !envFile;
+});
+
+document.getElementById("envTemplateBtn").addEventListener("click", () => {
+  Object.assign(document.createElement("a"), {
+    href: RP + "/api/settings/env/template",
+    download: "nexus.env.template"
+  }).click();
 });
 
 document.getElementById("envUploadBtn").addEventListener("click", async () => {

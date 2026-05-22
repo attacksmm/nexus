@@ -24,6 +24,13 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 button, input, textarea, select { font: inherit; }
 a { color: inherit; text-decoration: none; }
 
+/* ── Scrollbars (global) ───────────────────── */
+* { scrollbar-color: var(--border-strong) #080808; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #080808; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border: 2px solid #080808; }
+::-webkit-scrollbar-corner { background: #080808; }
+
 /* ── App shell ─────────────────────────────────── */
 .app-shell { height: 100vh; display: flex; flex-direction: column; }
 @supports (height: 100dvh) { .app-shell { height: 100dvh; } }
@@ -78,6 +85,10 @@ a { color: inherit; text-decoration: none; }
 
 .module-item__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.88rem; }
 .module-item__ver  { color: var(--text-subtle); font-size: 0.74rem; flex-shrink: 0; }
+.module-item__drag { color: var(--border-strong); font-size: 0.7rem; cursor: grab; padding: 0 2px; flex-shrink: 0; line-height: 1; }
+.module-item__drag:active { cursor: grabbing; }
+.module-item--dragging { opacity: 0.35; border-style: dashed !important; }
+.module-item--dragover  { border-color: var(--accent-bg) !important; }
 
 /* ── Content area ──────────────────────────────── */
 .content-area { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }

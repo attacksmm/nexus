@@ -10,180 +10,149 @@
       --text:#f2f2f2;--text-muted:#bababa;--text-subtle:#848484;
       --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
       --accent-bg:#f4f4f4;--accent-text:#080808;
-      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
-      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
-      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
-      --term-bg:#020202; --term-text:#d4d4d4;
-      --term-ok:#4ec994; --term-err:#f47067; --term-warn:#e5c07b;
-      --term-info:#61afef; --term-dim:#5c6370;
+      --ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;
+      --term-bg:#020202;--term-text:#d4d4d4;
+      --term-err:#f47067;--term-warn:#e5c07b;--term-info:#61afef;--term-dim:#5c6370;
       font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
     }
-    *,*::before,*::after{box-sizing:border-box;}
-    [hidden]{display:none!important;}
+    *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
     html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-size:13px;}
     button,input,select{font:inherit;}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
+    ::-webkit-scrollbar{width:8px;height:8px;}
+    ::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
 
     .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);}
 
     /* ── Tab bar ── */
-    .tabbar{
-      display:flex;align-items:stretch;gap:0;
-      border-bottom:1px solid var(--border);background:var(--panel);
-      overflow-x:auto;scrollbar-width:none;flex-shrink:0;
-    }
+    .tabbar{display:flex;align-items:stretch;border-bottom:1px solid var(--border);
+      background:var(--panel);overflow-x:auto;scrollbar-width:none;flex-shrink:0;}
     .tabbar::-webkit-scrollbar{display:none;}
-    .tab{
-      display:flex;align-items:center;gap:7px;
-      padding:0 14px;height:38px;
+    .tab{display:flex;align-items:center;gap:7px;padding:0 14px;height:38px;
       border-right:1px solid var(--border);border-bottom:2px solid transparent;
       background:transparent;color:var(--text-subtle);cursor:pointer;
-      white-space:nowrap;flex-shrink:0;font-size:.82rem;
-    }
+      white-space:nowrap;flex-shrink:0;font-size:.82rem;}
     .tab:hover{color:var(--text-muted);background:var(--panel-strong);}
     .tab--active{color:var(--text);border-bottom-color:var(--accent-bg);background:var(--panel-soft);}
     .tab__dot{width:6px;height:6px;border-radius:50%;background:var(--border-strong);flex-shrink:0;}
     .tab__dot--ok{background:var(--ok);}
-    .tab__dot--empty{background:var(--border-mid);}
     .tab__size{color:var(--text-subtle);font-size:.72rem;}
+    .tab__errs{background:var(--bad);color:#1a0305;border-radius:2px;font-size:.68rem;
+      padding:1px 5px;font-weight:700;min-width:16px;text-align:center;}
 
-    .tabbar__actions{
-      margin-left:auto;display:flex;align-items:center;gap:6px;
-      padding:0 10px;flex-shrink:0;border-left:1px solid var(--border);
-    }
+    .tabbar__actions{margin-left:auto;display:flex;align-items:center;gap:6px;
+      padding:0 10px;flex-shrink:0;border-left:1px solid var(--border);}
 
     /* ── Terminal ── */
-    .term-wrap{
-      display:grid;grid-template-rows:minmax(0,1fr);
-      min-height:0;position:relative;
-    }
-    .terminal{
-      font-family:"IBM Plex Mono","Fira Code",monospace;
-      font-size:.8rem;line-height:1.55;
-      background:var(--term-bg);color:var(--term-text);
-      padding:12px 14px;overflow-y:auto;overflow-x:hidden;
-      white-space:pre-wrap;word-break:break-all;
-      scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;
-    }
+    .term-area{display:grid;grid-template-rows:minmax(0,1fr);min-height:0;position:relative;}
+    .terminal{font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;
+      line-height:1.55;background:var(--term-bg);color:var(--term-text);
+      padding:10px 14px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;}
 
-    /* log line colorization */
     .l-err{color:var(--term-err);}
     .l-warn{color:var(--term-warn);}
-    .l-ok{color:var(--term-ok);}
     .l-info{color:var(--term-info);}
     .l-dim{color:var(--term-dim);}
 
-    /* live indicator */
-    .live-dot{
-      width:7px;height:7px;border-radius:50%;
-      background:var(--ok);display:inline-block;
-      animation:pulse 1.4s ease-in-out infinite;
-    }
+    .live-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
+      display:inline-block;animation:pulse 1.4s ease-in-out infinite;}
     .live-dot--off{background:var(--border-strong);animation:none;}
-    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
 
-    /* ── Buttons ── */
-    .btn{
-      display:inline-flex;align-items:center;justify-content:center;gap:5px;
-      min-height:26px;padding:3px 10px;
-      border:1px solid var(--border-strong);background:var(--panel-strong);
-      color:var(--text);cursor:pointer;white-space:nowrap;font-size:.78rem;
-    }
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
+      min-height:26px;padding:3px 10px;border:1px solid var(--border-strong);
+      background:var(--panel-strong);color:var(--text);cursor:pointer;
+      white-space:nowrap;font-size:.78rem;}
     .btn:disabled{opacity:.35;cursor:default;}
     .btn--primary{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
-    .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
+    .btn--danger{background:#251315;border-color:#5f3137;color:var(--bad);}
     .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+    .btn--err{background:#251315;border-color:#5f3137;color:var(--bad);}
+    .btn--err.active{background:#5f3137;color:#fff;}
 
-    .status-bar{
-      position:absolute;bottom:0;left:0;right:0;
-      display:flex;align-items:center;gap:10px;padding:4px 12px;
-      background:rgba(2,2,2,.85);border-top:1px solid var(--border);
-      font-size:.74rem;color:var(--text-subtle);
-    }
-    .status-bar span{display:flex;align-items:center;gap:5px;}
+    .status-bar{position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;
+      gap:10px;padding:3px 12px;background:rgba(2,2,2,.88);border-top:1px solid var(--border);
+      font-size:.72rem;color:var(--text-subtle);}
   </style>
 </head>
 <body>
 <div class="shell">
 
-  <!-- Tab bar -->
   <div class="tabbar" id="tabbar">
     <div class="tabbar__actions">
       <span class="live-dot live-dot--off" id="liveDot"></span>
-      <button id="liveBtn" class="btn" type="button" title="Live tail">Live</button>
-      <button id="downloadBtn" class="btn btn--ghost" type="button" title="Скачать лог">↓</button>
-      <button id="clearBtn" class="btn btn--danger" type="button" title="Очистить лог">Очистить</button>
-      <button id="scrollBtn" class="btn btn--ghost" type="button" title="Конец">↓↓</button>
+      <button id="liveBtn"     class="btn"         type="button">Live</button>
+      <button id="errBtn"      class="btn btn--err" type="button">Ошибки</button>
+      <button id="downloadBtn" class="btn btn--ghost" type="button" title="Скачать">↓</button>
+      <button id="clearBtn"    class="btn btn--danger" type="button">Очистить</button>
+      <button id="scrollBtn"   class="btn btn--ghost" type="button">↓↓</button>
     </div>
   </div>
 
-  <!-- Terminal -->
-  <div class="term-wrap">
+  <div class="term-area">
     <div class="terminal" id="terminal">[Выберите вкладку]</div>
-    <div class="status-bar" id="statusBar">
+    <div class="status-bar">
       <span id="statusLines">0 строк</span>
-      <span id="statusModule" style="margin-left:auto;color:var(--text-subtle)"></span>
+      <span id="statusErrMode" style="color:var(--bad);display:none">● режим ошибок</span>
+      <span style="margin-left:auto;color:var(--text-subtle)" id="statusModule"></span>
     </div>
   </div>
 </div>
 
 <script>
-// API base — вычисляем из текущего URL
-// iframe src: /nexus/logger/panel/index.html
-// API: /nexus/logger/api/
 const parts = location.pathname.split('/');
 const panelIdx = parts.indexOf('panel');
 const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
 const API = modBase + '/api';
-// WebSocket
 const WS_BASE = location.origin.replace(/^http/, 'ws') + modBase + '/api';
 
 let activeTab = null;
 let ws = null;
 let live = false;
+let errMode = false;
 let lineCount = 0;
+let allLines = [];      // полный буфер для фильтрации
 
 const term   = document.getElementById('terminal');
 const tabbar = document.getElementById('tabbar');
 const liveDot = document.getElementById('liveDot');
+const errBtn  = document.getElementById('errBtn');
 
-// ── Load modules & build tabs ─────────────────────────────────────────────
+// ── Modules & tabs ────────────────────────────────────────────────────────────
 
 async function loadModules() {
   const res = await fetch(API + '/modules').catch(() => null);
   if (!res?.ok) return;
   const mods = await res.json();
-
-  // Удаляем старые вкладки (кроме actions)
   const actions = document.querySelector('.tabbar__actions');
   tabbar.innerHTML = '';
   tabbar.appendChild(actions);
 
   for (const m of mods) {
+    // считаем ошибки из лога (простая эвристика по размеру — при live будем считать)
     const tab = document.createElement('button');
     tab.className = 'tab' + (m.id === activeTab ? ' tab--active' : '');
     tab.dataset.id = m.id;
     tab.type = 'button';
-    const hasSz = m.size > 0;
-    const szStr = m.size ? formatSize(m.size) : '';
     tab.innerHTML = `
-      <span class="tab__dot ${hasSz ? 'tab__dot--ok' : 'tab__dot--empty'}"></span>
+      <span class="tab__dot ${m.has_logs && m.size > 0 ? 'tab__dot--ok' : ''}"></span>
       <span>${esc(m.name || m.id)}</span>
-      ${szStr ? `<span class="tab__size">${szStr}</span>` : ''}`;
+      ${m.size > 0 ? `<span class="tab__size">${fmtSize(m.size)}</span>` : ''}`;
     tab.addEventListener('click', () => selectTab(m.id));
     tabbar.insertBefore(tab, actions);
   }
 
-  // Если нет активной вкладки — выбрать nexus
   if (!activeTab && mods.length) selectTab('nexus');
 }
 
-// ── Select tab ────────────────────────────────────────────────────────────
-
 async function selectTab(id) {
   stopLive();
+  errMode = false;
+  errBtn.classList.remove('active');
+  document.getElementById('statusErrMode').style.display = 'none';
   activeTab = id;
-  document.querySelectorAll('.tab').forEach(t =>
-    t.classList.toggle('tab--active', t.dataset.id === id));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab--active', t.dataset.id === id));
   document.getElementById('statusModule').textContent = id;
   document.getElementById('clearBtn').disabled = id === 'nexus';
   await loadLogs();
@@ -195,27 +164,32 @@ async function loadLogs() {
   const res = await fetch(`${API}/logs/${activeTab}?lines=500`).catch(() => null);
   if (!res?.ok) { term.textContent = '[ошибка загрузки]'; return; }
   const text = await res.text();
-  renderLog(text);
+  allLines = text.split('\n');
+  renderLines(errMode ? allLines.filter(isError) : allLines);
   scrollBottom();
 }
 
-function renderLog(text) {
-  const lines = text.split('\n');
-  lineCount = lines.length;
+function renderLines(lines) {
+  lineCount = lines.filter(l => l.trim()).length;
   term.innerHTML = lines.map(colorize).join('\n');
   document.getElementById('statusLines').textContent = `${lineCount} строк`;
 }
 
+function isError(line) {
+  return /\b(error|exception|traceback|critical|fatal|warn(ing)?)\b/i.test(line);
+}
+
 function appendLine(line) {
   if (!line.trim()) return;
+  allLines.push(line);
+  if (allLines.length > 5000) allLines.shift();
+  if (errMode && !isError(line)) return;
   lineCount++;
   const span = document.createElement('span');
   span.innerHTML = colorize(line) + '\n';
   term.appendChild(span);
   document.getElementById('statusLines').textContent = `${lineCount} строк`;
-  // auto-scroll если уже внизу
-  if (term.scrollTop + term.clientHeight >= term.scrollHeight - 60) scrollBottom();
-  // ограничение DOM: удаляем старые строки
+  if (term.scrollTop + term.clientHeight >= term.scrollHeight - 80) scrollBottom();
   while (term.childNodes.length > 3000) term.removeChild(term.firstChild);
 }
 
@@ -223,23 +197,35 @@ function colorize(line) {
   const l = line.toLowerCase();
   const e = esc(line);
   if (/\b(error|exception|traceback|critical|fatal)\b/.test(l)) return `<span class="l-err">${e}</span>`;
-  if (/\b(warning|warn)\b/.test(l))   return `<span class="l-warn">${e}</span>`;
-  if (/\b(info|started|active|ok)\b/.test(l)) return `<span class="l-info">${e}</span>`;
-  if (/\b(debug)\b/.test(l))           return `<span class="l-dim">${e}</span>`;
-  if (/^\s*(--|\[|\]|#)/.test(line))   return `<span class="l-dim">${e}</span>`;
+  if (/\bwarn(ing)?\b/.test(l))   return `<span class="l-warn">${e}</span>`;
+  if (/\b(info|started|active)\b/.test(l)) return `<span class="l-info">${e}</span>`;
+  if (/\bdebug\b/.test(l))        return `<span class="l-dim">${e}</span>`;
   return e;
 }
 
-// ── Live WebSocket ────────────────────────────────────────────────────────
+// ── Error mode ────────────────────────────────────────────────────────────────
+
+errBtn.addEventListener('click', () => {
+  errMode = !errMode;
+  errBtn.classList.toggle('active', errMode);
+  document.getElementById('statusErrMode').style.display = errMode ? 'inline' : 'none';
+  const filtered = errMode ? allLines.filter(isError) : allLines;
+  renderLines(filtered);
+  scrollBottom();
+});
+
+// ── Live WebSocket ────────────────────────────────────────────────────────────
 
 function startLive() {
   if (ws) { ws.close(); ws = null; }
   if (!activeTab) return;
   ws = new WebSocket(`${WS_BASE}/ws/${activeTab}`);
   ws.onmessage = e => { if (e.data) appendLine(e.data.replace(/\n$/, '')); };
-  ws.onopen    = () => { live = true; liveDot.classList.remove('live-dot--off'); document.getElementById('liveBtn').textContent = 'Stop'; };
-  ws.onclose   = () => stopLive();
-  ws.onerror   = () => stopLive();
+  ws.onopen = () => {
+    live = true; liveDot.classList.remove('live-dot--off');
+    document.getElementById('liveBtn').textContent = 'Stop';
+  };
+  ws.onclose = ws.onerror = () => stopLive();
 }
 
 function stopLive() {
@@ -249,50 +235,39 @@ function stopLive() {
   document.getElementById('liveBtn').textContent = 'Live';
 }
 
-document.getElementById('liveBtn').addEventListener('click', () => {
-  if (live) stopLive(); else startLive();
-});
+document.getElementById('liveBtn').addEventListener('click', () => { live ? stopLive() : startLive(); });
 
-// ── Download ──────────────────────────────────────────────────────────────
+// ── Actions ───────────────────────────────────────────────────────────────────
 
 document.getElementById('downloadBtn').addEventListener('click', () => {
   if (!activeTab) return;
-  const a = document.createElement('a');
-  a.href = `${API}/logs/${activeTab}/download`;
-  a.download = `${activeTab}.log`;
-  a.click();
+  Object.assign(document.createElement('a'), {
+    href: `${API}/logs/${activeTab}/download`, download: `${activeTab}.log`
+  }).click();
 });
-
-// ── Clear ─────────────────────────────────────────────────────────────────
 
 document.getElementById('clearBtn').addEventListener('click', async () => {
   if (!activeTab || activeTab === 'nexus') return;
-  if (!confirm(`Очистить логи модуля «${activeTab}»?`)) return;
-  await fetch(`${API}/logs/${activeTab}`, { method: 'DELETE' });
+  if (!confirm(`Очистить логи «${activeTab}»?`)) return;
+  await fetch(`${API}/logs/${activeTab}`, {method:'DELETE'});
+  allLines = [];
   await loadLogs();
-  loadModules();  // обновить размер в табе
+  loadModules();
 });
-
-// ── Scroll bottom ─────────────────────────────────────────────────────────
 
 function scrollBottom() { term.scrollTop = term.scrollHeight; }
 document.getElementById('scrollBtn').addEventListener('click', scrollBottom);
 
-// ── Utils ──────────────────────────────────────────────────────────────────
-
-function esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function formatSize(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
-  return (b/1048576).toFixed(1) + ' MB';
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtSize(b) {
+  if (b<1024) return b+'B'; if (b<1048576) return (b/1024).toFixed(1)+'K';
+  return (b/1048576).toFixed(1)+'M';
 }
 
-// ── Init + auto-refresh modules list ─────────────────────────────────────
-
+// ── Init ──────────────────────────────────────────────────────────────────────
 loadModules();
-setInterval(loadModules, 15000);   // вкладки обновляются автоматически
+setInterval(loadModules, 15000);
 </script>
 </body>
 </html>

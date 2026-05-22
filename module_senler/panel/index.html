@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Списки Сенлер</title>
+  <style>
+    :root {
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--text-muted:#bababa;--text-subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent-bg:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--text);}
+    button,input,select,textarea{font:inherit;}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
+    ::-webkit-scrollbar{width:8px;height:8px;}::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+
+    .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr);}
+
+    /* stat bar */
+    .statbar{display:flex;align-items:center;gap:16px;padding:8px 12px;
+      border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
+    .stat{display:flex;flex-direction:column;gap:1px;}
+    .stat__val{font-weight:600;font-size:.95rem;}
+    .stat__lbl{color:var(--text-subtle);font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;}
+    .statbar__right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+
+    /* tabs */
+    .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
+    .tab{padding:0 16px;height:36px;border:none;border-bottom:2px solid transparent;
+      background:transparent;color:var(--text-subtle);cursor:pointer;font-size:.82rem;}
+    .tab:hover{color:var(--text-muted);}
+    .tab--active{color:var(--text);border-bottom-color:var(--accent-bg);}
+
+    .view{display:none;flex-direction:column;min-height:0;overflow:hidden;}
+    .view--active{display:flex;}
+
+    /* table */
+    .table-wrap{overflow:auto;flex:1;}
+    table{width:100%;border-collapse:collapse;font-size:.82rem;}
+    th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;}
+    th{color:var(--text-subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1;}
+    tr:hover td{background:var(--panel-strong);}
+    .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem;}
+    .badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg);}
+    .badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg);}
+    .badge--off{color:var(--text-subtle);border-color:var(--border-mid);}
+
+    /* form panel */
+    .form-panel{flex-shrink:0;padding:10px 12px;border-bottom:1px solid var(--border);
+      background:var(--panel);display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
+    .f-group{display:grid;gap:4px;min-width:140px;}
+    .f-group label{font-size:.72rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.08em;}
+    .f-input{min-height:30px;padding:4px 8px;border:1px solid var(--border-strong);
+      background:#090909;color:var(--text);width:100%;}
+
+    /* buttons */
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
+      min-height:28px;padding:4px 11px;border:1px solid var(--border-strong);
+      background:var(--panel-strong);color:var(--text);cursor:pointer;font-size:.8rem;white-space:nowrap;}
+    .btn:disabled{opacity:.35;cursor:default;}
+    .btn--primary{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
+    .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
+    .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+    .btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem;}
+
+    /* settings form */
+    .settings-body{padding:16px;display:grid;gap:12px;max-width:480px;}
+    .s-label{display:grid;gap:5px;font-size:.82rem;color:var(--text-muted);}
+    .s-input{width:100%;min-height:34px;padding:6px 9px;border:1px solid var(--border-strong);
+      background:#090909;color:var(--text);}
+    .status-line{margin:0;font-size:.78rem;color:var(--text-subtle);min-height:16px;}
+    .status-line--ok{color:var(--ok);}
+    .status-line--err{color:var(--bad);}
+
+    /* script box */
+    .script-box{margin:0;padding:12px;background:#030303;border:1px solid var(--border);
+      color:var(--ok);font-family:"IBM Plex Mono",monospace;font-size:.74rem;
+      white-space:pre;overflow-x:auto;word-break:break-all;}
+
+    .eyebrow{margin:0 0 4px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.12em;font-size:.64rem;}
+    .empty{padding:24px;text-align:center;color:var(--text-subtle);}
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Stat bar -->
+  <div class="statbar">
+    <div class="stat"><div class="stat__val" id="sPages">—</div><div class="stat__lbl">Страниц</div></div>
+    <div class="stat"><div class="stat__val" id="sBindings">—</div><div class="stat__lbl">Связок</div></div>
+    <div class="stat"><div class="stat__val" id="sVisits">—</div><div class="stat__lbl">Визитов</div></div>
+    <div class="stat"><div class="stat__val" id="sSuccess">—</div><div class="stat__lbl">Успешно</div></div>
+    <div class="statbar__right">
+      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab tab--active" data-view="bindings" type="button">Связки</button>
+    <button class="tab" data-view="pages" type="button">Страницы</button>
+    <button class="tab" data-view="visits" type="button">Журнал</button>
+    <button class="tab" data-view="settings" type="button">Настройки</button>
+    <button class="tab" data-view="script" type="button">Скрипт</button>
+  </div>
+
+  <!-- Views -->
+
+  <!-- Связки -->
+  <div class="view view--active" id="viewBindings">
+    <div class="form-panel">
+      <div class="f-group" style="flex:2;min-width:200px">
+        <label>Страница</label>
+        <select id="bPageUrl" class="f-input"><option value="">— выберите страницу —</option></select>
+      </div>
+      <div class="f-group" style="flex:1">
+        <label>ID списка Senler</label>
+        <input id="bSubId" class="f-input" placeholder="123456" />
+      </div>
+      <div class="f-group" style="min-width:110px">
+        <label>Параметр VK ID</label>
+        <input id="bParam" class="f-input" value="vk_id" />
+      </div>
+      <div class="f-group" style="flex:1">
+        <label>Заметка</label>
+        <input id="bNote" class="f-input" placeholder="Необязательно" />
+      </div>
+      <button id="bAddBtn" class="btn btn--primary" type="button">+ Добавить связку</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Страница</th><th>Список Senler</th><th>Параметр</th><th>Заметка</th><th>Статус</th><th></th></tr></thead>
+        <tbody id="bindingsTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Страницы -->
+  <div class="view" id="viewPages">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>URL страницы</th><th>Первый визит</th><th>Всего визитов</th><th></th></tr></thead>
+        <tbody id="pagesTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Журнал -->
+  <div class="view" id="viewVisits">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Время</th><th>Страница</th><th>VK ID</th><th>IP</th><th>Связка</th><th>Результат</th></tr></thead>
+        <tbody id="visitsTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Настройки -->
+  <div class="view" id="viewSettings">
+    <div class="settings-body">
+      <p class="eyebrow">Настройки Senler API</p>
+      <label class="s-label">access_token (токен Senler)
+        <input id="cfgToken" class="s-input" type="password" placeholder="Токен из настроек Senler" />
+      </label>
+      <label class="s-label">group_id (ID группы ВКонтакте)
+        <input id="cfgGroupId" class="s-input" placeholder="123456789" />
+      </label>
+      <div style="display:flex;gap:8px">
+        <button id="cfgSave" class="btn btn--primary" type="button">Сохранить</button>
+      </div>
+      <p id="cfgStatus" class="status-line"></p>
+      <div style="margin-top:8px">
+        <p class="eyebrow" style="margin-bottom:6px">Тест подключения</p>
+        <div style="display:flex;gap:8px">
+          <input id="testVkId" class="s-input" style="max-width:160px" placeholder="VK ID (числом)" />
+          <input id="testSubId" class="s-input" style="max-width:160px" placeholder="ID списка" />
+          <button id="testBtn" class="btn" type="button">Тест</button>
+        </div>
+        <p id="testStatus" class="status-line"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Скрипт -->
+  <div class="view" id="viewScript">
+    <div class="settings-body" style="max-width:100%">
+      <p class="eyebrow">JS-скрипт для вставки на сайт</p>
+      <p style="color:var(--text-muted);font-size:.82rem;margin:0 0 8px">
+        Вставьте в <code style="color:var(--warn)">&lt;head&gt;</code> или перед <code style="color:var(--warn)">&lt;/body&gt;</code>.
+        Скрипт определяет URL страницы и параметры, отправляет в Nexus трекер.
+        Первое посещение (ваше) зарегистрирует страницу — потом создайте связку.
+      </p>
+      <pre class="script-box" id="scriptBox"></pre>
+      <button id="copyScriptBtn" class="btn" type="button">Скопировать</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const TRACK_URL = location.origin + modBase + '/api/track';
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('tab--active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('view--active'));
+    btn.classList.add('tab--active');
+    document.getElementById('view' + capitalize(btn.dataset.view)).classList.add('view--active');
+    if (btn.dataset.view === 'bindings') { loadBindings(); loadPages(); }
+    if (btn.dataset.view === 'pages')    loadPages();
+    if (btn.dataset.view === 'visits')   loadVisits();
+    if (btn.dataset.view === 'settings') loadSettings();
+    if (btn.dataset.view === 'script')   renderScript();
+  });
+});
+function capitalize(s) { return s[0].toUpperCase() + s.slice(1); }
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  const r = await fetch(API + '/stats').catch(() => null);
+  if (!r?.ok) return;
+  const s = await r.json();
+  document.getElementById('sPages').textContent = s.pages;
+  document.getElementById('sBindings').textContent = s.bindings;
+  document.getElementById('sVisits').textContent = s.visits;
+  document.getElementById('sSuccess').textContent = s.success;
+}
+document.getElementById('refreshBtn').addEventListener('click', () => { loadStats(); loadBindings(); loadPages(); });
+
+// ── Pages ─────────────────────────────────────────────────────────────────────
+let pagesData = [];
+
+async function loadPages() {
+  const r = await fetch(API + '/pages').catch(() => null);
+  if (!r?.ok) return;
+  pagesData = await r.json();
+
+  // Заполняем select в форме связок
+  const sel = document.getElementById('bPageUrl');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— выберите страницу —</option>' +
+    pagesData.map(p => `<option value="${esc(p.url)}">${esc(p.url)}</option>`).join('');
+  if (cur) sel.value = cur;
+
+  // Таблица страниц
+  const tb = document.getElementById('pagesTable');
+  if (!pagesData.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Страниц нет. Посетите сайт со скриптом.</td></tr>'; return; }
+  tb.innerHTML = pagesData.map(p => `<tr>
+    <td style="word-break:break-all;max-width:400px">${esc(p.url)}</td>
+    <td style="color:var(--text-subtle)">${p.first_seen?.slice(0,16).replace('T',' ')}</td>
+    <td>${p.visit_count}</td>
+    <td><button class="btn btn--sm btn--danger" onclick="deletePage(${p.id})">×</button></td>
+  </tr>`).join('');
+}
+
+async function deletePage(id) {
+  if (!confirm('Удалить страницу и все связки для неё?')) return;
+  await fetch(API + `/pages/${id}`, {method:'DELETE'});
+  loadPages(); loadBindings(); loadStats();
+}
+
+// ── Bindings ──────────────────────────────────────────────────────────────────
+async function loadBindings() {
+  const r = await fetch(API + '/bindings').catch(() => null);
+  if (!r?.ok) return;
+  const list = await r.json();
+  const tb = document.getElementById('bindingsTable');
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Связок нет. Добавьте первую выше.</td></tr>'; return; }
+  tb.innerHTML = list.map(b => `<tr>
+    <td style="word-break:break-all;max-width:280px;font-size:.78rem">${esc(b.page_url)}</td>
+    <td><code style="color:var(--warn)">${esc(b.subscription_id)}</code></td>
+    <td style="color:var(--text-subtle)">${esc(b.vk_id_param)}</td>
+    <td style="color:var(--text-subtle)">${esc(b.note)}</td>
+    <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'отключена'}</span></td>
+    <td style="display:flex;gap:4px">
+      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id})">${b.active?'Откл':'Вкл'}</button>
+      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id})">×</button>
+    </td>
+  </tr>`).join('');
+}
+
+document.getElementById('bAddBtn').addEventListener('click', async () => {
+  const page_url = document.getElementById('bPageUrl').value;
+  const subscription_id = document.getElementById('bSubId').value.trim();
+  const vk_id_param = document.getElementById('bParam').value.trim() || 'vk_id';
+  const note = document.getElementById('bNote').value.trim();
+  if (!page_url || !subscription_id) { alert('Выберите страницу и укажите ID списка Senler'); return; }
+  const r = await fetch(API + '/bindings', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({page_url, subscription_id, vk_id_param, note})
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || 'Ошибка'); return; }
+  document.getElementById('bSubId').value = '';
+  document.getElementById('bNote').value = '';
+  loadBindings(); loadStats();
+});
+
+async function toggleBinding(id) {
+  await fetch(API + `/bindings/${id}/toggle`, {method:'PUT'});
+  loadBindings();
+}
+async function deleteBinding(id) {
+  if (!confirm('Удалить связку?')) return;
+  await fetch(API + `/bindings/${id}`, {method:'DELETE'});
+  loadBindings(); loadStats();
+}
+
+// ── Visits ────────────────────────────────────────────────────────────────────
+async function loadVisits() {
+  const r = await fetch(API + '/visits?limit=200').catch(() => null);
+  if (!r?.ok) return;
+  const list = await r.json();
+  const tb = document.getElementById('visitsTable');
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Журнал пуст</td></tr>'; return; }
+  tb.innerHTML = list.map(v => `<tr>
+    <td style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
+    <td style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
+    <td>${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
+    <td style="color:var(--text-subtle);font-size:.75rem">${esc(v.ip)}</td>
+    <td style="color:var(--text-subtle)">${v.binding_id || '—'}</td>
+    <td>${v.success
+      ? '<span class="badge badge--ok">OK</span>'
+      : `<span class="badge badge--bad" title="${esc(v.error)}">ошибка</span>`}</td>
+  </tr>`).join('');
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const r = await fetch(API + '/settings').catch(() => null);
+  if (!r?.ok) return;
+  const s = await r.json();
+  document.getElementById('cfgToken').value = s.access_token ? '●'.repeat(12) : '';
+  document.getElementById('cfgToken').dataset.loaded = s.access_token ? '1' : '';
+  document.getElementById('cfgGroupId').value = s.group_id;
+}
+
+document.getElementById('cfgToken').addEventListener('focus', function() {
+  if (this.dataset.loaded) { this.value = ''; this.dataset.loaded = ''; }
+});
+
+document.getElementById('cfgSave').addEventListener('click', async () => {
+  const token = document.getElementById('cfgToken').value;
+  const group_id = document.getElementById('cfgGroupId').value.trim();
+  const body = {group_id};
+  if (token && token !== '●'.repeat(12)) body.access_token = token;
+  const r = await fetch(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  const st = document.getElementById('cfgStatus');
+  if (r.ok) { st.textContent = 'Сохранено'; st.className = 'status-line status-line--ok'; }
+  else { st.textContent = 'Ошибка сохранения'; st.className = 'status-line status-line--err'; }
+  setTimeout(() => { st.textContent = ''; }, 3000);
+});
+
+document.getElementById('testBtn').addEventListener('click', async () => {
+  const vk_id = document.getElementById('testVkId').value.trim();
+  const subscription_id = document.getElementById('testSubId').value.trim();
+  const st = document.getElementById('testStatus');
+  if (!vk_id || !subscription_id) { st.textContent = 'Введите VK ID и ID списка'; return; }
+  st.textContent = 'Отправляю...'; st.className = 'status-line';
+  const r = await fetch(API + '/track', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url: 'https://test.nexus/test-page', params:{vk_id}})
+  }).catch(e => null);
+  if (!r) { st.textContent = 'Ошибка запроса'; st.className = 'status-line status-line--err'; return; }
+  st.textContent = r.ok ? 'Запрос отправлен (проверьте журнал)' : 'Ошибка API';
+  st.className = 'status-line ' + (r.ok ? 'status-line--ok' : 'status-line--err');
+});
+
+// ── Script ────────────────────────────────────────────────────────────────────
+function renderScript() {
+  const script = `<!-- Nexus Senler Tracker -->
+<script>
+(function() {
+  try {
+    var url = location.origin + location.pathname;
+    var params = {};
+    location.search.slice(1).split('&').forEach(function(p) {
+      var s = p.split('=');
+      if (s[0]) params[decodeURIComponent(s[0])] = decodeURIComponent(s[1] || '');
+    });
+    fetch('${TRACK_URL}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, params: params }),
+      mode: 'cors'
+    }).catch(function(){});
+  } catch(e) {}
+})();
+<\/script>`;
+  document.getElementById('scriptBox').textContent = script;
+}
+
+document.getElementById('copyScriptBtn').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('scriptBox').textContent)
+    .then(() => { document.getElementById('copyScriptBtn').textContent = 'Скопировано ✓'; setTimeout(() => { document.getElementById('copyScriptBtn').textContent = 'Скопировать'; }, 2000); });
+});
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadStats();
+loadPages();
+loadBindings();
+</script>
+</body>
+</html>

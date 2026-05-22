@@ -1,0 +1,55 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Документация — Списки Сенлер</title></head>
+<body>
+<h2>Списки Сенлер v1.0.0</h2>
+<p>Модуль автоматически добавляет VK-пользователей в списки рассылки Senler при посещении ими страниц со встроенным JS-трекером.</p>
+
+<h2>Принцип работы</h2>
+<ol>
+  <li>На сайт вставляется JS-скрипт (вкладка «Скрипт»)</li>
+  <li>При каждом посещении скрипт отправляет <code>POST /nexus/senler/api/track</code> с URL и параметрами страницы</li>
+  <li>Модуль регистрирует страницу и ищет активные <strong>связки</strong> для этого URL</li>
+  <li>Если связка найдена и в параметрах есть VK ID — вызывается Senler API для добавления в список</li>
+</ol>
+
+<h2>REST API</h2>
+<p>Базовый путь: <code>/nexus/senler/api</code></p>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/stats</code></td><td>Общая статистика</td></tr>
+  <tr><td>GET/POST</td><td><code>/track</code></td><td>Трекинг-эндпоинт (CORS *)</td></tr>
+  <tr><td>GET</td><td><code>/pages</code></td><td>Список зарегистрированных страниц</td></tr>
+  <tr><td>DELETE</td><td><code>/pages/{id}</code></td><td>Удалить страницу и её связки</td></tr>
+  <tr><td>GET</td><td><code>/bindings</code></td><td>Список связок</td></tr>
+  <tr><td>POST</td><td><code>/bindings</code></td><td><code>{page_url, subscription_id, vk_id_param, note}</code></td></tr>
+  <tr><td>PUT</td><td><code>/bindings/{id}/toggle</code></td><td>Вкл/выкл связку</td></tr>
+  <tr><td>DELETE</td><td><code>/bindings/{id}</code></td><td>Удалить связку</td></tr>
+  <tr><td>GET</td><td><code>/visits</code></td><td>Журнал визитов (limit=200)</td></tr>
+  <tr><td>GET</td><td><code>/settings</code></td><td>Настройки API (без значений токенов)</td></tr>
+  <tr><td>POST</td><td><code>/settings</code></td><td><code>{access_token, group_id}</code></td></tr>
+</table>
+
+<h2>Трекинг-запрос</h2>
+<pre><code>POST /nexus/senler/api/track
+Content-Type: application/json
+{
+  "url": "https://example.com/page",
+  "params": { "vk_id": "123456", "utm_source": "vk" }
+}</code></pre>
+
+<h2>Структура связки</h2>
+<table>
+  <tr><th>Поле</th><th>Тип</th><th>Описание</th></tr>
+  <tr><td><code>page_url</code></td><td>TEXT</td><td>URL без параметров (origin+path)</td></tr>
+  <tr><td><code>subscription_id</code></td><td>TEXT</td><td>ID списка рассылки в Senler</td></tr>
+  <tr><td><code>vk_id_param</code></td><td>TEXT</td><td>Имя параметра URL содержащего VK ID (default: vk_id)</td></tr>
+  <tr><td><code>note</code></td><td>TEXT</td><td>Произвольная заметка</td></tr>
+  <tr><td><code>active</code></td><td>INTEGER</td><td>1=активна, 0=отключена</td></tr>
+</table>
+
+<h2>Настройки Senler</h2>
+<table>
+  <tr><th>Параметр</th><th>Где взять</th></tr>
+  <tr><td><code>access_token</code></td><td>Senler → Настройки → API → Токен доступа</td></tr>
+  <tr><td><code>group_id</code></td><td>ID группы ВКонтакте (число)</td></tr>
+</table>
+</body></html>

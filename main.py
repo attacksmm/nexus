@@ -1,11 +1,13 @@
+import json
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
 import psutil
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -128,6 +130,46 @@ async def api_pause(module_id: str, request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     return {"ok": True}
+
+
+@app.get("/api/settings/env/template")
+async def api_env_template(request: Request):
+    """Генерирует .env шаблон из NEXUS_SECRET + env_vars всех установленных модулей."""
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+
+    modules = await manager.list_modules()
+    lines = [
+        f"# Nexus Orchestrator — шаблон переменных окружения",
+        f"# Сгенерировано: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"# Заполните значения и загрузите через кнопку «Применить»",
+        "",
+        "# ── Nexus (обязательно) ─────────────────────────────────",
+        "NEXUS_SECRET=  # JWT секрет, минимум 32 символа. Смена требует перезапуска сервиса.",
+        "",
+    ]
+
+    for m in modules:
+        try:
+            manifest = json.loads(m.get("manifest_json", "{}"))
+            env_vars = manifest.get("env_vars", {})
+        except Exception:
+            env_vars = {}
+        if not env_vars:
+            continue
+        lines.append(f"# ── {m['name']} (id: {m['id']}) {'─' * max(0, 44 - len(m['name']))} ")
+        for key, desc in env_vars.items():
+            lines.append(f"# {desc}")
+            lines.append(f"{key}=")
+        lines.append("")
+
+    content = "\n".join(lines)
+    return PlainTextResponse(
+        content,
+        headers={"Content-Disposition": "attachment; filename=\"nexus.env.template\""},
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 @app.get("/api/server/stats")
