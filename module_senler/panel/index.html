@@ -23,7 +23,7 @@
     ::-webkit-scrollbar-track{background:#080808;}
     ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
 
-    .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);}
+    .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);position:relative;}
 
     .tabs{display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
     .tab{padding:0 16px;height:36px;border:none;border-bottom:2px solid transparent;
@@ -59,6 +59,27 @@
     .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
     .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
     .btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem;}
+
+    .visit-detail{
+      position:absolute;bottom:0;left:0;right:0;
+      background:var(--panel);border-top:1px solid var(--border-strong);
+      max-height:50%;display:flex;flex-direction:column;
+    }
+    .visit-detail__head{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
+    }
+    .visit-detail__body{overflow-y:auto;padding:12px;font-size:.8rem;display:grid;gap:8px;}
+    .vd-error{color:var(--bad);padding:6px 10px;border:1px solid var(--bad-bd);background:var(--bad-bg);}
+    .vd-kv{display:grid;grid-template-columns:160px 1fr;gap:4px 10px;}
+    .vd-key{color:var(--text-subtle);}
+    .vd-val{color:var(--text);word-break:break-all;font-family:"IBM Plex Mono",monospace;font-size:.76rem;}
+    .vd-pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);
+      color:var(--text-muted);font-family:"IBM Plex Mono",monospace;font-size:.74rem;
+      white-space:pre-wrap;word-break:break-all;overflow-x:auto;}
+    tr.visit-row{cursor:pointer;}
+    tr.visit-row:hover td{background:var(--panel-soft);}
+    tr.visit-row--active td{background:var(--panel-soft);border-bottom-color:var(--border-strong);}
 
     .script-body{padding:16px;display:grid;gap:10px;overflow-y:auto;}
     .script-note{margin:0;color:var(--text-muted);font-size:.82rem;line-height:1.6;}
@@ -128,6 +149,18 @@
         <thead><tr><th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th><th>Результат</th></tr></thead>
         <tbody id="visitsTable"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Детали визита -->
+  <div id="visitDetail" class="visit-detail" hidden>
+    <div class="visit-detail__head">
+      <span id="vdTitle" style="font-weight:600;font-size:.88rem"></span>
+      <button id="vdClose" class="btn btn--sm btn--ghost" type="button">×</button>
+    </div>
+    <div class="visit-detail__body">
+      <div id="vdError" class="vd-error" hidden></div>
+      <div id="vdDetails"></div>
     </div>
   </div>
 
@@ -250,22 +283,88 @@ async function deleteBinding(id) {
   loadBindings();
 }
 
+let _activeVisitRow = null;
+
 async function loadVisits() {
   const r = await fetch(API + '/visits?limit=200').catch(() => null);
   if (!r?.ok) return;
   const list = await r.json();
   const tb = document.getElementById('visitsTable');
+  closeVisitDetail();
   if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Журнал пуст</td></tr>'; return; }
-  tb.innerHTML = list.map(v => `<tr>
+  tb.innerHTML = list.map(v => `<tr class="visit-row" data-id="${v.id}" data-ok="${v.success}">
     <td style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
     <td style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
     <td>${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
     <td style="color:var(--text-subtle)">${v.binding_id || '—'}</td>
     <td>${v.success
       ? '<span class="badge badge--ok">OK</span>'
-      : `<span class="badge badge--bad" title="${esc(v.error)}">ошибка</span>`}</td>
+      : `<span class="badge badge--bad">ошибка</span>`}</td>
   </tr>`).join('');
+  tb.querySelectorAll('.visit-row').forEach(row => {
+    row.addEventListener('click', () => openVisitDetail(row));
+  });
 }
+
+async function openVisitDetail(row) {
+  if (_activeVisitRow === row) { closeVisitDetail(); return; }
+  if (_activeVisitRow) _activeVisitRow.classList.remove('visit-row--active');
+  _activeVisitRow = row;
+  row.classList.add('visit-row--active');
+
+  const vid = row.dataset.id;
+  const r = await fetch(API + `/visits/${vid}`).catch(() => null);
+  if (!r?.ok) return;
+  const v = await r.json();
+
+  const d = v.details || {};
+  document.getElementById('vdTitle').textContent = `Визит #${v.id} — ${v.visited_at?.slice(0,16).replace('T',' ')}`;
+
+  const errEl = document.getElementById('vdError');
+  if (v.error) { errEl.textContent = v.error; errEl.hidden = false; }
+  else { errEl.hidden = true; }
+
+  const rows = [
+    ['VK ID',     v.vk_id || '—'],
+    ['Страница',  v.page_url],
+    ['Связка ID', v.binding_id || '—'],
+    ['IP',        v.ip || '—'],
+    ['Статус',    v.success ? 'успех' : 'ошибка'],
+  ];
+
+  let html = `<div class="vd-kv">${rows.map(([k,val]) =>
+    `<span class="vd-key">${esc(k)}</span><span class="vd-val">${esc(String(val))}</span>`
+  ).join('')}</div>`;
+
+  if (d.http_status !== undefined) {
+    html += `<div class="vd-kv">
+      <span class="vd-key">HTTP статус</span>
+      <span class="vd-val" style="color:${d.http_status === 200 ? 'var(--ok)' : 'var(--bad)'}">${d.http_status}</span>
+    </div>`;
+  }
+
+  if (d.response !== undefined) {
+    const resp = typeof d.response === 'string' ? d.response : JSON.stringify(d.response, null, 2);
+    html += `<div style="color:var(--text-subtle);font-size:.74rem;margin-bottom:2px">Ответ Senler</div>
+             <pre class="vd-pre">${esc(resp)}</pre>`;
+  }
+
+  if (d.reason) {
+    html += `<div class="vd-kv">
+      <span class="vd-key">Причина</span><span class="vd-val">${esc(d.reason)}</span>
+    </div>`;
+  }
+
+  document.getElementById('vdDetails').innerHTML = html;
+  document.getElementById('visitDetail').hidden = false;
+}
+
+function closeVisitDetail() {
+  if (_activeVisitRow) { _activeVisitRow.classList.remove('visit-row--active'); _activeVisitRow = null; }
+  document.getElementById('visitDetail').hidden = true;
+}
+
+document.getElementById('vdClose').addEventListener('click', closeVisitDetail);
 
 function renderScript() {
   document.getElementById('scriptBox').textContent =

@@ -76,13 +76,19 @@ async def _init_db():
                 visited_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                 binding_id  INTEGER,
                 success     INTEGER NOT NULL DEFAULT 0,
-                error       TEXT NOT NULL DEFAULT ''
+                error       TEXT NOT NULL DEFAULT '',
+                details     TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_visits_page   ON visits(page_url);
             CREATE INDEX IF NOT EXISTS idx_bindings_page ON bindings(page_url);
         """)
+        # migration
+        try:
+            await db.execute("ALTER TABLE visits ADD COLUMN details TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         await db.commit()
-    _logger.info("senler DB initialized")
+    _logger.info("senul DB initialized")
 
 
 def _clean_url(raw: str) -> str:
@@ -197,6 +203,22 @@ async def list_visits(limit: int = 200):
         return [dict(r) for r in await cur.fetchall()]
 
 
+@router.get("/visits/{vid}")
+async def get_visit(vid: int):
+    async with aiosqlite.connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM visits WHERE id=?", (vid,))
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Не найдено")
+    r = dict(row)
+    try:
+        r["details"] = json.loads(r["details"]) if r["details"] else {}
+    except Exception:
+        r["details"] = {"raw": r["details"]}
+    return r
+
+
 @router.get("/stats")
 async def stats():
     async with aiosqlite.connect(_db_path) as db:
@@ -272,19 +294,20 @@ async def track(request: Request):
             vk_id = str(params.get(binding["vk_id_param"], "")).strip()
             if not vk_id:
                 _logger.warning(f"track: no vk_id in param '{binding['vk_id_param']}' for {page_url}")
+                details = json.dumps({"reason": f"параметр '{binding['vk_id_param']}' не найден в URL"}, ensure_ascii=False)
                 async with aiosqlite.connect(_db_path) as db:
                     await db.execute(
-                        "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error) VALUES(?,?,?,?,0,?)",
-                        (page_url, "", ip, binding["id"], f"no param {binding['vk_id_param']}"),
+                        "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error,details) VALUES(?,?,?,?,0,?,?)",
+                        (page_url, "", ip, binding["id"], f"no param {binding['vk_id_param']}", details),
                     )
                     await db.commit()
                 continue
 
-            success, error = await _senler_add(access_token, group_id, binding["subscription_id"], vk_id)
+            success, error, details = await _senler_add(access_token, group_id, binding["subscription_id"], vk_id)
             async with aiosqlite.connect(_db_path) as db:
                 await db.execute(
-                    "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error) VALUES(?,?,?,?,?,?)",
-                    (page_url, vk_id, ip, binding["id"], int(success), error),
+                    "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error,details) VALUES(?,?,?,?,?,?,?)",
+                    (page_url, vk_id, ip, binding["id"], int(success), error, details),
                 )
                 await db.commit()
             results.append({"binding_id": binding["id"], "vk_id": vk_id, "success": success, "error": error})
@@ -307,9 +330,63 @@ async def track_options():
 
 # ── Senler API call ───────────────────────────────────────────────────────────
 
-async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk_id: str) -> tuple[bool, str]:
+async def _senler_check(access_token: str, group_id: str, subscription_id: str, vk_id: str) -> tuple[bool | None, str]:
+    """Проверяет подписан ли vk_id в список subscription_id.
+    Возвращает (True=подписан, False=нет, None=ошибка проверки), raw_response.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{SENLER_API}/subscribers.get",
+                data={
+                    "access_token": access_token,
+                    "group_id": group_id,
+                    "subscription_id": subscription_id,
+                    "vk_user_ids": vk_id,
+                    "v": SENLER_V,
+                },
+            )
+        raw = resp.text[:2000]
+        try:
+            body = resp.json()
+        except Exception:
+            return None, raw
+        # если есть пользователь в ответе — он подписан
+        items = body.get("items") or body.get("users") or body.get("response") or []
+        if isinstance(items, list) and len(items) > 0:
+            return True, raw
+        return False, raw
+    except Exception as e:
+        return None, str(e)
+
+
+async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk_id: str) -> tuple[bool, str, str]:
+    """Возвращает (success, error_msg, details_json)."""
+    params = {
+        "access_token": "***",
+        "group_id": group_id,
+        "subscription_id": subscription_id,
+        "vk_user_ids": vk_id,
+        "v": SENLER_V,
+    }
     if not access_token or not group_id:
-        return False, "access_token или group_id не настроены"
+        details = json.dumps({"reason": "access_token или group_id не заданы в ENV", "params": params}, ensure_ascii=False)
+        return False, "токен или group_id не настроены", details
+
+    # проверяем — возможно уже подписан (пришёл из Salebot или другой системы)
+    already, check_raw = await _senler_check(access_token, group_id, subscription_id, vk_id)
+    if already is True:
+        _logger.info(f"senler: vk_id={vk_id} уже в списке {subscription_id}, пропускаем")
+        details = json.dumps({
+            "skipped": True,
+            "reason": "пользователь уже подписан на список",
+            "check_response": check_raw,
+            "params": params,
+        }, ensure_ascii=False)
+        return True, "", details
+
+    raw_body = ""
+    status_code = 0
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -322,14 +399,42 @@ async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk
                     "v": SENLER_V,
                 },
             )
-        body = resp.json()
+        status_code = resp.status_code
+        raw_body = resp.text[:2000]
+
+        try:
+            body = resp.json()
+        except Exception:
+            details = json.dumps({
+                "http_status": status_code,
+                "response": raw_body,
+                "params": params,
+            }, ensure_ascii=False)
+            _logger.warning(f"senler: не JSON ответ [{status_code}]: {raw_body[:200]}")
+            return False, f"ответ не JSON (HTTP {status_code})", details
+
+        details = json.dumps({
+            "http_status": status_code,
+            "response": body,
+            "params": params,
+            "check_before_add": check_raw,
+        }, ensure_ascii=False)
+
         if body.get("success"):
             _logger.info(f"senler: vk_id={vk_id} → list={subscription_id} OK")
-            return True, ""
+            return True, "", details
+
         err = body.get("error", {})
         msg = err.get("error_msg", str(body)) if isinstance(err, dict) else str(err)
         _logger.warning(f"senler: vk_id={vk_id} → list={subscription_id} FAIL: {msg}")
-        return False, msg
+        return False, msg, details
+
     except Exception as e:
+        details = json.dumps({
+            "http_status": status_code,
+            "response": raw_body,
+            "exception": str(e),
+            "params": params,
+        }, ensure_ascii=False)
         _logger.error(f"senler API error: {e}")
-        return False, str(e)
+        return False, str(e), details
