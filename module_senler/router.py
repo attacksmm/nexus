@@ -25,6 +25,10 @@ _logger: logging.Logger = None
 SENLER_API = "https://senler.ru/api"
 SENLER_V = "2"
 
+# правильные endpoints (через /): subscribers/add, subscribers/get
+_EP_ADD = f"{SENLER_API}/subscribers/add"
+_EP_GET = f"{SENLER_API}/subscribers/get"
+
 
 def _get_credentials() -> tuple[str, str]:
     """Читает токен и group_id из ENV без перезапуска."""
@@ -337,7 +341,7 @@ async def _senler_check(access_token: str, group_id: str, subscription_id: str, 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{SENLER_API}/subscribers.get",
+                _EP_GET,
                 data={
                     "access_token": access_token,
                     "group_id": group_id,
@@ -390,7 +394,7 @@ async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{SENLER_API}/subscribers.add",
+                _EP_ADD,
                 data={
                     "access_token": access_token,
                     "group_id": group_id,

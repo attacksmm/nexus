@@ -115,7 +115,7 @@
         <input id="bSubId" class="f-input" placeholder="123456" />
       </div>
       <div class="f-group" style="min-width:110px">
-        <label>Параметр VK ID</label>
+        <label title="Имя GET-параметра в URL с VK ID пользователя. Например utm_term, vk_id, uid">Параметр VK ID ⓘ</label>
         <input id="bParam" class="f-input" value="vk_id" />
       </div>
       <div class="f-group" style="flex:1">
@@ -146,7 +146,12 @@
   <div class="view" id="viewVisits">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th><th>Результат</th></tr></thead>
+        <thead><tr>
+          <th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th>
+          <th id="thResult" style="cursor:pointer;user-select:none" title="Кликните для фильтра">
+            Результат <span id="filterLabel" style="color:var(--text-subtle);font-weight:400;font-size:.72rem"></span>
+          </th>
+        </tr></thead>
         <tbody id="visitsTable"></tbody>
       </table>
     </div>
@@ -284,15 +289,34 @@ async function deleteBinding(id) {
 }
 
 let _activeVisitRow = null;
+const FILTERS = ['all', 'error', 'ok'];
+const FILTER_LABELS = { all: '', error: '· ошибки', ok: '· успех' };
+let _visitFilter = 'all';
+let _allVisits = [];
+
+document.getElementById('thResult').addEventListener('click', () => {
+  _visitFilter = FILTERS[(FILTERS.indexOf(_visitFilter) + 1) % FILTERS.length];
+  document.getElementById('filterLabel').textContent = FILTER_LABELS[_visitFilter];
+  renderVisits();
+});
 
 async function loadVisits() {
-  const r = await fetch(API + '/visits?limit=200').catch(() => null);
+  const r = await fetch(API + '/visits?limit=500').catch(() => null);
   if (!r?.ok) return;
-  const list = await r.json();
-  const tb = document.getElementById('visitsTable');
+  _allVisits = await r.json();
   closeVisitDetail();
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Журнал пуст</td></tr>'; return; }
-  tb.innerHTML = list.map(v => `<tr class="visit-row" data-id="${v.id}" data-ok="${v.success}">
+  renderVisits();
+}
+
+function renderVisits() {
+  const tb = document.getElementById('visitsTable');
+  const list = _visitFilter === 'all' ? _allVisits
+    : _allVisits.filter(v => _visitFilter === 'ok' ? v.success : !v.success);
+  if (!list.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">${_visitFilter === 'all' ? 'Журнал пуст' : 'Нет записей'}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = list.map(v => `<tr class="visit-row" data-id="${v.id}">
     <td style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
     <td style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
     <td>${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
