@@ -6,6 +6,15 @@
   <title>Nexus — Настройки</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23060606'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23f2f2f2' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23f2f2f2'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="{{ rp }}/static/styles.css?v=2" />
+  <style>
+    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }
+    .stat-card { background:var(--panel); border:1px solid var(--border); padding:12px 14px; display:grid; gap:6px; }
+    .stat-val  { font-size:1.1rem; font-weight:600; color:var(--text); }
+    .stat-bar  { height:4px; background:var(--panel-soft); border-radius:0; overflow:hidden; }
+    .stat-bar__fill { height:100%; background:var(--ok); transition:width .4s; }
+    .stat-bar__fill--warn { background:var(--warn); }
+    .stat-bar__fill--bad  { background:var(--bad); }
+  </style>
 </head>
 <body>
 <div class="app-shell">
@@ -29,19 +38,48 @@
     <aside class="sidebar">
       <div class="sidebar__head"><p class="eyebrow">Разделы</p></div>
       <div class="module-list">
-        <button class="module-item module-item--active" data-tab="users" type="button">
+        <button class="module-item module-item--active" data-tab="server" type="button">
+          <span class="module-item__name">Состояние сервера</span>
+        </button>
+        <button class="module-item" data-tab="users" type="button">
           <span class="module-item__name">Пользователи</span>
         </button>
         <button class="module-item" data-tab="env" type="button">
-          <span class="module-item__name">Переменные окружения</span>
+          <span class="module-item__name">Окружение</span>
         </button>
       </div>
     </aside>
 
     <main class="content-area">
 
+      <!-- Сервер -->
+      <section id="tabServer" class="settings-section">
+        <div class="settings-header">
+          <div><p class="eyebrow">Мониторинг</p><h2>Состояние сервера</h2></div>
+          <button id="statsRefreshBtn" class="btn btn--sm btn--ghost" type="button">↻ Обновить</button>
+        </div>
+
+        <div class="stat-grid" id="statGrid">
+          <div class="stat-card"><p class="eyebrow">CPU</p><div class="stat-val" id="sCpu">—</div><div class="stat-bar"><div class="stat-bar__fill" id="sCpuBar"></div></div></div>
+          <div class="stat-card"><p class="eyebrow">RAM</p><div class="stat-val" id="sRam">—</div><div class="stat-bar"><div class="stat-bar__fill" id="sRamBar"></div></div></div>
+          <div class="stat-card"><p class="eyebrow">Диск</p><div class="stat-val" id="sDisk">—</div><div class="stat-bar"><div class="stat-bar__fill" id="sDiskBar"></div></div></div>
+          <div class="stat-card"><p class="eyebrow">Uptime</p><div class="stat-val" id="sUptime">—</div></div>
+          <div class="stat-card"><p class="eyebrow">Load avg (1/5/15 мин)</p><div class="stat-val" id="sLoad">—</div></div>
+        </div>
+
+        <div style="margin-top:16px">
+          <p class="eyebrow" style="margin-bottom:8px">Модули</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Название</th><th>Версия</th><th>Статус</th></tr></thead>
+              <tbody id="statsModuleTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- Пользователи -->
-      <section id="tabUsers" class="settings-section">
+      <section id="tabUsers" class="settings-section" hidden>
         <div class="settings-header">
           <div>
             <p class="eyebrow">Управление доступом</p>
@@ -143,12 +181,71 @@ document.querySelectorAll(".module-item[data-tab]").forEach(btn => {
     document.querySelectorAll(".module-item[data-tab]").forEach(b => b.classList.remove("module-item--active"));
     document.querySelectorAll(".settings-section").forEach(s => s.hidden = true);
     btn.classList.add("module-item--active");
-    document.getElementById("tab" + capitalize(btn.dataset.tab)).hidden = false;
+    const tabEl = document.getElementById("tab" + capitalize(btn.dataset.tab));
+    if (tabEl) tabEl.hidden = false;
     if (btn.dataset.tab === "env") loadEnvKeys();
+    if (btn.dataset.tab === "server") loadServerStats();
   });
 });
 
 function capitalize(s) { return s[0].toUpperCase() + s.slice(1); }
+
+// ── Server stats ──────────────────────────────────────────────────────────────
+
+function fmtBytes(b) {
+  if (b >= 1073741824) return (b/1073741824).toFixed(1) + " ГБ";
+  if (b >= 1048576)    return (b/1048576).toFixed(0) + " МБ";
+  return (b/1024).toFixed(0) + " КБ";
+}
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  return `${d}д ${h}ч ${m}м`;
+}
+
+function setBar(barId, pct) {
+  const el = document.getElementById(barId);
+  if (!el) return;
+  el.style.width = pct + "%";
+  el.className = "stat-bar__fill" + (pct > 90 ? " stat-bar__fill--bad" : pct > 70 ? " stat-bar__fill--warn" : "");
+}
+
+async function loadServerStats() {
+  const res = await fetch(RP + "/api/server/stats").catch(() => null);
+  if (!res?.ok) { document.getElementById("sCpu").textContent = "Ошибка"; return; }
+  const s = await res.json();
+
+  document.getElementById("sCpu").textContent = s.cpu_percent.toFixed(1) + "% / " + s.cpu_count + " ядер";
+  setBar("sCpuBar", s.cpu_percent);
+
+  document.getElementById("sRam").textContent = fmtBytes(s.ram_used) + " / " + fmtBytes(s.ram_total) + " (" + s.ram_percent + "%)";
+  setBar("sRamBar", s.ram_percent);
+
+  document.getElementById("sDisk").textContent = fmtBytes(s.disk_used) + " / " + fmtBytes(s.disk_total) + " (" + s.disk_percent + "%)";
+  setBar("sDiskBar", s.disk_percent);
+
+  document.getElementById("sUptime").textContent = fmtUptime(s.uptime);
+  document.getElementById("sLoad").textContent = s.load_avg.map(v => v.toFixed(2)).join(" / ");
+
+  const STATUS = { active:"активен", paused:"пауза", unloaded:"выгружен", error:"ошибка" };
+  const CLR = { active:"var(--ok)", paused:"var(--warn)", error:"var(--bad)", unloaded:"var(--text-subtle)" };
+  document.getElementById("statsModuleTable").innerHTML = s.modules.map(m => `
+    <tr>
+      <td style="font-family:monospace;font-size:.82rem">${esc(m.id)}</td>
+      <td>${esc(m.name)}</td>
+      <td style="color:var(--text-subtle)">${esc(m.version)}</td>
+      <td style="color:${CLR[m.status]||"inherit"}">${STATUS[m.status]||m.status}</td>
+    </tr>`).join("");
+}
+
+document.getElementById("statsRefreshBtn").addEventListener("click", loadServerStats);
+
+// Auto-refresh каждые 10 сек если вкладка активна
+setInterval(() => {
+  if (!document.getElementById("tabServer").hidden) loadServerStats();
+}, 10000);
+
+// Загружаем при старте (вкладка Сервер открыта по умолчанию)
+loadServerStats();
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 

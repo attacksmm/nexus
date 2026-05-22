@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import logging
+import logging.handlers
 import shutil
 import sys
 import zipfile
@@ -16,6 +18,20 @@ MODULES_DIR = Path(__file__).parent.parent / "modules"
 UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
 REQUIRED_MANIFEST_KEYS = {"id", "name", "version"}
+
+
+def get_module_logger(module_id: str, log_dir: Path) -> logging.Logger:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "module.log"
+    logger = logging.getLogger(f"nexus.mod.{module_id}")
+    if not logger.handlers:
+        h = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(h)
+    logger.setLevel(logging.DEBUG)
+    return logger
 
 
 class ModuleContext:
@@ -116,13 +132,20 @@ class ModuleManager:
         if router_file.exists():
             mod = self._import_module_file(module_id, router_file)
             ctx = ModuleContext(module_id, module_dir)
-            if hasattr(mod, "setup"):
-                result = mod.setup(ctx)
-                # поддерживаем и async setup
-                if hasattr(result, "__await__"):
-                    await result
+            ctx.logger = get_module_logger(module_id, module_dir / "data" / "logs")
+            ctx.logger.info(f"Module {module_id} mounting")
+            try:
+                if hasattr(mod, "setup"):
+                    result = mod.setup(ctx)
+                    if hasattr(result, "__await__"):
+                        await result
+            except Exception as e:
+                ctx.logger.error(f"setup() failed: {e}", exc_info=True)
+                await update_module_status(module_id, "error")
+                raise
             if hasattr(mod, "router"):
                 app.include_router(mod.router, prefix=f"/{module_id}/api")
+            ctx.logger.info(f"Module {module_id} active")
             self._loaded[module_id] = mod
 
         for d, suffix in [(module_dir / "panel", "panel"), (module_dir / "static", "static")]:

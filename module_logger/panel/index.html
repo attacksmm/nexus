@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Логгер</title>
+  <style>
+    :root {
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--text-muted:#bababa;--text-subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent-bg:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      --term-bg:#020202; --term-text:#d4d4d4;
+      --term-ok:#4ec994; --term-err:#f47067; --term-warn:#e5c07b;
+      --term-info:#61afef; --term-dim:#5c6370;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    }
+    *,*::before,*::after{box-sizing:border-box;}
+    [hidden]{display:none!important;}
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-size:13px;}
+    button,input,select{font:inherit;}
+
+    .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);}
+
+    /* ── Tab bar ── */
+    .tabbar{
+      display:flex;align-items:stretch;gap:0;
+      border-bottom:1px solid var(--border);background:var(--panel);
+      overflow-x:auto;scrollbar-width:none;flex-shrink:0;
+    }
+    .tabbar::-webkit-scrollbar{display:none;}
+    .tab{
+      display:flex;align-items:center;gap:7px;
+      padding:0 14px;height:38px;
+      border-right:1px solid var(--border);border-bottom:2px solid transparent;
+      background:transparent;color:var(--text-subtle);cursor:pointer;
+      white-space:nowrap;flex-shrink:0;font-size:.82rem;
+    }
+    .tab:hover{color:var(--text-muted);background:var(--panel-strong);}
+    .tab--active{color:var(--text);border-bottom-color:var(--accent-bg);background:var(--panel-soft);}
+    .tab__dot{width:6px;height:6px;border-radius:50%;background:var(--border-strong);flex-shrink:0;}
+    .tab__dot--ok{background:var(--ok);}
+    .tab__dot--empty{background:var(--border-mid);}
+    .tab__size{color:var(--text-subtle);font-size:.72rem;}
+
+    .tabbar__actions{
+      margin-left:auto;display:flex;align-items:center;gap:6px;
+      padding:0 10px;flex-shrink:0;border-left:1px solid var(--border);
+    }
+
+    /* ── Terminal ── */
+    .term-wrap{
+      display:grid;grid-template-rows:minmax(0,1fr);
+      min-height:0;position:relative;
+    }
+    .terminal{
+      font-family:"IBM Plex Mono","Fira Code",monospace;
+      font-size:.8rem;line-height:1.55;
+      background:var(--term-bg);color:var(--term-text);
+      padding:12px 14px;overflow-y:auto;overflow-x:hidden;
+      white-space:pre-wrap;word-break:break-all;
+      scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;
+    }
+
+    /* log line colorization */
+    .l-err{color:var(--term-err);}
+    .l-warn{color:var(--term-warn);}
+    .l-ok{color:var(--term-ok);}
+    .l-info{color:var(--term-info);}
+    .l-dim{color:var(--term-dim);}
+
+    /* live indicator */
+    .live-dot{
+      width:7px;height:7px;border-radius:50%;
+      background:var(--ok);display:inline-block;
+      animation:pulse 1.4s ease-in-out infinite;
+    }
+    .live-dot--off{background:var(--border-strong);animation:none;}
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+
+    /* ── Buttons ── */
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;gap:5px;
+      min-height:26px;padding:3px 10px;
+      border:1px solid var(--border-strong);background:var(--panel-strong);
+      color:var(--text);cursor:pointer;white-space:nowrap;font-size:.78rem;
+    }
+    .btn:disabled{opacity:.35;cursor:default;}
+    .btn--primary{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
+    .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
+    .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+
+    .status-bar{
+      position:absolute;bottom:0;left:0;right:0;
+      display:flex;align-items:center;gap:10px;padding:4px 12px;
+      background:rgba(2,2,2,.85);border-top:1px solid var(--border);
+      font-size:.74rem;color:var(--text-subtle);
+    }
+    .status-bar span{display:flex;align-items:center;gap:5px;}
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Tab bar -->
+  <div class="tabbar" id="tabbar">
+    <div class="tabbar__actions">
+      <span class="live-dot live-dot--off" id="liveDot"></span>
+      <button id="liveBtn" class="btn" type="button" title="Live tail">Live</button>
+      <button id="downloadBtn" class="btn btn--ghost" type="button" title="Скачать лог">↓</button>
+      <button id="clearBtn" class="btn btn--danger" type="button" title="Очистить лог">Очистить</button>
+      <button id="scrollBtn" class="btn btn--ghost" type="button" title="Конец">↓↓</button>
+    </div>
+  </div>
+
+  <!-- Terminal -->
+  <div class="term-wrap">
+    <div class="terminal" id="terminal">[Выберите вкладку]</div>
+    <div class="status-bar" id="statusBar">
+      <span id="statusLines">0 строк</span>
+      <span id="statusModule" style="margin-left:auto;color:var(--text-subtle)"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+// API base — вычисляем из текущего URL
+// iframe src: /nexus/logger/panel/index.html
+// API: /nexus/logger/api/
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+// WebSocket
+const WS_BASE = location.origin.replace(/^http/, 'ws') + modBase + '/api';
+
+let activeTab = null;
+let ws = null;
+let live = false;
+let lineCount = 0;
+
+const term   = document.getElementById('terminal');
+const tabbar = document.getElementById('tabbar');
+const liveDot = document.getElementById('liveDot');
+
+// ── Load modules & build tabs ─────────────────────────────────────────────
+
+async function loadModules() {
+  const res = await fetch(API + '/modules').catch(() => null);
+  if (!res?.ok) return;
+  const mods = await res.json();
+
+  // Удаляем старые вкладки (кроме actions)
+  const actions = document.querySelector('.tabbar__actions');
+  tabbar.innerHTML = '';
+  tabbar.appendChild(actions);
+
+  for (const m of mods) {
+    const tab = document.createElement('button');
+    tab.className = 'tab' + (m.id === activeTab ? ' tab--active' : '');
+    tab.dataset.id = m.id;
+    tab.type = 'button';
+    const hasSz = m.size > 0;
+    const szStr = m.size ? formatSize(m.size) : '';
+    tab.innerHTML = `
+      <span class="tab__dot ${hasSz ? 'tab__dot--ok' : 'tab__dot--empty'}"></span>
+      <span>${esc(m.name || m.id)}</span>
+      ${szStr ? `<span class="tab__size">${szStr}</span>` : ''}`;
+    tab.addEventListener('click', () => selectTab(m.id));
+    tabbar.insertBefore(tab, actions);
+  }
+
+  // Если нет активной вкладки — выбрать nexus
+  if (!activeTab && mods.length) selectTab('nexus');
+}
+
+// ── Select tab ────────────────────────────────────────────────────────────
+
+async function selectTab(id) {
+  stopLive();
+  activeTab = id;
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('tab--active', t.dataset.id === id));
+  document.getElementById('statusModule').textContent = id;
+  document.getElementById('clearBtn').disabled = id === 'nexus';
+  await loadLogs();
+}
+
+async function loadLogs() {
+  if (!activeTab) return;
+  term.textContent = 'Загрузка…';
+  const res = await fetch(`${API}/logs/${activeTab}?lines=500`).catch(() => null);
+  if (!res?.ok) { term.textContent = '[ошибка загрузки]'; return; }
+  const text = await res.text();
+  renderLog(text);
+  scrollBottom();
+}
+
+function renderLog(text) {
+  const lines = text.split('\n');
+  lineCount = lines.length;
+  term.innerHTML = lines.map(colorize).join('\n');
+  document.getElementById('statusLines').textContent = `${lineCount} строк`;
+}
+
+function appendLine(line) {
+  if (!line.trim()) return;
+  lineCount++;
+  const span = document.createElement('span');
+  span.innerHTML = colorize(line) + '\n';
+  term.appendChild(span);
+  document.getElementById('statusLines').textContent = `${lineCount} строк`;
+  // auto-scroll если уже внизу
+  if (term.scrollTop + term.clientHeight >= term.scrollHeight - 60) scrollBottom();
+  // ограничение DOM: удаляем старые строки
+  while (term.childNodes.length > 3000) term.removeChild(term.firstChild);
+}
+
+function colorize(line) {
+  const l = line.toLowerCase();
+  const e = esc(line);
+  if (/\b(error|exception|traceback|critical|fatal)\b/.test(l)) return `<span class="l-err">${e}</span>`;
+  if (/\b(warning|warn)\b/.test(l))   return `<span class="l-warn">${e}</span>`;
+  if (/\b(info|started|active|ok)\b/.test(l)) return `<span class="l-info">${e}</span>`;
+  if (/\b(debug)\b/.test(l))           return `<span class="l-dim">${e}</span>`;
+  if (/^\s*(--|\[|\]|#)/.test(line))   return `<span class="l-dim">${e}</span>`;
+  return e;
+}
+
+// ── Live WebSocket ────────────────────────────────────────────────────────
+
+function startLive() {
+  if (ws) { ws.close(); ws = null; }
+  if (!activeTab) return;
+  ws = new WebSocket(`${WS_BASE}/ws/${activeTab}`);
+  ws.onmessage = e => { if (e.data) appendLine(e.data.replace(/\n$/, '')); };
+  ws.onopen    = () => { live = true; liveDot.classList.remove('live-dot--off'); document.getElementById('liveBtn').textContent = 'Stop'; };
+  ws.onclose   = () => stopLive();
+  ws.onerror   = () => stopLive();
+}
+
+function stopLive() {
+  if (ws) { try { ws.close(); } catch(e){} ws = null; }
+  live = false;
+  liveDot.classList.add('live-dot--off');
+  document.getElementById('liveBtn').textContent = 'Live';
+}
+
+document.getElementById('liveBtn').addEventListener('click', () => {
+  if (live) stopLive(); else startLive();
+});
+
+// ── Download ──────────────────────────────────────────────────────────────
+
+document.getElementById('downloadBtn').addEventListener('click', () => {
+  if (!activeTab) return;
+  const a = document.createElement('a');
+  a.href = `${API}/logs/${activeTab}/download`;
+  a.download = `${activeTab}.log`;
+  a.click();
+});
+
+// ── Clear ─────────────────────────────────────────────────────────────────
+
+document.getElementById('clearBtn').addEventListener('click', async () => {
+  if (!activeTab || activeTab === 'nexus') return;
+  if (!confirm(`Очистить логи модуля «${activeTab}»?`)) return;
+  await fetch(`${API}/logs/${activeTab}`, { method: 'DELETE' });
+  await loadLogs();
+  loadModules();  // обновить размер в табе
+});
+
+// ── Scroll bottom ─────────────────────────────────────────────────────────
+
+function scrollBottom() { term.scrollTop = term.scrollHeight; }
+document.getElementById('scrollBtn').addEventListener('click', scrollBottom);
+
+// ── Utils ──────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function formatSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+// ── Init + auto-refresh modules list ─────────────────────────────────────
+
+loadModules();
+setInterval(loadModules, 15000);   // вкладки обновляются автоматически
+</script>
+</body>
+</html>

@@ -1,7 +1,9 @@
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiofiles
+import psutil
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -126,6 +128,30 @@ async def api_pause(module_id: str, request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     return {"ok": True}
+
+
+@app.get("/api/server/stats")
+async def api_server_stats(request: Request):
+    user = await verify_token_from_request(request)
+    if not user:
+        return _unauth_json()
+    boot = psutil.boot_time()
+    vm = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    modules = await manager.list_modules()
+    return {
+        "cpu_percent": psutil.cpu_percent(interval=0.3),
+        "cpu_count": psutil.cpu_count(),
+        "ram_total": vm.total,
+        "ram_used": vm.used,
+        "ram_percent": vm.percent,
+        "disk_total": disk.total,
+        "disk_used": disk.used,
+        "disk_percent": disk.percent,
+        "uptime": int(time.time() - boot),
+        "load_avg": list(psutil.getloadavg()),
+        "modules": [{"id": m["id"], "name": m["name"], "status": m["status"], "version": m["version"]} for m in modules],
+    }
 
 
 @app.post("/api/modules/{module_id}/resume")
