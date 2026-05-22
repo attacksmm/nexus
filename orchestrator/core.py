@@ -116,12 +116,25 @@ class ModuleManager:
             raise ValueError(f"Invalid module id: {module_id!r}")
 
         module_dir = MODULES_DIR / module_id
+
+        # сохраняем data/ при обновлении — там БД и логи модуля
+        data_backup: Path | None = None
         if module_dir.exists():
+            data_dir = module_dir / "data"
+            if data_dir.exists():
+                import tempfile
+                data_backup = Path(tempfile.mkdtemp()) / "data"
+                shutil.copytree(data_dir, data_backup)
             shutil.rmtree(module_dir)
+
         module_dir.mkdir(parents=True)
 
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(module_dir)
+
+        if data_backup and data_backup.exists():
+            shutil.copytree(data_backup, module_dir / "data")
+            shutil.rmtree(data_backup.parent)
 
         return manifest, module_dir
 

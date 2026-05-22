@@ -19,30 +19,22 @@
     html,body{margin:0;height:100%;background:var(--bg);color:var(--text);}
     button,input,select,textarea{font:inherit;}
     *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
-    ::-webkit-scrollbar{width:8px;height:8px;}::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar{width:8px;height:8px;}
+    ::-webkit-scrollbar-track{background:#080808;}
     ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
 
-    .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr);}
+    .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);}
 
-    /* stat bar */
-    .statbar{display:flex;align-items:center;gap:16px;padding:8px 12px;
-      border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
-    .stat{display:flex;flex-direction:column;gap:1px;}
-    .stat__val{font-weight:600;font-size:.95rem;}
-    .stat__lbl{color:var(--text-subtle);font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;}
-    .statbar__right{margin-left:auto;display:flex;gap:8px;align-items:center;}
-
-    /* tabs */
-    .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
+    .tabs{display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
     .tab{padding:0 16px;height:36px;border:none;border-bottom:2px solid transparent;
       background:transparent;color:var(--text-subtle);cursor:pointer;font-size:.82rem;}
     .tab:hover{color:var(--text-muted);}
     .tab--active{color:var(--text);border-bottom-color:var(--accent-bg);}
+    .tabs__right{margin-left:auto;display:flex;align-items:center;padding:0 10px;gap:8px;border-left:1px solid var(--border);}
 
-    .view{display:none;flex-direction:column;min-height:0;overflow:hidden;}
+    .view{display:none;flex-direction:column;min-height:0;overflow:hidden;height:100%;}
     .view--active{display:flex;}
 
-    /* table */
     .table-wrap{overflow:auto;flex:1;}
     table{width:100%;border-collapse:collapse;font-size:.82rem;}
     th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;}
@@ -53,15 +45,12 @@
     .badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg);}
     .badge--off{color:var(--text-subtle);border-color:var(--border-mid);}
 
-    /* form panel */
     .form-panel{flex-shrink:0;padding:10px 12px;border-bottom:1px solid var(--border);
       background:var(--panel);display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
     .f-group{display:grid;gap:4px;min-width:140px;}
     .f-group label{font-size:.72rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.08em;}
-    .f-input{min-height:30px;padding:4px 8px;border:1px solid var(--border-strong);
-      background:#090909;color:var(--text);width:100%;}
+    .f-input{min-height:30px;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);width:100%;}
 
-    /* buttons */
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
       min-height:28px;padding:4px 11px;border:1px solid var(--border-strong);
       background:var(--panel-strong);color:var(--text);cursor:pointer;font-size:.8rem;white-space:nowrap;}
@@ -71,48 +60,27 @@
     .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
     .btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem;}
 
-    /* settings form */
-    .settings-body{padding:16px;display:grid;gap:12px;max-width:480px;}
-    .s-label{display:grid;gap:5px;font-size:.82rem;color:var(--text-muted);}
-    .s-input{width:100%;min-height:34px;padding:6px 9px;border:1px solid var(--border-strong);
-      background:#090909;color:var(--text);}
-    .status-line{margin:0;font-size:.78rem;color:var(--text-subtle);min-height:16px;}
-    .status-line--ok{color:var(--ok);}
-    .status-line--err{color:var(--bad);}
-
-    /* script box */
+    .script-body{padding:16px;display:grid;gap:10px;overflow-y:auto;}
+    .script-note{margin:0;color:var(--text-muted);font-size:.82rem;line-height:1.6;}
     .script-box{margin:0;padding:12px;background:#030303;border:1px solid var(--border);
       color:var(--ok);font-family:"IBM Plex Mono",monospace;font-size:.74rem;
-      white-space:pre;overflow-x:auto;word-break:break-all;}
+      white-space:pre;overflow-x:auto;}
 
-    .eyebrow{margin:0 0 4px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.12em;font-size:.64rem;}
     .empty{padding:24px;text-align:center;color:var(--text-subtle);}
   </style>
 </head>
 <body>
 <div class="shell">
 
-  <!-- Stat bar -->
-  <div class="statbar">
-    <div class="stat"><div class="stat__val" id="sPages">—</div><div class="stat__lbl">Страниц</div></div>
-    <div class="stat"><div class="stat__val" id="sBindings">—</div><div class="stat__lbl">Связок</div></div>
-    <div class="stat"><div class="stat__val" id="sVisits">—</div><div class="stat__lbl">Визитов</div></div>
-    <div class="stat"><div class="stat__val" id="sSuccess">—</div><div class="stat__lbl">Успешно</div></div>
-    <div class="statbar__right">
-      <span id="envBadge" style="font-size:.74rem;padding:2px 8px;border:1px solid;display:inline-block"></span>
-      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button>
-    </div>
-  </div>
-
-  <!-- Tabs -->
   <div class="tabs">
     <button class="tab tab--active" data-view="bindings" type="button">Связки</button>
     <button class="tab" data-view="pages" type="button">Страницы</button>
     <button class="tab" data-view="visits" type="button">Журнал</button>
     <button class="tab" data-view="script" type="button">Скрипт</button>
+    <div class="tabs__right">
+      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button>
+    </div>
   </div>
-
-  <!-- Views -->
 
   <!-- Связки -->
   <div class="view view--active" id="viewBindings">
@@ -133,7 +101,7 @@
         <label>Заметка</label>
         <input id="bNote" class="f-input" placeholder="Необязательно" />
       </div>
-      <button id="bAddBtn" class="btn btn--primary" type="button">+ Добавить связку</button>
+      <button id="bAddBtn" class="btn btn--primary" type="button">+ Добавить</button>
     </div>
     <div class="table-wrap">
       <table>
@@ -147,7 +115,7 @@
   <div class="view" id="viewPages">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>URL страницы</th><th>Первый визит</th><th>Всего визитов</th><th></th></tr></thead>
+        <thead><tr><th>URL страницы</th><th>Первый визит</th><th></th></tr></thead>
         <tbody id="pagesTable"></tbody>
       </table>
     </div>
@@ -157,7 +125,7 @@
   <div class="view" id="viewVisits">
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Время</th><th>Страница</th><th>VK ID</th><th>IP</th><th>Связка</th><th>Результат</th></tr></thead>
+        <thead><tr><th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th><th>Результат</th></tr></thead>
         <tbody id="visitsTable"></tbody>
       </table>
     </div>
@@ -165,15 +133,10 @@
 
   <!-- Скрипт -->
   <div class="view" id="viewScript">
-    <div class="settings-body" style="max-width:100%">
-      <p class="eyebrow">JS-скрипт для вставки на сайт</p>
-      <p style="color:var(--text-muted);font-size:.82rem;margin:0 0 8px;line-height:1.6">
-        Вставьте в <code style="color:var(--warn)">&lt;head&gt;</code> или перед <code style="color:var(--warn)">&lt;/body&gt;</code>.<br>
-        <strong style="color:var(--text)">Безопасность:</strong> скрипт не изменяет DOM, не блокирует рендеринг, не бросает ошибок, защищён от двойного выполнения.<br>
-        <strong style="color:var(--text)">Первый шаг:</strong> посетите страницу сами — она появится в списке «Страницы». Потом создайте связку.
-      </p>
+    <div class="script-body">
+      <p class="script-note">Вставьте в <code>&lt;head&gt;</code> или перед <code>&lt;/body&gt;</code>. Первое посещение зарегистрирует страницу — потом создайте связку.</p>
       <pre class="script-box" id="scriptBox"></pre>
-      <button id="copyScriptBtn" class="btn" type="button">Скопировать</button>
+      <button id="copyScriptBtn" class="btn" type="button" style="justify-self:start">Скопировать</button>
     </div>
   </div>
 
@@ -186,50 +149,32 @@ const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
 const API = modBase + '/api';
 const TRACK_URL = location.origin + modBase + '/api/track';
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(b => b.classList.remove('tab--active'));
     document.querySelectorAll('.view').forEach(v => v.classList.remove('view--active'));
     btn.classList.add('tab--active');
-    document.getElementById('view' + capitalize(btn.dataset.view)).classList.add('view--active');
+    const id = 'view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1);
+    document.getElementById(id).classList.add('view--active');
     if (btn.dataset.view === 'bindings') { loadBindings(); loadPages(); }
     if (btn.dataset.view === 'pages')    loadPages();
     if (btn.dataset.view === 'visits')   loadVisits();
     if (btn.dataset.view === 'script')   renderScript();
   });
 });
-function capitalize(s) { return s[0].toUpperCase() + s.slice(1); }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
-async function loadStats() {
-  const r = await fetch(API + '/stats').catch(() => null);
-  if (!r?.ok) return;
-  const s = await r.json();
-  document.getElementById('sPages').textContent = s.pages;
-  document.getElementById('sBindings').textContent = s.bindings;
-  document.getElementById('sVisits').textContent = s.visits;
-  document.getElementById('sSuccess').textContent = s.success;
-}
+document.getElementById('refreshBtn').addEventListener('click', () => { loadBindings(); loadPages(); loadEnvCheck(); });
 
-async function loadEnvStatus() {
+async function loadEnvCheck() {
   const r = await fetch(API + '/env-status').catch(() => null);
   if (!r?.ok) return;
   const s = await r.json();
-  const badge = document.getElementById('envBadge');
-  if (s.ready) {
-    badge.textContent = 'ENV ✓';
-    badge.style.cssText = 'font-size:.74rem;padding:2px 8px;border:1px solid var(--ok-bd);color:var(--ok);background:var(--ok-bg);display:inline-block';
-  } else {
+  if (!s.ready) {
     const missing = Object.entries(s).filter(([k,v]) => k !== 'ready' && !v).map(([k]) => k).join(', ');
-    badge.textContent = `ENV: нет ${missing}`;
-    badge.style.cssText = 'font-size:.74rem;padding:2px 8px;border:1px solid var(--bad-bd);color:var(--bad);background:var(--bad-bg);display:inline-block';
+    (window.parent?.notify || console.warn)(`Senler: не настроены переменные ${missing}`, 'warn');
   }
 }
 
-document.getElementById('refreshBtn').addEventListener('click', () => { loadStats(); loadBindings(); loadPages(); loadEnvStatus(); });
-
-// ── Pages ─────────────────────────────────────────────────────────────────────
 let pagesData = [];
 
 async function loadPages() {
@@ -237,20 +182,17 @@ async function loadPages() {
   if (!r?.ok) return;
   pagesData = await r.json();
 
-  // Заполняем select в форме связок
   const sel = document.getElementById('bPageUrl');
   const cur = sel.value;
   sel.innerHTML = '<option value="">— выберите страницу —</option>' +
     pagesData.map(p => `<option value="${esc(p.url)}">${esc(p.url)}</option>`).join('');
   if (cur) sel.value = cur;
 
-  // Таблица страниц
   const tb = document.getElementById('pagesTable');
-  if (!pagesData.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">Страниц нет. Посетите сайт со скриптом.</td></tr>'; return; }
+  if (!pagesData.length) { tb.innerHTML = '<tr><td colspan="3" class="empty">Нет страниц. Посетите сайт со скриптом.</td></tr>'; return; }
   tb.innerHTML = pagesData.map(p => `<tr>
-    <td style="word-break:break-all;max-width:400px">${esc(p.url)}</td>
-    <td style="color:var(--text-subtle)">${p.first_seen?.slice(0,16).replace('T',' ')}</td>
-    <td>${p.visit_count}</td>
+    <td style="word-break:break-all">${esc(p.url)}</td>
+    <td style="color:var(--text-subtle);white-space:nowrap">${p.first_seen?.slice(0,16).replace('T',' ')}</td>
     <td><button class="btn btn--sm btn--danger" onclick="deletePage(${p.id})">×</button></td>
   </tr>`).join('');
 }
@@ -258,22 +200,21 @@ async function loadPages() {
 async function deletePage(id) {
   if (!confirm('Удалить страницу и все связки для неё?')) return;
   await fetch(API + `/pages/${id}`, {method:'DELETE'});
-  loadPages(); loadBindings(); loadStats();
+  loadPages(); loadBindings();
 }
 
-// ── Bindings ──────────────────────────────────────────────────────────────────
 async function loadBindings() {
   const r = await fetch(API + '/bindings').catch(() => null);
   if (!r?.ok) return;
   const list = await r.json();
   const tb = document.getElementById('bindingsTable');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Связок нет. Добавьте первую выше.</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Связок нет.</td></tr>'; return; }
   tb.innerHTML = list.map(b => `<tr>
     <td style="word-break:break-all;max-width:280px;font-size:.78rem">${esc(b.page_url)}</td>
     <td><code style="color:var(--warn)">${esc(b.subscription_id)}</code></td>
     <td style="color:var(--text-subtle)">${esc(b.vk_id_param)}</td>
     <td style="color:var(--text-subtle)">${esc(b.note)}</td>
-    <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'отключена'}</span></td>
+    <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
     <td style="display:flex;gap:4px">
       <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id})">${b.active?'Откл':'Вкл'}</button>
       <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id})">×</button>
@@ -286,7 +227,7 @@ document.getElementById('bAddBtn').addEventListener('click', async () => {
   const subscription_id = document.getElementById('bSubId').value.trim();
   const vk_id_param = document.getElementById('bParam').value.trim() || 'vk_id';
   const note = document.getElementById('bNote').value.trim();
-  if (!page_url || !subscription_id) { alert('Выберите страницу и укажите ID списка Senler'); return; }
+  if (!page_url || !subscription_id) { alert('Выберите страницу и укажите ID списка'); return; }
   const r = await fetch(API + '/bindings', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({page_url, subscription_id, vk_id_param, note})
@@ -295,31 +236,30 @@ document.getElementById('bAddBtn').addEventListener('click', async () => {
   if (!r.ok) { alert(d.error || 'Ошибка'); return; }
   document.getElementById('bSubId').value = '';
   document.getElementById('bNote').value = '';
-  loadBindings(); loadStats();
+  loadBindings();
 });
 
 async function toggleBinding(id) {
   await fetch(API + `/bindings/${id}/toggle`, {method:'PUT'});
   loadBindings();
 }
+
 async function deleteBinding(id) {
   if (!confirm('Удалить связку?')) return;
   await fetch(API + `/bindings/${id}`, {method:'DELETE'});
-  loadBindings(); loadStats();
+  loadBindings();
 }
 
-// ── Visits ────────────────────────────────────────────────────────────────────
 async function loadVisits() {
   const r = await fetch(API + '/visits?limit=200').catch(() => null);
   if (!r?.ok) return;
   const list = await r.json();
   const tb = document.getElementById('visitsTable');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Журнал пуст</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Журнал пуст</td></tr>'; return; }
   tb.innerHTML = list.map(v => `<tr>
     <td style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
     <td style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
     <td>${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
-    <td style="color:var(--text-subtle);font-size:.75rem">${esc(v.ip)}</td>
     <td style="color:var(--text-subtle)">${v.binding_id || '—'}</td>
     <td>${v.success
       ? '<span class="badge badge--ok">OK</span>'
@@ -327,59 +267,37 @@ async function loadVisits() {
   </tr>`).join('');
 }
 
-
-// ── Script ────────────────────────────────────────────────────────────────────
 function renderScript() {
-  const script = `<!-- Nexus Senler Tracker v1 -->
-<script>
-(function() {
-  'use strict';
-  // Защита от двойной загрузки
-  if (window.__nxt) return;
-  window.__nxt = 1;
-  try {
-    var url = location.origin + location.pathname;
-    var params = {};
-    var qs = location.search.slice(1);
-    if (qs) {
-      qs.split('&').forEach(function(p) {
-        var idx = p.indexOf('=');
-        if (idx < 1) return;
-        try {
-          var k = decodeURIComponent(p.slice(0, idx));
-          var v = decodeURIComponent(p.slice(idx + 1));
-          if (k) params[k] = v;
-        } catch (e) {}
-      });
-    }
-    // keepalive — запрос не прерывается при уходе со страницы
-    if (typeof fetch === 'function') {
-      fetch('${TRACK_URL}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url, params: params }),
-        keepalive: true,
-        mode: 'cors'
-      }).catch(function() {});
-    }
-  } catch (e) {}
-  // Скрипт не изменяет DOM, не блокирует рендеринг, не бросает ошибок
+  document.getElementById('scriptBox').textContent =
+`<script>
+(function(){
+  if(window.__nxt)return;window.__nxt=1;
+  try{
+    var u=location.origin+location.pathname,p={},q=location.search.slice(1);
+    if(q)q.split('&').forEach(function(s){
+      var i=s.indexOf('=');if(i<1)return;
+      try{p[decodeURIComponent(s.slice(0,i))]=decodeURIComponent(s.slice(i+1));}catch(e){}
+    });
+    if(typeof fetch==='function')fetch('${TRACK_URL}',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:u,params:p}),keepalive:true,mode:'cors'
+    }).catch(function(){});
+  }catch(e){}
 })();
 <\/script>`;
-  document.getElementById('scriptBox').textContent = script;
 }
 
 document.getElementById('copyScriptBtn').addEventListener('click', () => {
   navigator.clipboard.writeText(document.getElementById('scriptBox').textContent)
-    .then(() => { document.getElementById('copyScriptBtn').textContent = 'Скопировано ✓'; setTimeout(() => { document.getElementById('copyScriptBtn').textContent = 'Скопировать'; }, 2000); });
+    .then(() => {
+      document.getElementById('copyScriptBtn').textContent = 'Скопировано ✓';
+      setTimeout(() => { document.getElementById('copyScriptBtn').textContent = 'Скопировать'; }, 2000);
+    });
 });
 
-// ── Utils ─────────────────────────────────────────────────────────────────────
 function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-loadStats();
-loadEnvStatus();
+loadEnvCheck();
 loadPages();
 loadBindings();
 </script>
