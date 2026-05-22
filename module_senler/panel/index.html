@@ -148,9 +148,7 @@
       <table>
         <thead><tr>
           <th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th>
-          <th id="thResult" style="cursor:pointer;user-select:none" title="Кликните для фильтра">
-            Результат <span id="filterLabel" style="color:var(--text-subtle);font-weight:400;font-size:.72rem"></span>
-          </th>
+          <th id="thResult" style="cursor:pointer;user-select:none">Результат</th>
         </tr></thead>
         <tbody id="visitsTable"></tbody>
       </table>
@@ -290,13 +288,13 @@ async function deleteBinding(id) {
 
 let _activeVisitRow = null;
 const FILTERS = ['all', 'error', 'ok'];
-const FILTER_LABELS = { all: '', error: '· ошибки', ok: '· успех' };
 let _visitFilter = 'all';
 let _allVisits = [];
 
-document.getElementById('thResult').addEventListener('click', () => {
+const _thResult = document.getElementById('thResult');
+_thResult.addEventListener('click', () => {
   _visitFilter = FILTERS[(FILTERS.indexOf(_visitFilter) + 1) % FILTERS.length];
-  document.getElementById('filterLabel').textContent = FILTER_LABELS[_visitFilter];
+  _thResult.style.color = _visitFilter === 'error' ? 'var(--bad)' : _visitFilter === 'ok' ? 'var(--ok)' : '';
   renderVisits();
 });
 

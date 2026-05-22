@@ -106,6 +106,7 @@ def _clean_url(raw: str) -> str:
 
 # ── ENV status ────────────────────────────────────────────────────────────────
 
+
 @router.get("/env-status")
 async def env_status():
     """Показывает наличие переменных ENV (без значений)."""
