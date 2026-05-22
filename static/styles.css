@@ -217,6 +217,25 @@ tr:hover td { background: var(--panel-strong); }
 }
 .upload-zone:hover { border-color: var(--border-strong); }
 
+/* ── Toast notifications ──────────────────────── */
+.toast-wrap {
+  position: fixed; bottom: 16px; right: 16px;
+  display: flex; flex-direction: column; gap: 6px;
+  z-index: 9999; pointer-events: none; max-width: 320px;
+}
+.toast {
+  padding: 8px 12px; font-size: 0.8rem; line-height: 1.4;
+  border: 1px solid; pointer-events: all;
+  animation: toast-in .15s ease; cursor: pointer;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast--error { background: var(--bad-bg);  border-color: var(--bad-bd);  color: var(--bad);  }
+.toast--warn  { background: var(--warn-bg); border-color: var(--warn-bd); color: var(--warn); }
+.toast--ok    { background: var(--ok-bg);   border-color: var(--ok-bd);   color: var(--ok);   }
+
 /* ── Login ─────────────────────────────────────── */
 .login-body { overflow: auto; }
 .login-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }

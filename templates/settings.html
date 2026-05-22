@@ -555,7 +555,6 @@ async function loadEnvKeys() {
   el.innerHTML = data.keys.map(k => `<span class="env-key">${esc(k)}</span>`).join("");
 }
 
-document.getElementById("envUploadZone").addEventListener("click", () => document.getElementById("envFileInput").click());
 document.getElementById("envFileInput").addEventListener("change", e => {
   envFile = e.target.files[0];
   document.getElementById("envZoneText").textContent = envFile?.name ?? "Выбрать файл";

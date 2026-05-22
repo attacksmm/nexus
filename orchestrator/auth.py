@@ -69,13 +69,24 @@ def require_admin(user: dict | None) -> bool:
 # ── Default user ──────────────────────────────────────────────────────────────
 
 async def ensure_default_users():
+    """Создаёт admin только при самом первом запуске (bootstrap).
+    После удаления admin — не восстанавливает его."""
     from orchestrator.db import DB_PATH
     import aiosqlite
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM users")
-        (count,) = await cur.fetchone()
-    if count == 0:
-        await create_user("admin", pwd_ctx.hash("admin"), role="admin", module_access="[]")
+        cur = await db.execute("SELECT value FROM meta WHERE key='bootstrap_done'")
+        row = await cur.fetchone()
+        if row:
+            return  # bootstrap уже выполнялся — ничего не делаем
+        cur2 = await db.execute("SELECT COUNT(*) FROM users")
+        (count,) = await cur2.fetchone()
+        if count == 0:
+            await create_user("admin", pwd_ctx.hash("admin"), role="admin", module_access="[]")
+        # помечаем что bootstrap выполнен
+        await db.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('bootstrap_done', '1')"
+        )
+        await db.commit()
 
 
 # ── Auth pages ────────────────────────────────────────────────────────────────

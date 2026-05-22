@@ -99,6 +99,7 @@
     <div class="stat"><div class="stat__val" id="sVisits">—</div><div class="stat__lbl">Визитов</div></div>
     <div class="stat"><div class="stat__val" id="sSuccess">—</div><div class="stat__lbl">Успешно</div></div>
     <div class="statbar__right">
+      <span id="envBadge" style="font-size:.74rem;padding:2px 8px;border:1px solid;display:inline-block"></span>
       <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button>
     </div>
   </div>
@@ -108,7 +109,6 @@
     <button class="tab tab--active" data-view="bindings" type="button">Связки</button>
     <button class="tab" data-view="pages" type="button">Страницы</button>
     <button class="tab" data-view="visits" type="button">Журнал</button>
-    <button class="tab" data-view="settings" type="button">Настройки</button>
     <button class="tab" data-view="script" type="button">Скрипт</button>
   </div>
 
@@ -163,32 +163,6 @@
     </div>
   </div>
 
-  <!-- Настройки -->
-  <div class="view" id="viewSettings">
-    <div class="settings-body">
-      <p class="eyebrow">Настройки Senler API</p>
-      <label class="s-label">access_token (токен Senler)
-        <input id="cfgToken" class="s-input" type="password" placeholder="Токен из настроек Senler" />
-      </label>
-      <label class="s-label">group_id (ID группы ВКонтакте)
-        <input id="cfgGroupId" class="s-input" placeholder="123456789" />
-      </label>
-      <div style="display:flex;gap:8px">
-        <button id="cfgSave" class="btn btn--primary" type="button">Сохранить</button>
-      </div>
-      <p id="cfgStatus" class="status-line"></p>
-      <div style="margin-top:8px">
-        <p class="eyebrow" style="margin-bottom:6px">Тест подключения</p>
-        <div style="display:flex;gap:8px">
-          <input id="testVkId" class="s-input" style="max-width:160px" placeholder="VK ID (числом)" />
-          <input id="testSubId" class="s-input" style="max-width:160px" placeholder="ID списка" />
-          <button id="testBtn" class="btn" type="button">Тест</button>
-        </div>
-        <p id="testStatus" class="status-line"></p>
-      </div>
-    </div>
-  </div>
-
   <!-- Скрипт -->
   <div class="view" id="viewScript">
     <div class="settings-body" style="max-width:100%">
@@ -222,7 +196,6 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.view === 'bindings') { loadBindings(); loadPages(); }
     if (btn.dataset.view === 'pages')    loadPages();
     if (btn.dataset.view === 'visits')   loadVisits();
-    if (btn.dataset.view === 'settings') loadSettings();
     if (btn.dataset.view === 'script')   renderScript();
   });
 });
@@ -238,7 +211,23 @@ async function loadStats() {
   document.getElementById('sVisits').textContent = s.visits;
   document.getElementById('sSuccess').textContent = s.success;
 }
-document.getElementById('refreshBtn').addEventListener('click', () => { loadStats(); loadBindings(); loadPages(); });
+
+async function loadEnvStatus() {
+  const r = await fetch(API + '/env-status').catch(() => null);
+  if (!r?.ok) return;
+  const s = await r.json();
+  const badge = document.getElementById('envBadge');
+  if (s.ready) {
+    badge.textContent = 'ENV ✓';
+    badge.style.cssText = 'font-size:.74rem;padding:2px 8px;border:1px solid var(--ok-bd);color:var(--ok);background:var(--ok-bg);display:inline-block';
+  } else {
+    const missing = Object.entries(s).filter(([k,v]) => k !== 'ready' && !v).map(([k]) => k).join(', ');
+    badge.textContent = `ENV: нет ${missing}`;
+    badge.style.cssText = 'font-size:.74rem;padding:2px 8px;border:1px solid var(--bad-bd);color:var(--bad);background:var(--bad-bg);display:inline-block';
+  }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', () => { loadStats(); loadBindings(); loadPages(); loadEnvStatus(); });
 
 // ── Pages ─────────────────────────────────────────────────────────────────────
 let pagesData = [];
@@ -338,46 +327,6 @@ async function loadVisits() {
   </tr>`).join('');
 }
 
-// ── Settings ──────────────────────────────────────────────────────────────────
-async function loadSettings() {
-  const r = await fetch(API + '/settings').catch(() => null);
-  if (!r?.ok) return;
-  const s = await r.json();
-  document.getElementById('cfgToken').value = s.access_token ? '●'.repeat(12) : '';
-  document.getElementById('cfgToken').dataset.loaded = s.access_token ? '1' : '';
-  document.getElementById('cfgGroupId').value = s.group_id;
-}
-
-document.getElementById('cfgToken').addEventListener('focus', function() {
-  if (this.dataset.loaded) { this.value = ''; this.dataset.loaded = ''; }
-});
-
-document.getElementById('cfgSave').addEventListener('click', async () => {
-  const token = document.getElementById('cfgToken').value;
-  const group_id = document.getElementById('cfgGroupId').value.trim();
-  const body = {group_id};
-  if (token && token !== '●'.repeat(12)) body.access_token = token;
-  const r = await fetch(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  const st = document.getElementById('cfgStatus');
-  if (r.ok) { st.textContent = 'Сохранено'; st.className = 'status-line status-line--ok'; }
-  else { st.textContent = 'Ошибка сохранения'; st.className = 'status-line status-line--err'; }
-  setTimeout(() => { st.textContent = ''; }, 3000);
-});
-
-document.getElementById('testBtn').addEventListener('click', async () => {
-  const vk_id = document.getElementById('testVkId').value.trim();
-  const subscription_id = document.getElementById('testSubId').value.trim();
-  const st = document.getElementById('testStatus');
-  if (!vk_id || !subscription_id) { st.textContent = 'Введите VK ID и ID списка'; return; }
-  st.textContent = 'Отправляю...'; st.className = 'status-line';
-  const r = await fetch(API + '/track', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({url: 'https://test.nexus/test-page', params:{vk_id}})
-  }).catch(e => null);
-  if (!r) { st.textContent = 'Ошибка запроса'; st.className = 'status-line status-line--err'; return; }
-  st.textContent = r.ok ? 'Запрос отправлен (проверьте журнал)' : 'Ошибка API';
-  st.className = 'status-line ' + (r.ok ? 'status-line--ok' : 'status-line--err');
-});
 
 // ── Script ────────────────────────────────────────────────────────────────────
 function renderScript() {
@@ -430,6 +379,7 @@ function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadStats();
+loadEnvStatus();
 loadPages();
 loadBindings();
 </script>

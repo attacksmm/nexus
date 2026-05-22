@@ -7,6 +7,7 @@ senler v1.0.0
 """
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -23,6 +24,14 @@ _logger: logging.Logger = None
 
 SENLER_API = "https://senler.ru/api"
 SENLER_V = "2"
+
+
+def _get_credentials() -> tuple[str, str]:
+    """Читает токен и group_id из ENV без перезапуска."""
+    return (
+        os.environ.get("SENLER_ACCESS_TOKEN", ""),
+        os.environ.get("SENLER_GROUP_ID", ""),
+    )
 
 
 def setup(ctx):
@@ -85,32 +94,17 @@ def _clean_url(raw: str) -> str:
         return raw.split("?")[0].split("#")[0].rstrip("/")
 
 
-# ── Settings ──────────────────────────────────────────────────────────────────
+# ── ENV status ────────────────────────────────────────────────────────────────
 
-@router.get("/settings")
-async def get_settings():
-    async with aiosqlite.connect(_db_path) as db:
-        cur = await db.execute("SELECT key, value FROM settings")
-        rows = dict(await cur.fetchall())
+@router.get("/env-status")
+async def env_status():
+    """Показывает наличие переменных ENV (без значений)."""
+    token, group_id = _get_credentials()
     return {
-        "access_token": rows.get("access_token", ""),
-        "group_id": rows.get("group_id", ""),
+        "SENLER_ACCESS_TOKEN": bool(token),
+        "SENLER_GROUP_ID": bool(group_id),
+        "ready": bool(token and group_id),
     }
-
-
-@router.post("/settings")
-async def save_settings(request: Request):
-    data = await request.json()
-    async with aiosqlite.connect(_db_path) as db:
-        for k in ("access_token", "group_id"):
-            if k in data:
-                await db.execute(
-                    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (k, str(data[k]).strip()),
-                )
-        await db.commit()
-    _logger.info("senler settings updated")
-    return {"ok": True}
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -268,15 +262,10 @@ async def track(request: Request):
             )
             bindings = [dict(r) for r in await cur.fetchall()]
 
-            # Настройки Senler
-            s_cur = await db.execute("SELECT key, value FROM settings")
-            cfg = dict(await s_cur.fetchall())
-
         if not bindings:
             return JSONResponse({"ok": True, "action": "page_registered", "url": page_url}, headers=headers)
 
-        access_token = cfg.get("access_token", "")
-        group_id = cfg.get("group_id", "")
+        access_token, group_id = _get_credentials()
 
         results = []
         for binding in bindings:

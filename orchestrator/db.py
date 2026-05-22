@@ -30,6 +30,10 @@ async def init_db():
                 installed_at TEXT NOT NULL,
                 manifest_json TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         # migrations — add columns that may be missing in old DBs
         for col, ddl in [

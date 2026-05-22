@@ -132,6 +132,17 @@ async def api_pause(module_id: str, request: Request):
     return {"ok": True}
 
 
+@app.get("/api/env/check")
+async def api_env_check(request: Request, keys: str = ""):
+    """Проверяет наличие переменных в os.environ. Значения не возвращаются."""
+    user = await verify_token_from_request(request)
+    if not user:
+        return _unauth_json()
+    import os
+    key_list = [k.strip() for k in keys.split(",") if k.strip()]
+    return {k: bool(os.environ.get(k)) for k in key_list}
+
+
 @app.get("/api/settings/env/template")
 async def api_env_template(request: Request):
     """Генерирует .env шаблон из NEXUS_SECRET + env_vars всех установленных модулей."""

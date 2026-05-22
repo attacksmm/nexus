@@ -1,6 +1,24 @@
 // Nexus Orchestrator UI v3
 const RP = document.querySelector("meta[name=rp]")?.content ?? "";
 
+// ── Toast notifications ───────────────────────────────────────────────────────
+
+const _toastWrap = () => document.getElementById("toastWrap");
+
+function notify(message, level = "warn") {
+  const wrap = _toastWrap();
+  if (!wrap) return;
+  const el = document.createElement("div");
+  el.className = `toast toast--${level}`;
+  el.textContent = message;
+  el.addEventListener("click", () => el.remove());
+  wrap.appendChild(el);
+  const ttl = level === "error" ? 7000 : 4500;
+  setTimeout(() => el.classList.contains("toast") && el.remove(), ttl);
+}
+// экспортируем глобально — iframe модулей могут вызывать window.parent.notify()
+window.notify = notify;
+
 let activeModuleId = null;
 let modulesCache = {};
 let sortOrder = [];  // localStorage порядок
@@ -146,6 +164,35 @@ function selectModule(id, pushHistory = true) {
   $("contentWelcome").hidden = true;
   $("contentModule").hidden = false;
   $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html` : "about:blank";
+
+  // уведомления о статусе модуля
+  if (m.status === "error") {
+    notify(`Модуль «${m.name}» не запустился — проверьте Логгер`, "error");
+  } else if (m.status === "paused") {
+    notify(`Модуль «${m.name}» на паузе`, "warn");
+  }
+
+  // проверка ENV переменных модуля
+  checkModuleEnv(m);
+}
+
+async function checkModuleEnv(m) {
+  try {
+    const manifest = JSON.parse(m.manifest_json || "{}");
+    const envVars = manifest.env_vars || {};
+    const keys = Object.keys(envVars).filter(Boolean);
+    if (!keys.length) return;
+
+    const res = await fetch(`${RP}/api/env/check?keys=${keys.join(",")}`);
+    if (!res.ok) return;
+    const status = await res.json();
+
+    for (const [key, present] of Object.entries(status)) {
+      if (!present) {
+        notify(`${m.name}: не задана переменная ${key} — добавьте в ENV`, "warn");
+      }
+    }
+  } catch { /* игнорируем */ }
 }
 
 function updateToolbar(m) {
@@ -230,7 +277,6 @@ function closeUpload() {
   $("uploadSubmitBtn").disabled = true;
 }
 
-$("uploadZone").addEventListener("click", () => $("uploadInput").click());
 $("uploadInput").addEventListener("change", () => {
   selectedFile = $("uploadInput").files[0];
   if (selectedFile) { $("uploadZoneText").textContent = selectedFile.name; $("uploadSubmitBtn").disabled = false; }
