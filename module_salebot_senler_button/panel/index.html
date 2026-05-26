@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Salebot → Senler</title>
+  <style>
+    :root{--bg:#070707;--panel:#101010;--panel2:#171717;--line:#2e2e2e;--line2:#474747;--text:#f2f2f2;--muted:#a8a8a8;--ok:#9fe0aa;--bad:#ffc2ca}
+    *{box-sizing:border-box}html{scrollbar-color:#555 #090909;scrollbar-width:thin}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 system-ui,"Segoe UI",sans-serif;overflow:hidden}
+    *::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:#090909}*::-webkit-scrollbar-thumb{background:#555;border:2px solid #090909}*::-webkit-scrollbar-thumb:hover{background:#6a6a6a}
+    button,input,textarea{font:inherit}button{cursor:pointer}
+    .shell{height:100vh;display:grid;grid-template-columns:300px minmax(0,1fr);overflow:hidden}
+    aside{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-height:0}
+    header{padding:14px;border-bottom:1px solid var(--line)}
+    h1{margin:0 0 4px;font-size:17px;font-weight:650}.muted{margin:0;color:var(--muted)}
+    .list{padding:10px;display:grid;gap:8px;overflow:auto}
+    .preset{border:1px solid var(--line);background:#0b0b0b;color:var(--text);padding:10px;text-align:left;display:grid;gap:4px}
+    .preset:hover,.preset.is-active{border-color:var(--line2);background:var(--panel2)}
+    .preset strong{font-size:13px}.preset span{color:var(--muted);font-size:12px;word-break:break-all}
+    main{display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;overflow:hidden}
+    .toolbar{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
+    .content{padding:14px;display:grid;gap:14px;overflow:auto;max-width:1050px;min-width:0;scrollbar-color:#555 #090909}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:10px}
+    label{display:grid;gap:5px;color:var(--muted);font-size:12px}
+    input,textarea{width:100%;background:#050505;color:var(--text);border:1px solid var(--line);padding:8px 9px}
+    textarea{min-height:72px;resize:vertical}
+    pre{margin:0;padding:12px;border:1px solid var(--line);background:#020202;color:var(--ok);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-height:210px;max-height:min(46vh,520px);overflow:auto;overflow-x:hidden;min-width:0;scrollbar-color:#555 #090909}
+    .btn{width:max-content;background:#f4f4f4;color:#050505;border:0;padding:8px 12px;font-weight:650}
+    .btn--ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+    .btn--bad{background:#2a1114;color:var(--bad);border:1px solid #67343a}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:20px;color:var(--muted)}code{color:var(--ok)}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start}.tab{background:transparent;color:var(--text);border:1px solid var(--line);width:118px;height:44px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;text-align:center;line-height:1.15;white-space:normal;overflow-wrap:anywhere}.tab.is-active{background:#f4f4f4;color:#050505;border-color:#f4f4f4}.view[hidden]{display:none}
+    .hint{padding:10px 12px;border:1px solid var(--line);background:#090909;color:var(--muted)}
+    @media(max-width:760px){.shell{grid-template-columns:1fr}.shell aside{max-height:34vh;border-right:0;border-bottom:1px solid var(--line)}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <header>
+      <h1>Salebot → Senler</h1>
+      <p class="muted">Сохранённые кнопки</p>
+    </header>
+    <div class="list" id="presetList"></div>
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <button class="btn btn--ghost" id="newBtn" type="button">+ Новая</button>
+      <button class="btn" id="saveBtn" type="button">Сохранить</button>
+      <button class="btn btn--bad" id="deleteBtn" type="button">Удалить</button>
+      <span class="status" id="status"></span>
+    </div>
+
+    <div class="content">
+      <div class="tabs">
+        <button class="tab is-active" id="tabSenler" type="button" data-view="senler">Senler-замена</button>
+        <button class="tab" id="tabFallback" type="button" data-view="fallback">Авто fallback</button>
+      </div>
+
+      <section class="view" id="viewSenler">
+        <p class="muted">Заполните данные из Senler. После сохранения модуль выдаст автономный блок: официальный Senler + встроенный адаптер для Salebot/Tilda без загрузки скрипта с нашего сервера.</p>
+
+        <div class="grid">
+          <label>Название
+            <input id="name" placeholder="Щенок. Основная группа подписки">
+          </label>
+          <label>Button ID
+            <input id="buttonId" placeholder="senlerBtn-puppy">
+          </label>
+          <label>VK group ID
+            <input id="groupId" placeholder="225075265">
+          </label>
+          <label>Subscription ID
+            <input id="subId" placeholder="3700634">
+          </label>
+          <label>Текст кнопки
+            <input id="buttonText" value="Записаться в ВКонтакте">
+          </label>
+          <label>CSS selector блока Salebot
+            <input id="target" value=".salebot_tilda_block">
+          </label>
+          <label>URL формы после клика
+            <input id="redirectUrl" value="https://vk.com/app6013442_-225075265?form_id=1#form_id=1">
+          </label>
+        </div>
+
+        <label>Заметка
+          <textarea id="note" placeholder="Где используется, какая страница, комментарии"></textarea>
+        </label>
+      </section>
+
+      <section class="view" id="viewFallback" hidden>
+        <p class="muted">Автономная прямая ссылка без загрузки с нашего сервера. Если Salebot отрисовал VK-кнопку, скрипт заменит её. Если Salebot-блок пустой, поставит одну кнопку сам.</p>
+        <div class="grid">
+          <label>Текст кнопки
+            <input id="fallbackText" value="Записаться в ВКонтакте">
+          </label>
+          <label>URL прямой ссылки
+            <input id="fallbackUrl" value="https://vk.ru/app5898182_-225075265#s=3700634">
+          </label>
+          <label>VK group ID
+            <input id="fallbackGroupId" value="225075265">
+          </label>
+          <label>Subscription ID
+            <input id="fallbackSubId" value="3700634">
+          </label>
+          <label>Base ID
+            <input id="fallbackId" value="nexusVkFallback">
+          </label>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button class="btn" id="copyBtn" type="button">Скопировать скрипт</button>
+      </div>
+      <pre id="snippet"></pre>
+      <p class="hint">Сохранение работает для пресета слева: название, group/subscription, текст, selector и redirect. Вкладки строят скрипт из выбранного пресета; чтобы добавить новую кнопку, нажмите “+ Новая”, заполните поля и сохраните. Чтобы править старую, выберите её слева, измените поля и сохраните. “Удалить” удаляет выбранный пресет.</p>
+    </div>
+  </main>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const SCRIPT_URL = location.origin + modBase + '/api/replace.js';
+const $ = id => document.getElementById(id);
+
+let presets = [];
+let activeId = 0;
+let serverSnippet = '';
+let activeView = 'senler';
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formData() {
+  return {
+    id: activeId,
+    name: $('name').value.trim(),
+    button_id: $('buttonId').value.trim(),
+    group_id: $('groupId').value.trim(),
+    subscription_id: $('subId').value.trim(),
+    button_text: $('buttonText').value.trim() || 'Записаться в ВКонтакте',
+    target_selector: $('target').value.trim() || '.salebot_tilda_block',
+    redirect_url: $('redirectUrl').value.trim() || 'https://vk.com/app6013442_-225075265?form_id=1#form_id=1',
+    note: $('note').value.trim()
+  };
+}
+
+function buildSnippet(data) {
+  const buttonId = data.button_id || 'senlerBtn-custom';
+  const groupId = data.group_id || '225075265';
+  const subId = data.subscription_id || '';
+  const text = data.button_text || 'Записаться в ВКонтакте';
+  const params = new URLSearchParams({ button_id: buttonId });
+  if (data.target_selector && data.target_selector !== '.salebot_tilda_block') params.set('target', data.target_selector);
+  if (data.redirect_url) params.set('redirect_url', data.redirect_url);
+  return `<style data-nexus-salebot-senler-early>.salebot_tilda_block .vk_link,.form_integration_block .vk_link{visibility:hidden!important}#${buttonId}{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important}<\/style>
+<script src="https://senler.ru/dist/web/js/senler.js?9"><\/script>
+<script>
+  try { Senler.ButtonSubscribe("${buttonId}"); } catch (e) { console.log(e); }
+<\/script>
+<div id="${buttonId}" data-vk_group_id="${groupId}" data-subscription_id="${subId}" data-text="${text}" data-alt_text=""></div>
+<script src="${SCRIPT_URL}?${params.toString()}" async><\/script>`;
+}
+
+function jsString(s) {
+  return JSON.stringify(String(s ?? ''));
+}
+
+function buildFallbackSnippet(data) {
+  const id = ($('fallbackId').value.trim() || 'nexusVkFallback').replace(/[^A-Za-z0-9_-]/g, '') || 'nexusVkFallback';
+  const text = $('fallbackText').value.trim() || data.button_text || 'Записаться в ВКонтакте';
+  const groupId = ($('fallbackGroupId').value.trim() || data.group_id || '225075265').replace(/\D/g, '') || '225075265';
+  const subId = ($('fallbackSubId').value.trim() || data.subscription_id || '3700634').replace(/\D/g, '');
+  const href = $('fallbackUrl').value.trim() || `https://vk.ru/app5898182_-${groupId}#s=${subId || '3700634'}`;
+  return `<script>
+(function(){
+  'use strict';
+  var cfg={id:${jsString(id)},href:${jsString(href.replace('https://vk.com/app', 'https://vk.ru/app'))},text:${jsString(text)},root:'.salebot_tilda_block,.form_integration_block'};
+  function style(){
+    if(document.getElementById('nexus-vk-autofallback-style')) return;
+    var s=document.createElement('style');
+    s.id='nexus-vk-autofallback-style';
+    s.textContent='.nexus-vk-autofallback-btn{display:flex!important;align-items:center!important;justify-content:center!important;gap:8px!important;width:var(--nexus-vk-autofallback-width,100%)!important;max-width:100%!important;min-height:var(--nexus-vk-autofallback-height,44px)!important;padding:0 18px!important;box-sizing:border-box!important;border-radius:999px!important;background:#4b86c9!important;color:#fff!important;font-family:inherit!important;font-size:inherit!important;line-height:1.15!important;font-weight:700!important;text-align:center!important;text-decoration:none!important;margin:0!important;letter-spacing:0!important}.nexus-vk-autofallback-btn:before{content:"VK";font:900 .9em/1 Arial,Helvetica,sans-serif;color:#fff}@media(max-width:640px){.nexus-vk-autofallback-btn{min-height:42px!important;padding:0 14px!important}}';
+    (document.head||document.documentElement).appendChild(s);
+  }
+  function collect(){
+    var out=[];
+    function add(raw){String(raw||'').replace(/^[?#]/,'').split('&').forEach(function(p){var k=(p.split('=')[0]||'').toLowerCase();if(!k)return;if(out.some(function(x){return(x.split('=')[0]||'').toLowerCase()===k;}))return;out.push(p);});}
+    function cv(n){var m=('; '+document.cookie).match('; '+n+'=([^;]*)');return m?decodeURIComponent(m[1]):'';}
+    function ap(k,v){if(v)add(k+'='+encodeURIComponent(v));}
+    add(location.search);add(location.hash);ap('yclid',cv('yclid'));ap('_ym_uid',cv('_ym_uid'));
+    return out;
+  }
+  function hasParam(url,key){try{return new RegExp('([?#&])'+key+'=').test(url);}catch(e){return url.indexOf(key+'=')!==-1;}}
+  function withParams(url){
+    var hash='',i=url.indexOf('#');
+    if(i>=0){hash=url.slice(i+1);url=url.slice(0,i);}
+    collect().forEach(function(p){var key=(p.split('=')[0]||'').toLowerCase();if(!key||hasParam(url+'#'+hash,key))return;if(hash)hash+='&'+p;else url+=(url.indexOf('?')<0?'?':'&')+p;});
+    return url+(hash?'#'+hash:'');
+  }
+  function isVk(el){
+    if(!el||el.classList&&el.classList.contains('nexus-vk-autofallback-btn')) return false;
+    var t=((el.innerText||el.textContent||'')+' '+(el.className||'')+' '+(el.href||el.getAttribute('href')||'')).toLowerCase();
+    return t.indexOf('вконтакте')>-1||t.indexOf(' vk')>-1||t.indexOf('вк')>-1||t.indexOf('vk.com')>-1||t.indexOf('vk.ru')>-1;
+  }
+  function tg(root){return root.querySelector('.tg_link,a[href*="t.me"],a[href*="telegram"],button[class*="tg"],a[class*="tg"],button[class*="telegram"]');}
+  function fit(node,anchor){
+    if(!node||!anchor) return;
+    var r=anchor.getBoundingClientRect(),cs=getComputedStyle(anchor);
+    if(r.width>80){node.style.setProperty('--nexus-vk-autofallback-width',Math.round(r.width)+'px');node.style.setProperty('width',Math.round(r.width)+'px','important');}
+    if(r.height>30){node.style.setProperty('--nexus-vk-autofallback-height',Math.round(r.height)+'px');node.style.setProperty('min-height',Math.round(r.height)+'px','important');}
+    if(cs.fontSize) node.style.fontSize=cs.fontSize;
+    var p=anchor.parentElement;
+    if(p&&(getComputedStyle(p).display||'').indexOf('flex')!==-1){p.style.setProperty('flex-direction','column','important');p.style.setProperty('align-items','stretch','important');p.style.setProperty('row-gap','12px','important');}
+  }
+  function hasOwnButton(root){
+    return !!(root&&root.querySelector('.nexus-vk-direct-btn,.nexus-vk-autofallback-btn,.nexus-vk-direct-senler-fallback,.senler-btn,.senler-btn-alt'));
+  }
+  function mount(root,i){
+    if(!root||hasOwnButton(root)) return;
+    var vk=[].slice.call(root.querySelectorAll('a,button,[role=button],input[type=button],input[type=submit]')).map(function(el){return el.closest('a,button,[role=button]')||el}).find(isVk);
+    var anchor=tg(root)||vk;
+    var node=document.createElement('a');
+    node.id=cfg.id+'-'+i;
+    node.className='nexus-vk-autofallback-btn';
+    node.href=withParams(cfg.href);
+    node.target='_self';
+    node.rel='noopener';
+    node.textContent=cfg.text;
+    node.addEventListener('click',function(){node.href=withParams(cfg.href);},true);
+    if(anchor&&anchor.parentNode) anchor.parentNode.insertBefore(node,anchor); else root.appendChild(node);
+    if(anchor) fit(node,anchor);
+    if(vk) vk.style.display='none';
+  }
+  function run(){style();[].slice.call(document.querySelectorAll(cfg.root)).forEach(mount);}
+  setTimeout(run,3500);
+  setTimeout(run,7000);
+  window.addEventListener('load',function(){setTimeout(run,500);});
+})();
+<\/script>`;
+}
+
+function renderSnippet() {
+  const data = formData();
+  $('snippet').textContent = activeView === 'fallback'
+      ? buildFallbackSnippet(data)
+      : (serverSnippet || buildSnippet(data));
+}
+
+function fill(data) {
+  activeId = Number(data?.id || 0);
+  serverSnippet = data?.snippet || '';
+  $('name').value = data?.name || '';
+  $('buttonId').value = data?.button_id || '';
+  $('groupId').value = data?.group_id || '225075265';
+  $('subId').value = data?.subscription_id || '';
+  $('buttonText').value = data?.button_text || 'Записаться в ВКонтакте';
+  $('target').value = data?.target_selector || '.salebot_tilda_block';
+  $('redirectUrl').value = data?.redirect_url || 'https://vk.com/app6013442_-225075265?form_id=1#form_id=1';
+  $('note').value = data?.note || '';
+  $('fallbackText').value = data?.button_text || 'Записаться в ВКонтакте';
+  $('fallbackGroupId').value = data?.group_id || '225075265';
+  $('fallbackSubId').value = data?.subscription_id || '3700634';
+  $('fallbackUrl').value = `https://vk.ru/app5898182_-${data?.group_id || '225075265'}#s=${data?.subscription_id || '3700634'}`;
+  $('fallbackId').value = (data?.button_id || 'senlerBtn-custom').replace(/^senlerBtn/, 'nexusVkFallback');
+  renderList();
+  renderSnippet();
+}
+
+function renderList() {
+  const list = $('presetList');
+  if (!presets.length) {
+    list.innerHTML = '<p class="muted">Пока нет сохранённых кнопок.</p>';
+    return;
+  }
+  list.innerHTML = presets.map(p => `
+    <button class="preset ${Number(p.id) === activeId ? 'is-active' : ''}" data-id="${p.id}" type="button">
+      <strong>${esc(p.name)}</strong>
+      <span>${esc(p.group_id)} / ${esc(p.subscription_id || 'без списка')}</span>
+      <span>${esc(p.button_id)}</span>
+    </button>
+  `).join('');
+  list.querySelectorAll('.preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = presets.find(x => Number(x.id) === Number(btn.dataset.id));
+      if (p) fill(p);
+    });
+  });
+}
+
+async function loadPresets() {
+  const res = await fetch(API + '/presets');
+  presets = res.ok ? await res.json() : [];
+  renderList();
+  const selected = presets.find(p => Number(p.id) === activeId);
+  if (selected) fill(selected);
+  else if (presets.length) fill(presets[0]);
+  else fill({});
+}
+
+async function savePreset() {
+  const data = formData();
+  if (!data.button_id || !data.group_id) {
+    $('status').textContent = 'Заполните Button ID и VK group ID';
+    return;
+  }
+  const res = await fetch(API + '/presets', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('status').textContent = body.error || 'Ошибка сохранения';
+    return;
+  }
+  $('status').textContent = 'Сохранено';
+  activeId = Number(body.id || 0);
+  await loadPresets();
+  const saved = presets.find(p => Number(p.id) === activeId);
+  if (saved) fill(saved);
+}
+
+async function deletePreset() {
+  if (!activeId || !confirm('Удалить сохранённую кнопку?')) return;
+  await fetch(API + '/presets/' + activeId, {method: 'DELETE'});
+  $('status').textContent = 'Удалено';
+  activeId = 0;
+  await loadPresets();
+}
+
+function newPreset() {
+  activeId = 0;
+  serverSnippet = '';
+  $('status').textContent = 'Новая кнопка: заполните поля и сохраните';
+  fill({
+    name: '',
+    button_id: 'senlerBtn-custom',
+    group_id: '225075265',
+    subscription_id: '',
+    button_text: 'Записаться в ВКонтакте',
+    target_selector: '.salebot_tilda_block',
+    redirect_url: 'https://vk.com/app6013442_-225075265?form_id=1#form_id=1',
+    note: ''
+  });
+}
+
+['name','buttonId','groupId','subId','buttonText','target','redirectUrl','note'].forEach(id => $(id).addEventListener('input', () => {
+  serverSnippet = '';
+  renderSnippet();
+}));
+['fallbackText','fallbackUrl','fallbackGroupId','fallbackSubId','fallbackId'].forEach(id => $(id).addEventListener('input', renderSnippet));
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeView = btn.dataset.view;
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('is-active', x === btn));
+    $('viewSenler').hidden = activeView !== 'senler';
+    $('viewFallback').hidden = activeView !== 'fallback';
+    renderSnippet();
+  });
+});
+$('newBtn').addEventListener('click', newPreset);
+$('saveBtn').addEventListener('click', savePreset);
+$('deleteBtn').addEventListener('click', deletePreset);
+$('copyBtn').addEventListener('click', () => {
+  navigator.clipboard.writeText($('snippet').textContent).then(() => {
+    $('status').textContent = 'Скопировано';
+  });
+});
+
+loadPresets();
+</script>
+</body>
+</html>

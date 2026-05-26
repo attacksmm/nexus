@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Документация - Salebot -> Senler кнопка</title>
+  <style>
+    *{box-sizing:border-box}html{scrollbar-color:#555 #090909;scrollbar-width:thin}body{margin:24px;max-width:900px;background:#070707;color:#f2f2f2;font:14px/1.55 system-ui,"Segoe UI",sans-serif;overflow-x:hidden}
+    *::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:#090909}*::-webkit-scrollbar-thumb{background:#555;border:2px solid #090909}
+    h1,h2{line-height:1.2}code,pre{background:#020202;color:#9fe0aa}code{overflow-wrap:anywhere}pre{padding:12px;overflow:auto;overflow-x:hidden;border:1px solid #2e2e2e;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;scrollbar-color:#555 #090909}
+    table{border-collapse:collapse;width:100%;margin:12px 0;table-layout:fixed}td,th{border:1px solid #2e2e2e;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+    th{background:#101010}.muted{color:#a8a8a8}
+  </style>
+</head>
+<body>
+<h1>Salebot -> Senler кнопка</h1>
+<p>Модуль хранит пресеты Senler и генерирует код для Tilda/Salebot. Пресет слева общий: название, <code>group_id</code>, <code>subscription_id</code>, текст, selector и redirect. После выбора пресета можно переключать вкладки и копировать нужный вариант скрипта.</p>
+
+<h2>Режимы</h2>
+<table>
+  <tr><th>Вкладка</th><th>Когда использовать</th><th>Зависимости</th></tr>
+  <tr><td>Senler-замена</td><td>Заменяет VK-кнопку Salebot на официальный Senler-виджет и оставляет Telegram.</td><td><code>senler.ru</code> + адаптер с Nexus.</td></tr>
+  <tr><td>Авто fallback</td><td>Полностью автономная прямая ссылка. Если Salebot отрисовал VK-кнопку, заменяет её. Если Salebot-блок пустой, ставит одну кнопку сам. Ссылка вида <code>vk.ru/app5898182_-225075265#s=3700634</code>, параметры страницы, <code>yclid</code> и <code>_ym_uid</code> добавляются в hash.</td><td>Полностью inline. Не зависит от <code>junior.sobakovod.pro</code>, <code>/api</code> и <code>senler.ru</code>.</td></tr>
+</table>
+
+<h2>Создание и редактирование</h2>
+<p>Чтобы добавить кнопку, нажмите <b>+ Новая</b>, заполните поля и нажмите <b>Сохранить</b>. Чтобы изменить старую кнопку, выберите её слева, отредактируйте поля и нажмите <b>Сохранить</b>. Чтобы удалить пресет, выберите его слева и нажмите <b>Удалить</b>.</p>
+<p>Вкладки не создают отдельные записи в базе: они генерируют разные варианты кода из выбранного пресета. Поэтому для щенка, собаки, подзыва и укусов достаточно хранить по одному пресету на подписку.</p>
+
+<h2>Автономный fallback</h2>
+<p>Этот код берите из вкладки “Авто fallback” и вставляйте ниже основного кода кнопок. Он нужен для случаев, когда Salebot или Nexus недоступны. Скрипт не грузит внешние файлы и создает обычную ссылку на VK-приложение, сохраняя параметры страницы и cookie-метки <code>yclid</code>/<code>_ym_uid</code>.</p>
+</body>
+</html>
