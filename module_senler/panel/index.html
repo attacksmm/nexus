@@ -145,7 +145,14 @@
   <!-- Журнал -->
   <div class="view" id="viewVisits">
     <div class="table-wrap">
-      <table>
+      <table style="table-layout:fixed">
+        <colgroup>
+          <col style="width:120px">
+          <col>
+          <col style="width:90px">
+          <col style="width:60px">
+          <col style="width:84px">
+        </colgroup>
         <thead><tr>
           <th>Время</th><th>Страница</th><th>VK ID</th><th>Связка</th>
           <th id="thResult" style="cursor:pointer;user-select:none">Результат</th>
@@ -287,11 +294,12 @@ async function deleteBinding(id) {
 }
 
 let _activeVisitRow = null;
-const FILTERS = ['all', 'error', 'ok'];
-let _visitFilter = 'all';
+const FILTERS = ['ok', 'all', 'error'];
+let _visitFilter = 'ok';
 let _allVisits = [];
 
 const _thResult = document.getElementById('thResult');
+_thResult.style.color = 'var(--ok)';
 _thResult.addEventListener('click', () => {
   _visitFilter = FILTERS[(FILTERS.indexOf(_visitFilter) + 1) % FILTERS.length];
   _thResult.style.color = _visitFilter === 'error' ? 'var(--bad)' : _visitFilter === 'ok' ? 'var(--ok)' : '';

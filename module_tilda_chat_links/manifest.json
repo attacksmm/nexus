@@ -1,0 +1,15 @@
+{
+  "id": "tilda-chat-links",
+  "name": "Чаты для клиентов",
+  "version": "1.0.11",
+  "description": "Публичный виджет для Tilda: проверяет GetCourse по email/phone и показывает актуальные TG/VK чаты по купленному курсу.",
+  "env_vars": {
+    "GETCOURSE_ACCOUNT_NAME": "Имя аккаунта GetCourse, например sobakovod",
+    "GETCOURSE_API_TOKEN": "Секретный ключ API GetCourse",
+    "TILDA_CHAT_LINKS_ALLOWED_ORIGINS": "Разрешенные origin для CORS через запятую. По умолчанию *",
+    "TILDA_CHAT_LINKS_SPREADSHEET_ID": "ID Google Sheet со ссылками на чаты. По умолчанию таблица Собаковода",
+    "TILDA_CHAT_LINKS_CACHE_TTL_SECONDS": "Базовый TTL короткого in-memory кэша в секундах. По умолчанию 300",
+    "TILDA_CHAT_LINKS_DEALS_LOOKBACK_DATE": "С какой даты сканировать оплаченные заказы GetCourse, если включен fallback. По умолчанию 2024-01-01",
+    "TILDA_CHAT_LINKS_DEAL_SCAN_TIMEOUT_SECONDS": "Максимальное время fallback-скана заказов. По умолчанию 20"
+  }
+}

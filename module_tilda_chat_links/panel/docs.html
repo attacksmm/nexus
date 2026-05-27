@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Документация</title>
+</head>
+<body>
+  <h2>Чаты для клиентов</h2>
+  <p>Модуль отдает публичный скрипт для Tilda. Скрипт читает параметры <code>email</code> и <code>phone</code> из адресной строки, вызывает <code>/tilda-chat-links/api/lookup</code>, проверяет GetCourse и показывает ссылки на актуальные TG/VK чаты.</p>
+  <pre>&lt;div id="nexus-chat-links"&gt;&lt;/div&gt;
+&lt;script src="https://junior.sobakovod.pro/nexus/tilda-chat-links/api/script.js" async&gt;&lt;/script&gt;</pre>
+  <p>Нужные ENV: <code>GETCOURSE_ACCOUNT_NAME</code>, <code>GETCOURSE_API_TOKEN</code>. Сначала используются допполя GetCourse <code>Ссылка на чат ВК</code> и <code>Ссылка на чат ТГ</code>, затем группы пользователя, затем актуальные ссылки из Google Sheet.</p>
+  <p>Частично оплаченный клиент получает ссылки, пока возраст частичной оплаты не превышает <code>TILDA_CHAT_LINKS_PARTIAL_GRACE_DAYS</code> дней. После этого виджет показывает «Ссылки недоступны».</p>
+  <p>В панели модуля есть бан-лист по email или телефону. Бан-лист проверяется до кэша и сразу перекрывает выдачу ссылок.</p>
+  <p>Тяжелый скан заказов GetCourse выключен по умолчанию: <code>TILDA_CHAT_LINKS_ENABLE_DEAL_SCAN=false</code>. Для снижения расхода лимитов включен SQLite-кэш проверок клиента.</p>
+</body>
+</html>

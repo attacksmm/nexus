@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Чаты для клиентов</title>
+  <style>
+    :root {
+      font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      color: #f2f2f2;
+      background: #060606;
+      --panel: #101010;
+      --soft: #171717;
+      --border: #2d2d2d;
+      --muted: #a8a8a8;
+      --bad: #ffc2ca;
+      --ok: #9fe0aa;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #060606; }
+    main { padding: 16px; display: grid; gap: 14px; max-width: 920px; }
+    h1 { margin: 0; font-size: 20px; font-weight: 650; }
+    p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 14px; }
+    .panel { border: 1px solid var(--border); background: var(--panel); padding: 14px; display: grid; gap: 12px; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
+    input, textarea {
+      width: 100%; min-height: 36px; border: 1px solid #4a4a4a;
+      background: #080808; color: #f2f2f2; padding: 8px 10px; font: inherit;
+    }
+    textarea { min-height: 76px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    button, a.btn {
+      min-height: 34px; border: 1px solid #555; background: #f2f2f2; color: #080808;
+      padding: 7px 12px; font: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;
+    }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ghost { background: transparent; color: #f2f2f2; }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #d8d8d8; font-size: 12px; line-height: 1.45; }
+    .status-ok { color: var(--ok); }
+    .status-bad { color: var(--bad); }
+    .table { display: grid; gap: 6px; }
+    .ban-row {
+      display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center;
+      border-top: 1px solid var(--border); padding-top: 8px; font-size: 13px;
+    }
+    .ban-value { color: #f2f2f2; overflow-wrap: anywhere; }
+    .ban-note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .danger { border-color: #8a3842; color: #ffc2ca; background: transparent; }
+    @media (max-width: 620px) {
+      .ban-row { grid-template-columns: 1fr; }
+      .ban-row button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Чаты для клиентов</h1>
+    <p>Публичный скрипт для Tilda проверяет email или phone из URL и показывает актуальные Telegram/VK ссылки.</p>
+  </header>
+
+  <section class="panel">
+    <h2 style="margin:0;font-size:15px">Статус</h2>
+    <pre id="status">Загрузка...</pre>
+  </section>
+
+  <section class="panel">
+    <h2 style="margin:0;font-size:15px">Проверка клиента</h2>
+    <div class="grid">
+      <label>Email <input id="email" placeholder="client@example.com" /></label>
+      <label>Phone <input id="phone" placeholder="+79990000000" /></label>
+    </div>
+    <div class="btn-row">
+      <button id="checkBtn" type="button">Проверить</button>
+      <a class="btn ghost" href="../api/preview" target="_blank" rel="noopener">Preview</a>
+    </div>
+    <pre id="result"></pre>
+  </section>
+
+  <section class="panel">
+    <h2 style="margin:0;font-size:15px">Бан-лист</h2>
+    <p>Клиент из списка получит ответ «Ссылки недоступны» даже при найденной покупке.</p>
+    <div class="grid">
+      <label>Email или телефон <input id="banValue" placeholder="client@example.com или +79990000000" /></label>
+      <label>Комментарий <input id="banNote" placeholder="Причина для команды" /></label>
+    </div>
+    <div class="btn-row">
+      <button id="banAddBtn" type="button">Добавить</button>
+    </div>
+    <pre id="banStatus"></pre>
+    <div id="banList" class="table"></div>
+  </section>
+
+  <section class="panel">
+    <h2 style="margin:0;font-size:15px">Код для Tilda</h2>
+    <textarea id="snippet" readonly></textarea>
+  </section>
+</main>
+
+<script>
+const api = "../api";
+const statusEl = document.getElementById("status");
+const resultEl = document.getElementById("result");
+const snippetEl = document.getElementById("snippet");
+const banStatusEl = document.getElementById("banStatus");
+const banListEl = document.getElementById("banList");
+
+function show(el, value) {
+  el.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+async function loadStatus() {
+  const res = await fetch(api + "/status");
+  const data = await res.json();
+  statusEl.className = data.ready ? "status-ok" : "status-bad";
+  show(statusEl, data);
+}
+
+async function loadSnippet() {
+  const res = await fetch(api + "/snippet");
+  snippetEl.value = await res.text();
+}
+
+function formatDate(ts) {
+  if (!ts) return "";
+  return new Date(ts * 1000).toLocaleString("ru-RU");
+}
+
+async function loadBans() {
+  const res = await fetch(api + "/ban-list", {credentials: "same-origin"});
+  const data = await res.json();
+  if (!data.ok) {
+    show(banStatusEl, data);
+    return;
+  }
+  banStatusEl.textContent = data.items.length ? "" : "Бан-лист пуст";
+  banListEl.innerHTML = "";
+  data.items.forEach(item => {
+    const row = document.createElement("div");
+    row.className = "ban-row";
+    row.innerHTML = `
+      <div>${item.kind === "email" ? "Email" : "Телефон"}</div>
+      <div>
+        <div class="ban-value"></div>
+        <div class="ban-note"></div>
+      </div>
+      <button class="danger" type="button">Удалить</button>
+    `;
+    row.querySelector(".ban-value").textContent = item.raw_value + " · " + formatDate(item.created_at);
+    row.querySelector(".ban-note").textContent = item.note || "Без комментария";
+    row.querySelector("button").addEventListener("click", async () => {
+      await fetch(api + "/ban-list/" + item.id, {method: "DELETE", credentials: "same-origin"});
+      await loadBans();
+    });
+    banListEl.appendChild(row);
+  });
+}
+
+document.getElementById("checkBtn").addEventListener("click", async () => {
+  resultEl.textContent = "Проверяем...";
+  const params = new URLSearchParams({
+    email: document.getElementById("email").value.trim(),
+    phone: document.getElementById("phone").value.trim()
+  });
+  const res = await fetch(api + "/lookup?" + params.toString());
+  show(resultEl, await res.json());
+});
+
+document.getElementById("banAddBtn").addEventListener("click", async () => {
+  const value = document.getElementById("banValue").value.trim();
+  const note = document.getElementById("banNote").value.trim();
+  if (!value) {
+    banStatusEl.textContent = "Введите email или телефон";
+    return;
+  }
+  const res = await fetch(api + "/ban-list", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({value, note})
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    show(banStatusEl, data);
+    return;
+  }
+  document.getElementById("banValue").value = "";
+  document.getElementById("banNote").value = "";
+  await loadBans();
+});
+
+loadStatus().catch(err => show(statusEl, String(err)));
+loadSnippet().catch(err => show(snippetEl, String(err)));
+loadBans().catch(err => show(banStatusEl, String(err)));
+</script>
+</body>
+</html>

@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import aiosqlite
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -347,7 +347,7 @@ async def _senler_check(access_token: str, group_id: str, subscription_id: str, 
                     "access_token": access_token,
                     "group_id": group_id,
                     "subscription_id": subscription_id,
-                    "vk_user_ids": vk_id,
+                    "vk_user_id": vk_id,
                     "v": SENLER_V,
                 },
             )
@@ -371,7 +371,7 @@ async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk
         "access_token": "***",
         "group_id": group_id,
         "subscription_id": subscription_id,
-        "vk_user_ids": vk_id,
+        "vk_user_id": vk_id,
         "v": SENLER_V,
     }
     if not access_token or not group_id:
@@ -400,7 +400,7 @@ async def _senler_add(access_token: str, group_id: str, subscription_id: str, vk
                     "access_token": access_token,
                     "group_id": group_id,
                     "subscription_id": subscription_id,
-                    "vk_user_ids": vk_id,
+                    "vk_user_id": vk_id,
                     "v": SENLER_V,
                 },
             )

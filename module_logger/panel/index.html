@@ -110,6 +110,8 @@ const WS_BASE = location.origin.replace(/^http/, 'ws') + modBase + '/api';
 let activeTab = null;
 let ws = null;
 let live = false;
+let autoLive = true;
+let liveReplayUntil = 0;
 let errMode = false;
 let lineCount = 0;
 let allLines = [];      // полный буфер для фильтрации
@@ -156,6 +158,7 @@ async function selectTab(id) {
   document.getElementById('statusModule').textContent = id;
   document.getElementById('clearBtn').disabled = id === 'nexus';
   await loadLogs();
+  if (autoLive) startLive();
 }
 
 async function loadLogs() {
@@ -181,6 +184,7 @@ function isError(line) {
 
 function appendLine(line) {
   if (!line.trim()) return;
+  if (Date.now() < liveReplayUntil && allLines.slice(-120).includes(line)) return;
   allLines.push(line);
   if (allLines.length > 5000) allLines.shift();
   if (errMode && !isError(line)) return;
@@ -219,6 +223,7 @@ errBtn.addEventListener('click', () => {
 function startLive() {
   if (ws) { ws.close(); ws = null; }
   if (!activeTab) return;
+  liveReplayUntil = Date.now() + 1500;
   ws = new WebSocket(`${WS_BASE}/ws/${activeTab}`);
   ws.onmessage = e => { if (e.data) appendLine(e.data.replace(/\n$/, '')); };
   ws.onopen = () => {
@@ -235,7 +240,10 @@ function stopLive() {
   document.getElementById('liveBtn').textContent = 'Live';
 }
 
-document.getElementById('liveBtn').addEventListener('click', () => { live ? stopLive() : startLive(); });
+document.getElementById('liveBtn').addEventListener('click', () => {
+  autoLive = !live;
+  live ? stopLive() : startLive();
+});
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
