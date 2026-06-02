@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -40,88 +40,88 @@ COURSE_DEFAULTS = [
     {
         "key": "puppy",
         "choice": "1",
-        "title": "РљСѓСЂСЃ Р©РµРЅРѕРє. РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ",
-        "vk_title": "РљСѓСЂСЃ Р©РµРЅРѕРє. РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ",
-        "tg_title": "РљСѓСЂСЃ Р©РµРЅРѕРє. РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ",
+        "title": "Курс Щенок. Современный Собаковод",
+        "vk_title": "Курс Щенок. Современный Собаковод",
+        "tg_title": "Курс Щенок. Современный Собаковод",
         "enabled": 1,
     },
     {
         "key": "dog",
         "choice": "2",
-        "title": "РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ",
-        "vk_title": "РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ - Р·Р°РєСЂС‹С‚С‹Р№ С‡Р°С‚",
-        "tg_title": "РЎРѕРІСЂРµРјРµРЅРЅС‹Р№ РЎРѕР±Р°РєРѕРІРѕРґ - Р·Р°РєСЂС‹С‚С‹Р№ С‡Р°С‚.",
+        "title": "Современный Собаковод",
+        "vk_title": "Современный Собаковод - закрытый чат",
+        "tg_title": "Современный Собаковод - закрытый чат.",
         "enabled": 1,
     },
 ]
 
 PEOPLE_DEFAULTS = [
-    {"kind": "author", "name": "РђРЅРЅР°", "vk_id": "765938", "vk_mention": "[id765938|@timofeevapodbordog]", "tg_ref": "@Anna_Timofeeva_Podbordog", "enabled": 1},
-    {"kind": "admin", "name": "РќР°С‚Р°Р»СЊСЏ", "vk_id": "69145639", "vk_mention": "[id69145639|РќР°С‚Р°Р»СЊСЏ]", "tg_ref": "", "enabled": 1},
-    {"kind": "kurator", "name": "Р•РєР°С‚РµСЂРёРЅР°", "vk_id": "1025748213", "vk_mention": "[id1025748213|@psypuppy]", "tg_ref": "", "parity": "odd", "enabled": 1},
-    {"kind": "kurator", "name": "РСЂРёРЅР°", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "even", "enabled": 1},
-    {"kind": "kurator", "name": "РўР“ РєСѓСЂР°С‚РѕСЂ 1", "vk_id": "", "vk_mention": "", "tg_ref": "+79206159472", "parity": "any", "enabled": 1},
-    {"kind": "kurator", "name": "РўР“ РєСѓСЂР°С‚РѕСЂ 2", "vk_id": "", "vk_mention": "", "tg_ref": "+79818123970", "parity": "any", "enabled": 1},
-    {"kind": "tech", "name": "РўРµС…РЅРёС‡РµСЃРєР°СЏ РїРѕРґРґРµСЂР¶РєР°", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
-    {"kind": "tech", "name": "РќРёРєРёС‚Р°", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
-    {"kind": "admin", "name": "РђРЅРґСЂРµР№", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
+    {"kind": "author", "name": "Анна", "vk_id": "765938", "vk_mention": "[id765938|@timofeevapodbordog]", "tg_ref": "@Anna_Timofeeva_Podbordog", "enabled": 1},
+    {"kind": "admin", "name": "Наталья", "vk_id": "69145639", "vk_mention": "[id69145639|Наталья]", "tg_ref": "", "enabled": 1},
+    {"kind": "kurator", "name": "Екатерина", "vk_id": "1025748213", "vk_mention": "[id1025748213|@psypuppy]", "tg_ref": "", "parity": "odd", "enabled": 1},
+    {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "even", "enabled": 1},
+    {"kind": "kurator", "name": "ТГ куратор 1", "vk_id": "", "vk_mention": "", "tg_ref": "+79206159472", "parity": "any", "enabled": 1},
+    {"kind": "kurator", "name": "ТГ куратор 2", "vk_id": "", "vk_mention": "", "tg_ref": "+79818123970", "parity": "any", "enabled": 1},
+    {"kind": "tech", "name": "Техническая поддержка", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
+    {"kind": "tech", "name": "Никита", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
+    {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
 ]
 
-VK_WELCOME_TEMPLATE = """Р”РѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ Р·Р°РєСЂС‹С‚С‹Р№ С‡Р°С‚ РєСѓСЂСЃР° В«{course_full_name}В»!
+VK_WELCOME_TEMPLATE = """Добро пожаловать в закрытый чат курса «{course_full_name}»!
 
-РџРѕС‚РѕРє в„–{stream_number}: РѕР±СѓС‡РµРЅРёРµ СЃС‚Р°СЂС‚СѓРµС‚ {date_start}.
+Поток №{stream_number}: обучение стартует {date_start}.
 
-РџРµСЂРІС‹Р№ С€Р°Рі - Р·РЅР°РєРѕРјСЃС‚РІРѕ. Р Р°СЃСЃРєР°Р¶РёС‚Рµ Рѕ СЃРµР±Рµ Рё РїРёС‚РѕРјС†Рµ РѕРґРЅРёРј СЃРѕРѕР±С‰РµРЅРёРµРј:
-1. Р’Р°С€Рµ РёРјСЏ Рё РіРѕСЂРѕРґ.
-2. РљР»РёС‡РєР°, РІРѕР·СЂР°СЃС‚, РїРѕСЂРѕРґР° РёР»Рё С„РµРЅРѕС‚РёРї СЃРѕР±Р°РєРё.
-3. РЎ РєР°РєРёРјРё С‚СЂСѓРґРЅРѕСЃС‚СЏРјРё РїСЂРёС€Р»Рё Рё РєР°РєРѕР№ СЂРµР·СѓР»СЊС‚Р°С‚ С…РѕС‚РёС‚Рµ РїРѕР»СѓС‡РёС‚СЊ.
+Первый шаг - знакомство. Расскажите о себе и питомце одним сообщением:
+1. Ваше имя и город.
+2. Кличка, возраст, порода или фенотип собаки.
+3. С какими трудностями пришли и какой результат хотите получить.
 
-РЎРѕР·РґР°С‚РµР»СЊ РєСѓСЂСЃР°: {authors_text}
-РљСѓСЂР°С‚РѕСЂС‹-РєРёРЅРѕР»РѕРіРё: {kurators_text}
-РўРµС…РЅРёС‡РµСЃРєР°СЏ РїРѕРґРґРµСЂР¶РєР°: {techs_text}
-РЎРѕРѕР±С‰РµСЃС‚РІРѕ: https://vk.com/ssobakovod?utm_source=vk_edu_chat
+Создатель курса: {authors_text}
+Кураторы-кинологи: {kurators_text}
+Техническая поддержка: {techs_text}
+Сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat
 
-РџСЂР°РІРёР»Р° С‡Р°С‚Р°:
-- РѕР±С‰Р°РµРјСЃСЏ РєСѓР»СЊС‚СѓСЂРЅРѕ, Р±РµР· СЃРїР°РјР° Рё РЅРµРЅРѕСЂРјР°С‚РёРІРЅРѕР№ Р»РµРєСЃРёРєРё;
-- Р°СѓРґРёРѕСЃРѕРѕР±С‰РµРЅРёСЏ РёСЃРїРѕР»СЊР·СѓСЋС‚ С‚РѕР»СЊРєРѕ РєСѓСЂР°С‚РѕСЂС‹;
-- РІРѕРїСЂРѕСЃС‹ РїРѕ СѓСЂРѕРєР°Рј Рё РїСЂР°РєС‚РёРєРµ Р·Р°РґР°РµРј РїСЂСЏРјРѕ РІ СЌС‚РѕРј С‡Р°С‚Рµ.
+Правила чата:
+- общаемся культурно, без спама и ненормативной лексики;
+- аудиосообщения используют только кураторы;
+- вопросы по урокам и практике задаем прямо в этом чате.
 
-РќР°С‡РёРЅР°РµРј РѕР±СѓС‡РµРЅРёРµ."""
+Начинаем обучение."""
 
-TG_WELCOME_TEMPLATE = """<b>Р’СЃРµРј РїСЂРёРІРµС‚ Рё РґРѕР±СЂРѕ РїРѕР¶Р°Р»РѕРІР°С‚СЊ РІ Р·Р°РєСЂС‹С‚С‹Р№ С‡Р°С‚ РєСѓСЂСЃР° В«{course_full_name}В»!</b>
+TG_WELCOME_TEMPLATE = """<b>Всем привет и добро пожаловать в закрытый чат курса «{course_full_name}»!</b>
 
-РћР±СѓС‡РµРЅРёРµ СЃС‚Р°СЂС‚СѓРµС‚: {date_start}
+Обучение стартует: {date_start}
 
-Р­С‚Рѕ РіР»Р°РІРЅС‹Р№ С‡Р°С‚ РїРѕС‚РѕРєР° в„–{stream_number}. Р—РґРµСЃСЊ РєРѕРјР°РЅРґР° Р±СѓРґРµС‚ РїСѓР±Р»РёРєРѕРІР°С‚СЊ РІР°Р¶РЅС‹Рµ РѕР±СЉСЏРІР»РµРЅРёСЏ, РЅР°РїРѕРјРёРЅР°РЅРёСЏ Рё РЅРѕРІРѕСЃС‚Рё РєСѓСЂСЃР°.
+Это главный чат потока №{stream_number}. Здесь команда будет публиковать важные объявления, напоминания и новости курса.
 
-РЎРѕР·РґР°С‚РµР»СЊ РєСѓСЂСЃР°: {authors_text}
-РљСѓСЂР°С‚РѕСЂС‹-РєРёРЅРѕР»РѕРіРё: {kurators_text}
-РўРµС…РЅРёС‡РµСЃРєР°СЏ РїРѕРґРґРµСЂР¶РєР°: {techs_text}
+Создатель курса: {authors_text}
+Кураторы-кинологи: {kurators_text}
+Техническая поддержка: {techs_text}
 
-РџРѕР¶Р°Р»СѓР№СЃС‚Р°, Р·Р°РіР»СЏРЅРёС‚Рµ РІ РїРѕРґС‡Р°С‚ В«Р’РёР·РёС‚РєР°В» Рё СЂР°СЃСЃРєР°Р¶РёС‚Рµ Рѕ СЃРµР±Рµ Рё РїРёС‚РѕРјС†Рµ."""
+Пожалуйста, загляните в подчат «Визитка» и расскажите о себе и питомце."""
 
-TG_VIZITKA_TEMPLATE = """<b>РџРѕРґС‡Р°С‚ В«Р’РёР·РёС‚РєР°В»</b>
+TG_VIZITKA_TEMPLATE = """<b>Подчат «Визитка»</b>
 
-Р Р°СЃСЃРєР°Р¶РёС‚Рµ Рѕ СЃРµР±Рµ Рё РїРёС‚РѕРјС†Рµ:
-1. Р’Р°С€Рµ РёРјСЏ Рё РіРѕСЂРѕРґ.
-2. РљР»РёС‡РєР°, РІРѕР·СЂР°СЃС‚, РїРѕСЂРѕРґР° РёР»Рё С„РµРЅРѕС‚РёРї СЃРѕР±Р°РєРё.
-3. РЎ РєР°РєРёРјРё С‚СЂСѓРґРЅРѕСЃС‚СЏРјРё РїСЂРёС€Р»Рё Рё РєР°РєРѕР№ СЂРµР·СѓР»СЊС‚Р°С‚ С…РѕС‚РёС‚Рµ РїРѕР»СѓС‡РёС‚СЊ.
+Расскажите о себе и питомце:
+1. Ваше имя и город.
+2. Кличка, возраст, порода или фенотип собаки.
+3. С какими трудностями пришли и какой результат хотите получить.
 
-Р’ РєРѕРЅС†Рµ РґРѕР±Р°РІСЊС‚Рµ С„СЂР°Р·Сѓ:
-<blockquote>РЇ РѕР±СЏР·СѓСЋСЃСЊ РІРЅРёРјР°С‚РµР»СЊРЅРѕ РёР·СѓС‡Р°С‚СЊ РјР°С‚РµСЂРёР°Р»С‹ РєСѓСЂСЃР°, РІС‹РїРѕР»РЅСЏС‚СЊ РїСЂР°РєС‚РёРєСѓ, Р·Р°РґР°РІР°С‚СЊ РІРѕРїСЂРѕСЃС‹ РђРЅРЅРµ Рё РєСѓСЂР°С‚РѕСЂР°Рј, Р±С‹С‚СЊ С‚РµСЂРїРµР»РёРІС‹Рј Рє СЃРµР±Рµ Рё СЃРІРѕРµР№ СЃРѕР±Р°РєРµ Рё РёРґС‚Рё Рє СЂРµР·СѓР»СЊС‚Р°С‚Сѓ С€Р°Рі Р·Р° С€Р°РіРѕРј.</blockquote>"""
+В конце добавьте фразу:
+<blockquote>Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым к себе и своей собаке и идти к результату шаг за шагом.</blockquote>"""
 
-TG_OBUCHENIE_TEMPLATE = """<b>РќР°С€ СЂР°Р±РѕС‡РёР№ РєР°Р±РёРЅРµС‚</b>
+TG_OBUCHENIE_TEMPLATE = """<b>Наш рабочий кабинет</b>
 
-Р’СЃРµ, С‡С‚Рѕ РєР°СЃР°РµС‚СЃСЏ РѕР±СѓС‡РµРЅРёСЏ, Р¶РёРІРµС‚ Р·РґРµСЃСЊ.
+Все, что касается обучения, живет здесь.
 
-РњРѕРґСѓР»Рё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РµР¶РµРЅРµРґРµР»СЊРЅРѕ РІ СЃСѓР±Р±РѕС‚Сѓ РІ 12:00 РїРѕ РјРѕСЃРєРѕРІСЃРєРѕРјСѓ РІСЂРµРјРµРЅРё. Р—Р°РґР°РІР°Р№С‚Рµ РІРѕРїСЂРѕСЃС‹ РїРѕ СѓСЂРѕРєР°Рј, РѕС‚РјРµС‡Р°Р№С‚Рµ РђРЅРЅСѓ Рё РєСѓСЂР°С‚РѕСЂРѕРІ, РµСЃР»Рё РЅСѓР¶РµРЅ СЂР°Р·Р±РѕСЂ.
+Модули открываются еженедельно в субботу в 12:00 по московскому времени. Задавайте вопросы по урокам, отмечайте Анну и кураторов, если нужен разбор.
 
-РђРЅРЅР° РўРёРјРѕС„РµРµРІР°: {authors_text}
-РљСѓСЂР°С‚РѕСЂС‹-РєРёРЅРѕР»РѕРіРё: {kurators_text}"""
+Анна Тимофеева: {authors_text}
+Кураторы-кинологи: {kurators_text}"""
 
-TG_BOLTALKA_TEMPLATE = """<b>Р§Р°С‚, РіРґРµ РјРѕР¶РЅРѕ РїСЂРѕСЃС‚Рѕ РїРѕР±РѕР»С‚Р°С‚СЊ</b>
+TG_BOLTALKA_TEMPLATE = """<b>Чат, где можно просто поболтать</b>
 
-Р—РґРµСЃСЊ РјРѕР¶РЅРѕ РґРµР»РёС‚СЊСЃСЏ СЂР°РґРѕСЃС‚СЏРјРё, РјР°Р»РµРЅСЊРєРёРјРё РїРѕР±РµРґР°РјРё, С„РѕС‚Рѕ Рё РїРѕРІСЃРµРґРЅРµРІРЅРѕР№ Р¶РёР·РЅСЊСЋ СЃ СЃРѕР±Р°РєРѕР№."""
+Здесь можно делиться радостями, маленькими победами, фото и повседневной жизнью с собакой."""
 
 
 def setup(ctx):
@@ -285,7 +285,7 @@ def _clean(value: Any) -> str:
 
 
 def _bool(value: Any) -> bool:
-    return str(value).lower() in {"1", "true", "yes", "y", "РґР°"}
+    return str(value).lower() in {"1", "true", "yes", "y", "да"}
 
 
 def _password() -> str:
@@ -303,12 +303,12 @@ def _course_key(value: Any) -> str:
     aliases = {
         "1": "puppy",
         "puppy": "puppy",
-        "С‰РµРЅРѕРє": "puppy",
+        "щенок": "puppy",
         "shchenok": "puppy",
         "2": "dog",
         "dog": "dog",
-        "СЃРѕР±Р°РєР°": "dog",
-        "СЃРѕР±Р°РєРѕРІРѕРґ": "dog",
+        "собака": "dog",
+        "собаковод": "dog",
     }
     return aliases.get(raw, raw or "puppy")
 
@@ -401,7 +401,7 @@ def _mentions(people: list[dict[str, Any]], platform: str) -> str:
             ref = _clean(person.get("tg_ref")) or _clean(person.get("name"))
         if ref:
             items.append(f"{person['name']} - {ref}" if platform == "vk" and " - " not in ref else ref)
-    return ", ".join(items) if items else "РЅРµ СѓРєР°Р·Р°РЅС‹"
+    return ", ".join(items) if items else "не указаны"
 
 
 def _template(key: str) -> str:
@@ -534,7 +534,7 @@ async def _create_vk_chat(data: dict[str, Any]) -> dict[str, Any]:
     test_mode = _bool(data.get("test_mode"))
     token = _clean(os.environ.get("VK_TEST_USER_TOKEN") if test_mode and os.environ.get("VK_TEST_USER_TOKEN") else os.environ.get("VK_USER_TOKEN"))
     stream_number = _clean(data.get("stream_number") or "15")
-    date_start = _clean(data.get("date_start") or data.get("start_date") or "17 РјР°СЂС‚Р°")
+    date_start = _clean(data.get("date_start") or data.get("start_date") or "17 марта")
     course = _course_by_input(data.get("course_type") or data.get("course_choice") or "puppy")
     title = _format_title(stream_number, date_start, course, "vk")
     selected = _selected_people(stream_number)
@@ -586,7 +586,7 @@ async def _create_vk_chat(data: dict[str, Any]) -> dict[str, Any]:
     log_chat_id = _clean(os.environ.get("VK_LOG_CHAT_ID"))
     if not test_mode and log_chat_id:
         try:
-            await _vk_method("messages.send", {"peer_id": log_chat_id, "message": f"РќРѕРІС‹Р№ VK С‡Р°С‚ СЃРѕР·РґР°РЅ\n{title}\n{invite_link}", "random_id": 0}, token)
+            await _vk_method("messages.send", {"peer_id": log_chat_id, "message": f"Новый VK чат создан\n{title}\n{invite_link}", "random_id": 0}, token)
         except Exception:
             pass
     await _send_salebot(invite_link=invite_link, stream_number=stream_number, course_value=course["key"], date_start=date_start, salebot_id=data.get("salebot_id"), vk=True, test_mode=test_mode)
@@ -605,7 +605,7 @@ def _telegram_credentials() -> tuple[int, str, str]:
 
 
 def _format_date_russian(date_str: str) -> str:
-    months = ["СЏРЅРІР°СЂСЏ", "С„РµРІСЂР°Р»СЏ", "РјР°СЂС‚Р°", "Р°РїСЂРµР»СЏ", "РјР°СЏ", "РёСЋРЅСЏ", "РёСЋР»СЏ", "Р°РІРіСѓСЃС‚Р°", "СЃРµРЅС‚СЏР±СЂСЏ", "РѕРєС‚СЏР±СЂСЏ", "РЅРѕСЏР±СЂСЏ", "РґРµРєР°Р±СЂСЏ"]
+    months = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
     try:
         dt = datetime.strptime(date_str, "%d.%m.%Y")
         return f"{dt.day} {months[dt.month - 1]}"
@@ -663,13 +663,13 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
             return None
 
         try:
-            await client(EditForumTopicRequest(peer=channel, topic_id=1, title="РРЅС„Рѕ"))
+            await client(EditForumTopicRequest(peer=channel, topic_id=1, title="Инфо"))
             await asyncio.sleep(1)
-            topic_vizitka = await client(CreateForumTopicRequest(peer=channel, title="Р’РёР·РёС‚РєР°", icon_emoji_id=5237999392438371490, random_id=random.randint(1, 2**31 - 1)))
+            topic_vizitka = await client(CreateForumTopicRequest(peer=channel, title="Визитка", icon_emoji_id=5237999392438371490, random_id=random.randint(1, 2**31 - 1)))
             topic_ids["vizitka"] = get_topic_id(topic_vizitka)
-            topic_obuchenie = await client(CreateForumTopicRequest(peer=channel, title="РћР±СѓС‡РµРЅРёРµ", icon_emoji_id=5357419403325481346, random_id=random.randint(1, 2**31 - 1)))
+            topic_obuchenie = await client(CreateForumTopicRequest(peer=channel, title="Обучение", icon_emoji_id=5357419403325481346, random_id=random.randint(1, 2**31 - 1)))
             topic_ids["obuchenie"] = get_topic_id(topic_obuchenie)
-            topic_boltalka = await client(CreateForumTopicRequest(peer=channel, title="Р‘РѕР»С‚Р°Р»РєР°", icon_emoji_id=5417915203100613993, random_id=random.randint(1, 2**31 - 1)))
+            topic_boltalka = await client(CreateForumTopicRequest(peer=channel, title="Болталка", icon_emoji_id=5417915203100613993, random_id=random.randint(1, 2**31 - 1)))
             topic_ids["boltalka"] = get_topic_id(topic_boltalka)
             await client(UpdatePinnedForumTopicRequest(peer=channel, topic_id=1, pinned=True))
         except Exception as exc:
@@ -708,9 +708,9 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
 
         if not test_mode:
             await invite_and_admin(admins, "admin")
-            await invite_and_admin(kurators, "РљСѓСЂР°С‚РѕСЂ С€РєРѕР»С‹")
-            await invite_and_admin(authors, "РђРІС‚РѕСЂ РєСѓСЂСЃР°")
-            await invite_and_admin(techs, "РўРµС…. РѕС‚РґРµР»")
+            await invite_and_admin(kurators, "Куратор школы")
+            await invite_and_admin(authors, "Автор курса")
+            await invite_and_admin(techs, "Тех. отдел")
         channel_url_id = str(abs(int(getattr(channel, "id", 0))))
         extras = {"date_start": _format_date_russian(date_start), "channel_url_id": channel_url_id, **{f"topic_{k}_id": v or 1 for k, v in topic_ids.items()}}
         bot_channel = await client.get_entity(channel)
