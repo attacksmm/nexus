@@ -35,6 +35,7 @@ TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
 
 _ctx = None
 _logger = None
+_db_initialized = False
 
 
 COURSE_DEFAULTS = [
@@ -120,6 +121,7 @@ def _db():
 
 
 def _init_db() -> None:
+    global _db_initialized
     with _db() as db:
         db.executescript(
             """
@@ -226,6 +228,12 @@ def _init_db() -> None:
                 (TEMPLATE_DEFAULTS_VERSION,),
             )
         db.commit()
+    _db_initialized = True
+
+
+def _ensure_db() -> None:
+    if not _db_initialized:
+        _init_db()
 
 
 async def _require_panel_access(request: Request) -> dict:
@@ -275,6 +283,7 @@ def _course_key(value: Any) -> str:
 
 
 def _course_by_input(value: Any) -> sqlite3.Row:
+    _ensure_db()
     key = _course_key(value)
     with _db() as db:
         row = db.execute("SELECT * FROM courses WHERE key=? AND enabled=1", (key,)).fetchone()
@@ -299,6 +308,7 @@ def _stream_is_even(stream_number: Any) -> bool:
 
 
 def _people(kind: str | None = None, *, enabled: bool = True) -> list[dict[str, Any]]:
+    _ensure_db()
     sql = "SELECT * FROM people WHERE 1=1"
     args: list[Any] = []
     if kind:
@@ -366,6 +376,7 @@ def _mentions(people: list[dict[str, Any]], platform: str) -> str:
 
 
 def _template(key: str) -> str:
+    _ensure_db()
     with _db() as db:
         row = db.execute("SELECT body FROM templates WHERE key=?", (key,)).fetchone()
     return row["body"] if row else ""
@@ -397,6 +408,7 @@ def _render_template(key: str, *, course: sqlite3.Row, stream_number: str, date_
 
 
 def _record_run(platform: str, title: str, stream_number: str, date_start: str, course_key: str, test_mode: bool, status: str, request_json: dict[str, Any], response_json: dict[str, Any] | None = None, error: str = "", link: str = "", chat_id: str = "") -> None:
+    _ensure_db()
     with _db() as db:
         db.execute(
             """INSERT INTO runs(platform,title,stream_number,date_start,course_key,test_mode,status,link,chat_id,error,request_json,response_json)
@@ -787,6 +799,7 @@ async def create_from_panel(request: Request):
 
 @router.get("/status")
 async def status():
+    _ensure_db()
     return {
         "ok": True,
         "env": {
@@ -811,6 +824,7 @@ async def list_people(request: Request):
 @router.post("/people")
 async def upsert_person(request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     data = await request.json()
     kind = _clean(data.get("kind"))
     name = _clean(data.get("name"))
@@ -849,6 +863,7 @@ async def upsert_person(request: Request):
 @router.delete("/people/{person_id}")
 async def delete_person(person_id: int, request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     with _db() as db:
         db.execute("DELETE FROM people WHERE id=?", (person_id,))
         db.commit()
@@ -858,6 +873,7 @@ async def delete_person(person_id: int, request: Request):
 @router.get("/courses")
 async def list_courses(request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     with _db() as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM courses ORDER BY choice, key").fetchall()]
     return {"ok": True, "items": rows}
@@ -866,6 +882,7 @@ async def list_courses(request: Request):
 @router.post("/courses")
 async def upsert_course(request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     data = await request.json()
     key = _course_key(data.get("key"))
     payload = {
@@ -891,6 +908,7 @@ async def upsert_course(request: Request):
 @router.get("/templates")
 async def list_templates(request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     with _db() as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM templates ORDER BY key").fetchall()]
     return {"ok": True, "items": rows}
@@ -899,6 +917,7 @@ async def list_templates(request: Request):
 @router.post("/templates")
 async def update_template(request: Request):
     await _require_panel_access(request)
+    _ensure_db()
     data = await request.json()
     key = _clean(data.get("key"))
     body = str(data.get("body") or "")
@@ -930,6 +949,7 @@ async def preview(stream_number: str = "51", start_date: str = "01.06.2026", cou
 @router.get("/runs")
 async def list_runs(request: Request, limit: int = 50):
     await _require_panel_access(request)
+    _ensure_db()
     limit = max(1, min(200, int(limit)))
     with _db() as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
