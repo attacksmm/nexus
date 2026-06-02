@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Form, Request, Response
@@ -197,6 +198,7 @@ async def api_user_delete(uid: int, request: Request):
 # ── ENV API (admin only) ───────────────────────────────────────────────────────
 
 ENV_PATH = __import__("pathlib").Path(__file__).parent.parent / ".env"
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @router.get("/api/settings/env")
@@ -217,8 +219,11 @@ async def api_env_list(request: Request):
 
 @router.post("/api/settings/env/upload")
 async def api_env_upload(request: Request):
-    """Принимает любой текстовый .env файл (любое имя/расширение).
-    Значения никогда не возвращаются клиенту.
+    """Safely merges a text .env upload into the stored environment.
+
+    Values are never returned to the client. Empty template lines are ignored,
+    and omitted existing keys are preserved so module installs cannot wipe
+    already configured secrets.
     """
     user = await verify_token_from_request(request)
     if not require_admin(user):
@@ -234,17 +239,34 @@ async def api_env_upload(request: Request):
     if not parsed:
         return _err("Файл не содержит переменных формата KEY=value")
 
-    # перезаписываем .env (чисто, без комментариев и пустых строк)
-    with open(ENV_PATH, "w", encoding="utf-8") as f:
-        for k, v in parsed.items():
-            f.write(f"{k}={v}\n")
+    invalid = [k for k in parsed if not ENV_KEY_RE.match(k)]
+    if invalid:
+        return _err("Некорректные ENV ключи: " + ", ".join(invalid))
+
+    existing = _read_env_values()
+    merged = dict(existing)
+    added = [k for k in parsed if k not in existing]
+    updated = [k for k, v in parsed.items() if k in existing and existing[k] != v]
+    unchanged = [k for k, v in parsed.items() if k in existing and existing[k] == v]
+    changed_keys = added + updated
+    merged.update(parsed)
+
+    _write_env_values(merged)
 
     # применяем к процессу без перезапуска
-    import os
     for k, v in parsed.items():
         os.environ[k] = v
 
-    return {"ok": True, "count": len(parsed), "keys": list(parsed.keys())}
+    return {
+        "ok": True,
+        "count": len(parsed),
+        "keys": list(parsed.keys()),
+        "changed_keys": changed_keys,
+        "added": added,
+        "updated": updated,
+        "unchanged": unchanged,
+        "retained_count": max(0, len(existing) - len(updated) - len(unchanged)),
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -259,7 +281,7 @@ def _parse_env_content(content: str) -> dict[str, str]:
     """
     parsed = {}
     for raw_line in content.splitlines():
-        line = raw_line.strip()
+        line = raw_line.strip().lstrip("\ufeff")
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
@@ -280,6 +302,23 @@ def _parse_env_content(content: str) -> dict[str, str]:
     return parsed
 
 
+def _read_env_values() -> dict[str, str]:
+    if not ENV_PATH.exists():
+        return {}
+    return _parse_env_content(ENV_PATH.read_text(encoding="utf-8"))
+
+
+def _write_env_values(values: dict[str, str]) -> None:
+    if ENV_PATH.exists():
+        backup_path = ENV_PATH.parent / ".env.bak"
+        backup_path.write_text(ENV_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    tmp_path = ENV_PATH.parent / ".env.tmp"
+    with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+        for k, v in values.items():
+            f.write(f"{k}={v}\n")
+    tmp_path.replace(ENV_PATH)
+
+
 def _strip_inline_comment(s: str) -> str:
     """Убирает # комментарий в конце значения если он вне кавычек."""
     s = s.strip()
@@ -296,9 +335,7 @@ def _strip_inline_comment(s: str) -> str:
 
 
 def _parse_env_keys() -> list[str]:
-    if not ENV_PATH.exists():
-        return []
-    return list(_parse_env_content(ENV_PATH.read_text(encoding="utf-8")).keys())
+    return list(_read_env_values().keys())
 
 
 async def _get_user_by_id(uid: int) -> str | None:

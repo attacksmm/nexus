@@ -294,8 +294,8 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
         <div class="env-info panel">
           <p class="env-info__text">
             Значения переменных <strong>никогда не передаются</strong> клиенту — только имена ключей.<br>
-            Принимается любой текстовый файл — скачайте шаблон, заполните, загрузите обратно без переименования.<br>
-            Все переменные применяются <strong>сразу без перезапуска</strong> сервиса.
+            Шаблон содержит только недостающие ключи установленных модулей. При загрузке Nexus безопасно объединяет файл с текущим <code>.env</code>, не удаляя старые секреты.<br>
+            Заполненные переменные применяются <strong>сразу без перезапуска</strong> сервиса.
           </p>
         </div>
         <div class="settings-upload-block">
@@ -306,7 +306,7 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
           <p id="envStatus" class="status-line"></p>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button id="envUploadBtn" class="btn btn--primary" type="button" disabled>Применить</button>
-            <button id="envTemplateBtn" class="btn btn--ghost" type="button">↓ Шаблон .env</button>
+            <button id="envTemplateBtn" class="btn btn--ghost" type="button">↓ Недостающие ENV</button>
           </div>
         </div>
         <div style="margin-top:16px;display:flex;align-items:baseline;gap:12px;margin-bottom:8px">
@@ -591,7 +591,8 @@ document.getElementById("envUploadBtn").addEventListener("click", async () => {
     return;
   }
 
-  const changedSecret = data.keys.includes("NEXUS_SECRET");
+  const changedKeys = data.changed_keys || data.keys || [];
+  const changedSecret = changedKeys.includes("NEXUS_SECRET");
   if (changedSecret) {
     // Сессия аннулирована — новый секрет, старый JWT невалиден
     st.textContent = `Применено ${data.count} переменных. NEXUS_SECRET изменён — войдите заново.`;
@@ -600,7 +601,11 @@ document.getElementById("envUploadBtn").addEventListener("click", async () => {
     return;
   }
 
-  st.textContent = `Применено ${data.count} переменных: ${data.keys.join(", ")}`;
+  const parts = [];
+  if (data.added?.length) parts.push(`добавлено: ${data.added.join(", ")}`);
+  if (data.updated?.length) parts.push(`обновлено: ${data.updated.join(", ")}`);
+  if (data.unchanged?.length) parts.push(`без изменений: ${data.unchanged.join(", ")}`);
+  st.textContent = parts.length ? `ENV объединён, ${parts.join("; ")}` : `ENV объединён, применено ${data.count}`;
   st.className = "status-line status-line--ok";
   await loadEnvKeys();
 });

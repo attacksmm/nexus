@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -12,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from orchestrator.auth import (
-    ensure_default_users, require_admin,
+    ENV_PATH, ensure_default_users, require_admin,
+    _read_env_values,
     router as auth_router, verify_token_from_request,
 )
 from orchestrator.core import ModuleManager, UPLOADS_DIR
@@ -145,21 +147,21 @@ async def api_env_check(request: Request, keys: str = ""):
 
 @app.get("/api/settings/env/template")
 async def api_env_template(request: Request):
-    """Генерирует .env шаблон из NEXUS_SECRET + env_vars всех установленных модулей."""
+    """Генерирует безопасный .env шаблон только для недостающих ключей."""
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
 
     modules = await manager.list_modules()
-    lines = [
-        f"# Nexus Orchestrator — шаблон переменных окружения",
-        f"# Сгенерировано: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        f"# Заполните значения и загрузите через кнопку «Применить»",
-        "",
-        "# ── Nexus (обязательно) ─────────────────────────────────",
-        "NEXUS_SECRET=  # JWT секрет, минимум 32 символа. Смена требует перезапуска сервиса.",
-        "",
-    ]
+    configured = {k for k, v in _read_env_values().items() if v}
+    configured.update(k for k, v in os.environ.items() if v)
+
+    required: dict[str, dict] = {
+        "NEXUS_SECRET": {
+            "desc": "JWT секрет, минимум 32 символа. Смена требует повторного входа.",
+            "modules": ["Nexus"],
+        }
+    }
 
     for m in modules:
         try:
@@ -167,13 +169,35 @@ async def api_env_template(request: Request):
             env_vars = manifest.get("env_vars", {})
         except Exception:
             env_vars = {}
-        if not env_vars:
-            continue
-        lines.append(f"# ── {m['name']} (id: {m['id']}) {'─' * max(0, 44 - len(m['name']))} ")
         for key, desc in env_vars.items():
-            lines.append(f"# {desc}")
+            entry = required.setdefault(key, {"desc": desc, "modules": []})
+            if desc and not entry.get("desc"):
+                entry["desc"] = desc
+            entry["modules"].append(m["name"])
+
+    missing = {k: v for k, v in required.items() if k not in configured}
+    lines = [
+        f"# Nexus Orchestrator — шаблон недостающих переменных окружения",
+        f"# Сгенерировано: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        "# Заполните только пустые значения и загрузите через «Применить».",
+        "# Уже настроенные ключи не включены: Nexus сохранит их при загрузке этого файла.",
+        f"# Источник текущих значений: {ENV_PATH}",
+        "",
+    ]
+
+    if not missing:
+        lines.extend([
+            "# Все обязательные ENV ключи установленных модулей уже есть.",
+            "# Добавьте сюда KEY=value вручную, если нужно изменить или добавить ключ.",
+        ])
+    else:
+        for key, meta in missing.items():
+            modules_text = ", ".join(dict.fromkeys(meta["modules"]))
+            lines.append(f"# Модули: {modules_text}")
+            if meta.get("desc"):
+                lines.append(f"# {meta['desc']}")
             lines.append(f"{key}=")
-        lines.append("")
+            lines.append("")
 
     content = "\n".join(lines)
     return PlainTextResponse(
