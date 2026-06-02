@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Документация: создание учебных чатов</title>
+  <style>
+    :root{--bg:#070707;--panel:#101010;--line:#2d2d2d;--text:#f2f2f2;--muted:#a8a8a8;--ok:#9fe0aa}
+    *{box-sizing:border-box}html{scrollbar-color:#555 #090909;scrollbar-width:thin}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,"Segoe UI",sans-serif}
+    main{max-width:980px;padding:18px;display:grid;gap:14px}section{border:1px solid var(--line);background:var(--panel);padding:14px;display:grid;gap:10px}
+    h1,h2{margin:0}h1{font-size:21px}h2{font-size:16px}p{margin:0;color:var(--muted)}code{color:var(--ok)}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:#050505;padding:12px;overflow-x:hidden}
+    ul{margin:0;padding-left:20px;color:var(--muted)}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Создание учебных чатов</h1>
+  <section>
+    <h2>Назначение</h2>
+    <p>Модуль переносит legacy endpoint'ы Sobakovod/Windsurf для создания учебных чатов в Nexus и добавляет панель управления списками людей, курсами и шаблонами сообщений.</p>
+  </section>
+  <section>
+    <h2>Публичные endpoint'ы</h2>
+    <pre>POST /nexus/course-chat-creator/api/process_vk
+POST /nexus/course-chat-creator/api/api/process_vk
+POST /nexus/course-chat-creator/api/process6
+POST /nexus/course-chat-creator/api/api/process6</pre>
+    <p>Двойные варианты сохранены для совместимости с legacy путями внутри FastAPI router. Все публичные вызовы требуют поле <code>password</code>.</p>
+  </section>
+  <section>
+    <h2>Поля запроса</h2>
+    <pre>{
+  "password": "...",
+  "stream_number": "51",
+  "start_date": "01.06.2026",
+  "date_start": "01.06.2026",
+  "course_choice": "1",
+  "course_type": "puppy",
+  "salebot_id": "optional",
+  "test_mode": "true"
+}</pre>
+    <ul>
+      <li><code>course_choice=1</code> и <code>course_type=puppy</code> означают курс щенка.</li>
+      <li><code>course_choice=2</code> и <code>course_type=dog</code> означают основной курс собаки.</li>
+      <li>Кураторы выбираются по четности <code>stream_number</code>: <code>even</code>, <code>odd</code> или <code>any</code>.</li>
+    </ul>
+  </section>
+  <section>
+    <h2>ENV</h2>
+    <pre>NEXUS_CHAT_CREATOR_PASSWORD=
+SBKVD_PROCESS_WEBHOOK_PASSWORD=
+SALEBOT_API_KEY_3=
+VK_USER_TOKEN=
+VK_TEST_USER_TOKEN=
+VK_GROUP_TOKEN=
+VK_GROUP_ID=
+VK_LOG_CHAT_ID=
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_SESSION_FILE=</pre>
+    <p>Секреты не хранятся в модуле. Значения задаются через Nexus Settings ENV.</p>
+  </section>
+  <section>
+    <h2>Что сохраняется</h2>
+    <ul>
+      <li>VK: создание беседы, добавление участников, назначение админов, история для новых участников, приветствие, закреп, invite link, Salebot variables.</li>
+      <li>Telegram: создание forum supergroup, темы Инфо/Визитка/Обучение/Болталка, аватар, бот, роли админов, приветственные сообщения, закрепы, invite link, Salebot variables.</li>
+      <li>Панель: редактирование людей, курсов, шаблонов и просмотр истории запусков.</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Сборка ZIP</h2>
+    <pre>cd module_course_chat_creator
+zip -r ../course-chat-creator.zip manifest.json router.py panel static</pre>
+  </section>
+</main>
+</body>
+</html>
