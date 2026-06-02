@@ -23,6 +23,7 @@
     .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{min-height:34px;border:1px solid #555;background:#f2f2f2;color:#080808;padding:7px 12px;font-weight:650}.ghost{background:transparent;color:var(--text)}.danger{background:#2a1114;color:var(--bad);border-color:#67343a}
     .surface{border:1px solid var(--line);background:var(--panel);padding:12px;display:grid;gap:10px;min-width:0}.surface--plain{border:0;background:transparent;padding:0}
     pre{margin:0;border:1px solid var(--line);background:#050505;color:#d8d8d8;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;scrollbar-color:#555 #090909}
+    pre[hidden]{display:none}
     .table{border:1px solid var(--line);background:var(--panel);overflow:hidden}.table-head,.row{display:grid;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line)}.table-head{color:var(--muted);font-size:12px;background:#0b0b0b}.row:last-child{border-bottom:0}.row:hover{background:var(--soft)}
     .people-head,.people-row{grid-template-columns:92px minmax(130px,1.1fr) minmax(110px,.8fr) minmax(140px,1fr) 82px 70px 84px}
     .course-head,.course-row{grid-template-columns:90px 70px minmax(220px,1.2fr) minmax(240px,1fr) 70px 84px}
@@ -69,16 +70,12 @@
             <label>Курс
               <select id="course"></select>
             </label>
-            <label>Salebot client_id
-              <input id="salebotId" placeholder="необязательно">
-            </label>
           </div>
           <div class="actions">
             <button class="btn ghost" id="previewBtn" type="button">Предпросмотр</button>
             <button class="btn danger" id="createBtn" type="button">Создать чат</button>
           </div>
-          <p class="mini">В тестовом режиме модуль создает пустой чат: без приглашения людей, бота, назначения админов, Salebot и лог-чата.</p>
-          <pre id="createResult"></pre>
+          <pre id="createResult" hidden></pre>
         </div>
         <div class="surface">
           <h2>Предпросмотр</h2>
@@ -100,7 +97,7 @@
           <label>Активен<select id="pEnabled"><option value="1">да</option><option value="0">нет</option></select></label>
         </div>
         <div class="actions"><button class="btn" id="personSave" type="button">Сохранить</button><button class="btn ghost" id="personClear" type="button">Новая запись</button></div>
-        <pre id="peopleStatus"></pre>
+        <pre id="peopleStatus" hidden></pre>
       </div>
       <div class="table">
         <div class="table-head people-head"><span>Роль</span><span>Имя</span><span>VK ID</span><span>Telegram</span><span>Четность</span><span>Статус</span><span></span></div>
@@ -120,7 +117,7 @@
           <label>Активен<select id="cEnabled"><option value="1">да</option><option value="0">нет</option></select></label>
         </div>
         <div class="actions"><button class="btn" id="courseSave" type="button">Сохранить курс</button></div>
-        <pre id="courseStatus"></pre>
+        <pre id="courseStatus" hidden></pre>
       </div>
       <div class="table">
         <div class="table-head course-head"><span>Key</span><span>Choice</span><span>Название</span><span>Отличия VK/TG</span><span>Статус</span><span></span></div>
@@ -134,7 +131,7 @@
         <label>Шаблон<select id="tplKey"></select></label>
         <textarea id="tplBody"></textarea>
         <div class="actions"><button class="btn" id="tplSave" type="button">Сохранить шаблон</button></div>
-        <pre id="tplStatus"></pre>
+        <pre id="tplStatus" hidden></pre>
       </div>
     </section>
 
@@ -143,13 +140,13 @@
       <div class="surface">
         <div class="grid3">
           <label>Телефон аккаунта
-            <input id="tgPhone" placeholder="+79990000000">
+            <input id="tgPhone" autocomplete="tel" placeholder="+79990000000">
           </label>
           <label>Код из Telegram
-            <input id="tgCode" inputmode="numeric" placeholder="12345">
+            <input id="tgCode" inputmode="numeric" autocomplete="one-time-code" placeholder="12345">
           </label>
           <label>2FA пароль
-            <input id="tgPassword" type="password" placeholder="если включен">
+            <input id="tgPassword" type="password" autocomplete="off" name="telegram_two_factor_manual" value="" data-lpignore="true" data-1p-ignore placeholder="если включен">
           </label>
         </div>
         <div class="actions">
@@ -157,12 +154,12 @@
           <button class="btn" id="tgSendCodeBtn" type="button">Отправить код</button>
           <button class="btn" id="tgConfirmBtn" type="button">Подтвердить</button>
         </div>
-        <pre id="tgAuthStatus"></pre>
+        <pre id="tgAuthStatus" hidden></pre>
       </div>
     </section>
 
     <section class="view" id="view-runs" hidden>
-      <div class="head"><h1>История запусков</h1><button class="btn ghost" id="runsRefresh" type="button">Обновить</button></div>
+      <div class="head"><h1>История запусков</h1><div class="actions"><button class="btn ghost" id="runsRefresh" type="button">Обновить</button><button class="btn ghost" id="runsClear" type="button">Очистить</button></div></div>
       <div class="table">
         <div class="table-head run-head"><span>Платформа</span><span>Название</span><span>Поток</span><span>Дата</span><span>Режим</span><span>Статус</span><span>Ссылка / ошибка</span></div>
         <div id="runsList"></div>
@@ -175,7 +172,8 @@
 const api = "../api";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-const show = (el, data) => { el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
+const show = (el, data) => { el.hidden = false; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
+const hide = el => { el.hidden = true; el.textContent = ""; };
 let people = [], courses = [], templates = [], editPersonId = null;
 
 document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {
@@ -242,14 +240,14 @@ $("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pVkMen
 $("personSave").onclick = async () => {
   try {
     const payload = {id:editPersonId, kind:$("pKind").value, name:$("pName").value, vk_id:$("pVkId").value, vk_mention:$("pVkMention").value, tg_ref:$("pTgRef").value, parity:$("pParity").value, enabled:$("pEnabled").value === "1"};
-    show($("peopleStatus"), await postJson("/people", payload)); await loadPeople(); $("personClear").click();
+    hide($("peopleStatus")); await postJson("/people", payload); await loadPeople(); $("personClear").click();
   } catch(e) { show($("peopleStatus"), e); }
 };
 
 $("courseSave").onclick = async () => {
   try {
     const payload = {key:$("cKey").value, choice:$("cChoice").value, title:$("cTitle").value, vk_title:$("cVkTitle").value, tg_title:$("cTgTitle").value, enabled:$("cEnabled").value === "1"};
-    show($("courseStatus"), await postJson("/courses", payload)); await loadCourses();
+    hide($("courseStatus")); await postJson("/courses", payload); await loadCourses();
   } catch(e) { show($("courseStatus"), e); }
 };
 
@@ -261,7 +259,7 @@ async function loadTemplates() {
 }
 $("tplKey").onchange = () => { const t = templates.find(x => x.key === $("tplKey").value); $("tplBody").value = t ? t.body : ""; };
 $("tplSave").onclick = async () => {
-  try { show($("tplStatus"), await postJson("/templates", {key:$("tplKey").value, body:$("tplBody").value})); await loadTemplates(); }
+  try { hide($("tplStatus")); await postJson("/templates", {key:$("tplKey").value, body:$("tplBody").value}); await loadTemplates(); }
   catch(e) { show($("tplStatus"), e); }
 };
 
@@ -277,12 +275,13 @@ $("tgSendCodeBtn").onclick = async () => {
 $("tgConfirmBtn").onclick = async () => {
   try {
     show($("tgAuthStatus"), await postJson("/telegram/auth/confirm", {phone:$("tgPhone").value, code:$("tgCode").value, password:$("tgPassword").value}));
+    $("tgCode").value = ""; $("tgPassword").value = "";
     await loadStatus();
   } catch(e) { show($("tgAuthStatus"), e); }
 };
 
 function createPayload() {
-  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, salebot_id:$("salebotId").value, test_mode:$("testMode").value};
+  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, test_mode:$("testMode").value};
 }
 $("previewBtn").onclick = async () => {
   try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}`)); }
@@ -307,8 +306,14 @@ async function loadRuns() {
   } catch(e) { $("runsList").innerHTML = `<div class="row run-row"><span>${esc(JSON.stringify(e))}</span></div>`; }
 }
 $("runsRefresh").onclick = loadRuns;
+$("runsClear").onclick = async () => {
+  if (!confirm("Очистить историю запусков?")) return;
+  try { await postJson("/runs/clear", {}); await loadRuns(); }
+  catch(e) { $("runsList").innerHTML = `<div class="row run-row"><span>${esc(JSON.stringify(e))}</span></div>`; }
+};
 
 async function init() {
+  $("tgPassword").value = ""; $("tgCode").value = "";
   await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns();
 }
 init().catch(e => show($("createResult"), e));

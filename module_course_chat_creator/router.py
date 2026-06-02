@@ -28,8 +28,6 @@ except Exception:  # pragma: no cover - isolated local tests
 router = APIRouter()
 
 VK_API_VERSION = "5.131"
-SALEBOT_CHAT_LINK_CALLBACK = "get_potok_link"
-STANDARD_SALEBOT_CLIENT_ID = "771116046"
 DEFAULT_MODULE_ID = "course-chat-creator"
 TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
 
@@ -436,28 +434,6 @@ def _record_run(platform: str, title: str, stream_number: str, date_start: str, 
         db.commit()
 
 
-async def _send_salebot(*, invite_link: str, stream_number: str, course_value: str, date_start: str, salebot_id: Any, vk: bool, test_mode: bool) -> None:
-    api_key = _clean(os.environ.get("SALEBOT_API_KEY_3"))
-    if test_mode or not api_key:
-        return
-    salebot_ids = [STANDARD_SALEBOT_CLIENT_ID]
-    if salebot_id:
-        salebot_ids.append(str(salebot_id))
-    variables = {
-        "link_potok": invite_link,
-        "number_potok": stream_number,
-        "course_potok": course_value,
-        "date_potok": date_start,
-    }
-    if vk:
-        variables["link_potok_vk"] = invite_link
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for client_id in dict.fromkeys(salebot_ids):
-            await client.post(f"https://chatter.salebot.pro/api/{api_key}/save_variables", json={"client_id": client_id, "variables": variables})
-            await asyncio.sleep(3)
-            await client.get(f"https://chatter.salebot.pro/api/{api_key}/callback", params={"client_id": client_id, "message": SALEBOT_CHAT_LINK_CALLBACK})
-
-
 async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
     if not token:
         raise HTTPException(status_code=503, detail="VK token is not configured")
@@ -568,13 +544,6 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         await _vk_method("messages.pin", {"peer_id": peer_id, "message_id": welcome_resp}, token)
     invite_data = await _vk_method("messages.getInviteLink", {"peer_id": peer_id}, token)
     invite_link = invite_data.get("link", "") if isinstance(invite_data, dict) else ""
-    log_chat_id = _clean(os.environ.get("VK_LOG_CHAT_ID"))
-    if not test_mode and log_chat_id:
-        try:
-            await _vk_method("messages.send", {"peer_id": log_chat_id, "message": f"Новый VK чат создан\n{title}\n{invite_link}", "random_id": 0}, token)
-        except Exception:
-            pass
-    await _send_salebot(invite_link=invite_link, stream_number=stream_number, course_value=course["key"], date_start=date_start, salebot_id=data.get("salebot_id"), vk=True, test_mode=test_mode)
     response = {"message": "Success! VK chat created.", "group_link": invite_link, "chat_id": chat_id, "peer_id": peer_id, "test_mode": test_mode, "title": title}
     _record_run("vk", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id=str(chat_id))
     return response
@@ -787,7 +756,6 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         except Exception as exc:
             _log("warning", "Telegram invite export failed: %s", exc)
             invite_link = ""
-    await _send_salebot(invite_link=invite_link, stream_number=stream_number, course_value=course["choice"], date_start=date_start, salebot_id=data.get("salebot_id"), vk=False, test_mode=test_mode)
     response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode}
     _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
     return response
@@ -917,8 +885,6 @@ async def status():
         "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
         "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
         "vk_group_id": bool(os.environ.get("VK_GROUP_ID")),
-        "vk_log_chat_id": bool(os.environ.get("VK_LOG_CHAT_ID")),
-        "salebot": bool(os.environ.get("SALEBOT_API_KEY_3")),
     }
     return {
         "ok": True,
@@ -1069,3 +1035,13 @@ async def list_runs(request: Request, limit: int = 50):
     with _db() as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
     return {"ok": True, "items": rows}
+
+
+@router.post("/runs/clear")
+async def clear_runs(request: Request):
+    await _require_panel_access(request)
+    _ensure_db()
+    with _db() as db:
+        db.execute("DELETE FROM runs")
+        db.commit()
+    return {"ok": True}

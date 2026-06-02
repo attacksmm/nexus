@@ -180,7 +180,9 @@ async function checkModuleEnv(m) {
   try {
     const manifest = JSON.parse(m.manifest_json || "{}");
     const envVars = manifest.env_vars || {};
-    const keys = Object.keys(envVars).filter(Boolean);
+    const keys = Array.isArray(manifest.env_required)
+      ? manifest.env_required.filter(Boolean)
+      : Object.keys(envVars).filter(Boolean);
     if (!keys.length) return;
 
     const res = await fetch(`${RP}/api/env/check?keys=${keys.join(",")}`);

@@ -1,7 +1,7 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Nexus-модуль для создания учебных Telegram/VK чатов с редактируемыми админами, кураторами, авторами, курсами и шаблонами сообщений.",
   "env_required": [
     "VK_USER_TOKEN",
@@ -13,12 +13,10 @@
     "VK_USER_TOKEN": "Пользовательский VK token, от имени которого создаются боевые беседы.",
     "TELEGRAM_API_ID": "Telegram API ID для Telethon.",
     "TELEGRAM_API_HASH": "Telegram API hash для Telethon.",
-    "SBKVD_PROCESS_WEBHOOK_PASSWORD": "Legacy пароль webhook'ов Salebot/sobakovod. Используется только если NEXUS_CHAT_CREATOR_PASSWORD не задан.",
-    "SALEBOT_API_KEY_3": "Опционально: API key Salebot для сохранения переменных link_potok/number_potok/course_potok/date_potok и callback get_potok_link.",
+    "SBKVD_PROCESS_WEBHOOK_PASSWORD": "Legacy пароль webhook'ов Sobakovod. Используется только если NEXUS_CHAT_CREATOR_PASSWORD не задан.",
     "VK_TEST_USER_TOKEN": "Опционально: отдельный пользовательский VK token для test_mode.",
     "VK_GROUP_TOKEN": "Опционально: VK group token для настройки истории чата, если доступно.",
     "VK_GROUP_ID": "Опционально: ID сообщества VK для добавления бота/сообщества в беседу.",
-    "VK_LOG_CHAT_ID": "Опционально: peer_id VK лог-чата для уведомления о создании чата.",
     "TELEGRAM_SESSION_FILE": "Опционально: путь к Telethon session-файлу. По умолчанию data/telegram.session внутри модуля."
   }
 }
