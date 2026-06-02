@@ -1,7 +1,7 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Nexus-модуль для создания учебных Telegram/VK чатов с редактируемыми админами, кураторами, авторами, курсами и шаблонами сообщений.",
   "env_vars": {
     "NEXUS_CHAT_CREATOR_PASSWORD": "Пароль для публичных webhook endpoint'ов создания чатов. Если не задан, используется SBKVD_PROCESS_WEBHOOK_PASSWORD.",

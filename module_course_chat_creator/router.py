@@ -31,7 +31,7 @@ VK_API_VERSION = "5.131"
 SALEBOT_CHAT_LINK_CALLBACK = "get_potok_link"
 STANDARD_SALEBOT_CLIENT_ID = "771116046"
 DEFAULT_MODULE_ID = "course-chat-creator"
-TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02"
+TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
 
 _ctx = None
 _logger = None
