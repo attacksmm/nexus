@@ -263,6 +263,8 @@ def _password() -> str:
 
 def _check_password(data: dict[str, Any]) -> None:
     configured = _password()
+    if not configured:
+        raise HTTPException(status_code=503, detail="Webhook password is not configured")
     if configured and data.get("password") != configured:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -455,7 +457,7 @@ async def _send_salebot(*, invite_link: str, stream_number: str, course_value: s
 
 async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
     if not token:
-        raise HTTPException(status_code=500, detail="VK token is not configured")
+        raise HTTPException(status_code=503, detail="VK token is not configured")
     payload = dict(params)
     payload["access_token"] = token
     payload["v"] = VK_API_VERSION
@@ -580,7 +582,7 @@ def _telegram_credentials() -> tuple[int, str, str]:
     api_hash = _clean(os.environ.get("TELEGRAM_API_HASH"))
     session_file = _clean(os.environ.get("TELEGRAM_SESSION_FILE")) or str(_data_dir() / "telegram.session")
     if not api_id_raw or not api_hash:
-        raise HTTPException(status_code=500, detail="Telegram credentials are not configured")
+        raise HTTPException(status_code=503, detail="Telegram credentials are not configured")
     return int(api_id_raw), api_hash, session_file
 
 
