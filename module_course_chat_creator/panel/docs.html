@@ -21,11 +21,10 @@
   </section>
   <section>
     <h2>Публичные endpoint'ы</h2>
-    <pre>POST /nexus/course-chat-creator/api/process_vk
-POST /nexus/course-chat-creator/api/api/process_vk
-POST /nexus/course-chat-creator/api/process6
-POST /nexus/course-chat-creator/api/api/process6</pre>
-    <p>Двойные варианты сохранены для совместимости с legacy путями внутри FastAPI router. Все публичные вызовы требуют поле <code>password</code>.</p>
+    <pre>POST /nexus/course-chat-creator/api/vk/create
+POST /nexus/course-chat-creator/api/telegram/create
+POST /nexus/course-chat-creator/api/chats/create</pre>
+    <p>Для старых сценариев оставлены алиасы <code>/process_vk</code> и <code>/process6</code>. Все публичные вызовы требуют поле <code>password</code>. Документация открывается штатной кнопкой Nexus <code>?</code> у модуля.</p>
   </section>
   <section>
     <h2>Поля запроса</h2>
@@ -43,6 +42,7 @@ POST /nexus/course-chat-creator/api/api/process6</pre>
       <li><code>course_choice=1</code> и <code>course_type=puppy</code> означают курс щенка.</li>
       <li><code>course_choice=2</code> и <code>course_type=dog</code> означают основной курс собаки.</li>
       <li>Кураторы выбираются по четности <code>stream_number</code>: <code>even</code>, <code>odd</code> или <code>any</code>.</li>
+      <li><code>test_mode=true</code> создает пустой чат без приглашения людей, бота, назначения админов, Salebot и лог-чата.</li>
     </ul>
   </section>
   <section>
@@ -66,6 +66,7 @@ TELEGRAM_SESSION_FILE=</pre>
       <li>VK: создание беседы, добавление участников, назначение админов, история для новых участников, приветствие, закреп, invite link, Salebot variables.</li>
       <li>Telegram: создание forum supergroup, темы Инфо/Визитка/Обучение/Болталка, аватар, бот, роли админов, приветственные сообщения, закрепы, invite link, Salebot variables.</li>
       <li>Панель: редактирование людей, курсов, шаблонов и просмотр истории запусков.</li>
+      <li>Шаблоны по умолчанию взяты из Windsurf/Sobakovod endpoint'ов.</li>
     </ul>
   </section>
   <section>

@@ -31,6 +31,7 @@ VK_API_VERSION = "5.131"
 SALEBOT_CHAT_LINK_CALLBACK = "get_potok_link"
 STANDARD_SALEBOT_CLIENT_ID = "771116046"
 DEFAULT_MODULE_ID = "course-chat-creator"
+TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02"
 
 _ctx = None
 _logger = None
@@ -67,69 +68,11 @@ PEOPLE_DEFAULTS = [
     {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
 ]
 
-VK_WELCOME_TEMPLATE = """Добро пожаловать в закрытый чат курса «{course_full_name}»!
-
-Поток №{stream_number}: обучение стартует {date_start}.
-
-Первый шаг - знакомство. Расскажите о себе и питомце одним сообщением:
-1. Ваше имя и город.
-2. Кличка, возраст, порода или фенотип собаки.
-3. С какими трудностями пришли и какой результат хотите получить.
-
-Создатель курса: {authors_text}
-Кураторы-кинологи: {kurators_text}
-Техническая поддержка: {techs_text}
-Сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat
-
-Правила чата:
-- общаемся культурно, без спама и ненормативной лексики;
-- аудиосообщения используют только кураторы;
-- вопросы по урокам и практике задаем прямо в этом чате.
-
-Начинаем обучение."""
-
-TG_WELCOME_TEMPLATE = """<b>Всем привет и добро пожаловать в закрытый чат курса «{course_full_name}»!</b>
-
-Обучение стартует: {date_start}
-
-Это главный чат потока №{stream_number}. Здесь команда будет публиковать важные объявления, напоминания и новости курса.
-
-Создатель курса: {authors_text}
-Кураторы-кинологи: {kurators_text}
-Техническая поддержка: {techs_text}
-
-Пожалуйста, загляните в подчат «Визитка» и расскажите о себе и питомце."""
-
-TG_VIZITKA_TEMPLATE = """<b>Подчат «Визитка»</b>
-
-Расскажите о себе и питомце:
-1. Ваше имя и город.
-2. Кличка, возраст, порода или фенотип собаки.
-3. С какими трудностями пришли и какой результат хотите получить.
-
-В конце добавьте фразу:
-<blockquote>Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым к себе и своей собаке и идти к результату шаг за шагом.</blockquote>"""
-
-TG_OBUCHENIE_TEMPLATE = """<b>Наш рабочий кабинет</b>
-
-Все, что касается обучения, живет здесь.
-
-Модули открываются еженедельно в субботу в 12:00 по московскому времени. Задавайте вопросы по урокам, отмечайте Анну и кураторов, если нужен разбор.
-
-Анна Тимофеева: {authors_text}
-Кураторы-кинологи: {kurators_text}"""
-
-TG_BOLTALKA_TEMPLATE = """<b>Чат, где можно просто поболтать</b>
-
-Здесь можно делиться радостями, маленькими победами, фото и повседневной жизнью с собакой."""
-
-
-def setup(ctx):
-    global _ctx, _logger
-    _ctx = ctx
-    _logger = getattr(ctx, "logger", None)
-    _init_db()
-
+VK_WELCOME_TEMPLATE = "🐾 Добро пожаловать в закрытый чат курса «{course_full_name}»! 🐾\n\nЯ очень рада, что вы здесь. Вы уже сделали важный шаг на пути к осознанному воспитанию вашей собаки.\n\n🗓 Поток №{stream_number}: Обучение стартует {date_start}\nВпереди у нас 11 недель практического обучения, поддержки и маленьких побед! 💪🏼🐶\n\n📍 ПЕРВЫЙ ШАГ — ЗНАКОМСТВО (ВИЗИТКА)\nПожалуйста, расскажите о себе и своем питомце в ОДНОМ сообщении по форме:\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода/фенотип/дворняжка\n3️⃣ С какими трудностями пришли и какой результат хотите получить (ваша точка В)?\n\n✅ ОБЯЗАТЕЛЬСТВО НА КУРС:\nВ конце своего сообщения обязательно добавьте фразу:\n«Я обязуюсь внимательно изучать материалы курса, если я что-то не понял(а) — посмотреть урок еще раз. Выполнять практику, задавать вопросы Анне и кураторам. Быть терпеливым(ой) к себе и своей любимой собаке и идти к результату шаг за шагом».\n\n🎓 КАК ПРОХОДИТ ОБУЧЕНИЕ:\n• Модули открываются еженедельно в субботу в 12:00 (МСК) на платформе.\n• Все вопросы по урокам, разборы и обратную связь пишем прямо в этот чат.\n• Обязательно отмечайте нас, чтобы мы не пропустили вопрос!\n\n👩‍🏫 Создатель курса: Анна - [id765938|@timofeevapodbordog]\n🛡 Кураторы-кинологи: {kurators_text}\n❤️ Руководитель отдела заботы: Андрей - [id11335495|@id11335495]\n🛠 Технические специалисты: Техническая поддержка - [id1105209997|@tehpod_sobakovodpro], Никита - [id741919467|@attackpng]\n📢 Наше сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat\n\n⚖ ПРАВИЛА ЧАТА:\n— Общаемся культурно, ненормативная лексика и спам запрещены.\n— Аудиосообщения запрещены (их используют только кураторы).\n— Сообщения, нарушающие правила, удаляются автоматически.\n\nНу что, начинаем наше путешествие в новый мир! ❤️"
+TG_WELCOME_TEMPLATE = "<b>Всем привет и добро пожаловать в закрытый чат курса «{course_name}»!🐾</b>\n\n<i>Я очень рада, что вы здесь. Вы уже сделали важный шаг, а именно решили осознанно выстраивать жизнь со своей собакой, а не терпеть, надеяться, что перерастёт или бороться в одиночку.\n\nВпереди у нас <b>11 недель практического обучения</b>, поддержки, вопросов, открытий и маленьких (а иногда и очень больших) побед💪🏼🐶\n\nЗдесь находится ваше новое окружение, которые всегда помогут вам, подскажут и поддержат! Этого же они ждут и с вашей стороны. Поэтому открытость и общительность всегда приветствуется🙏🏼</i>\n\n🗓Обучение стартует: {date_start}\n\n<b>А пока несколько ВАЖНЫХ организационных моментов, чтобы ваше пребывание на курсе стало еще удобнее и продуктивнее⤵️</b>\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_info_id}\">Главный чат (вы сейчас здесь)</a></u>\nЭто наш навигатор. Здесь мы с командой будем писать важные объявления, делиться новостями курса, напоминать про эфиры и обновления.\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_vizitka_id}\">Подчат «🤝 Визитка»</a></u>\nМесто, где мы знакомимся. После прочтения этого сообщения обязательно перейдите в подчат «Визитка» и расскажите о себе по заданной форме. \nТак мы с командой сможем узнать вас и вашего питомца поближе, а соответственно точнее помочь вам с вашей ситуацией. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_obuchenie_id}\">Подчат «🎓 Обучение»</a></u>\nСвоего рода наш рабочий кабинет. Здесь все, что касается самого обучения: вопросы по урокам, разборы, обратная связь. \nЕсли что-то не получается - это сюда. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_boltalka_id}\">Подчат «💬 Болталка»</a></u>\nПросто по-человечески поделиться радостью, сомнениями, успехами, поддержать друг друга, выдохнуть, обсудить - в общем, все что угодно (в рамках правил, разумеется😁)\n_________________________________\n\n<b>ПРАВИЛА ЗАКРЫТОГО ЧАТА</b>\n\n1️⃣ Вопросы <u>по рассрочкам и оплатам</u> курса адресуются <u>в службу заботы</u> @andrew_karakchiev\n\n2️⃣ Если вы <u>хотите задать вопрос</u> мне или моим кураторам, то <u>обязательно упоминайте нас в сообщении</u>, чтобы мы точно не пропустили ваш вопрос. \n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\n\nКураторы-кинологи в чате: {kurators_list}\n\n❗️Только обязательно делайте это в чате, не пишите нам в личные сообщения❗️\n\n3️⃣ По <u>техническим вопросам или проблемам</u> обращайтесь <u>к тех.поддержке</u> школы @tech_sobakovod_pro\n\n\n<b>В ЧАТЕ ЗАПРЕЩЕНО</b> (сообщения нарушающие правила, будут удалены ботом-модератором автоматически)\n\n• Ненормативная лексика\n• Видео, ссылки НЕ относящиеся к теме обучения\n• Аудио сообщения. Их размещаю я и кураторы\n_________________________________\n\nНу что, начинаем путешествие в новый мир!❤️"
+TG_VIZITKA_TEMPLATE = "<b>Место, где мы начинаем знакомство 💛</b>\n\nЗдесь вы можете чуть больше рассказать о себе и своей собаке, а мы сможем лучше понять вашу ситуацию и помочь максимально точно.\n\nОчень прошу не пропускать этот шаг!\n\n✍️ <u>Пожалуйста, напишите ОДНО сообщение по следующей форме:</u>\n\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода / метис / дворняжка\n3️⃣ С какими трудностями вы пришли на курс? Какой результат вы хотите получить к концу обучения? Что должно измениться в жизни с собакой?\n\n И в конце обязательно добавьте фразу:\n\n<blockquote>«Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым(ой) к себе и своей собаке и идти к результату шаг за шагом».\n</blockquote>\n\nЭто не формальность. Это ваш личный путь из точки А в точку Б и настрой на 100% результат 😉\n\n<u>Пример сообщения, которое у вас должно получится:</u>\n\n<i>Меня зовут Ольга, г. Москва. У меня Лабрадор-ретривер, 3 года.\n\nХочу, чтобы моя собака перестала тянуть поводок и слышала меня на прогулке. Очень нервничаю каждый выход на улицу, потому что первая проезжающая машина сводит ее с ума.\n\nЯ обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливой к себе и своей собаке и идти к результату шаг за шагом!</i>\n\n<b>Ждем ваших визиток🙌🏼</b>"
+TG_OBUCHENIE_TEMPLATE = "<b>Наш рабочий кабинет🎓</b>\n\nСамое важное пространство курса. Всё, что касается обучения, живёт здесь.\n\n👩‍🎓 На обучающей платформе уже доступен нулевой модуль в котором есть первые задания.\n\nДоступ должен был прийти вам на почту, если вы не смогли найти письмо с доступом в кабинет, напишите куратору @Tech_kurator\n\n<b>Модули будут открываться еженедельно в субботу в 12:00 по московскому времени</b>. Не забывайте выполнять задания после видеоуроков, я и мои кураторы проверим каждый ответ лично и дадим развернутую обратную связь.\n\nКроме того, за выполнения заданий, вам <b>будут начисляться бонусные баллы</b>. <b>В нулевом модуле об этом рассказано подробнее.</b>\n\n✅ <u>В этом чате вы можете и даже нужно:</u>\n\n• Задавать вопросы по урокам и заданиям\n• Писать, если что-то не получается или вызывает сомнения\n• Делиться наблюдениями и результатами практики\n• Получать обратную связь от меня и кураторов\n• Разбирать конкретные ситуации с вашей собакой\n\n<b>❗️Здесь нет глупых вопросов. </b>\n\nЛучше спросить, чем делать «на авось». Мы рядом, чтобы поддержать вас на каждом этапе🤍\n\n<u>Как задавать вопросы, чтобы помощь была максимально точной</u>👇🏼\n\nПожалуйста, старайтесь сразу прописать:\n- в каком уроке или задании возник вопрос\n- что именно не получается\n- что уже пробовали делать\n- поведение собаки в этот момент (спокойна / возбуждена / отвлекается и т.д.)\n\nИ <b>обязательно отмечайте нас в сообщении</b>, чтобы мы точно не пропустили вопрос🙌🏼\n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\nКураторы-кинологи: #{kurators_list}\n\nПомните: результат складывается из маленьких шагов!"
+TG_BOLTALKA_TEMPLATE = "<b>Чат, где можно просто поболтать 💬</b>\n\nЗдесь можно выдохнуть 💛\n\n✨ Делится радостями и маленькими победами\n✨ Писать о сложностях и получать поддержку\n✨ Обсуждать повседневную жизнь с собакой\n✨ Показывать фото и видео хвостатых учеников\n✨ Общаться, шутить, знакомиться и поддерживать друг друга\n\nИногда именно поддержка других участников помогает не сдаться и продолжить путь 💪🏼"
 
 def _log(level: str, message: str, *args: Any) -> None:
     if _logger:
@@ -223,6 +166,10 @@ def _init_db() -> None:
                 response_json TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         for row in PEOPLE_DEFAULTS:
@@ -253,16 +200,30 @@ def _init_db() -> None:
                    ON CONFLICT(key) DO NOTHING""",
                 row,
             )
-        for key, body in {
+        template_defaults = {
             "vk_welcome": VK_WELCOME_TEMPLATE,
             "tg_welcome": TG_WELCOME_TEMPLATE,
             "tg_vizitka": TG_VIZITKA_TEMPLATE,
             "tg_obuchenie": TG_OBUCHENIE_TEMPLATE,
             "tg_boltalka": TG_BOLTALKA_TEMPLATE,
-        }.items():
+        }
+        current_template_version = db.execute("SELECT value FROM meta WHERE key='template_defaults_version'").fetchone()
+        should_refresh_templates = not current_template_version or current_template_version["value"] != TEMPLATE_DEFAULTS_VERSION
+        for key, body in template_defaults.items():
+            if should_refresh_templates:
+                db.execute(
+                    "INSERT INTO templates(key, body) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET body=excluded.body,updated_at=strftime('%s','now')",
+                    (key, body),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO templates(key, body) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
+                    (key, body),
+                )
+        if should_refresh_templates:
             db.execute(
-                "INSERT INTO templates(key, body) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
-                (key, body),
+                "INSERT INTO meta(key,value) VALUES('template_defaults_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (TEMPLATE_DEFAULTS_VERSION,),
             )
         db.commit()
 
@@ -413,18 +374,26 @@ def _template(key: str) -> str:
 def _render_template(key: str, *, course: sqlite3.Row, stream_number: str, date_start: str, selected: dict[str, list[dict[str, Any]]], platform: str, extra: dict[str, Any] | None = None) -> str:
     values = {
         "course_full_name": course["title"],
+        "course_name": course["title"],
         "course_key": course["key"],
         "course_choice": course["choice"],
         "stream_number": stream_number,
         "date_start": date_start,
         "authors_text": _mentions(selected["authors"], platform),
         "kurators_text": _mentions(selected["kurators"], platform),
+        "kurators_list": _mentions(selected["kurators"], platform),
         "techs_text": _mentions(selected["techs"], platform),
         "admins_text": _mentions(selected["admins"], platform),
+        "channel_url_id": "0",
+        "topic_info_id": 1,
+        "topic_vizitka_id": 1,
+        "topic_obuchenie_id": 1,
+        "topic_boltalka_id": 1,
     }
     if extra:
         values.update(extra)
-    return _template(key).format(**values)
+    body = _template(key).replace("#{kurators_list}", "{kurators_list}")
+    return body.format(**values)
 
 
 def _record_run(platform: str, title: str, stream_number: str, date_start: str, course_key: str, test_mode: bool, status: str, request_json: dict[str, Any], response_json: dict[str, Any] | None = None, error: str = "", link: str = "", chat_id: str = "") -> None:
@@ -540,8 +509,7 @@ async def _create_vk_chat(data: dict[str, Any]) -> dict[str, Any]:
     selected = _selected_people(stream_number)
     chat_member_ids = _vk_ids(selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"])
     if test_mode:
-        current_id = await _resolve_current_vk_user_id(os.environ.get("VK_USER_TOKEN"))
-        chat_member_ids = [current_id] if current_id else []
+        chat_member_ids = []
     create_params: dict[str, Any] = {"title": title}
     if chat_member_ids:
         create_params["user_ids"] = ",".join(map(str, chat_member_ids))
@@ -634,7 +602,7 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
     kurators = _tg_refs(selected["kurators"])
     authors = _tg_refs(selected["authors"])
     techs = _tg_refs(selected["techs"])
-    all_users = list(dict.fromkeys(admins + kurators + authors + techs))
+    all_users = [] if test_mode else list(dict.fromkeys(admins + kurators + authors + techs))
     api_id, api_hash, session_file = _telegram_credentials()
     client = TelegramClient(session_file, api_id, api_hash)
     await client.connect()
@@ -642,12 +610,13 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Telegram session is not authorized. Configure TELEGRAM_SESSION_FILE with an authorized Telethon session.")
     async with client:
         valid_users = []
-        for user in all_users:
-            try:
-                await client.get_entity(user)
-                valid_users.append(user)
-            except Exception:
-                _log("warning", "Telegram user cannot be resolved: %s", user)
+        if not test_mode:
+            for user in all_users:
+                try:
+                    await client.get_entity(user)
+                    valid_users.append(user)
+                except Exception:
+                    _log("warning", "Telegram user cannot be resolved: %s", user)
         result = await client(functions.channels.CreateChannelRequest(title=title, about="", megagroup=True, forum=True))
         channel = result.chats[0]
         topic_ids = {"info": 1, "vizitka": None, "obuchenie": None, "boltalka": None}
@@ -724,8 +693,20 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
             topic_id = topic_ids.get(topic_key)
             try:
                 text = _render_template(key, course=course, stream_number=stream_number, date_start=date_start, selected=selected, platform="tg", extra=extras)
+                if key == "tg_welcome":
+                    welcome_photo = _asset_path("welcome_message_photo.jpg")
+                    if welcome_photo and topic_id:
+                        try:
+                            await client.send_file(bot_channel, str(welcome_photo), reply_to=topic_id)
+                        except Exception as exc:
+                            _log("warning", "Telegram welcome image send failed: %s", exc)
                 msg = await client.send_message(bot_channel, text, parse_mode="html", reply_to=topic_id)
                 sent.append((msg, topic_id, label))
+                if key == "tg_welcome" and topic_id:
+                    try:
+                        await client(EditForumTopicRequest(peer=channel, topic_id=topic_id, closed=True))
+                    except Exception as exc:
+                        _log("warning", "Telegram info topic close failed: %s", exc)
             except Exception as exc:
                 _log("warning", "Telegram message failed %s: %s", label, exc)
         await asyncio.sleep(10 if test_mode else 180)
@@ -761,8 +742,8 @@ async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+@router.post("/vk/create")
 @router.post("/process_vk")
-@router.post("/api/process_vk")
 async def process_vk(request: Request):
     data = await request.json()
     try:
@@ -776,8 +757,8 @@ async def process_vk(request: Request):
         raise
 
 
+@router.post("/telegram/create")
 @router.post("/process6")
-@router.post("/api/process6")
 async def process6(request: Request):
     data = await request.json()
     try:
@@ -791,6 +772,7 @@ async def process6(request: Request):
         raise
 
 
+@router.post("/chats/create")
 @router.post("/create")
 async def create_from_panel(request: Request):
     await _require_panel_access(request)
