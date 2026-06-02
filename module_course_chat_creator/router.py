@@ -60,12 +60,9 @@ COURSE_DEFAULTS = [
 PEOPLE_DEFAULTS = [
     {"kind": "author", "name": "Анна", "vk_id": "765938", "vk_mention": "[id765938|@timofeevapodbordog]", "tg_ref": "@Anna_Timofeeva_Podbordog", "enabled": 1},
     {"kind": "admin", "name": "Наталья", "vk_id": "69145639", "vk_mention": "[id69145639|Наталья]", "tg_ref": "", "enabled": 1},
-    {"kind": "kurator", "name": "Екатерина", "vk_id": "1025748213", "vk_mention": "[id1025748213|@psypuppy]", "tg_ref": "", "parity": "odd", "enabled": 1},
-    {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "even", "enabled": 1},
-    {"kind": "kurator", "name": "ТГ куратор 1", "vk_id": "", "vk_mention": "", "tg_ref": "", "parity": "any", "enabled": 1},
-    {"kind": "kurator", "name": "ТГ куратор 2", "vk_id": "", "vk_mention": "", "tg_ref": "", "parity": "any", "enabled": 1},
-    {"kind": "tech", "name": "Техническая поддержка", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
-    {"kind": "tech", "name": "Никита", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
+    {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "any", "enabled": 1},
+    {"kind": "admin", "name": "Техническая поддержка", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
+    {"kind": "admin", "name": "Никита", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
     {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
 ]
 
@@ -177,6 +174,13 @@ def _init_db() -> None:
                 value TEXT NOT NULL
             );
             """
+        )
+        db.execute("DELETE FROM people WHERE name IN ('Екатерина','ТГ куратор 1','ТГ куратор 2')")
+        db.execute("UPDATE people SET kind='author',parity='any',enabled=1,updated_at=strftime('%s','now') WHERE name='Анна'")
+        db.execute("UPDATE people SET kind='kurator',parity='any',enabled=1,updated_at=strftime('%s','now') WHERE name='Ирина'")
+        db.execute(
+            "UPDATE people SET kind='admin',parity='any',enabled=1,updated_at=strftime('%s','now') "
+            "WHERE name IN ('Наталья','Андрей','Техническая поддержка','Никита')"
         )
         for row in PEOPLE_DEFAULTS:
             row = {
@@ -789,7 +793,6 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     try:
         from telethon import TelegramClient, functions, types
         from telethon.tl.functions.channels import EditPhotoRequest
-        from telethon.tl.functions.messages import CreateForumTopicRequest, EditForumTopicRequest, UpdatePinnedForumTopicRequest, UpdatePinnedMessageRequest
         from telethon.tl.types import InputChatUploadedPhoto
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
@@ -834,18 +837,58 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                     return update.id
             return None
 
+        async def create_topic(title: str, icon_emoji_id: int) -> int | None:
+            last_exc: Exception | None = None
+            for attempt in range(3):
+                try:
+                    updates = await client(functions.messages.CreateForumTopicRequest(
+                        peer=channel,
+                        title=title,
+                        icon_emoji_id=icon_emoji_id,
+                        random_id=random.randint(1, 2**31 - 1),
+                    ))
+                    return get_topic_id(updates)
+                except Exception as exc:
+                    last_exc = exc
+                    _log("warning", "Telegram topic create retry %s for %s failed: %s", attempt + 1, title, exc)
+                    await asyncio.sleep(2 + attempt * 3)
+            if last_exc:
+                raise last_exc
+            return None
+
+        async def fetch_topic_ids() -> dict[str, int]:
+            topics = await client(functions.messages.GetForumTopicsRequest(
+                peer=channel,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=20,
+                q="",
+            ))
+            return {
+                str(getattr(topic, "title", "")): int(getattr(topic, "id"))
+                for topic in getattr(topics, "topics", []) or []
+                if getattr(topic, "id", None) is not None
+            }
+
         try:
-            await client(EditForumTopicRequest(peer=channel, topic_id=1, title="Инфо"))
+            await client(functions.messages.EditForumTopicRequest(peer=channel, topic_id=1, title="Инфо"))
             await asyncio.sleep(1)
-            topic_vizitka = await client(CreateForumTopicRequest(peer=channel, title="Визитка", icon_emoji_id=5237999392438371490, random_id=random.randint(1, 2**31 - 1)))
-            topic_ids["vizitka"] = get_topic_id(topic_vizitka)
-            topic_obuchenie = await client(CreateForumTopicRequest(peer=channel, title="Обучение", icon_emoji_id=5357419403325481346, random_id=random.randint(1, 2**31 - 1)))
-            topic_ids["obuchenie"] = get_topic_id(topic_obuchenie)
-            topic_boltalka = await client(CreateForumTopicRequest(peer=channel, title="Болталка", icon_emoji_id=5417915203100613993, random_id=random.randint(1, 2**31 - 1)))
-            topic_ids["boltalka"] = get_topic_id(topic_boltalka)
-            await client(UpdatePinnedForumTopicRequest(peer=channel, topic_id=1, pinned=True))
+            topic_ids["vizitka"] = await create_topic("Визитка", 5237999392438371490)
+            topic_ids["obuchenie"] = await create_topic("Обучение", 5357419403325481346)
+            topic_ids["boltalka"] = await create_topic("Болталка", 5417915203100613993)
+            topic_map = await fetch_topic_ids()
+            topic_ids["info"] = topic_map.get("Инфо", 1)
+            topic_ids["vizitka"] = topic_ids["vizitka"] or topic_map.get("Визитка")
+            topic_ids["obuchenie"] = topic_ids["obuchenie"] or topic_map.get("Обучение")
+            topic_ids["boltalka"] = topic_ids["boltalka"] or topic_map.get("Болталка")
+            missing_topics = [name for key, name in (("info", "Инфо"), ("vizitka", "Визитка"), ("obuchenie", "Обучение"), ("boltalka", "Болталка")) if not topic_ids.get(key)]
+            if missing_topics:
+                raise RuntimeError("missing topics: " + ", ".join(missing_topics))
+            await client(functions.messages.UpdatePinnedForumTopicRequest(peer=channel, topic_id=topic_ids["info"], pinned=True))
         except Exception as exc:
             _log("warning", "Telegram topic setup failed: %s", exc)
+            raise HTTPException(status_code=500, detail=f"Telegram topic setup failed: {exc}")
         photo = _avatar_path()
         if photo:
             try:
@@ -890,11 +933,11 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                     await asyncio.sleep(random.uniform(5, 10))
 
         if not test_mode:
-            await invite_and_admin(admins, "admin")
+            await invite_and_admin(admins, "")
             await invite_and_admin(kurators, "Куратор школы")
             await invite_and_admin(authors, "Автор курса")
-            await invite_and_admin(techs, "Тех. отдел")
-            await invite_and_admin([u for u in valid_users if u not in admins + kurators + authors + techs], "Сотрудник")
+            await invite_and_admin(techs, "")
+            await invite_and_admin([u for u in valid_users if u not in admins + kurators + authors + techs], "")
         channel_url_id = str(abs(int(getattr(channel, "id", 0))))
         extras = {"date_start": _format_date_russian(date_start), "channel_url_id": channel_url_id, **{f"topic_{k}_id": v or 1 for k, v in topic_ids.items()}}
         bot_channel = await client.get_entity(channel)
@@ -919,7 +962,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                 sent.append((msg, topic_id, label))
                 if key == "tg_welcome" and topic_id:
                     try:
-                        await client(EditForumTopicRequest(peer=channel, topic_id=topic_id, closed=True))
+                        await client(functions.messages.EditForumTopicRequest(peer=channel, topic_id=topic_id, closed=True))
                     except Exception as exc:
                         _log("warning", "Telegram info topic close failed: %s", exc)
             except Exception as exc:
@@ -927,7 +970,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         await asyncio.sleep(10 if test_mode else 180)
         for msg, topic_id, label in sent:
             try:
-                await client(UpdatePinnedMessageRequest(peer=bot_channel, id=msg.id, silent=True))
+                await client(functions.messages.UpdatePinnedMessageRequest(peer=bot_channel, id=msg.id, silent=True))
                 await asyncio.sleep(1)
             except Exception as exc:
                 _log("warning", "Telegram pin failed %s: %s", label, exc)
@@ -937,7 +980,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         except Exception as exc:
             _log("warning", "Telegram invite export failed: %s", exc)
             invite_link = ""
-    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode}
+    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids}
     _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
     return response
 
@@ -978,11 +1021,20 @@ async def create_from_panel(request: Request):
     await _require_panel_access(request)
     data = await request.json()
     platform = _clean(data.get("platform")).lower()
-    if platform == "vk":
-        return JSONResponse(await _create_vk_chat(data, trusted=True))
-    if platform in {"tg", "telegram"}:
-        return JSONResponse(await _create_tg_chat(data, trusted=True))
-    raise HTTPException(status_code=400, detail="platform must be vk or telegram")
+    try:
+        if platform == "vk":
+            return JSONResponse(await _create_vk_chat(data, trusted=True))
+        if platform in {"tg", "telegram"}:
+            return JSONResponse(await _create_tg_chat(data, trusted=True))
+        raise HTTPException(status_code=400, detail="platform must be vk or telegram")
+    except Exception as exc:
+        if platform in {"vk", "tg", "telegram"}:
+            stream_number = _clean(data.get("stream_number"))
+            date_start = _clean(data.get("date_start") or data.get("start_date"))
+            course_key = _course_key(data.get("course_type") or data.get("course_choice"))
+            title = f"{stream_number}. {date_start}"
+            _record_run("telegram" if platform in {"tg", "telegram"} else "vk", title, stream_number, date_start, course_key, _bool(data.get("test_mode")), "error", data, error=str(exc))
+        raise
 
 
 @router.get("/telegram/auth/status")

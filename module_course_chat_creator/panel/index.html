@@ -25,8 +25,8 @@
     pre{margin:0;border:1px solid var(--line);background:#050505;color:#d8d8d8;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;scrollbar-color:#555 #090909}
     pre[hidden]{display:none}
     .table{border:1px solid var(--line);background:var(--panel);overflow:hidden}.table-head,.row{display:grid;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line)}.table-head{color:var(--muted);font-size:12px;background:#0b0b0b}.row:last-child{border-bottom:0}.row:hover{background:var(--soft)}
-    .people-head,.people-row{grid-template-columns:92px minmax(130px,1.1fr) minmax(150px,1fr) minmax(140px,1fr) 82px 70px 84px}
-    .course-head,.course-row{grid-template-columns:90px 70px minmax(220px,1.2fr) minmax(240px,1fr) 70px 84px}
+    .people-head,.people-row{grid-template-columns:92px minmax(130px,1.1fr) minmax(150px,1fr) minmax(140px,1fr) 92px 80px 176px}
+    .course-head,.course-row{grid-template-columns:90px 70px minmax(220px,1.2fr) minmax(240px,1fr) 80px 110px}
     .run-head,.run-row{grid-template-columns:90px minmax(220px,1fr) 80px 110px 80px 90px minmax(160px,1fr)}
     .cell-main{font-weight:600}.cell-sub{margin-top:2px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.pill{width:max-content;max-width:100%;border:1px solid var(--line2);padding:2px 6px;color:var(--muted);font-size:12px}.on{color:var(--ok)}.off{color:var(--bad)}.warn{color:var(--warn)}
     @media(max-width:900px){body{height:auto;overflow:auto}.shell{height:auto}.create-grid,.grid,.grid3{grid-template-columns:1fr}.people-head,.people-row,.course-head,.course-row,.run-head,.run-row{grid-template-columns:1fr}.table-head{display:none}.tabs{position:sticky;top:0;z-index:2}.tab{width:104px}}
@@ -59,8 +59,8 @@
             <label>Платформа
               <select id="platform"><option value="vk">VK</option><option value="telegram">Telegram</option></select>
             </label>
-            <label>Тестовый режим
-              <select id="testMode"><option value="true">Да, без людей</option><option value="false">Нет, боевой запуск</option></select>
+            <label>Режим
+              <select id="testMode"><option value="false">Боевой: добавить сотрудников</option><option value="true">Проверка: без сотрудников</option></select>
             </label>
             <label>Номер потока
               <input id="stream" value="51" inputmode="numeric">
@@ -86,12 +86,12 @@
     </section>
 
     <section class="view" id="view-people" hidden>
-      <div class="head"><h1>Люди и роли</h1><p class="muted">Кураторы с четностью even/odd выбираются по номеру потока, any попадают всегда.</p></div>
+      <div class="head"><h1>Люди и роли</h1><p class="muted">Кураторы выбираются по номеру потока только если задана четность. Сейчас основной куратор — Ирина.</p></div>
       <div class="surface">
         <div class="grid3">
-          <label>Роль<select id="pKind"><option value="admin">admin</option><option value="kurator">kurator</option><option value="author">author</option><option value="tech">tech</option></select></label>
+          <label>Роль<select id="pKind"><option value="admin">Админ</option><option value="author">Автор курса</option><option value="kurator">Куратор</option><option value="tech">Техподдержка</option></select></label>
           <label>Имя<input id="pName"></label>
-          <label>Четность<select id="pParity"><option value="any">любая</option><option value="even">четный поток</option><option value="odd">нечетный поток</option></select></label>
+          <label>Потоки<select id="pParity"><option value="any">Все потоки</option><option value="even">Только четные</option><option value="odd">Только нечетные</option></select></label>
           <label>VK страница / username / ID<input id="pVkId" placeholder="https://vk.com/name или @name"></label>
           <label>Telegram username<input id="pTgRef" placeholder="@username"></label>
           <label>Активен<select id="pEnabled"><option value="1">да</option><option value="0">нет</option></select></label>
@@ -100,7 +100,7 @@
         <pre id="peopleStatus" hidden></pre>
       </div>
       <div class="table">
-        <div class="table-head people-head"><span>Роль</span><span>Имя</span><span>VK</span><span>Telegram</span><span>Четность</span><span>Статус</span><span></span></div>
+        <div class="table-head people-head"><span>Роль</span><span>Имя</span><span>VK</span><span>Telegram</span><span>Потоки</span><span>Статус</span><span></span></div>
         <div id="peopleList"></div>
       </div>
     </section>
@@ -188,6 +188,9 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;'
 const show = (el, data) => { el.hidden = false; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
 const hide = el => { el.hidden = true; el.textContent = ""; };
 let people = [], courses = [], templates = [], editPersonId = null;
+const roleLabels = {admin:"Админ", author:"Автор курса", kurator:"Куратор", tech:"Техподдержка"};
+const parityLabels = {any:"Все", even:"Четные", odd:"Нечетные"};
+const enabledLabel = value => value ? "Да" : "Нет";
 
 document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
@@ -203,6 +206,7 @@ async function getJson(path, opts) {
   return data;
 }
 const postJson = (path, payload) => getJson(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+const deleteJson = path => getJson(path, {method:"DELETE"});
 
 async function loadStatus() {
   try {
@@ -226,29 +230,30 @@ async function loadCourses() {
       <span>${esc(c.key)}</span><span>${esc(c.choice)}</span>
       <span><span class="cell-main">${esc(c.title)}</span></span>
       <span class="cell-sub">${diff.length ? diff.join("<br>") : "VK/TG совпадают с названием"}</span>
-      <span class="${c.enabled ? "on" : "off"}">${c.enabled ? "on" : "off"}</span>
-      <button class="btn ghost" onclick='editCourse(${esc(JSON.stringify(c))})'>Править</button>
+      <span class="${c.enabled ? "on" : "off"}">${enabledLabel(c.enabled)}</span>
+      <button class="btn ghost" type="button" data-course-action="edit" data-key="${esc(c.key)}">Править</button>
     </div>`;
   }).join("");
 }
-window.editCourse = c => {
+function editCourse(c) {
   $("cKey").value = c.key; $("cChoice").value = c.choice; $("cTitle").value = c.title; $("cVkTitle").value = c.vk_title; $("cTgTitle").value = c.tg_title; $("cEnabled").value = String(c.enabled);
-};
+}
 
 async function loadPeople() {
   const data = await getJson("/people");
   people = data.items;
   $("peopleList").innerHTML = people.map(p => `<div class="row people-row">
-    <span>${esc(p.kind)}</span>
-    <span><span class="cell-main">${esc(p.name)}</span>${p.vk_mention ? `<span class="cell-sub">${esc(p.vk_mention)}</span>` : ""}</span>
-    <span>${esc(p.vk_id || "")}</span><span>${esc(p.tg_ref || "")}</span><span>${esc(p.parity)}</span>
-    <span class="${p.enabled ? "on" : "off"}">${p.enabled ? "on" : "off"}</span>
-    <button class="btn ghost" onclick='editPerson(${esc(JSON.stringify(p))})'>Править</button>
+    <span>${esc(roleLabels[p.kind] || p.kind)}</span>
+    <span><span class="cell-main">${esc(p.name)}</span></span>
+    <span>${esc(p.vk_id || "")}</span><span>${esc(p.tg_ref || "")}</span>
+    <span>${esc(parityLabels[p.parity] || p.parity)}</span>
+    <span class="${p.enabled ? "on" : "off"}">${enabledLabel(p.enabled)}</span>
+    <span class="actions"><button class="btn ghost" type="button" data-person-action="edit" data-id="${p.id}">Править</button><button class="btn danger" type="button" data-person-action="delete" data-id="${p.id}">Удалить</button></span>
   </div>`).join("");
 }
-window.editPerson = p => {
+function editPerson(p) {
   editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
-};
+}
 $("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pTgRef"].forEach(id => $(id).value = ""); $("pParity").value = "any"; $("pEnabled").value = "1"; };
 $("personSave").onclick = async () => {
   try {
@@ -256,6 +261,32 @@ $("personSave").onclick = async () => {
     hide($("peopleStatus")); await postJson("/people", payload); await loadPeople(); $("personClear").click();
   } catch(e) { show($("peopleStatus"), e); }
 };
+
+$("peopleList").addEventListener("click", async event => {
+  const btn = event.target.closest("button[data-person-action]");
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  const person = people.find(p => Number(p.id) === id);
+  if (!person) return;
+  if (btn.dataset.personAction === "edit") {
+    editPerson(person);
+    return;
+  }
+  if (!confirm(`Удалить сотрудника «${person.name}» из списка?`)) return;
+  try {
+    hide($("peopleStatus"));
+    await deleteJson(`/people/${id}`);
+    if (editPersonId === id) $("personClear").click();
+    await loadPeople();
+  } catch(e) { show($("peopleStatus"), e); }
+});
+
+$("courseList").addEventListener("click", event => {
+  const btn = event.target.closest("button[data-course-action='edit']");
+  if (!btn) return;
+  const course = courses.find(c => c.key === btn.dataset.key);
+  if (course) editCourse(course);
+});
 
 $("courseSave").onclick = async () => {
   try {
@@ -303,24 +334,43 @@ $("removeBtn").onclick = async () => {
 function createPayload() {
   return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, test_mode:$("testMode").value};
 }
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const min = String(Math.floor(total / 60)).padStart(2, "0");
+  const sec = String(total % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
 $("previewBtn").onclick = async () => {
   try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}`)); }
   catch(e) { show($("previewResult"), e); }
 };
 $("createBtn").onclick = async () => {
-  const test = $("testMode").value === "true";
-  if (!confirm(test ? "Создать тестовый пустой чат?" : "Создать боевой чат с добавлением людей?")) return;
-  show($("createResult"), "Создание запущено, дождитесь ответа...");
-  try { show($("createResult"), await postJson("/chats/create", createPayload())); await loadRuns(); }
-  catch(e) { show($("createResult"), e); }
+  const btn = $("createBtn");
+  const started = Date.now();
+  btn.disabled = true;
+  show($("createResult"), `Создание началось: 00:00\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка без сотрудников" : "боевой запуск"}`);
+  const timer = setInterval(() => {
+    show($("createResult"), `Создание идет: ${formatElapsed(Date.now() - started)}\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка без сотрудников" : "боевой запуск"}`);
+  }, 1000);
+  try {
+    const result = await postJson("/chats/create", createPayload());
+    show($("createResult"), Object.assign({elapsed: formatElapsed(Date.now() - started)}, result));
+    await loadRuns();
+  } catch(e) {
+    show($("createResult"), Object.assign({elapsed: formatElapsed(Date.now() - started)}, e));
+    await loadRuns();
+  } finally {
+    clearInterval(timer);
+    btn.disabled = false;
+  }
 };
 
 async function loadRuns() {
   try {
     const data = await getJson("/runs?limit=50");
     $("runsList").innerHTML = data.items.map(r => `<div class="row run-row">
-      <span>${esc(r.platform)}</span><span>${esc(r.title)}</span><span>${esc(r.stream_number)}</span><span>${esc(r.date_start)}</span>
-      <span>${r.test_mode ? "test" : "live"}</span><span class="${r.status === "ok" ? "on" : "off"}">${esc(r.status)}</span>
+      <span>${esc(r.platform === "telegram" ? "Telegram" : "VK")}</span><span>${esc(r.title)}</span><span>${esc(r.stream_number)}</span><span>${esc(r.date_start)}</span>
+      <span>${r.test_mode ? "Проверка" : "Боевой"}</span><span class="${r.status === "ok" ? "on" : "off"}">${r.status === "ok" ? "Готово" : "Ошибка"}</span>
       <span class="cell-sub">${esc(r.link || r.error || "")}</span>
     </div>`).join("");
   } catch(e) { $("runsList").innerHTML = `<div class="row run-row"><span>${esc(JSON.stringify(e))}</span></div>`; }
