@@ -316,7 +316,7 @@ async function init() {
   $("tgPassword").value = ""; $("tgCode").value = "";
   await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns();
 }
-init().catch(e => show($("createResult"), e));
+init().catch(() => {});
 </script>
 </body>
 </html>
