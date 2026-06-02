@@ -262,7 +262,9 @@ def _password() -> str:
     return _clean(os.environ.get("NEXUS_CHAT_CREATOR_PASSWORD") or os.environ.get("SBKVD_PROCESS_WEBHOOK_PASSWORD"))
 
 
-def _check_password(data: dict[str, Any]) -> None:
+def _check_password(data: dict[str, Any], *, trusted: bool = False) -> None:
+    if trusted:
+        return
     configured = _password()
     if not configured:
         raise HTTPException(status_code=503, detail="Webhook password is not configured")
@@ -513,8 +515,8 @@ async def _upload_vk_message_photo(peer_id: int, photo_path: Path, token: str) -
         return None
 
 
-async def _create_vk_chat(data: dict[str, Any]) -> dict[str, Any]:
-    _check_password(data)
+async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
+    _check_password(data, trusted=trusted)
     test_mode = _bool(data.get("test_mode"))
     token = _clean(os.environ.get("VK_TEST_USER_TOKEN") if test_mode and os.environ.get("VK_TEST_USER_TOKEN") else os.environ.get("VK_USER_TOKEN"))
     stream_number = _clean(data.get("stream_number") or "15")
@@ -630,8 +632,8 @@ def _format_date_russian(date_str: str) -> str:
         return date_str
 
 
-async def _create_tg_chat(data: dict[str, Any]) -> dict[str, Any]:
-    _check_password(data)
+async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
+    _check_password(data, trusted=trusted)
     try:
         from telethon import TelegramClient, functions, types
         from telethon.tl.functions.channels import EditPhotoRequest
@@ -828,9 +830,9 @@ async def create_from_panel(request: Request):
     data = await request.json()
     platform = _clean(data.get("platform")).lower()
     if platform == "vk":
-        return await process_vk(request)
+        return JSONResponse(await _create_vk_chat(data, trusted=True))
     if platform in {"tg", "telegram"}:
-        return await process6(request)
+        return JSONResponse(await _create_tg_chat(data, trusted=True))
     raise HTTPException(status_code=400, detail="platform must be vk or telegram")
 
 
@@ -905,12 +907,12 @@ async def status():
     _ensure_db()
     telegram = await _telegram_auth_state()
     required_env = {
-        "password": bool(_password()),
         "vk_user_token": bool(os.environ.get("VK_USER_TOKEN")),
         "telegram_api": bool(os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")),
         "telegram_session": bool(telegram.get("authorized")),
     }
     optional_env = {
+        "webhook_password": bool(_password()),
         "sbkvd_legacy_password": bool(os.environ.get("SBKVD_PROCESS_WEBHOOK_PASSWORD")),
         "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
         "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),

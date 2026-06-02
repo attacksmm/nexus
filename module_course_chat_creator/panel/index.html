@@ -73,9 +73,6 @@
               <input id="salebotId" placeholder="необязательно">
             </label>
           </div>
-          <label>Webhook password
-            <input id="password" type="password" placeholder="только для запуска из панели или webhook">
-          </label>
           <div class="actions">
             <button class="btn ghost" id="previewBtn" type="button">Предпросмотр</button>
             <button class="btn danger" id="createBtn" type="button">Создать чат</button>
@@ -285,7 +282,7 @@ $("tgConfirmBtn").onclick = async () => {
 };
 
 function createPayload() {
-  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, salebot_id:$("salebotId").value, test_mode:$("testMode").value, password:$("password").value};
+  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, salebot_id:$("salebotId").value, test_mode:$("testMode").value};
 }
 $("previewBtn").onclick = async () => {
   try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}`)); }

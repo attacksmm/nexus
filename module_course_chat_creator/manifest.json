@@ -1,16 +1,15 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Nexus-модуль для создания учебных Telegram/VK чатов с редактируемыми админами, кураторами, авторами, курсами и шаблонами сообщений.",
   "env_required": [
-    "NEXUS_CHAT_CREATOR_PASSWORD",
     "VK_USER_TOKEN",
     "TELEGRAM_API_ID",
     "TELEGRAM_API_HASH"
   ],
   "env_vars": {
-    "NEXUS_CHAT_CREATOR_PASSWORD": "Пароль для публичных webhook endpoint'ов создания чатов.",
+    "NEXUS_CHAT_CREATOR_PASSWORD": "Опционально: пароль для публичных webhook endpoint'ов создания чатов. Из панели Nexus не нужен.",
     "VK_USER_TOKEN": "Пользовательский VK token, от имени которого создаются боевые беседы.",
     "TELEGRAM_API_ID": "Telegram API ID для Telethon.",
     "TELEGRAM_API_HASH": "Telegram API hash для Telethon.",

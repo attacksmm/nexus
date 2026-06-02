@@ -24,7 +24,7 @@
     <pre>POST /nexus/course-chat-creator/api/vk/create
 POST /nexus/course-chat-creator/api/telegram/create
 POST /nexus/course-chat-creator/api/chats/create</pre>
-    <p>Для старых сценариев оставлены алиасы <code>/process_vk</code> и <code>/process6</code>. Все публичные вызовы требуют поле <code>password</code>. Документация открывается штатной кнопкой Nexus <code>?</code> у модуля.</p>
+    <p>Для старых сценариев оставлены алиасы <code>/process_vk</code> и <code>/process6</code>. Публичные webhook-вызовы требуют поле <code>password</code>, если задан <code>NEXUS_CHAT_CREATOR_PASSWORD</code>. Запуск из панели Nexus работает по авторизации Nexus. Документация открывается штатной кнопкой Nexus <code>?</code> у модуля.</p>
   </section>
   <section>
     <h2>Поля запроса</h2>
@@ -47,12 +47,11 @@ POST /nexus/course-chat-creator/api/chats/create</pre>
   </section>
   <section>
     <h2>ENV</h2>
-    <p>Минимально нужны только ключи ниже. Telegram session создаётся во вкладке <code>Telegram</code> внутри панели.</p>
-    <pre>NEXUS_CHAT_CREATOR_PASSWORD=
-VK_USER_TOKEN=
+    <p>Минимально нужны только ключи ниже. Telegram session создаётся во вкладке <code>Telegram</code> внутри панели. Webhook password нужен только для внешних публичных вызовов.</p>
+    <pre>VK_USER_TOKEN=
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=</pre>
-    <p>Опционально: <code>SBKVD_PROCESS_WEBHOOK_PASSWORD</code> как legacy fallback, <code>SALEBOT_API_KEY_3</code> для Salebot, <code>VK_GROUP_TOKEN</code>/<code>VK_GROUP_ID</code> для сообщества, <code>VK_LOG_CHAT_ID</code> для уведомлений, <code>VK_TEST_USER_TOKEN</code> для отдельного test token, <code>TELEGRAM_SESSION_FILE</code> только если нужен нестандартный путь.</p>
+    <p>Опционально: <code>NEXUS_CHAT_CREATOR_PASSWORD</code> или <code>SBKVD_PROCESS_WEBHOOK_PASSWORD</code> для webhook, <code>SALEBOT_API_KEY_3</code> для Salebot, <code>VK_GROUP_TOKEN</code>/<code>VK_GROUP_ID</code> для сообщества, <code>VK_LOG_CHAT_ID</code> для уведомлений, <code>VK_TEST_USER_TOKEN</code> для отдельного test token, <code>TELEGRAM_SESSION_FILE</code> только если нужен нестандартный путь.</p>
   </section>
   <section>
     <h2>Что сохраняется</h2>
