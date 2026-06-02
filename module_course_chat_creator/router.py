@@ -36,6 +36,7 @@ TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
 _ctx = None
 _logger = None
 _db_initialized = False
+_tg_auth_pending: dict[str, dict[str, Any]] = {}
 
 
 COURSE_DEFAULTS = [
@@ -580,10 +581,44 @@ async def _create_vk_chat(data: dict[str, Any]) -> dict[str, Any]:
 def _telegram_credentials() -> tuple[int, str, str]:
     api_id_raw = _clean(os.environ.get("TELEGRAM_API_ID"))
     api_hash = _clean(os.environ.get("TELEGRAM_API_HASH"))
-    session_file = _clean(os.environ.get("TELEGRAM_SESSION_FILE")) or str(_data_dir() / "telegram.session")
+    session_file = _telegram_session_file()
     if not api_id_raw or not api_hash:
         raise HTTPException(status_code=503, detail="Telegram credentials are not configured")
     return int(api_id_raw), api_hash, session_file
+
+
+def _telegram_session_file() -> str:
+    return _clean(os.environ.get("TELEGRAM_SESSION_FILE")) or str(_data_dir() / "telegram.session")
+
+
+async def _telegram_auth_state(*, include_user: bool = False) -> dict[str, Any]:
+    try:
+        from telethon import TelegramClient
+    except Exception as exc:
+        return {"api": False, "authorized": False, "session_file": _telegram_session_file(), "error": f"Telethon is not installed: {exc}"}
+    try:
+        api_id, api_hash, session_file = _telegram_credentials()
+    except HTTPException as exc:
+        return {"api": False, "authorized": False, "session_file": _telegram_session_file(), "error": exc.detail}
+    client = TelegramClient(session_file, api_id, api_hash)
+    await client.connect()
+    try:
+        authorized = await client.is_user_authorized()
+        me = await client.get_me() if authorized else None
+        state = {
+            "api": True,
+            "authorized": authorized,
+            "session_file": session_file,
+        }
+        if include_user:
+            state["user"] = {
+                "id": getattr(me, "id", None),
+                "username": getattr(me, "username", None),
+                "phone": getattr(me, "phone", None),
+            } if me else None
+        return state
+    finally:
+        await client.disconnect()
 
 
 def _format_date_russian(date_str: str) -> str:
@@ -799,20 +834,96 @@ async def create_from_panel(request: Request):
     raise HTTPException(status_code=400, detail="platform must be vk or telegram")
 
 
+@router.get("/telegram/auth/status")
+async def telegram_auth_status(request: Request):
+    await _require_panel_access(request)
+    return {"ok": True, "telegram": await _telegram_auth_state(include_user=True)}
+
+
+@router.post("/telegram/auth/send-code")
+async def telegram_auth_send_code(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    phone = _clean(data.get("phone"))
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone is required")
+    try:
+        from telethon import TelegramClient
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
+    api_id, api_hash, session_file = _telegram_credentials()
+    client = TelegramClient(session_file, api_id, api_hash)
+    await client.connect()
+    try:
+        sent = await client.send_code_request(phone)
+        _tg_auth_pending[phone] = {
+            "phone_code_hash": sent.phone_code_hash,
+            "created_at": time.time(),
+        }
+        return {"ok": True, "phone": phone, "session_file": session_file}
+    finally:
+        await client.disconnect()
+
+
+@router.post("/telegram/auth/confirm")
+async def telegram_auth_confirm(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    phone = _clean(data.get("phone"))
+    code = _clean(data.get("code"))
+    password = _clean(data.get("password"))
+    pending = _tg_auth_pending.get(phone)
+    if not phone or not code:
+        raise HTTPException(status_code=400, detail="phone and code are required")
+    if not pending or time.time() - float(pending.get("created_at", 0)) > 600:
+        raise HTTPException(status_code=400, detail="Telegram code request expired. Send code again.")
+    try:
+        from telethon import TelegramClient
+        from telethon.errors import SessionPasswordNeededError
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
+    api_id, api_hash, session_file = _telegram_credentials()
+    client = TelegramClient(session_file, api_id, api_hash)
+    await client.connect()
+    try:
+        try:
+            await client.sign_in(phone=phone, code=code, phone_code_hash=pending["phone_code_hash"])
+        except SessionPasswordNeededError:
+            if not password:
+                return JSONResponse({"ok": False, "password_required": True}, status_code=401)
+            await client.sign_in(password=password)
+        authorized = await client.is_user_authorized()
+        if authorized:
+            _tg_auth_pending.pop(phone, None)
+        return {"ok": True, "authorized": authorized, "session_file": session_file}
+    finally:
+        await client.disconnect()
+
+
 @router.get("/status")
 async def status():
     _ensure_db()
+    telegram = await _telegram_auth_state()
+    required_env = {
+        "password": bool(_password()),
+        "vk_user_token": bool(os.environ.get("VK_USER_TOKEN")),
+        "telegram_api": bool(os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")),
+        "telegram_session": bool(telegram.get("authorized")),
+    }
+    optional_env = {
+        "sbkvd_legacy_password": bool(os.environ.get("SBKVD_PROCESS_WEBHOOK_PASSWORD")),
+        "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
+        "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
+        "vk_group_id": bool(os.environ.get("VK_GROUP_ID")),
+        "vk_log_chat_id": bool(os.environ.get("VK_LOG_CHAT_ID")),
+        "salebot": bool(os.environ.get("SALEBOT_API_KEY_3")),
+    }
     return {
         "ok": True,
-        "env": {
-            "password": bool(_password()),
-            "vk_user_token": bool(os.environ.get("VK_USER_TOKEN")),
-            "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
-            "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
-            "telegram_api": bool(os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")),
-            "telegram_session_file": _clean(os.environ.get("TELEGRAM_SESSION_FILE")),
-            "salebot": bool(os.environ.get("SALEBOT_API_KEY_3")),
-        },
+        "env": required_env,
+        "required_env": required_env,
+        "optional_env": optional_env,
+        "telegram": telegram,
         "asset_welcome_photo": bool(_asset_path("welcome_message_photo.jpg")),
     }
 

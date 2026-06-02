@@ -38,6 +38,7 @@
     <button class="tab" data-view="people" type="button">Люди</button>
     <button class="tab" data-view="courses" type="button">Курсы</button>
     <button class="tab" data-view="templates" type="button">Шаблоны</button>
+    <button class="tab" data-view="telegram" type="button">Telegram</button>
     <button class="tab" data-view="runs" type="button">История</button>
   </nav>
 
@@ -140,6 +141,29 @@
       </div>
     </section>
 
+    <section class="view" id="view-telegram" hidden>
+      <div class="head"><h1>Telegram</h1><p class="muted">Telethon session сохраняется в data модуля. Нужны только TELEGRAM_API_ID и TELEGRAM_API_HASH в ENV.</p></div>
+      <div class="surface">
+        <div class="grid3">
+          <label>Телефон аккаунта
+            <input id="tgPhone" placeholder="+79990000000">
+          </label>
+          <label>Код из Telegram
+            <input id="tgCode" inputmode="numeric" placeholder="12345">
+          </label>
+          <label>2FA пароль
+            <input id="tgPassword" type="password" placeholder="если включен">
+          </label>
+        </div>
+        <div class="actions">
+          <button class="btn ghost" id="tgStatusBtn" type="button">Проверить</button>
+          <button class="btn" id="tgSendCodeBtn" type="button">Отправить код</button>
+          <button class="btn" id="tgConfirmBtn" type="button">Подтвердить</button>
+        </div>
+        <pre id="tgAuthStatus"></pre>
+      </div>
+    </section>
+
     <section class="view" id="view-runs" hidden>
       <div class="head"><h1>История запусков</h1><button class="btn ghost" id="runsRefresh" type="button">Обновить</button></div>
       <div class="table">
@@ -175,8 +199,9 @@ const postJson = (path, payload) => getJson(path, {method:"POST", headers:{"Cont
 async function loadStatus() {
   try {
     const s = await getJson("/status");
-    const missing = Object.entries(s.env || {}).filter(([,v]) => !v).map(([k]) => k);
-    $("envPill").textContent = missing.length ? `ENV не заполнен: ${missing.length}` : "ENV готов";
+    const required = s.required_env || s.env || {};
+    const missing = Object.entries(required).filter(([,v]) => !v).map(([k]) => k);
+    $("envPill").textContent = missing.length ? `Требуется: ${missing.length}` : "Готово";
     $("envPill").className = "pill " + (missing.length ? "warn" : "on");
   } catch { $("envPill").textContent = "ENV недоступен"; $("envPill").className = "pill off"; }
 }
@@ -243,6 +268,22 @@ $("tplSave").onclick = async () => {
   catch(e) { show($("tplStatus"), e); }
 };
 
+async function loadTelegramAuth() {
+  try { show($("tgAuthStatus"), await getJson("/telegram/auth/status")); }
+  catch(e) { show($("tgAuthStatus"), e); }
+}
+$("tgStatusBtn").onclick = loadTelegramAuth;
+$("tgSendCodeBtn").onclick = async () => {
+  try { show($("tgAuthStatus"), await postJson("/telegram/auth/send-code", {phone:$("tgPhone").value})); }
+  catch(e) { show($("tgAuthStatus"), e); }
+};
+$("tgConfirmBtn").onclick = async () => {
+  try {
+    show($("tgAuthStatus"), await postJson("/telegram/auth/confirm", {phone:$("tgPhone").value, code:$("tgCode").value, password:$("tgPassword").value}));
+    await loadStatus();
+  } catch(e) { show($("tgAuthStatus"), e); }
+};
+
 function createPayload() {
   return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, salebot_id:$("salebotId").value, test_mode:$("testMode").value, password:$("password").value};
 }
@@ -271,7 +312,7 @@ async function loadRuns() {
 $("runsRefresh").onclick = loadRuns;
 
 async function init() {
-  await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadRuns();
+  await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns();
 }
 init().catch(e => show($("createResult"), e));
 </script>

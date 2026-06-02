@@ -169,7 +169,12 @@ async def api_env_template(request: Request):
             env_vars = manifest.get("env_vars", {})
         except Exception:
             env_vars = {}
-        for key, desc in env_vars.items():
+        required_keys = manifest.get("env_required")
+        if isinstance(required_keys, list):
+            env_items = [(key, env_vars.get(key, "")) for key in required_keys]
+        else:
+            env_items = list(env_vars.items())
+        for key, desc in env_items:
             entry = required.setdefault(key, {"desc": desc, "modules": []})
             if desc and not entry.get("desc"):
                 entry["desc"] = desc
