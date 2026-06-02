@@ -30,6 +30,7 @@ router = APIRouter()
 VK_API_VERSION = "5.131"
 DEFAULT_MODULE_ID = "course-chat-creator"
 TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
+COURSE_CHAT_TITLE_RE = re.compile(r"^\s*\d+\.\s*\d{2}\.\d{2}\.\d{4}\s*-\s*(Курс Щенок\. Современный Собаковод|Современный Собаковод\b)", re.IGNORECASE)
 
 _ctx = None
 _logger = None
@@ -61,8 +62,8 @@ PEOPLE_DEFAULTS = [
     {"kind": "admin", "name": "Наталья", "vk_id": "69145639", "vk_mention": "[id69145639|Наталья]", "tg_ref": "", "enabled": 1},
     {"kind": "kurator", "name": "Екатерина", "vk_id": "1025748213", "vk_mention": "[id1025748213|@psypuppy]", "tg_ref": "", "parity": "odd", "enabled": 1},
     {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "even", "enabled": 1},
-    {"kind": "kurator", "name": "ТГ куратор 1", "vk_id": "", "vk_mention": "", "tg_ref": "+79206159472", "parity": "any", "enabled": 1},
-    {"kind": "kurator", "name": "ТГ куратор 2", "vk_id": "", "vk_mention": "", "tg_ref": "+79818123970", "parity": "any", "enabled": 1},
+    {"kind": "kurator", "name": "ТГ куратор 1", "vk_id": "", "vk_mention": "", "tg_ref": "", "parity": "any", "enabled": 1},
+    {"kind": "kurator", "name": "ТГ куратор 2", "vk_id": "", "vk_mention": "", "tg_ref": "", "parity": "any", "enabled": 1},
     {"kind": "tech", "name": "Техническая поддержка", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
     {"kind": "tech", "name": "Никита", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
     {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
@@ -100,6 +101,10 @@ def _asset_path(name: str) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _avatar_path() -> Path | None:
+    return _asset_path("group_photo.jpg")
 
 
 def _connect() -> sqlite3.Connection:
@@ -226,6 +231,9 @@ def _init_db() -> None:
                 "INSERT INTO meta(key,value) VALUES('template_defaults_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (TEMPLATE_DEFAULTS_VERSION,),
             )
+        for row in db.execute("SELECT id,tg_ref FROM people WHERE COALESCE(tg_ref,'') != ''").fetchall():
+            if not _tg_username(row["tg_ref"]):
+                db.execute("UPDATE people SET tg_ref='',updated_at=strftime('%s','now') WHERE id=?", (row["id"],))
         db.commit()
     _db_initialized = True
 
@@ -357,24 +365,83 @@ def _vk_ids(people: list[dict[str, Any]]) -> list[int]:
     return result
 
 
+def _vk_screen_name(value: Any) -> str:
+    raw = _clean(value)
+    if not raw:
+        return ""
+    raw = raw.split("|")[-1].strip("]") if raw.startswith("[") else raw
+    raw = raw.replace("https://", "").replace("http://", "")
+    for host in ("vk.com/", "vk.ru/", "m.vk.com/", "m.vk.ru/"):
+        if raw.lower().startswith(host):
+            raw = raw[len(host):]
+            break
+    raw = raw.split("?")[0].split("/")[0].strip()
+    raw = raw[1:] if raw.startswith("@") else raw
+    if raw.startswith("id") and raw[2:].isdigit():
+        return raw[2:]
+    return raw
+
+
+async def _resolve_vk_people_ids(people: list[dict[str, Any]], token: str) -> list[int]:
+    result = _vk_ids(people)
+    seen = set(result)
+    for person in people:
+        candidates = [
+            _clean(person.get("vk_id")),
+            _clean(person.get("vk_mention")),
+        ]
+        for candidate in candidates:
+            screen_name = _vk_screen_name(candidate)
+            if not screen_name or screen_name.isdigit():
+                continue
+            resolved = await _vk_method("utils.resolveScreenName", {"screen_name": screen_name}, token)
+            if isinstance(resolved, dict) and resolved.get("type") == "user" and resolved.get("object_id"):
+                user_id = int(resolved["object_id"])
+                if user_id not in seen:
+                    result.append(user_id)
+                    seen.add(user_id)
+                break
+    return result
+
+
 def _tg_refs(people: list[dict[str, Any]]) -> list[str]:
     result: list[str] = []
     for person in people:
-        value = _clean(person.get("tg_ref"))
+        value = _tg_username(person.get("tg_ref"))
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _tg_username(value: Any) -> str:
+    raw = _clean(value)
+    if not raw:
+        return ""
+    raw = raw.replace("https://", "").replace("http://", "")
+    for host in ("t.me/", "telegram.me/"):
+        if raw.lower().startswith(host):
+            raw = raw[len(host):]
+            break
+    raw = raw.split("?")[0].split("/")[0].strip()
+    if raw.startswith("@"):
+        return raw
+    if re.fullmatch(r"[A-Za-z0-9_]{5,}", raw):
+        return "@" + raw
+    return ""
 
 
 def _mentions(people: list[dict[str, Any]], platform: str) -> str:
     items: list[str] = []
     for person in people:
         if platform == "vk":
-            ref = _clean(person.get("vk_mention")) or (_clean(person.get("vk_id")) and f"[id{person['vk_id']}|{person['name']}]")
+            ref = _clean(person.get("vk_mention"))
+            if not ref:
+                screen_name = _vk_screen_name(person.get("vk_id"))
+                ref = f"@{screen_name}" if screen_name and not screen_name.isdigit() else _clean(person.get("name"))
         else:
-            ref = _clean(person.get("tg_ref")) or _clean(person.get("name"))
+            ref = _tg_username(person.get("tg_ref")) or _clean(person.get("name"))
         if ref:
-            items.append(f"{person['name']} - {ref}" if platform == "vk" and " - " not in ref else ref)
+            items.append(ref)
     return ", ".join(items) if items else "не указаны"
 
 
@@ -491,6 +558,29 @@ async def _upload_vk_message_photo(peer_id: int, photo_path: Path, token: str) -
         return None
 
 
+async def _upload_vk_chat_photo(peer_id: int, photo_path: Path, token: str) -> bool:
+    try:
+        upload_data = await _vk_method("photos.getChatUploadServer", {"chat_id": peer_id - 2000000000}, token)
+        if isinstance(upload_data, dict) and "error" in upload_data:
+            return False
+        upload_url = upload_data.get("upload_url")
+        if not upload_url:
+            return False
+        content_type = mimetypes.guess_type(photo_path.name)[0] or "image/jpeg"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with open(photo_path, "rb") as f:
+                upload_resp = await client.post(upload_url, files={"file": (photo_path.name, f, content_type)})
+        data = upload_resp.json()
+        response_file = data.get("response")
+        if not response_file:
+            return False
+        set_result = await _vk_method("messages.setChatPhoto", {"file": response_file}, token)
+        return not (isinstance(set_result, dict) and "error" in set_result)
+    except Exception as exc:
+        _log("warning", "VK chat avatar upload failed: %s", exc)
+        return False
+
+
 async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
     _check_password(data, trusted=trusted)
     test_mode = _bool(data.get("test_mode"))
@@ -500,7 +590,8 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     course = _course_by_input(data.get("course_type") or data.get("course_choice") or "puppy")
     title = _format_title(stream_number, date_start, course, "vk")
     selected = _selected_people(stream_number)
-    chat_member_ids = _vk_ids(selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"])
+    staff_people = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
+    chat_member_ids = await _resolve_vk_people_ids(staff_people, token)
     if test_mode:
         chat_member_ids = []
     create_params: dict[str, Any] = {"title": title}
@@ -532,11 +623,9 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         for admin_id in chat_member_ids:
             await asyncio.sleep(0.5)
             await _vk_method("messages.setMemberRole", {"peer_id": peer_id, "member_id": admin_id, "role": "admin"}, token)
-    photo = _asset_path("welcome_message_photo.jpg")
+    photo = _avatar_path()
     if photo:
-        attachment = await _upload_vk_message_photo(peer_id, photo, token)
-        if attachment:
-            await _vk_method("messages.send", {"peer_id": peer_id, "attachment": attachment, "random_id": 0}, token)
+        await _upload_vk_chat_photo(peer_id, photo, token)
     welcome_text = _render_template("vk_welcome", course=course, stream_number=stream_number, date_start=date_start, selected=selected, platform="vk")
     welcome_resp = await _vk_method("messages.send", {"peer_id": peer_id, "message": welcome_text, "random_id": 0}, token)
     if isinstance(welcome_resp, int):
@@ -601,6 +690,100 @@ def _format_date_russian(date_str: str) -> str:
         return date_str
 
 
+async def _resolve_vk_target_id(target: str, token: str) -> int:
+    raw = _clean(target)
+    screen_name = _vk_screen_name(raw)
+    if screen_name.isdigit():
+        return int(screen_name)
+    resolved = await _vk_method("utils.resolveScreenName", {"screen_name": screen_name}, token)
+    if isinstance(resolved, dict) and resolved.get("type") == "user" and resolved.get("object_id"):
+        return int(resolved["object_id"])
+    users = await _vk_method("users.get", {"user_ids": screen_name}, token)
+    if isinstance(users, list) and users:
+        return int(users[0]["id"])
+    raise HTTPException(status_code=400, detail="VK user cannot be resolved")
+
+
+def _is_course_chat_title(title: Any) -> bool:
+    return bool(COURSE_CHAT_TITLE_RE.search(_clean(title)))
+
+
+async def _remove_vk_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
+    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    user_id = await _resolve_vk_target_id(target, token)
+    touched: list[dict[str, Any]] = []
+    offset = 0
+    while offset < limit:
+        data = await _vk_method("messages.getConversations", {"count": min(200, limit - offset), "offset": offset}, token)
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not items:
+            break
+        for item in items:
+            conv = item.get("conversation", {})
+            peer = conv.get("peer", {})
+            peer_id = int(peer.get("id", 0) or 0)
+            chat_settings = conv.get("chat_settings", {}) or {}
+            title = chat_settings.get("title", "")
+            if peer_id <= 2000000000 or not _is_course_chat_title(title):
+                continue
+            chat_id = peer_id - 2000000000
+            present = False
+            try:
+                members = await _vk_method("messages.getConversationMembers", {"peer_id": peer_id}, token)
+                profiles = members.get("profiles", []) if isinstance(members, dict) else []
+                present = any(int(p.get("id", 0)) == user_id for p in profiles)
+            except Exception:
+                present = True
+            if not present:
+                touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "not_found", "present": False})
+                continue
+            if not dry_run:
+                result = await _vk_method("messages.removeChatUser", {"chat_id": chat_id, "member_id": user_id}, token)
+                if isinstance(result, dict) and "error" in result:
+                    touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "error", "error": result["error"]})
+                    continue
+            touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "would_remove" if dry_run else "removed", "present": present})
+        if len(items) < 200:
+            break
+        offset += len(items)
+    return {"ok": True, "platform": "vk", "target": user_id, "dry_run": dry_run, "items": touched}
+
+
+async def _remove_tg_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
+    try:
+        from telethon import TelegramClient
+        from telethon.tl import functions, types
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
+    api_id, api_hash, session_file = _telegram_credentials()
+    client = TelegramClient(session_file, api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise HTTPException(status_code=401, detail="Telegram session is not authorized")
+        entity = await client.get_entity(target)
+        touched: list[dict[str, Any]] = []
+        async for dialog in client.iter_dialogs(limit=limit):
+            title = getattr(dialog, "name", "") or ""
+            if not _is_course_chat_title(title):
+                continue
+            try:
+                await client.get_permissions(dialog.entity, entity)
+                present = True
+            except Exception:
+                present = False
+            if not present:
+                touched.append({"platform": "telegram", "title": title, "chat_id": getattr(dialog.entity, "id", None), "status": "not_found", "present": False})
+                continue
+            if not dry_run:
+                banned = types.ChatBannedRights(until_date=None, view_messages=True)
+                await client(functions.channels.EditBannedRequest(channel=dialog.entity, participant=entity, banned_rights=banned))
+            touched.append({"platform": "telegram", "title": title, "chat_id": getattr(dialog.entity, "id", None), "status": "would_remove" if dry_run else "removed", "present": True})
+        return {"ok": True, "platform": "telegram", "target": target, "dry_run": dry_run, "items": touched}
+    finally:
+        await client.disconnect()
+
+
 async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
     _check_password(data, trusted=trusted)
     try:
@@ -663,7 +846,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
             await client(UpdatePinnedForumTopicRequest(peer=channel, topic_id=1, pinned=True))
         except Exception as exc:
             _log("warning", "Telegram topic setup failed: %s", exc)
-        photo = _asset_path("welcome_message_photo.jpg")
+        photo = _avatar_path()
         if photo:
             try:
                 uploaded = await client.upload_file(str(photo))
@@ -687,7 +870,18 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                     await client(functions.channels.EditAdminRequest(
                         channel=channel,
                         user_id=entity,
-                        admin_rights=types.ChatAdminRights(change_info=True, post_messages=True, edit_messages=True, delete_messages=True, ban_users=True, invite_users=True, pin_messages=True, add_admins=True, manage_call=True),
+                        admin_rights=types.ChatAdminRights(
+                            change_info=True,
+                            post_messages=True,
+                            edit_messages=True,
+                            delete_messages=True,
+                            ban_users=True,
+                            invite_users=True,
+                            pin_messages=True,
+                            add_admins=True,
+                            anonymous=False,
+                            manage_call=True,
+                        ),
                         rank=rank,
                     ))
                     await asyncio.sleep(random.uniform(1, 3))
@@ -700,6 +894,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
             await invite_and_admin(kurators, "Куратор школы")
             await invite_and_admin(authors, "Автор курса")
             await invite_and_admin(techs, "Тех. отдел")
+            await invite_and_admin([u for u in valid_users if u not in admins + kurators + authors + techs], "Сотрудник")
         channel_url_id = str(abs(int(getattr(channel, "id", 0))))
         extras = {"date_start": _format_date_russian(date_start), "channel_url_id": channel_url_id, **{f"topic_{k}_id": v or 1 for k, v in topic_ids.items()}}
         bot_channel = await client.get_entity(channel)
@@ -736,20 +931,6 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                 await asyncio.sleep(1)
             except Exception as exc:
                 _log("warning", "Telegram pin failed %s: %s", label, exc)
-        if not test_mode:
-            start = time.monotonic()
-            added = 0
-            for user in valid_users:
-                if time.monotonic() - start > 5 * 60:
-                    break
-                try:
-                    entity = await client.get_entity(user)
-                    await client(functions.channels.InviteToChannelRequest(channel=channel, users=[entity]))
-                    added += 1
-                    await asyncio.sleep(random.uniform(10, 20))
-                except Exception as exc:
-                    _log("warning", "Telegram user add failed %s: %s", user, exc)
-                    await asyncio.sleep(random.uniform(20, 40))
         try:
             invite = await client(functions.messages.ExportChatInviteRequest(peer=channel))
             invite_link = invite.link
@@ -892,6 +1073,7 @@ async def status():
         "required_env": required_env,
         "optional_env": optional_env,
         "telegram": telegram,
+        "asset_group_photo": bool(_avatar_path()),
         "asset_welcome_photo": bool(_asset_path("welcome_message_photo.jpg")),
     }
 
@@ -913,12 +1095,18 @@ async def upsert_person(request: Request):
         raise HTTPException(status_code=400, detail="Invalid kind")
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    vk_value = _clean(data.get("vk_id"))
+    vk_screen = _vk_screen_name(vk_value)
+    vk_mention = _clean(data.get("vk_mention"))
+    if not vk_mention and vk_screen:
+        vk_mention = f"[id{vk_screen}|{name}]" if vk_screen.isdigit() else f"@{vk_screen}"
+    tg_ref = _tg_username(data.get("tg_ref"))
     payload = {
         "kind": kind,
         "name": name,
-        "vk_id": _clean(data.get("vk_id")),
-        "vk_mention": _clean(data.get("vk_mention")),
-        "tg_ref": _clean(data.get("tg_ref")),
+        "vk_id": vk_value,
+        "vk_mention": vk_mention,
+        "tg_ref": tg_ref,
         "parity": _clean(data.get("parity")) or "any",
         "enabled": 1 if data.get("enabled", True) else 0,
         "note": _clean(data.get("note")),
@@ -1045,3 +1233,26 @@ async def clear_runs(request: Request):
         db.execute("DELETE FROM runs")
         db.commit()
     return {"ok": True}
+
+
+@router.post("/members/remove")
+async def remove_member_from_course_chats(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    target = _clean(data.get("target"))
+    platform = _clean(data.get("platform")).lower()
+    dry_run = _bool(data.get("dry_run", True))
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    if platform == "vk":
+        return await _remove_vk_from_course_chats(target, dry_run=dry_run)
+    if platform in {"tg", "telegram"}:
+        return await _remove_tg_from_course_chats(target, dry_run=dry_run)
+    if platform == "both":
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "vk": await _remove_vk_from_course_chats(target, dry_run=dry_run),
+            "telegram": await _remove_tg_from_course_chats(target, dry_run=dry_run),
+        }
+    raise HTTPException(status_code=400, detail="platform must be vk, telegram or both")

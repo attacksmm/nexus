@@ -1,7 +1,7 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Nexus-модуль для создания учебных Telegram/VK чатов с редактируемыми админами, кураторами, авторами, курсами и шаблонами сообщений.",
   "env_required": [
     "VK_USER_TOKEN",
