@@ -26,7 +26,7 @@
     .tab:hover{color:var(--muted)}.tab.is-active{color:var(--text);border-bottom-color:var(--accent)}
     .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
     .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
-    .form-grid{flex-shrink:0;display:grid;grid-template-columns:170px minmax(260px,1fr) 170px minmax(180px,1fr) minmax(170px,1fr) auto auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .form-grid{flex-shrink:0;display:grid;grid-template-columns:170px minmax(260px,1fr) 170px minmax(180px,1fr) minmax(170px,1fr) 150px auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
     .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
     .f-input,.select-btn{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text)}
     .check-field{min-height:30px;display:flex;gap:8px;align-items:center;padding:4px 0;color:var(--text);white-space:nowrap}.check-field input{width:14px;height:14px}.check-field.is-disabled{opacity:.45}
@@ -37,10 +37,11 @@
     .pipeline{padding:8px 8px 4px;color:var(--subtle);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}.status-option{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;color:var(--text);border-top:1px solid #111}.status-option:hover{background:var(--panel-strong)}.status-option input{margin-top:2px}.status-option small{display:block;color:var(--subtle);font-size:.72rem}
     .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .form-actions{display:flex;gap:8px;align-items:end;justify-content:flex-end;min-width:0}
     .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
     .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}.empty{padding:24px;text-align:center;color:var(--subtle)}
     .split{display:grid;grid-template-columns:minmax(0,1fr) 360px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.kv{display:grid;grid-template-columns:128px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}.pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:340px;overflow:auto}.panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}.event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
-    @media(max-width:1180px){.form-grid{grid-template-columns:170px minmax(230px,1fr) 160px minmax(170px,1fr);}.form-grid .actions{grid-column:auto / span 1}}
+    @media(max-width:1180px){.form-grid{grid-template-columns:170px minmax(230px,1fr) 160px minmax(170px,1fr)}.form-actions{grid-column:1 / -1}}
     @media(max-width:900px){.form-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
     @media(max-width:760px){.form-grid{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
   </style>
@@ -72,13 +73,15 @@
       <div class="f-group"><label>Название</label><input id="bindName" class="f-input" placeholder="AMO. Сделка в работе"></div>
       <div class="f-group"><label>Заметка</label><input id="bindNote" class="f-input"></div>
       <div class="f-group"><label>Группы</label><label id="exclusiveWrap" class="check-field"><input id="exclusiveGroups" type="checkbox"> Убирать из остальных</label></div>
-      <button id="saveBindingBtn" class="btn btn--primary actions" type="button">Сохранить</button>
-      <button id="newBindingBtn" class="btn btn--ghost actions" type="button">Новая</button>
+      <div class="form-actions">
+        <button id="newBindingBtn" class="btn btn--ghost" type="button">Новая</button>
+        <button id="saveBindingBtn" class="btn btn--primary" type="button">Сохранить</button>
+      </div>
     </div>
     <div class="table-wrap">
       <table>
         <colgroup><col style="width:9%"><col style="width:16%"><col style="width:20%"><col style="width:10%"><col style="width:18%"><col style="width:10%"><col style="width:7%"><col style="width:10%"></colgroup>
-        <thead><tr><th>Тип</th><th>Воронка</th><th>Статус amoCRM</th><th>Senler</th><th>Название</th><th>Группы</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Тип</th><th>Воронка</th><th>Статусы amoCRM</th><th>Senler</th><th>Название</th><th>Группы</th><th>Статус</th><th></th></tr></thead>
         <tbody id="bindingsTable"></tbody>
       </table>
     </div>
@@ -94,7 +97,7 @@
         <div class="f-group"><label>Тестовый payload JSON</label><textarea id="testPayload" class="f-input mono"></textarea></div>
         <button id="sendTestBtn" class="btn btn--primary" type="button">Отправить тест</button>
       </div>
-      <pre id="testResult" class="pre"></pre>
+      <pre id="testResult" class="pre" hidden></pre>
     </div>
   </section>
 
@@ -283,9 +286,10 @@ $('copyWebhookBtn').addEventListener('click', async () => { await navigator.clip
 $('sendTestBtn').addEventListener('click', async () => {
   try {
     const r = await fetchJson($('webhookUrl').value, {method:'POST', headers:{'Content-Type':'application/json'}, body:$('testPayload').value});
+    $('testResult').hidden = false;
     $('testResult').textContent = JSON.stringify(r, null, 2);
     loadEvents();
-  } catch(e) { $('testResult').textContent = e.message; }
+  } catch(e) { $('testResult').hidden = false; $('testResult').textContent = e.message; }
 });
 
 function clearBindingForm(){
@@ -322,7 +326,7 @@ async function loadBindings(){
   tb.innerHTML = bindings.map(b => `<tr>
     <td>${esc(b.category_label || b.category)}</td>
     <td title="${esc(b.pipeline_name || '')}">${esc(b.pipeline_name || 'Любая воронка')}</td>
-    <td title="${esc(b.status_name || '')}">${esc(b.status_name || 'Не выбран')}</td>
+    <td title="${esc((b.statuses || []).map(statusLabel).join('\n') || b.statuses_label || '')}">${esc(b.statuses_label || b.status_name || 'Не выбран')}</td>
     <td class="mono" style="color:var(--warn)">${esc(b.subscription_id)}</td>
     <td title="${esc(b.name || '')}">${esc(b.name || '')}</td>
     <td>${b.exclusive_groups ? '<span class="badge badge--warn">замена</span>' : '<span class="muted">—</span>'}</td>
@@ -339,10 +343,10 @@ window.editBinding = async id => {
   const b = bindings.find(x => x.id === id); if (!b) return;
   $('bindId').value=b.id; $('category').value=b.category; $('subId').value=b.subscription_id || ''; $('bindName').value=b.name || ''; $('bindNote').value=b.note || ''; $('exclusiveGroups').checked=!!b.exclusive_groups;
   selectedStatuses.clear();
-  if (b.status_id) {
-    const item = findStatus(`${b.pipeline_id || ''}:${b.status_id}`) || {pipeline_id:b.pipeline_id || '', pipeline_name:b.pipeline_name || 'Любая воронка', status_id:b.status_id, status_name:b.status_name || b.status_id};
+  (b.statuses || []).forEach(status => {
+    const item = findStatus(`${status.pipeline_id || ''}:${status.status_id}`) || {pipeline_id:status.pipeline_id || '', pipeline_name:status.pipeline_name || 'Любая воронка', status_id:status.status_id, status_name:status.status_name || status.status_id};
     selectedStatuses.set(statusKey(item), item);
-  }
+  });
   $('category').dispatchEvent(new Event('change'));
   renderStatusList();
 };

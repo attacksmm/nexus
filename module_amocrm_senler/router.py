@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote_plus
 
 import aiosqlite
 import httpx
@@ -72,6 +73,7 @@ async def _init_db():
                 pipeline_name   TEXT NOT NULL DEFAULT '',
                 status_id       TEXT NOT NULL DEFAULT '',
                 status_name     TEXT NOT NULL DEFAULT '',
+                statuses_json   TEXT NOT NULL DEFAULT '[]',
                 subscription_id TEXT NOT NULL DEFAULT '',
                 exclusive_groups INTEGER NOT NULL DEFAULT 0,
                 name            TEXT NOT NULL DEFAULT '',
@@ -113,12 +115,14 @@ async def _init_db():
         for column, ddl in (
             ("pipeline_name", "ALTER TABLE status_bindings ADD COLUMN pipeline_name TEXT NOT NULL DEFAULT ''"),
             ("status_name", "ALTER TABLE status_bindings ADD COLUMN status_name TEXT NOT NULL DEFAULT ''"),
+            ("statuses_json", "ALTER TABLE status_bindings ADD COLUMN statuses_json TEXT NOT NULL DEFAULT '[]'"),
             ("exclusive_groups", "ALTER TABLE status_bindings ADD COLUMN exclusive_groups INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 await db.execute(ddl)
             except Exception:
                 pass
+        await _migrate_binding_statuses(db)
         for key, value in DEFAULT_SETTINGS.items():
             await db.execute(
                 "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
@@ -132,10 +136,19 @@ async def _init_db():
             if not await cur.fetchone():
                 await db.execute(
                     """
-                    INSERT INTO status_bindings(category,pipeline_id,pipeline_name,status_id,status_name,subscription_id,exclusive_groups,name,note,active)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)
+                    INSERT INTO status_bindings(category,pipeline_id,pipeline_name,status_id,status_name,statuses_json,subscription_id,exclusive_groups,name,note,active)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (category, pipeline_id, pipeline_name, status_id, status_name, subscription_id, 0, name, note, active),
+                    (
+                        category, pipeline_id, pipeline_name, status_id, status_name,
+                        _statuses_json([{
+                            "pipeline_id": pipeline_id,
+                            "pipeline_name": pipeline_name,
+                            "status_id": status_id,
+                            "status_name": status_name,
+                        }] if category != "created" and status_id else []),
+                        subscription_id, 0, name, note, active,
+                    ),
                 )
         await db.commit()
     _log("info", "amocrm-senler DB initialized")
@@ -148,6 +161,116 @@ def _log(level: str, message: str, *args: Any) -> None:
 
 def _clean(value: Any, limit: int = 1000) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _status_item(item: dict[str, Any]) -> dict[str, str]:
+    status_id = _clean(item.get("status_id") or item.get("id"), 64)
+    return {
+        "pipeline_id": _clean(item.get("pipeline_id"), 64),
+        "pipeline_name": _clean(item.get("pipeline_name"), 300),
+        "status_id": status_id,
+        "status_name": _clean(item.get("status_name") or item.get("name"), 300) or status_id,
+    }
+
+
+def _statuses_json(statuses: list[dict[str, Any]]) -> str:
+    clean_statuses = []
+    seen = set()
+    for raw in statuses:
+        if not isinstance(raw, dict):
+            continue
+        item = _status_item(raw)
+        if not item["status_id"]:
+            continue
+        key = (item["pipeline_id"], item["status_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        clean_statuses.append(item)
+    return json.dumps(clean_statuses, ensure_ascii=False)
+
+
+def _binding_statuses(row: dict[str, Any]) -> list[dict[str, str]]:
+    raw = row.get("statuses_json") or "[]"
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        parsed = []
+    statuses = [_status_item(item) for item in parsed if isinstance(item, dict)]
+    statuses = [item for item in statuses if item["status_id"]]
+    if statuses:
+        return statuses
+    status_id = _clean(row.get("status_id"), 64)
+    if not status_id:
+        return []
+    return [_status_item({
+        "pipeline_id": row.get("pipeline_id"),
+        "pipeline_name": row.get("pipeline_name"),
+        "status_id": status_id,
+        "status_name": row.get("status_name"),
+    })]
+
+
+async def _migrate_binding_statuses(db: aiosqlite.Connection) -> None:
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute("SELECT * FROM status_bindings ORDER BY id")
+    rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        try:
+            existing = json.loads(row.get("statuses_json") or "[]")
+        except Exception:
+            existing = []
+        if isinstance(existing, list) and existing:
+            continue
+        status_id = _clean(row.get("status_id"), 64)
+        if not status_id:
+            continue
+        await db.execute(
+            "UPDATE status_bindings SET statuses_json=? WHERE id=?",
+            (_statuses_json([row]), row["id"]),
+        )
+
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("category") == "created":
+            continue
+        key = (
+            _clean(row.get("category"), 32),
+            _clean(row.get("subscription_id"), 64),
+            _clean(row.get("name"), 300),
+            _clean(row.get("note"), 1000),
+        )
+        groups.setdefault(key, []).append(row)
+
+    for grouped in groups.values():
+        if len(grouped) < 2:
+            continue
+        statuses: list[dict[str, Any]] = []
+        for row in grouped:
+            statuses.extend(_binding_statuses(row) or ([row] if _clean(row.get("status_id"), 64) else []))
+        keeper = grouped[0]
+        first = _binding_statuses({"statuses_json": _statuses_json(statuses)})[:1]
+        first_status = first[0] if first else {"pipeline_id": "", "pipeline_name": "", "status_id": "", "status_name": ""}
+        await db.execute(
+            """
+            UPDATE status_bindings
+            SET pipeline_id=?, pipeline_name=?, status_id=?, status_name=?, statuses_json=?,
+                exclusive_groups=?, active=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id=?
+            """,
+            (
+                first_status["pipeline_id"], first_status["pipeline_name"],
+                first_status["status_id"], first_status["status_name"],
+                _statuses_json(statuses),
+                1 if any(int(row.get("exclusive_groups") or 0) for row in grouped) else 0,
+                1 if any(int(row.get("active") or 0) for row in grouped) else 0,
+                keeper["id"],
+            ),
+        )
+        await db.execute(
+            f"DELETE FROM status_bindings WHERE id IN ({','.join(['?'] * (len(grouped) - 1))})",
+            tuple(row["id"] for row in grouped[1:]),
+        )
 
 
 def _now() -> str:
@@ -211,7 +334,6 @@ def _timeout(settings: dict[str, str]) -> int:
 
 def _flat_payload_to_nested(flat: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"leads": {}, "account": {}}
-    item_re = re.compile(r"^([A-Za-z0-9_]+)\[([A-Za-z0-9_]+)\]\[(\d+)\]\[([^\]]+)\]$")
     account_re = re.compile(r"^account\[([^\]]+)\]$")
     for key, value in flat.items():
         key = str(key)
@@ -219,13 +341,18 @@ def _flat_payload_to_nested(flat: dict[str, Any]) -> dict[str, Any]:
         if account_match:
             result["account"][account_match.group(1)] = value
             continue
-        match = item_re.match(key)
-        if not match:
+        parts = re.findall(r"([^\[\]]+)", key)
+        if len(parts) < 4:
             result[key] = value
             continue
-        entity, action, idx, field = match.groups()
-        bucket = result.setdefault(entity, {}).setdefault(action, {})
-        bucket.setdefault(idx, {})[field] = value
+        cursor: dict[str, Any] = result
+        for part in parts[:-1]:
+            next_value = cursor.setdefault(part, {})
+            if not isinstance(next_value, dict):
+                next_value = {}
+                cursor[part] = next_value
+            cursor = next_value
+        cursor[parts[-1]] = value
     return result
 
 
@@ -271,8 +398,10 @@ def _custom_field_value(source: dict[str, Any], field_name: str) -> str:
         if str(key).lower() == target:
             return _clean(value, 200)
     fields = source.get("custom_fields_values") or source.get("custom_fields") or []
+    if isinstance(fields, dict):
+        fields = list(fields.values())
     if not isinstance(fields, list):
-        return ""
+        fields = []
     for field in fields:
         if not isinstance(field, dict):
             continue
@@ -290,7 +419,64 @@ def _custom_field_value(source: dict[str, Any], field_name: str) -> str:
             if isinstance(first, dict):
                 return _clean(first.get("value"), 200)
             return _clean(first, 200)
+        if isinstance(values, dict):
+            for item in values.values():
+                if isinstance(item, dict) and item.get("value"):
+                    return _clean(item.get("value"), 200)
+                if item:
+                    return _clean(item, 200)
         return _clean(field.get("value"), 200)
+    direct = _recursive_key_value(source, target)
+    if direct:
+        return direct
+    query_value = _recursive_query_value(source, target)
+    if query_value:
+        return query_value
+    return ""
+
+
+def _recursive_key_value(value: Any, target: str) -> str:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() == target:
+                return _clean(item, 200)
+            found = _recursive_key_value(item, target)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _recursive_key_value(item, target)
+            if found:
+                return found
+    return ""
+
+
+def _query_value(text: str, target: str) -> str:
+    current = str(text or "")
+    for _ in range(3):
+        match = re.search(rf"(?:^|[?&#;\s]){re.escape(target)}=([^&#;\s]+)", current, re.IGNORECASE)
+        if match:
+            return _clean(unquote_plus(match.group(1)), 200)
+        decoded = unquote_plus(current)
+        if decoded == current:
+            break
+        current = decoded
+    return ""
+
+
+def _recursive_query_value(value: Any, target: str) -> str:
+    if isinstance(value, str):
+        return _query_value(value, target)
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _recursive_query_value(item, target)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _recursive_query_value(item, target)
+            if found:
+                return found
     return ""
 
 
@@ -311,30 +497,34 @@ async def _find_binding(event: dict[str, Any]) -> dict[str, Any] | None:
                 SELECT * FROM status_bindings
                 WHERE active=1
                   AND category=?
-                  AND (pipeline_id='' OR pipeline_id=?)
-                  AND (status_id='' OR status_id=?)
-                ORDER BY CASE WHEN pipeline_id=? THEN 0 ELSE 1 END,
-                         CASE WHEN status_id=? THEN 0 ELSE 1 END,
-                         id
+                ORDER BY id
                 LIMIT 1
                 """,
-                (category, pipeline_id, status_id, pipeline_id, status_id),
+                (category,),
             )
             row = await cur.fetchone()
             return dict(row) if row else None
         cur = await db.execute(
             """
             SELECT * FROM status_bindings
-            WHERE active=1
-              AND status_id=?
-              AND (pipeline_id='' OR pipeline_id=?)
-            ORDER BY CASE WHEN pipeline_id=? THEN 0 ELSE 1 END, id
-            LIMIT 1
+            WHERE active=1 AND category<>'created'
+            ORDER BY id
             """,
-            (status_id, pipeline_id, pipeline_id),
         )
-        row = await cur.fetchone()
-        return dict(row) if row else None
+        rows = [dict(row) for row in await cur.fetchall()]
+    matches = []
+    for row in rows:
+        for status in _binding_statuses(row):
+            if status["status_id"] != status_id:
+                continue
+            if status["pipeline_id"] and status["pipeline_id"] != pipeline_id:
+                continue
+            score = 0 if status["pipeline_id"] == pipeline_id else 1
+            matches.append((score, int(row["id"]), row))
+            break
+    if not matches:
+        return None
+    return sorted(matches, key=lambda item: (item[0], item[1]))[0][2]
 
 
 async def _amo_get(path: str, settings: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
@@ -474,10 +664,37 @@ async def _senler_post(endpoint: str, data: dict[str, Any], timeout: int) -> tup
                 "response": raw,
                 "params": safe_params,
             }
+        subscribers = body.get("subscribers")
+        if isinstance(subscribers, list):
+            failures = []
+            for item in subscribers:
+                if not isinstance(item, dict) or item.get("success") is not False:
+                    continue
+                msg = _clean(item.get("error") or item.get("error_message") or item, 300)
+                low = msg.lower()
+                if endpoint == _EP_SUB_ADD and ("already" in low or "уже" in low):
+                    continue
+                if endpoint == _EP_SUB_DEL and (
+                    "not found" in low or "not subscribed" in low or "не найден" in low or "не подпис" in low
+                ):
+                    continue
+                failures.append(msg)
+            if failures:
+                msg = "; ".join(failures)
+                return False, msg or "ошибка подписчика Senler", {
+                    "http_status": status_code,
+                    "response": body,
+                    "params": safe_params,
+                }
         if body.get("success"):
             return True, "", {"http_status": status_code, "response": body, "params": safe_params}
         err = body.get("error", {})
-        msg = err.get("error_msg", str(body)) if isinstance(err, dict) else str(err)
+        msg = (
+            body.get("error_message")
+            or (err.get("error_msg") if isinstance(err, dict) else "")
+            or (str(err) if err else "")
+            or str(body)
+        )
         return False, msg, {"http_status": status_code, "response": body, "params": safe_params}
     except Exception as exc:
         return False, str(exc), {
@@ -748,32 +965,57 @@ async def amo_statuses():
 async def list_bindings():
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM status_bindings ORDER BY category, id")
+        cur = await db.execute(
+            """
+            SELECT * FROM status_bindings
+            ORDER BY CASE category
+                WHEN 'created' THEN 1
+                WHEN 'work' THEN 2
+                WHEN 'closed_lost' THEN 3
+                WHEN 'success' THEN 4
+                ELSE 5
+            END, id
+            """
+        )
         rows = [dict(row) for row in await cur.fetchall()]
     settings = await _settings_map()
     pipelines, _ = await _amo_status_catalog(settings)
     lookup = _status_lookup(pipelines)
     for row in rows:
         row["category_label"] = CATEGORY_LABELS.get(row["category"], row["category"])
-        found = lookup.get((_clean(row.get("pipeline_id"), 64), _clean(row.get("status_id"), 64)))
-        if found:
-            if row.get("pipeline_id") and not row.get("pipeline_name"):
-                row["pipeline_name"] = found["pipeline_name"]
-            if not row.get("status_name"):
-                row["status_name"] = found["status_name"]
-        if not row.get("pipeline_name"):
+        statuses = []
+        for status in _binding_statuses(row):
+            found = lookup.get((_clean(status.get("pipeline_id"), 64), _clean(status.get("status_id"), 64)))
+            if found:
+                status = {**status}
+                if status.get("pipeline_id") and not status.get("pipeline_name"):
+                    status["pipeline_name"] = found["pipeline_name"]
+                elif not status.get("pipeline_id") and not status.get("pipeline_name"):
+                    status["pipeline_name"] = "Любая воронка"
+                status["status_name"] = found["status_name"]
+            statuses.append(status)
+        row["statuses"] = statuses
+        row["statuses_count"] = len(statuses)
+        if row["category"] == "created":
             row["pipeline_name"] = "Любая воронка"
-        if not row.get("status_name"):
-            if row["category"] == "created":
-                row["status_name"] = "Создание сделки"
-            elif not row.get("status_id"):
-                row["status_name"] = "Все статусы в работе"
-            elif row.get("status_id") == "142":
-                row["status_name"] = "Успешно реализовано"
-            elif row.get("status_id") == "143":
-                row["status_name"] = "Закрыто и не реализовано"
-            else:
-                row["status_name"] = row.get("status_id") or "Не выбран"
+            row["status_name"] = "Событие создания сделки"
+            row["statuses_label"] = "Событие создания сделки"
+        elif len(statuses) == 1:
+            status = statuses[0]
+            row["pipeline_id"] = status["pipeline_id"]
+            row["pipeline_name"] = status["pipeline_name"] or "Любая воронка"
+            row["status_id"] = status["status_id"]
+            row["status_name"] = status["status_name"] or status["status_id"]
+            row["statuses_label"] = row["status_name"]
+        elif statuses:
+            pipeline_names = {_clean(status.get("pipeline_name"), 300) for status in statuses if _clean(status.get("pipeline_name"), 300)}
+            row["pipeline_name"] = next(iter(pipeline_names)) if len(pipeline_names) == 1 else "Несколько воронок"
+            row["status_name"] = f"Выбрано статусов: {len(statuses)}"
+            row["statuses_label"] = row["status_name"]
+        else:
+            row["pipeline_name"] = row.get("pipeline_name") or "Любая воронка"
+            row["status_name"] = "Не выбран"
+            row["statuses_label"] = "Не выбран"
     return rows
 
 
@@ -793,26 +1035,16 @@ async def save_binding(request: Request):
         return JSONResponse({"error": "subscription_id обязателен"}, status_code=400)
     raw_statuses = data.get("statuses")
     if category == "created":
-        statuses = [{
-            "pipeline_id": _clean(data.get("pipeline_id"), 64),
-            "pipeline_name": _clean(data.get("pipeline_name"), 300),
-            "status_id": "",
-            "status_name": "Создание сделки",
-        }]
+        statuses = []
     elif isinstance(raw_statuses, list) and raw_statuses:
         statuses = []
         for item in raw_statuses:
             if not isinstance(item, dict):
                 continue
-            status_id = _clean(item.get("status_id") or item.get("id"), 64)
-            if not status_id:
+            status = _status_item(item)
+            if not status["status_id"]:
                 continue
-            statuses.append({
-                "pipeline_id": _clean(item.get("pipeline_id"), 64),
-                "pipeline_name": _clean(item.get("pipeline_name"), 300),
-                "status_id": status_id,
-                "status_name": _clean(item.get("status_name") or item.get("name"), 300) or status_id,
-            })
+            statuses.append(status)
         if not statuses:
             return JSONResponse({"error": "выберите хотя бы один статус amoCRM"}, status_code=400)
     else:
@@ -825,40 +1057,46 @@ async def save_binding(request: Request):
             "status_id": status_id,
             "status_name": _clean(data.get("status_name"), 300) or status_id,
         }]
+    clean_statuses = json.loads(_statuses_json(statuses))
+    first_status = clean_statuses[0] if clean_statuses else {
+        "pipeline_id": "",
+        "pipeline_name": "",
+        "status_id": "",
+        "status_name": "Событие создания сделки",
+    }
+    row_name = name or f"{CATEGORY_LABELS[category]}: {first_status['status_name']}"
     async with aiosqlite.connect(_db_path) as db:
-        saved_ids = []
-        for idx, status in enumerate(statuses):
-            row_name = name or f"{CATEGORY_LABELS[category]}: {status['status_name']}"
-            if binding_id and idx == 0:
-                saved_id = binding_id
-                await db.execute(
-                    """
-                    UPDATE status_bindings
-                    SET category=?, pipeline_id=?, pipeline_name=?, status_id=?, status_name=?,
-                        subscription_id=?, exclusive_groups=?, name=?, note=?, active=?,
-                        updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                    WHERE id=?
-                    """,
-                    (
-                        category, status["pipeline_id"], status["pipeline_name"], status["status_id"],
-                        status["status_name"], subscription_id, exclusive_groups, row_name, note, active, binding_id,
-                    ),
-                )
-            else:
-                cur = await db.execute(
-                    """
-                    INSERT INTO status_bindings(category,pipeline_id,pipeline_name,status_id,status_name,subscription_id,exclusive_groups,name,note,active)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        category, status["pipeline_id"], status["pipeline_name"], status["status_id"],
-                        status["status_name"], subscription_id, exclusive_groups, row_name, note, active,
-                    ),
-                )
-                saved_id = int(cur.lastrowid)
-            saved_ids.append(saved_id)
+        if binding_id:
+            await db.execute(
+                """
+                UPDATE status_bindings
+                SET category=?, pipeline_id=?, pipeline_name=?, status_id=?, status_name=?, statuses_json=?,
+                    subscription_id=?, exclusive_groups=?, name=?, note=?, active=?,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                WHERE id=?
+                """,
+                (
+                    category, first_status["pipeline_id"], first_status["pipeline_name"], first_status["status_id"],
+                    first_status["status_name"], _statuses_json(clean_statuses), subscription_id, exclusive_groups,
+                    row_name, note, active, binding_id,
+                ),
+            )
+            saved_id = binding_id
+        else:
+            cur = await db.execute(
+                """
+                INSERT INTO status_bindings(category,pipeline_id,pipeline_name,status_id,status_name,statuses_json,subscription_id,exclusive_groups,name,note,active)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    category, first_status["pipeline_id"], first_status["pipeline_name"], first_status["status_id"],
+                    first_status["status_name"], _statuses_json(clean_statuses), subscription_id, exclusive_groups,
+                    row_name, note, active,
+                ),
+            )
+            saved_id = int(cur.lastrowid)
         await db.commit()
-    return {"ok": True, "id": saved_ids[0], "ids": saved_ids}
+    return {"ok": True, "id": saved_id}
 
 
 @router.put("/bindings/{binding_id}/toggle")
@@ -927,11 +1165,31 @@ async def stats():
 async def webhook(request: Request):
     settings = await _settings_map()
     if not _secret_ok(request, settings):
+        _log("warning", "webhook rejected: invalid secret")
         return JSONResponse({"ok": False, "error": "invalid secret"}, status_code=403)
     try:
         payload, raw_payload = await _read_payload(request)
         events = _iter_lead_events(payload)
+        _log("info", "webhook received: %s lead event(s)", len(events))
         if not events:
+            event_id = await _store_event({
+                "action": "webhook",
+                "category": "",
+                "deal_id": "",
+                "pipeline_id": "",
+                "status_id": "",
+                "old_status_id": "",
+                "responsible_user_id": "",
+                "responsible_name": "",
+                "vk_id": "",
+                "binding_id": None,
+                "subscription_id": "",
+                "success": 0,
+                "ignored": 1,
+                "error": "lead events not found",
+                "details": json.dumps({"payload_keys": list(payload.keys())}, ensure_ascii=False),
+                "raw_payload": raw_payload,
+            })
             return {"ok": True, "processed": 0, "ignored": True, "error": "lead events not found"}
         results = [await _process_event(event, raw_payload, settings) for event in events]
         return {
