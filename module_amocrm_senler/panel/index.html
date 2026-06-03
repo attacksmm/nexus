@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>amoCRM -> Senler</title>
+  <style>
+    :root{
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+    button,input,textarea{font:inherit}button{cursor:pointer}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    .shell{width:100%;height:100vh;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;background:var(--bg)}
+    .tabs{min-width:0;display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto;overflow-y:hidden}
+    .tab{flex:0 0 auto;height:36px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:.82rem}
+    .tab:hover{color:var(--muted)}.tab.is-active{color:var(--text);border-bottom-color:var(--accent)}
+    .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
+    .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
+    .form-grid{flex-shrink:0;display:grid;grid-template-columns:170px minmax(260px,1fr) 170px minmax(180px,1fr) minmax(170px,1fr) auto auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
+    .f-input,.select-btn{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text)}
+    .check-field{min-height:30px;display:flex;gap:8px;align-items:center;padding:4px 0;color:var(--text);white-space:nowrap}.check-field input{width:14px;height:14px}.check-field.is-disabled{opacity:.45}
+    textarea.f-input{min-height:70px;resize:vertical}.select-wrap{position:relative;min-width:0}.select-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left}.select-btn span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.select-btn::after{content:"▾";color:var(--muted)}
+    .status-menu{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 4px);max-height:360px;overflow:auto;border:1px solid var(--border-strong);background:#080808;box-shadow:0 10px 24px rgba(0,0,0,.45)}
+    .status-menu__head{position:sticky;top:0;display:flex;gap:6px;padding:8px;border-bottom:1px solid var(--border);background:var(--panel)}
+    .status-menu__head input{min-height:28px;flex:1;min-width:0;padding:4px 8px;border:1px solid var(--border);background:#050505;color:var(--text)}
+    .pipeline{padding:8px 8px 4px;color:var(--subtle);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}.status-option{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;color:var(--text);border-top:1px solid #111}.status-option:hover{background:var(--panel-strong)}.status-option input{margin-top:2px}.status-option small{display:block;color:var(--subtle);font-size:.72rem}
+    .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
+    .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}.empty{padding:24px;text-align:center;color:var(--subtle)}
+    .split{display:grid;grid-template-columns:minmax(0,1fr) 360px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.kv{display:grid;grid-template-columns:128px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}.pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:340px;overflow:auto}.panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}.event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
+    @media(max-width:1180px){.form-grid{grid-template-columns:170px minmax(230px,1fr) 160px minmax(170px,1fr);}.form-grid .actions{grid-column:auto / span 1}}
+    @media(max-width:900px){.form-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+    @media(max-width:760px){.form-grid{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="tabs">
+    <button class="tab is-active" type="button" data-view="bindings">Связки</button>
+    <button class="tab" type="button" data-view="webhook">Webhook</button>
+    <button class="tab" type="button" data-view="events">Журнал</button>
+    <button class="tab" type="button" data-view="settings">Настройки</button>
+    <div class="tabs__right"><button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button></div>
+  </div>
+
+  <section id="viewBindings" class="view is-active">
+    <div class="form-grid">
+      <input id="bindId" type="hidden">
+      <div class="f-group"><label>Тип</label><select id="category" class="f-input">
+        <option value="created">Создана</option><option value="work">В работе</option><option value="success">Успех</option><option value="closed_lost">Закрыто</option>
+      </select></div>
+      <div class="f-group"><label>Статусы amoCRM</label><div class="select-wrap">
+        <button id="statusBtn" class="select-btn" type="button"><span>Загрузка статусов...</span></button>
+        <div id="statusMenu" class="status-menu" hidden>
+          <div class="status-menu__head"><input id="statusSearch" placeholder="Поиск статуса"><button id="clearStatusesBtn" class="btn btn--ghost btn--sm" type="button">Снять</button></div>
+          <div id="statusList"></div>
+        </div>
+      </div></div>
+      <div class="f-group"><label>Группа Senler</label><input id="subId" class="f-input" placeholder="3713900"></div>
+      <div class="f-group"><label>Название</label><input id="bindName" class="f-input" placeholder="AMO. Сделка в работе"></div>
+      <div class="f-group"><label>Заметка</label><input id="bindNote" class="f-input"></div>
+      <div class="f-group"><label>Группы</label><label id="exclusiveWrap" class="check-field"><input id="exclusiveGroups" type="checkbox"> Убирать из остальных</label></div>
+      <button id="saveBindingBtn" class="btn btn--primary actions" type="button">Сохранить</button>
+      <button id="newBindingBtn" class="btn btn--ghost actions" type="button">Новая</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <colgroup><col style="width:9%"><col style="width:16%"><col style="width:20%"><col style="width:10%"><col style="width:18%"><col style="width:10%"><col style="width:7%"><col style="width:10%"></colgroup>
+        <thead><tr><th>Тип</th><th>Воронка</th><th>Статус amoCRM</th><th>Senler</th><th>Название</th><th>Группы</th><th>Статус</th><th></th></tr></thead>
+        <tbody id="bindingsTable"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="viewWebhook" class="view">
+    <div class="panel-body">
+      <div class="form-grid" style="padding:0;border:0;background:transparent;grid-template-columns:minmax(280px,1fr) auto">
+        <div class="f-group"><label>URL amoCRM webhook</label><input id="webhookUrl" class="f-input mono" readonly></div>
+        <button id="copyWebhookBtn" class="btn" type="button">Скопировать</button>
+      </div>
+      <div class="form-grid" style="align-items:start;grid-template-columns:minmax(260px,1fr) auto">
+        <div class="f-group"><label>Тестовый payload JSON</label><textarea id="testPayload" class="f-input mono"></textarea></div>
+        <button id="sendTestBtn" class="btn btn--primary" type="button">Отправить тест</button>
+      </div>
+      <pre id="testResult" class="pre"></pre>
+    </div>
+  </section>
+
+  <section id="viewEvents" class="view">
+    <div class="form-grid" style="grid-template-columns:170px 120px auto">
+      <div class="f-group"><label>Фильтр</label><select id="eventFilter" class="f-input">
+        <option value="all">Все</option><option value="ok">OK</option><option value="error">Ошибки</option><option value="ignored">Игнор</option>
+      </select></div>
+      <div class="f-group"><label>Лимит</label><input id="eventLimit" class="f-input" value="200"></div>
+      <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
+    </div>
+    <div class="split">
+      <div class="table-wrap">
+        <table>
+          <colgroup><col style="width:16%"><col style="width:12%"><col style="width:14%"><col style="width:12%"><col style="width:34%"><col style="width:12%"></colgroup>
+          <thead><tr><th>Время</th><th>Deal</th><th>Тип</th><th>VK ID</th><th>Ответственный</th><th>Итог</th></tr></thead>
+          <tbody id="eventsTable"></tbody>
+        </table>
+      </div>
+      <aside id="eventDetail" class="side"><div class="empty">Выберите событие</div></aside>
+    </div>
+  </section>
+
+  <section id="viewSettings" class="view">
+    <div class="panel-body">
+      <div id="envBox" class="pre"></div>
+      <div class="form-grid" style="grid-template-columns:minmax(180px,1fr) 170px 120px auto">
+        <div class="f-group"><label>Webhook secret</label><input id="secret" class="f-input"></div>
+        <div class="f-group"><label>Поле VK ID</label><input id="vkField" class="f-input" value="utm_term"></div>
+        <div class="f-group"><label>Timeout, sec</label><input id="timeout" class="f-input" value="12"></div>
+        <button id="saveSettingsBtn" class="btn btn--primary" type="button">Сохранить</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+let settings = {};
+let bindings = [];
+let amoPipelines = [];
+let selectedStatuses = new Map();
+let activeEventRow = null;
+
+function esc(s){return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function notify(msg, level='warn'){(window.parent?.notify || console.warn)(msg, level)}
+function statusKey(s){return `${s.pipeline_id || ''}:${s.status_id || ''}`}
+function statusLabel(s){return `${s.pipeline_name || 'Любая воронка'} / ${s.status_name || s.status_id}`}
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('is-active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('is-active'));
+  btn.classList.add('is-active');
+  $('view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)).classList.add('is-active');
+  if (btn.dataset.view === 'bindings') { loadStatuses(); loadBindings(); }
+  if (btn.dataset.view === 'webhook') renderWebhook();
+  if (btn.dataset.view === 'events') loadEvents();
+  if (btn.dataset.view === 'settings') loadSettings();
+}));
+$('refreshBtn').addEventListener('click', () => { loadSettings(); loadStatuses(); loadBindings(); loadEvents(); });
+
+async function fetchJson(url, opts){
+  const r = await fetch(url, opts).catch(e => ({ok:false,json:async()=>({error:String(e)})}));
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Ошибка запроса');
+  return data;
+}
+
+async function loadSettings(){
+  settings = await fetchJson(API + '/settings').catch(e => (notify(e.message, 'error'), {}));
+  $('secret').value = settings.webhook_secret || '';
+  $('vkField').value = settings.vk_field || 'utm_term';
+  $('timeout').value = settings.request_timeout || '12';
+  const env = await fetchJson(API + '/env-status').catch(() => ({}));
+  $('envBox').textContent = [
+    ['SENLER_ACCESS_TOKEN', env.SENLER_ACCESS_TOKEN],
+    ['SENLER_GROUP_ID', env.SENLER_GROUP_ID],
+    ['AMO_BASE_URL', env.AMO_BASE_URL],
+    ['AMO_ACCESS_TOKEN', env.AMO_ACCESS_TOKEN],
+    ['webhook_secret', env.webhook_secret]
+  ].map(([k,v]) => `${k}: ${v ? 'OK' : 'нет'}`).join('\n');
+  renderWebhook();
+}
+
+$('saveSettingsBtn').addEventListener('click', async () => {
+  try {
+    settings = await fetchJson(API + '/settings', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({webhook_secret:$('secret').value.trim(), vk_field:$('vkField').value.trim() || 'utm_term', request_timeout:$('timeout').value.trim() || '12'})
+    });
+    notify('Настройки сохранены', 'ok');
+    renderWebhook();
+  } catch(e) { notify(e.message, 'error'); }
+});
+
+async function loadStatuses(){
+  if (amoPipelines.length) { renderStatusList(); return; }
+  try {
+    const data = await fetchJson(API + '/amo/statuses');
+    amoPipelines = data.pipelines || [];
+    renderStatusList();
+  } catch(e) {
+    $('statusList').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    $('statusBtn').querySelector('span').textContent = 'Статусы не загрузились';
+  }
+}
+
+function renderStatusList(){
+  const query = $('statusSearch').value.trim().toLowerCase();
+  const html = amoPipelines.map(p => {
+    const options = (p.statuses || []).filter(s => {
+      const text = `${p.name} ${s.name}`.toLowerCase();
+      return !query || text.includes(query);
+    }).map(s => {
+      const item = {pipeline_id:p.id, pipeline_name:p.name, status_id:s.id, status_name:s.name};
+      const key = statusKey(item);
+      return `<label class="status-option"><input type="checkbox" data-key="${esc(key)}" ${selectedStatuses.has(key) ? 'checked' : ''}>
+        <span>${esc(s.name)}<small>${esc(p.name)}</small></span></label>`;
+    }).join('');
+    return options ? `<div class="pipeline">${esc(p.name)}</div>${options}` : '';
+  }).join('');
+  $('statusList').innerHTML = html || '<div class="empty">Статусы не найдены</div>';
+  $('statusList').querySelectorAll('input[type=checkbox]').forEach(input => {
+    input.addEventListener('change', () => {
+      const item = findStatus(input.dataset.key);
+      if (!item) return;
+      if (input.checked) selectedStatuses.set(input.dataset.key, item);
+      else selectedStatuses.delete(input.dataset.key);
+      renderStatusButton();
+    });
+  });
+  renderStatusButton();
+}
+
+function findStatus(key){
+  for (const p of amoPipelines) for (const s of (p.statuses || [])) {
+    const item = {pipeline_id:p.id, pipeline_name:p.name, status_id:s.id, status_name:s.name};
+    if (statusKey(item) === key) return item;
+  }
+  return null;
+}
+
+function renderStatusButton(){
+  const span = $('statusBtn').querySelector('span');
+  if ($('category').value === 'created') { span.textContent = 'Событие создания сделки'; return; }
+  const count = selectedStatuses.size;
+  if (!count) span.textContent = 'Выберите статусы amoCRM';
+  else if (count === 1) span.textContent = statusLabel([...selectedStatuses.values()][0]);
+  else span.textContent = `Выбрано статусов: ${count}`;
+}
+
+function renderExclusiveState(){
+  const created = $('category').value === 'created';
+  $('exclusiveGroups').disabled = created;
+  if (created) $('exclusiveGroups').checked = false;
+  $('exclusiveWrap').classList.toggle('is-disabled', created);
+}
+
+$('statusBtn').addEventListener('click', () => {
+  if ($('category').value === 'created') return;
+  $('statusMenu').hidden = !$('statusMenu').hidden;
+});
+$('statusSearch').addEventListener('input', renderStatusList);
+$('clearStatusesBtn').addEventListener('click', () => { selectedStatuses.clear(); renderStatusList(); });
+document.addEventListener('click', e => {
+  if (!$('statusMenu').hidden && !e.target.closest('.select-wrap')) $('statusMenu').hidden = true;
+});
+$('category').addEventListener('change', () => {
+  const created = $('category').value === 'created';
+  $('statusBtn').disabled = created;
+  $('statusMenu').hidden = true;
+  renderExclusiveState();
+  renderStatusButton();
+});
+
+function renderWebhook(){
+  const secret = $('secret').value.trim() || settings.webhook_secret || '';
+  $('webhookUrl').value = location.origin + modBase + '/api/webhook' + (secret ? '?secret=' + encodeURIComponent(secret) : '');
+  $('testPayload').value ||= JSON.stringify({leads:{status:{"0":{id:"123456", pipeline_id:"", status_id:"142", old_status_id:"123", responsible_user_id:"987654"}}}}, null, 2);
+}
+$('copyWebhookBtn').addEventListener('click', async () => { await navigator.clipboard.writeText($('webhookUrl').value); notify('URL скопирован', 'ok'); });
+$('sendTestBtn').addEventListener('click', async () => {
+  try {
+    const r = await fetchJson($('webhookUrl').value, {method:'POST', headers:{'Content-Type':'application/json'}, body:$('testPayload').value});
+    $('testResult').textContent = JSON.stringify(r, null, 2);
+    loadEvents();
+  } catch(e) { $('testResult').textContent = e.message; }
+});
+
+function clearBindingForm(){
+  $('bindId').value=''; $('category').value='work'; $('subId').value=''; $('bindName').value=''; $('bindNote').value=''; $('exclusiveGroups').checked=false;
+  selectedStatuses.clear(); $('category').dispatchEvent(new Event('change')); renderStatusList();
+}
+$('newBindingBtn').addEventListener('click', clearBindingForm);
+$('saveBindingBtn').addEventListener('click', async () => {
+  try {
+    const category = $('category').value;
+    const statuses = [...selectedStatuses.values()];
+    if (category !== 'created' && !statuses.length) throw new Error('Выберите статусы amoCRM галочками');
+    await fetchJson(API + '/bindings', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        id:$('bindId').value || 0,
+        category,
+        statuses,
+        subscription_id:$('subId').value.trim(),
+        exclusive_groups:$('exclusiveGroups').checked,
+        name:$('bindName').value.trim(),
+        note:$('bindNote').value.trim(),
+        active:true
+      })
+    });
+    clearBindingForm(); loadBindings(); notify('Связка сохранена', 'ok');
+  } catch(e) { notify(e.message, 'error'); }
+});
+
+async function loadBindings(){
+  bindings = await fetchJson(API + '/bindings').catch(e => (notify(e.message, 'error'), []));
+  const tb = $('bindingsTable');
+  if (!bindings.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Связок нет</td></tr>'; return; }
+  tb.innerHTML = bindings.map(b => `<tr>
+    <td>${esc(b.category_label || b.category)}</td>
+    <td title="${esc(b.pipeline_name || '')}">${esc(b.pipeline_name || 'Любая воронка')}</td>
+    <td title="${esc(b.status_name || '')}">${esc(b.status_name || 'Не выбран')}</td>
+    <td class="mono" style="color:var(--warn)">${esc(b.subscription_id)}</td>
+    <td title="${esc(b.name || '')}">${esc(b.name || '')}</td>
+    <td>${b.exclusive_groups ? '<span class="badge badge--warn">замена</span>' : '<span class="muted">—</span>'}</td>
+    <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
+    <td style="display:flex;gap:4px;overflow:visible">
+      <button class="btn btn--sm btn--ghost" onclick="editBinding(${b.id})">Править</button>
+      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id})">${b.active ? 'Откл' : 'Вкл'}</button>
+      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id})">×</button>
+    </td>
+  </tr>`).join('');
+}
+window.editBinding = async id => {
+  await loadStatuses();
+  const b = bindings.find(x => x.id === id); if (!b) return;
+  $('bindId').value=b.id; $('category').value=b.category; $('subId').value=b.subscription_id || ''; $('bindName').value=b.name || ''; $('bindNote').value=b.note || ''; $('exclusiveGroups').checked=!!b.exclusive_groups;
+  selectedStatuses.clear();
+  if (b.status_id) {
+    const item = findStatus(`${b.pipeline_id || ''}:${b.status_id}`) || {pipeline_id:b.pipeline_id || '', pipeline_name:b.pipeline_name || 'Любая воронка', status_id:b.status_id, status_name:b.status_name || b.status_id};
+    selectedStatuses.set(statusKey(item), item);
+  }
+  $('category').dispatchEvent(new Event('change'));
+  renderStatusList();
+};
+window.toggleBinding = async id => { await fetchJson(API + `/bindings/${id}/toggle`, {method:'PUT'}); loadBindings(); };
+window.deleteBinding = async id => { if (!confirm('Удалить связку?')) return; await fetchJson(API + `/bindings/${id}`, {method:'DELETE'}); loadBindings(); };
+
+$('loadEventsBtn').addEventListener('click', loadEvents);
+$('eventFilter').addEventListener('change', loadEvents);
+async function loadEvents(){
+  const qs = new URLSearchParams({limit:$('eventLimit').value || '200', result:$('eventFilter').value});
+  const list = await fetchJson(API + '/events?' + qs).catch(e => (notify(e.message, 'error'), []));
+  const tb = $('eventsTable');
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Журнал пуст</td></tr>'; return; }
+  tb.innerHTML = list.map(e => `<tr class="event-row" data-id="${e.id}">
+    <td class="muted">${esc((e.received_at || '').slice(0,16).replace('T',' '))}</td>
+    <td class="mono">${esc(e.deal_id || '—')}</td>
+    <td>${esc(e.category || e.action || '—')}</td>
+    <td class="mono">${esc(e.vk_id || '—')}</td>
+    <td>${esc(e.responsible_name || '—')}</td>
+    <td>${e.success ? '<span class="badge badge--ok">OK</span>' : e.ignored ? '<span class="badge badge--warn">игнор</span>' : '<span class="badge badge--bad">ошибка</span>'}</td>
+  </tr>`).join('');
+  tb.querySelectorAll('.event-row').forEach(row => row.addEventListener('click', () => openEvent(row)));
+}
+async function openEvent(row){
+  if (activeEventRow) activeEventRow.classList.remove('is-active');
+  activeEventRow = row; row.classList.add('is-active');
+  const e = await fetchJson(API + `/events/${row.dataset.id}`).catch(err => ({error:err.message}));
+  $('eventDetail').innerHTML = `<div class="kv">
+    <span>ID</span><span class="mono">${esc(e.id)}</span>
+    <span>Deal</span><span class="mono">${esc(e.deal_id)}</span>
+    <span>Status</span><span class="mono">${esc(e.status_id)}</span>
+    <span>Группа</span><span class="mono">${esc(e.subscription_id)}</span>
+    <span>Ошибка</span><span>${esc(e.error || '—')}</span>
+  </div><pre class="pre">${esc(JSON.stringify(e.details || {}, null, 2))}</pre>`;
+}
+
+loadSettings();
+$('category').dispatchEvent(new Event('change'));
+loadStatuses();
+loadBindings();
+</script>
+</body>
+</html>

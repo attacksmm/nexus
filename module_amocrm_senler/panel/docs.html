@@ -1,0 +1,58 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Документация — amoCRM -> Senler</title></head>
+<body>
+<h2>amoCRM -> Senler v1.0.0</h2>
+<p>Модуль принимает webhook amoCRM по сделкам, определяет настроенный статус, добавляет VK ID из <code>utm_term</code> сделки в группу Senler и записывает пользовательские переменные <code>amo_responsible</code> и <code>amo_deal_id</code>.</p>
+
+<h2>ENV</h2>
+<table>
+  <tr><th>Ключ</th><th>Назначение</th></tr>
+  <tr><td><code>SENLER_ACCESS_TOKEN</code></td><td>API-токен Senler</td></tr>
+  <tr><td><code>SENLER_GROUP_ID</code></td><td>ID VK-группы, подключенной к Senler</td></tr>
+  <tr><td><code>AMO_BASE_URL</code></td><td>URL аккаунта amoCRM, например <code>https://example.amocrm.ru</code></td></tr>
+  <tr><td><code>AMO_ACCESS_TOKEN</code></td><td>Токен amoCRM с доступом к сделкам и пользователям</td></tr>
+  <tr><td><code>AMO_SENLER_WEBHOOK_SECRET</code></td><td>Необязательный секрет webhook. Если задан, имеет приоритет над настройкой в панели.</td></tr>
+</table>
+
+<h2>Webhook</h2>
+<p>URL берется во вкладке «Webhook». Если задан секрет, amoCRM должна отправлять запрос на URL с <code>?secret=...</code>. Модуль принимает стандартный формат amoCRM <code>application/x-www-form-urlencoded</code> и JSON для ручного теста.</p>
+<pre><code>POST /amocrm-senler/api/webhook
+Content-Type: application/x-www-form-urlencoded
+
+leads[status][0][id]=123456
+leads[status][0][pipeline_id]=111
+leads[status][0][status_id]=142
+leads[status][0][responsible_user_id]=987654</code></pre>
+
+<h2>Связки</h2>
+<p>Связка определяет, в какую группу Senler добавлять подписчика. Для «Создана» используется событие создания сделки. Для «В работе», «Успех» и «Закрыто» статусы выбираются галочками из списка amoCRM: модуль сам сохраняет ID, но в панели показывает названия воронок и статусов.</p>
+<p>Опция «Убирать из остальных» доступна для всех связок, кроме «Создана». Если она включена, после успешного добавления в группу текущей связки модуль удаляет подписчика из остальных активных групп amoCRM-связок через Senler <code>subscribers/del</code>. Удаление выполняется только из конкретных групп, без отписки от всех групп Senler.</p>
+<p>Предустановленные группы:</p>
+<ul>
+  <li><code>3713900</code> — AMO. Сделка создана</li>
+  <li><code>3713899</code> — AMO. Сделка в работе</li>
+  <li><code>3713898</code> — AMO. Закрыто и не реализованно</li>
+  <li><code>3713878</code> — AMO. Успешно реализованные</li>
+</ul>
+
+<h2>Данные сделки</h2>
+<ol>
+  <li>VK ID берется из поля сделки <code>utm_term</code>. Имя поля можно изменить во вкладке «Настройки».</li>
+  <li>Если webhook не содержит это поле, модуль запрашивает сделку через amoCRM API.</li>
+  <li>Точное имя ответственного берется через amoCRM users API по <code>responsible_user_id</code>.</li>
+  <li>После добавления в Senler вызывается <code>vars/set</code> для <code>amo_responsible</code> и <code>amo_deal_id</code>.</li>
+</ol>
+
+<h2>API модуля</h2>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/env-status</code></td><td>Проверка наличия ENV без вывода значений</td></tr>
+  <tr><td>GET/POST</td><td><code>/settings</code></td><td>Настройки webhook secret, поля VK ID и таймаута</td></tr>
+  <tr><td>GET</td><td><code>/amo/statuses</code></td><td>Список воронок и статусов amoCRM для выбора галочками</td></tr>
+  <tr><td>GET/POST</td><td><code>/bindings</code></td><td>Список и сохранение связок статусов</td></tr>
+  <tr><td>PUT</td><td><code>/bindings/{id}/toggle</code></td><td>Включить/отключить связку</td></tr>
+  <tr><td>DELETE</td><td><code>/bindings/{id}</code></td><td>Удалить связку</td></tr>
+  <tr><td>GET</td><td><code>/events</code></td><td>Журнал обработок</td></tr>
+  <tr><td>GET</td><td><code>/events/{id}</code></td><td>Детали события</td></tr>
+  <tr><td>POST</td><td><code>/webhook</code></td><td>Webhook amoCRM</td></tr>
+</table>
+</body></html>

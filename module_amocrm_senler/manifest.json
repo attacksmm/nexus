@@ -1,0 +1,19 @@
+{
+  "id": "amocrm-senler",
+  "name": "amoCRM -> Senler",
+  "version": "1.0.0",
+  "description": "Принимает webhook amoCRM по сделкам, добавляет VK-подписчика в нужную группу Senler и записывает переменные amo_responsible/amo_deal_id.",
+  "env_vars": {
+    "SENLER_ACCESS_TOKEN": "Токен API Senler. Senler -> Настройки -> API -> Токен доступа",
+    "SENLER_GROUP_ID": "Числовой ID группы ВКонтакте, к которой подключен Senler",
+    "AMO_BASE_URL": "Базовый URL аккаунта amoCRM, например https://example.amocrm.ru",
+    "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с доступом к сделкам и пользователям",
+    "AMO_SENLER_WEBHOOK_SECRET": "Необязательный секрет webhook. Можно задать в настройках модуля вместо ENV"
+  },
+  "env_required": [
+    "SENLER_ACCESS_TOKEN",
+    "SENLER_GROUP_ID",
+    "AMO_BASE_URL",
+    "AMO_ACCESS_TOKEN"
+  ]
+}
