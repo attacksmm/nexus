@@ -679,8 +679,6 @@ def _amo_success_note_text(vk_id: str, subscription_id: str, responsible_name: s
         f"Группа Senler: {subscription_id}",
         f"Сделка amoCRM: {deal_id}",
         f"VK диалог: https://vk.ru/gim225075265?sel={vk_id}",
-        "Senler email: {%email%}",
-        "Senler phone: {%phone%}",
     ]
     if responsible_name:
         lines.insert(3, f"Ответственный: {responsible_name}")
