@@ -14,7 +14,7 @@
 </table>
 
 <h2>Webhook</h2>
-<p>URL берется во вкладке «Webhook». Если задан секрет, amoCRM должна отправлять запрос на URL с <code>?secret=...</code>. Модуль принимает стандартный формат amoCRM <code>application/x-www-form-urlencoded</code> и JSON для ручного теста.</p>
+<p>URL берется во вкладке «Webhook». Если задан секрет, amoCRM должна отправлять запрос на URL с <code>?secret=...</code>. Модуль принимает стандартный формат amoCRM <code>application/x-www-form-urlencoded</code> и JSON для ручного теста. Ответ для amoCRM всегда возвращается с HTTP 200, чтобы amoCRM не отключала webhook из-за технических ошибок обработки.</p>
 <pre><code>POST /amocrm-senler/api/webhook
 Content-Type: application/x-www-form-urlencoded
 
@@ -38,8 +38,8 @@ leads[status][0][responsible_user_id]=987654</code></pre>
 <ol>
   <li>VK ID берется из поля сделки <code>utm_term</code>. Имя поля можно изменить во вкладке «Настройки». Если поле содержит URL или строку с query-параметром <code>utm_term=...</code>, модуль извлечет значение из нее.</li>
   <li>Если webhook не содержит это поле, модуль запрашивает сделку через amoCRM API.</li>
-  <li>Точное имя ответственного берется через amoCRM users API по <code>responsible_user_id</code>.</li>
-  <li>После добавления в Senler вызывается <code>vars/set</code> для <code>amo_responsible</code> и <code>amo_deal_id</code>.</li>
+  <li>Точное имя ответственного берется через amoCRM users API по <code>responsible_user_id</code>. Если amoCRM передала <code>0</code> или пустое значение, модуль не подставляет выдуманное имя.</li>
+  <li>После добавления в Senler вызывается <code>vars/set</code> для <code>amo_deal_id</code>. <code>amo_responsible</code> записывается только когда amoCRM отдала точного ответственного.</li>
 </ol>
 
 <h2>API модуля</h2>

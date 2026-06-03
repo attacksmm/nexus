@@ -277,6 +277,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _int_value(value: Any) -> int:
+    try:
+        return int(str(value or "0").strip())
+    except Exception:
+        return 0
+
+
 def _mask(value: str, keep: int = 4) -> str:
     value = str(value or "")
     if not value:
@@ -371,7 +378,7 @@ def _iter_lead_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(leads, dict):
         return []
     events: list[dict[str, Any]] = []
-    for action in ("add", "status"):
+    for action in ("add", "status", "update"):
         bucket = leads.get(action)
         if not bucket:
             continue
@@ -386,8 +393,23 @@ def _iter_lead_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             event = {str(k): v for k, v in item.items()}
             event["_action"] = action
+            if action == "update" and _is_creation_update(event):
+                event["_action"] = "add"
+                event["_source_action"] = "update"
+            elif action == "update":
+                event["_ignored_update"] = "1"
             events.append(event)
     return events
+
+
+def _is_creation_update(event: dict[str, Any]) -> bool:
+    if _clean(event.get("old_status_id"), 64):
+        return False
+    date_create = _int_value(event.get("date_create") or event.get("created_at"))
+    last_modified = _int_value(event.get("last_modified") or event.get("updated_at"))
+    if not date_create or not last_modified:
+        return False
+    return 0 <= last_modified - date_create <= 180
 
 
 def _custom_field_value(source: dict[str, Any], field_name: str) -> str:
@@ -485,6 +507,8 @@ def _category_for_action(action: str) -> str:
 
 
 async def _find_binding(event: dict[str, Any]) -> dict[str, Any] | None:
+    if event.get("_ignored_update"):
+        return None
     action = _clean(event.get("_action"))
     pipeline_id = _clean(event.get("pipeline_id"), 64)
     status_id = _clean(event.get("status_id"), 64)
@@ -733,7 +757,12 @@ async def _senler_apply(subscription_id: str, vk_id: str, responsible_name: str,
     if not add_ok:
         return False, add_error, details
 
-    for name, value in (("amo_responsible", responsible_name), ("amo_deal_id", deal_id)):
+    vars_to_set = [("amo_deal_id", deal_id)]
+    if responsible_name:
+        vars_to_set.insert(0, ("amo_responsible", responsible_name))
+    else:
+        details["vars"].append({"name": "amo_responsible", "ok": True, "skipped": True, "reason": "responsible_user_id пустой или amoCRM не вернула имя"})
+    for name, value in vars_to_set:
         ok, error, var_details = await _senler_post(
             _EP_VAR_SET,
             {**base, "name": name, "value": value},
@@ -834,7 +863,10 @@ async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict
     }
     if not binding:
         base_row["ignored"] = 1
-        base_row["error"] = "нет активной связки для события"
+        if event.get("_ignored_update"):
+            base_row["error"] = "update ignored: событие изменения без создания или смены статуса"
+        else:
+            base_row["error"] = "нет активной связки для события"
         base_row["details"] = json.dumps({"event": event}, ensure_ascii=False)
         event_id = await _store_event(base_row)
         return {"id": event_id, "ok": True, "ignored": True, "error": base_row["error"]}
@@ -857,17 +889,19 @@ async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict
         event_id = await _store_event(base_row)
         return {"id": event_id, "ok": False, "error": base_row["error"]}
 
-    responsible_name, responsible_error = await _responsible_name(responsible_user_id, settings)
+    responsible_name = ""
+    responsible_error = ""
+    if responsible_user_id and responsible_user_id != "0":
+        responsible_name, responsible_error = await _responsible_name(responsible_user_id, settings)
+    else:
+        responsible_error = "responsible_user_id пустой или 0"
     base_row["responsible_name"] = responsible_name
-    if not responsible_name:
-        base_row["error"] = f"не удалось получить точное имя ответственного: {responsible_error}"
-        base_row["details"] = json.dumps({"event": event, "deal_error": deal_error}, ensure_ascii=False)
-        event_id = await _store_event(base_row)
-        return {"id": event_id, "ok": False, "error": base_row["error"]}
 
     ok, error, senler_details = await _senler_apply(
         binding["subscription_id"], vk_id, responsible_name, deal_id, settings
     )
+    if ok and not responsible_name:
+        error = f"amo_responsible не записан: {responsible_error}"
     if ok and binding.get("category") != "created" and int(binding.get("exclusive_groups") or 0):
         other_subscription_ids = await _other_subscription_ids(binding.get("id"), binding["subscription_id"])
         remove_ok, remove_error, remove_details = await _senler_remove_from_groups(other_subscription_ids, vk_id, settings)
@@ -894,7 +928,10 @@ async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict
     )
     event_id = await _store_event(base_row)
     if ok:
-        _log("info", "amo deal %s -> Senler %s OK", deal_id, binding["subscription_id"])
+        if error:
+            _log("warning", "amo deal %s -> Senler %s OK with warning: %s", deal_id, binding["subscription_id"], error)
+        else:
+            _log("info", "amo deal %s -> Senler %s OK", deal_id, binding["subscription_id"])
     else:
         _log("warning", "amo deal %s -> Senler %s FAIL: %s", deal_id, binding["subscription_id"], error)
     return {"id": event_id, "ok": ok, "ignored": False, "error": error}
@@ -1166,7 +1203,7 @@ async def webhook(request: Request):
     settings = await _settings_map()
     if not _secret_ok(request, settings):
         _log("warning", "webhook rejected: invalid secret")
-        return JSONResponse({"ok": False, "error": "invalid secret"}, status_code=403)
+        return JSONResponse({"ok": False, "error": "invalid secret"}, status_code=200)
     try:
         payload, raw_payload = await _read_payload(request)
         events = _iter_lead_events(payload)
