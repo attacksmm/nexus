@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -378,7 +379,7 @@ def _iter_lead_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(leads, dict):
         return []
     events: list[dict[str, Any]] = []
-    for action in ("add", "status", "update"):
+    for action in ("add", "status", "responsible", "update"):
         bucket = leads.get(action)
         if not bucket:
             continue
@@ -474,7 +475,7 @@ def _recursive_key_value(value: Any, target: str) -> str:
 
 
 def _query_value(text: str, target: str) -> str:
-    current = str(text or "")
+    current = html.unescape(str(text or ""))
     for _ in range(3):
         match = re.search(rf"(?:^|[?&#;\s]){re.escape(target)}=([^&#;\s]+)", current, re.IGNORECASE)
         if match:
@@ -568,6 +569,27 @@ async def _amo_get(path: str, settings: dict[str, str]) -> tuple[dict[str, Any] 
         return None, str(exc)
 
 
+async def _amo_post(path: str, payload: Any, settings: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
+    env = _env()
+    if not env["amo_base_url"] or not env["amo_token"]:
+        return None, "AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы"
+    try:
+        async with httpx.AsyncClient(timeout=_timeout(settings)) as client:
+            resp = await client.post(
+                env["amo_base_url"] + path,
+                headers={
+                    "Authorization": f"Bearer {env['amo_token']}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code >= 400:
+            return None, f"amoCRM HTTP {resp.status_code}: {resp.text[:500]}"
+        return resp.json() if resp.text else {}, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
 async def _load_deal(deal_id: str, settings: dict[str, str]) -> tuple[dict[str, Any], str]:
     if not deal_id:
         return {}, "deal_id пустой"
@@ -649,6 +671,37 @@ async def _responsible_name(user_id: str, settings: dict[str, str]) -> tuple[str
         )
         await db.commit()
     return name, ""
+
+
+def _amo_success_note_text(vk_id: str, subscription_id: str, responsible_name: str, deal_id: str) -> str:
+    lines = [
+        "amoCRM -> Senler: подписчик обработан и отправлен в Senler.",
+        f"Группа Senler: {subscription_id}",
+        f"Сделка amoCRM: {deal_id}",
+        f"VK диалог: https://vk.ru/gim225075265?sel={vk_id}",
+        "Senler email: {%email%}",
+        "Senler phone: {%phone%}",
+    ]
+    if responsible_name:
+        lines.insert(3, f"Ответственный: {responsible_name}")
+    return "\n".join(lines)
+
+
+async def _amo_add_success_note(
+    deal_id: str,
+    vk_id: str,
+    subscription_id: str,
+    responsible_name: str,
+    settings: dict[str, str],
+) -> tuple[bool, str, dict[str, Any]]:
+    text = _amo_success_note_text(vk_id, subscription_id, responsible_name, deal_id)
+    body, error = await _amo_post(
+        f"/api/v4/leads/{deal_id}/notes",
+        [{"note_type": "common", "params": {"text": text}}],
+        settings,
+    )
+    details = {"request": {"note_type": "common", "params": {"text": text}}, "response": body}
+    return not error, error, details
 
 
 async def _senler_check(access_token: str, group_id: str, subscription_id: str, vk_id: str, timeout: int) -> tuple[bool | None, Any]:
@@ -915,6 +968,16 @@ async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict
             error = remove_error
     elif ok:
         senler_details["exclusive_remove"] = {"enabled": False}
+    if ok:
+        note_ok, note_error, note_details = await _amo_add_success_note(
+            deal_id, vk_id, binding["subscription_id"], responsible_name, settings
+        )
+        senler_details["amo_note"] = {"ok": note_ok, "error": note_error, "details": note_details}
+        if not note_ok:
+            note_warning = f"amo note не добавлен: {note_error}"
+            error = f"{error}; {note_warning}" if error else note_warning
+    else:
+        senler_details["amo_note"] = {"ok": False, "skipped": True}
     base_row["success"] = int(ok)
     base_row["error"] = error
     base_row["details"] = json.dumps(
