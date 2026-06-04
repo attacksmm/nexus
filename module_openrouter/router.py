@@ -928,13 +928,21 @@ async def get_models(request: Request, refresh: int = 0):
     return {"items": items, "cached": False}
 
 
-async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str, defer_summary: bool = False) -> dict[str, Any]:
+async def _run_chat(
+    data: ChatIn | TestChatIn,
+    *,
+    allow_write: bool,
+    source: str,
+    defer_summary: bool = False,
+    prefer_summary_context: bool = False,
+) -> dict[str, Any]:
     platform_id = _clean(data.platform_id, 300)
     conversation_id = _clean(data.conversation_id, 200) or None
     message = _clean(data.message, 50000)
     if not message:
         raise HTTPException(400, "message is required")
     mode = _context_mode(data.context)
+    read_mode = 2 if prefer_summary_context and mode == 4 else mode
     prompt_path, prompt_text = await _resolve_prompt(data.prompt)
     settings = await _settings()
     model = await _model_for_prompt(prompt_path, settings, data.model)
@@ -944,17 +952,17 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
         if not platform_id:
             raise HTTPException(400, "platform_id is required when conversation_id is not provided")
         cid = await _resolve_conversation(db, platform_id=platform_id, conversation_id=conversation_id, prompt_path=prompt_path, model=model)
-        summary = await _user_summary(db, platform_id) if mode in (1, 2) else ""
-        if mode in (1, 2):
+        summary = await _user_summary(db, platform_id) if read_mode in (1, 2) else ""
+        if read_mode in (1, 2):
             history = [] if summary else await _load_history(db, cid, _history_limit(settings))
-        elif mode in (3, 4):
+        elif read_mode in (3, 4):
             history = await _load_history(db, cid, -1)
         else:
             history = []
         await db.commit()
     _log(
         "info",
-        "chat start source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s message_chars=%s",
+        "chat start source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s read_context=%s message_chars=%s",
         source,
         allow_write,
         platform_id,
@@ -962,9 +970,10 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
         prompt_path,
         model,
         mode,
+        read_mode,
         len(message),
     )
-    answer, usage = await _call_openrouter(model, _context_payload(prompt_text, summary, history, message, mode), _timeout(settings))
+    answer, usage = await _call_openrouter(model, _context_payload(prompt_text, summary, history, message, read_mode), _timeout(settings))
     summary_result = None
     summary_error = ""
     if allow_write and mode in (2, 3, 4):
@@ -1011,6 +1020,7 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
         "conversation_id": cid,
         "prompt": prompt_path,
         "model": model,
+        "read_context": read_mode,
         "text": answer,
         "answer": answer,
         "usage": usage,
@@ -1077,7 +1087,7 @@ async def senler_chat(request: Request):
             raise HTTPException(400, f"invalid senler body: {_validation_detail(exc)}")
         except Exception:
             raise HTTPException(400, "invalid JSON body")
-        result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True)
+        result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True, prefer_summary_context=True)
         vars_out: list[dict[str, str]] = []
         _senler_var(vars_out, data.answer_var, result.get("text", ""))
         _senler_var(vars_out, data.conversation_id_var, result.get("conversation_id", ""))
@@ -1139,7 +1149,7 @@ async def api_schema(request: Request):
             "method": "POST",
             "path": "/nexus/openrouter/api/senler-chat",
             "auth": "Authorization: Bearer <токен модуля из настроек>",
-            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var",
+            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var. При context=4 ответ строится по краткой сводке, а sales-сводка обновляется в фоне.",
             "response": {
                 "vars": [
                     {"n": "ai_answer", "v": "текст ответа модели"},

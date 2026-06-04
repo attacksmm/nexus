@@ -168,6 +168,8 @@ Content-Type: application/json
 
 Имена переменных можно переопределить в теле запроса: `answer_var`, `conversation_id_var`, `platform_id_var`, `model_var`, `summary_var`, `summary_error_var`. Пустое имя отключает запись конкретной переменной.
 
+Для Senler можно отправлять `context: 4`: endpoint вернет ответ по краткой sales-сводке, сохранит вопрос/ответ и обновит сводку в фоне, не удерживая webhook ожиданием полной истории.
+
 Ручное пополнение контекста:
 
 ```http
