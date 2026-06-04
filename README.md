@@ -108,6 +108,7 @@ nexus/
 Ключевые возможности:
 
 - внешний `POST /nexus/openrouter/api/chat` с Bearer token, который генерируется самим модулем;
+- отдельный `POST /nexus/openrouter/api/senler-chat`, который возвращает ответ в формате Senler `vars`/`glob_vars`;
 - автоматическое создание `conversation_id`, если он не передан;
 - режимы контекста: `0` не читает и не пишет историю, `1` читает краткий контекст без записи, `2` читает краткий контекст и сохраняет вопрос/ответ, `3` читает полный контекст и сохраняет, `4` делает то же, что `3`, и автоматически обновляет краткую сводку;
 - при кратком чтении сохранённая сводка клиента используется в приоритете вместо истории сообщений;
@@ -135,6 +136,37 @@ Content-Type: application/json
   "context": 2
 }
 ```
+
+Запрос для Senler webhook использует те же поля, но возвращает переменные для блока «Обработать ответ в переменные»:
+
+```http
+POST /nexus/openrouter/api/senler-chat
+Authorization: Bearer <ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК>
+Content-Type: application/json
+
+{
+  "platform_id": 123456,
+  "conversation_id": null,
+  "prompt": "prompts/avito_gpt1.txt",
+  "message": "Вопрос клиента",
+  "context": 2
+}
+```
+
+Ответ:
+
+```json
+{
+  "vars": [
+    {"n": "ai_answer", "v": "Ответ модели"},
+    {"n": "conversation_id", "v": "or_conv_..."},
+    {"n": "platform_id", "v": "123456"}
+  ],
+  "glob_vars": []
+}
+```
+
+Имена переменных можно переопределить в теле запроса: `answer_var`, `conversation_id_var`, `platform_id_var`, `model_var`, `summary_var`, `summary_error_var`. Пустое имя отключает запись конкретной переменной.
 
 Ручное пополнение контекста:
 

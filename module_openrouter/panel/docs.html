@@ -25,6 +25,27 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
 }</pre>
   <p><code>context=0</code> не читает и не пишет историю, <code>context=1</code> читает краткий контекст, но не пишет, <code>context=2</code> читает краткий контекст и сохраняет вопрос/ответ, <code>context=3</code> читает полный контекст и сохраняет, <code>context=4</code> делает то же, что <code>3</code>, и после ответа автоматически обновляет краткую сводку.</p>
   <p>Если у клиента уже есть краткая сводка, при кратком чтении она используется в приоритете вместо истории сообщений.</p>
+  <h2>Senler webhook</h2>
+  <p>Для блока Senler «Обработать ответ в переменные» используйте отдельный endpoint. Он принимает те же поля, что <code>/chat</code>, но возвращает <code>vars</code> и <code>glob_vars</code>.</p>
+  <pre>POST /nexus/openrouter/api/senler-chat
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
+
+{
+  "platform_id": 123456,
+  "conversation_id": null,
+  "prompt": "prompts/avito_gpt1.txt",
+  "message": "Вопрос клиента",
+  "context": 2
+}</pre>
+  <pre>{
+  "vars": [
+    {"n": "ai_answer", "v": "Ответ модели"},
+    {"n": "conversation_id", "v": "or_conv_..."},
+    {"n": "platform_id", "v": "123456"}
+  ],
+  "glob_vars": []
+}</pre>
+  <p>Имена переменных можно переопределить полями <code>answer_var</code>, <code>conversation_id_var</code>, <code>platform_id_var</code>, <code>model_var</code>, <code>summary_var</code>, <code>summary_error_var</code>. Пустое имя отключает запись конкретной переменной.</p>
   <h2>Получение контекста</h2>
   <pre>GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
 Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>

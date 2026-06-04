@@ -175,7 +175,22 @@ async def _init_db():
 
 
 class TextInputMixin(BaseModel):
-    @field_validator("platform_id", "conversation_id", "prompt", "message", "question", "answer", mode="before", check_fields=False)
+    @field_validator(
+        "platform_id",
+        "conversation_id",
+        "prompt",
+        "message",
+        "question",
+        "answer",
+        "answer_var",
+        "conversation_id_var",
+        "platform_id_var",
+        "model_var",
+        "summary_var",
+        "summary_error_var",
+        mode="before",
+        check_fields=False,
+    )
     @classmethod
     def _normalize_text_input(cls, value: Any) -> str:
         return _coerce_text_input(value)
@@ -197,6 +212,15 @@ class TestChatIn(TextInputMixin):
     message: str
     context: int | bool = 1
     model: str | None = None
+
+
+class SenlerChatIn(ChatIn):
+    answer_var: str = "ai_answer"
+    conversation_id_var: str = "conversation_id"
+    platform_id_var: str = "platform_id"
+    model_var: str = ""
+    summary_var: str = ""
+    summary_error_var: str = ""
 
 
 class AppendIn(TextInputMixin):
@@ -993,6 +1017,41 @@ async def test_chat(request: Request):
         raise
 
 
+def _senler_var(items: list[dict[str, str]], name: str, value: Any) -> None:
+    clean_name = _clean(name, 120)
+    if not clean_name or value is None:
+        return
+    items.append({"n": clean_name, "v": str(value)})
+
+
+@router.post("/senler-chat")
+async def senler_chat(request: Request):
+    try:
+        await _require_bearer(request)
+        try:
+            raw = await request.json()
+            data = SenlerChatIn(**raw)
+        except ValidationError as exc:
+            raise HTTPException(400, f"invalid senler body: {_validation_detail(exc)}")
+        except Exception:
+            raise HTTPException(400, "invalid JSON body")
+        result = await _run_chat(data, allow_write=True, source="senler")
+        vars_out: list[dict[str, str]] = []
+        _senler_var(vars_out, data.answer_var, result.get("text", ""))
+        _senler_var(vars_out, data.conversation_id_var, result.get("conversation_id", ""))
+        _senler_var(vars_out, data.platform_id_var, result.get("platform_id", ""))
+        _senler_var(vars_out, data.model_var, result.get("model", ""))
+        _senler_var(vars_out, data.summary_var, result.get("summary", ""))
+        _senler_var(vars_out, data.summary_error_var, result.get("summary_error", ""))
+        return {"vars": vars_out, "glob_vars": []}
+    except HTTPException as exc:
+        _log("warning", "senler-chat failed status=%s detail=%s", exc.status_code, exc.detail)
+        raise
+    except Exception as exc:
+        _log("error", "senler-chat crashed: %s", exc, exc_info=True)
+        raise
+
+
 @router.get("/schema")
 async def api_schema(request: Request):
     await _require_bearer_or_panel(request)
@@ -1033,6 +1092,20 @@ async def api_schema(request: Request):
             "brief": "GET /nexus/openrouter/api/context/brief?platform_id=vk_123 или ?conversation_id=or_conv_...",
             "full": "GET /nexus/openrouter/api/context/full?platform_id=vk_123 или ?conversation_id=or_conv_...",
             "append": "POST /nexus/openrouter/api/context/append",
+        },
+        "senler_chat": {
+            "method": "POST",
+            "path": "/nexus/openrouter/api/senler-chat",
+            "auth": "Authorization: Bearer <токен модуля из настроек>",
+            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var",
+            "response": {
+                "vars": [
+                    {"n": "ai_answer", "v": "текст ответа модели"},
+                    {"n": "conversation_id", "v": "or_conv_..."},
+                    {"n": "platform_id", "v": "vk_123"},
+                ],
+                "glob_vars": [],
+            },
         },
         "panel_test": {
             "method": "POST",
