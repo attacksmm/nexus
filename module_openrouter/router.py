@@ -759,6 +759,22 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
     return {"platform_id": conv["platform_id"], "conversation_id": conversation_id, "model": summary_model, "summary": summary, "usage": usage}
 
 
+async def _generate_summary_background(conversation_id: str) -> None:
+    try:
+        result = await _generate_and_save_summary(conversation_id)
+        _log(
+            "info",
+            "chat auto-summary ok conversation_id=%s model=%s summary_chars=%s",
+            conversation_id,
+            result.get("model", ""),
+            len(result.get("summary", "") or ""),
+        )
+    except HTTPException as exc:
+        _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", conversation_id, exc.detail)
+    except Exception as exc:
+        _log("error", "chat auto-summary crashed conversation_id=%s detail=%s", conversation_id, exc, exc_info=True)
+
+
 @router.get("/env-status")
 async def env_status(request: Request):
     await _require_panel_user(request)
@@ -890,7 +906,7 @@ async def get_models(request: Request, refresh: int = 0):
     return {"items": items, "cached": False}
 
 
-async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str) -> dict[str, Any]:
+async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str, defer_summary: bool = False) -> dict[str, Any]:
     platform_id = _clean(data.platform_id, 300)
     conversation_id = _clean(data.conversation_id, 200) or None
     message = _clean(data.message, 50000)
@@ -945,11 +961,15 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
             )
             await db.commit()
         if mode == 4:
-            try:
-                summary_result = await _generate_and_save_summary(cid)
-            except HTTPException as exc:
-                summary_error = str(exc.detail)
-                _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", cid, summary_error)
+            if defer_summary:
+                asyncio.create_task(_generate_summary_background(cid))
+                _log("info", "chat auto-summary scheduled conversation_id=%s source=%s", cid, source)
+            else:
+                try:
+                    summary_result = await _generate_and_save_summary(cid)
+                except HTTPException as exc:
+                    summary_error = str(exc.detail)
+                    _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", cid, summary_error)
     _log(
         "info",
         "chat ok source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s total_tokens=%s answer_chars=%s",
@@ -1035,7 +1055,7 @@ async def senler_chat(request: Request):
             raise HTTPException(400, f"invalid senler body: {_validation_detail(exc)}")
         except Exception:
             raise HTTPException(400, "invalid JSON body")
-        result = await _run_chat(data, allow_write=True, source="senler")
+        result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True)
         vars_out: list[dict[str, str]] = []
         _senler_var(vars_out, data.answer_var, result.get("text", ""))
         _senler_var(vars_out, data.conversation_id_var, result.get("conversation_id", ""))
