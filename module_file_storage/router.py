@@ -251,6 +251,47 @@ async def list_items(folder_id: int, request: Request):
     return {"folder_id": folder_id, "path": path, "items": items}
 
 
+@router.get("/path")
+async def resolve_path(request: Request, path: str = ""):
+    await _require_user(request)
+    parts = [part for part in str(path or "").strip("/").split("/") if part]
+    async with aiosqlite.connect(_must_db()) as db:
+        db.row_factory = aiosqlite.Row
+        current_id = ROOT_ID
+        current = None
+        if not parts:
+            cur = await db.execute(
+                """
+                SELECT id, parent_id, kind, name, ext, mime_type, size, created_at, updated_at
+                FROM items
+                WHERE id=?
+                """,
+                (ROOT_ID,),
+            )
+            current = await cur.fetchone()
+        for raw_name in parts:
+            name = _safe_name(raw_name)
+            cur = await db.execute(
+                """
+                SELECT id, parent_id, kind, name, ext, mime_type, size, created_at, updated_at
+                FROM items
+                WHERE parent_id=? AND name=?
+                """,
+                (current_id, name),
+            )
+            current = await cur.fetchone()
+            if not current:
+                raise HTTPException(404, "Путь не найден")
+            if raw_name != parts[-1] and current["kind"] != "folder":
+                raise HTTPException(404, "Путь не найден")
+            current_id = current["id"]
+        if not current:
+            raise HTTPException(404, "Путь не найден")
+        item = _item_dict(current)
+        path_chain = await _path_for(db, item["id"])
+    return {"item": item, "path": path_chain}
+
+
 @router.post("/folders", status_code=201)
 async def create_folder(data: FolderIn, request: Request):
     await _require_editor(request)
@@ -507,4 +548,3 @@ async def serve_file(token: str, filename: str):
         "Cache-Control": "public, max-age=3600",
     }
     return FileResponse(str(path), media_type=item["mime_type"], headers=headers)
-

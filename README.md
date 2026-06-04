@@ -94,6 +94,13 @@ nexus/
 /nexus/file-storage/api/f/{token}/{filename}
 ```
 
+Навигационные ссылки внутри авторизованного Nexus поддерживают человекочитаемый путь:
+
+```text
+/nexus/#file-storage/prompts
+/nexus/#file-storage/prompts/avito_gpt1.txt
+```
+
 ### `getcourse-orders`
 
 Webhook-модуль GetCourse. Принимает события заказов, нормализует состояние оплаты, пишет данные в `customer-db` и применяет правила распределения по группам Senler.

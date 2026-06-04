@@ -44,18 +44,30 @@ function applyOrder(list) {
 
 // ── Hash routing ──────────────────────────────────────────────────────────────
 
-function getHashModule() {
+function getHashRoute() {
   const h = location.hash.slice(1);
-  return h || null;
+  if (!h) return { id: null, path: "" };
+  const parts = h.split("/");
+  return {
+    id: parts.shift() || null,
+    path: parts.length ? "/" + parts.join("/") : "",
+  };
 }
-function setHashModule(id) {
-  history.pushState({module: id}, "", RP + "/#" + id);
+function getHashModule() {
+  return getHashRoute().id;
+}
+function setHashModule(id, path = "", replace = false) {
+  const cleanPath = path ? "/" + String(path).replace(/^\/+/, "") : "";
+  const url = RP + "/#" + id + cleanPath;
+  const method = replace ? "replaceState" : "pushState";
+  history[method]({module: id, path: cleanPath}, "", url);
   document.title = id ? `Nexus / ${modulesCache[id]?.name ?? id}` : "Nexus";
 }
 
 window.addEventListener("popstate", () => {
-  const id = getHashModule();
-  if (id && modulesCache[id]) selectModule(id, false);
+  const route = getHashRoute();
+  const id = route.id;
+  if (id && modulesCache[id]) selectModule(id, false, route.path);
   else if (!id) {
     activeModuleId = null;
     $("contentWelcome").hidden = false;
@@ -64,6 +76,14 @@ window.addEventListener("popstate", () => {
     document.title = "Nexus";
     document.querySelectorAll(".module-item").forEach(b => b.classList.remove("module-item--active"));
   }
+});
+
+window.addEventListener("message", event => {
+  if (event.origin !== location.origin) return;
+  const data = event.data || {};
+  if (data.type !== "nexus:set-module-path") return;
+  if (!activeModuleId || data.moduleId !== activeModuleId) return;
+  setHashModule(activeModuleId, data.path || "", true);
 });
 
 // ── Module list render ────────────────────────────────────────────────────────
@@ -149,7 +169,7 @@ function attachDrag(el) {
 
 // ── Select module ─────────────────────────────────────────────────────────────
 
-function selectModule(id, pushHistory = true) {
+function selectModule(id, pushHistory = true, modulePath = "") {
   activeModuleId = id;
   const m = modulesCache[id];
   if (!m) return;
@@ -158,12 +178,13 @@ function selectModule(id, pushHistory = true) {
     b.classList.toggle("module-item--active", b.dataset.id === id));
 
   $("topbarCrumb").textContent = m.name;
-  if (pushHistory) setHashModule(id);
+  if (pushHistory) setHashModule(id, modulePath);
 
   updateToolbar(m);
   $("contentWelcome").hidden = true;
   $("contentModule").hidden = false;
-  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html?v=${encodeURIComponent(m.version || "")}` : "about:blank";
+  const panelHash = modulePath ? "#" + modulePath.replace(/^\/?/, "/") : "";
+  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html?v=${encodeURIComponent(m.version || "")}${panelHash}` : "about:blank";
 
   // уведомления о статусе модуля
   if (m.status === "error") {
@@ -332,8 +353,8 @@ function esc(s) {
   renderModules(list);
 
   // hash routing — открыть модуль из URL
-  const hashId = getHashModule();
-  if (hashId && modulesCache[hashId]) {
-    selectModule(hashId, false);
+  const route = getHashRoute();
+  if (route.id && modulesCache[route.id]) {
+    selectModule(route.id, false, route.path);
   }
 })();

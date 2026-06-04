@@ -201,7 +201,8 @@ const state = {
   sortKey: 'name',
   sortDir: 1,
   config: { max_file_size: 104857600, allowed_extensions: [] },
-  editingId: null
+  editingId: null,
+  applyingRoute: false
 };
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
@@ -242,10 +243,61 @@ async function init(){
     state.config = await api('/config');
     $('statusLimit').textContent = `Лимит файла: ${fmtSize(state.config.max_file_size)}`;
   }catch(e){ setMsg(e.message, 'error'); }
-  await loadFolder(1);
+  const routePath = currentRoutePath();
+  if(routePath) await openRoutePath(routePath);
+  else await loadFolder(1);
 }
 
-async function loadFolder(id){
+function encodePathPart(part){return encodeURIComponent(part);}
+function pathFromChain(chain){
+  const names = (chain || []).filter(p => p.id !== 1).map(p => encodePathPart(p.name));
+  return names.length ? '/' + names.join('/') : '';
+}
+function pathForItem(item){
+  const folderPath = pathFromChain(state.path);
+  return (folderPath ? folderPath : '') + '/' + encodePathPart(item.name);
+}
+function currentRoutePath(){
+  const raw = location.hash.slice(1);
+  if(!raw) return '';
+  const parts = raw.replace(/^\/+/, '').split('/').filter(Boolean);
+  try{
+    return parts.length ? '/' + parts.map(part => decodeURIComponent(part)).join('/') : '';
+  }catch{
+    return '/' + raw.replace(/^\/+/, '');
+  }
+}
+function syncRoute(path){
+  const clean = path ? '/' + String(path).replace(/^\/+/, '') : '';
+  const nextHash = clean ? '#' + clean : '';
+  if(location.hash !== nextHash) history.replaceState(null, '', location.pathname + location.search + nextHash);
+  window.parent?.postMessage({type:'nexus:set-module-path', moduleId:'file-storage', path:clean}, location.origin);
+}
+async function openRoutePath(path){
+  const clean = String(path || '').replace(/^\/+/, '');
+  if(!clean){ await loadFolder(1); return; }
+  state.applyingRoute = true;
+  try{
+    const data = await api('/path?path=' + encodeURIComponent(clean));
+    const item = data.item;
+    if(item.kind === 'folder'){
+      await loadFolder(item.id, false);
+      syncRoute(pathFromChain(data.path));
+    }else{
+      await loadFolder(item.parent_id || 1, false);
+      state.selectedId = item.id;
+      renderItems();
+      await previewItem(item, true);
+    }
+  }catch(e){
+    await loadFolder(1, false);
+    setMsg(e.message, 'error');
+  }finally{
+    state.applyingRoute = false;
+  }
+}
+
+async function loadFolder(id, updateRoute = true){
   state.folderId = id;
   state.selectedId = null;
   try{
@@ -253,6 +305,7 @@ async function loadFolder(id){
     state.path = data.path;
     state.items = data.items;
     render();
+    if(updateRoute && !state.applyingRoute) syncRoute(pathFromChain(state.path));
   }catch(e){ setMsg(e.message, 'error'); }
 }
 
@@ -357,8 +410,9 @@ async function copyLink(item){
     setMsg('Ссылка скопирована', 'ok');
   }catch(e){ setMsg(e.message, 'error'); }
 }
-async function previewItem(item){
+async function previewItem(item, updateRoute = true){
   try{
+    if(updateRoute && !state.applyingRoute) syncRoute(pathForItem(item));
     const url = await getLink(item);
     $('previewTitle').textContent = item.name;
     $('previewUrl').value = url;
@@ -428,6 +482,11 @@ const body = $('fileBody');
 body.addEventListener('dragover', e => {e.preventDefault();body.classList.add('drop-active');});
 body.addEventListener('dragleave', e => {if(e.currentTarget === body) body.classList.remove('drop-active');});
 body.addEventListener('drop', e => {e.preventDefault();body.classList.remove('drop-active');if(e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files).catch(err=>setMsg(err.message,'error'));});
+
+window.addEventListener('hashchange', () => {
+  if(state.applyingRoute) return;
+  openRoutePath(currentRoutePath());
+});
 
 init();
 </script>
