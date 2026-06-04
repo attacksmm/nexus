@@ -11,10 +11,10 @@
 </head>
 <body><main>
   <h1>OpenRouter API</h1>
-  <p>Модуль принимает внешние запросы с Bearer token, читает промпты из file-storage и хранит локальный контекст по <code>platform_id</code>.</p>
+  <p>Модуль принимает внешние запросы с собственным Bearer token, читает промпты из file-storage и хранит локальный контекст по <code>platform_id</code>.</p>
   <h2>Генерация</h2>
   <pre>POST /nexus/openrouter/api/chat
-Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
 
 {
   "platform_id": "vk_123",
@@ -27,12 +27,12 @@ Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
   <p>Если у клиента уже есть краткая сводка, при кратком чтении она используется в приоритете вместо истории сообщений.</p>
   <h2>Получение контекста</h2>
   <pre>GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
-Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;</pre>
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>
   <pre>GET /nexus/openrouter/api/context/full?conversation_id=or_conv_...
-Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;</pre>
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>
   <h2>Ручное пополнение</h2>
   <pre>POST /nexus/openrouter/api/context/append
-Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
 
 {
   "platform_id": "vk_123",
@@ -41,5 +41,5 @@ Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
   "answer": "1) ответ пользователя"
 }</pre>
   <h2>Настройки</h2>
-  <p>OpenRouter API token можно указать во вкладке «Настройки». Непустое значение сохраняется в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
+  <p>Во вкладке «Настройки» отображается токен модуля для бота. OpenRouter API token можно указать там же: непустое значение сохраняется в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
 </main></body></html>

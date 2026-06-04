@@ -26,6 +26,7 @@ DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_TIMEOUT = 90
 MAX_HISTORY_MESSAGES = 80
 SUMMARY_MAX_CHARS = 1800
+MODULE_TOKEN_SETTING = "module_api_token"
 
 _ctx = None
 _db_path: Path | None = None
@@ -145,6 +146,14 @@ async def _init_db():
         }
         for key, value in defaults.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+        cur = await db.execute("SELECT value FROM settings WHERE key=?", (MODULE_TOKEN_SETTING,))
+        row = await cur.fetchone()
+        if not row or not row[0]:
+            module_token = _env()["api_token"] or secrets.token_urlsafe(40)
+            await db.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (MODULE_TOKEN_SETTING, module_token),
+            )
         await db.commit()
     _log("info", "openrouter DB initialized")
 
@@ -192,9 +201,9 @@ async def _require_panel_user(request: Request) -> dict:
 
 
 async def _require_bearer(request: Request) -> None:
-    expected = _env()["api_token"]
+    expected = await _module_api_token()
     if not expected:
-        raise HTTPException(503, "NEXUS_OPENROUTER_API_TOKEN is not configured")
+        raise HTTPException(503, "module API token is not configured")
     header = request.headers.get("authorization", "")
     prefix = "Bearer "
     if not header.startswith(prefix) or not secrets.compare_digest(header[len(prefix):].strip(), expected):
@@ -237,6 +246,32 @@ async def _settings() -> dict[str, str]:
     }
     data.update({row[0]: row[1] for row in rows})
     return data
+
+
+async def _module_api_token() -> str:
+    async with aiosqlite.connect(_must_db()) as db:
+        cur = await db.execute("SELECT value FROM settings WHERE key=?", (MODULE_TOKEN_SETTING,))
+        row = await cur.fetchone()
+        if row and row[0]:
+            return str(row[0]).strip()
+        token = _env()["api_token"] or secrets.token_urlsafe(40)
+        await db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (MODULE_TOKEN_SETTING, token),
+        )
+        await db.commit()
+        return token
+
+
+async def _rotate_module_api_token() -> str:
+    token = secrets.token_urlsafe(40)
+    async with aiosqlite.connect(_must_db()) as db:
+        await db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (MODULE_TOKEN_SETTING, token),
+        )
+        await db.commit()
+    return token
 
 
 def _timeout(settings: dict[str, str]) -> float:
@@ -670,10 +705,12 @@ async def env_status(request: Request):
     await _require_panel_user(request)
     env = _env()
     fs_db = _file_storage_db_path()
+    module_token = await _module_api_token()
     return {
-        "ready": bool(env["openrouter_key"] and env["api_token"] and fs_db.exists()),
+        "ready": bool(env["openrouter_key"] and module_token and fs_db.exists()),
         "OPENROUTER_API_KEY": bool(env["openrouter_key"]),
-        "NEXUS_OPENROUTER_API_TOKEN": bool(env["api_token"]),
+        "NEXUS_OPENROUTER_API_TOKEN": bool(module_token),
+        "MODULE_API_TOKEN": bool(module_token),
         "file_storage_db": fs_db.exists(),
         "env_path": str(ENV_PATH),
     }
@@ -695,6 +732,18 @@ async def post_settings(data: SettingsIn, request: Request):
 async def put_settings(data: SettingsIn, request: Request):
     await _require_panel_user(request)
     return await _save_settings(data)
+
+
+@router.get("/api-token")
+async def get_api_token(request: Request):
+    await _require_panel_user(request)
+    return {"token": await _module_api_token()}
+
+
+@router.post("/api-token/rotate")
+async def rotate_api_token(request: Request):
+    await _require_panel_user(request)
+    return {"token": await _rotate_module_api_token()}
 
 
 @router.get("/prompts")

@@ -105,7 +105,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.1</div>
+    <div class="ver">v1.0.2</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -171,6 +171,15 @@
         <div class="field"><label>Модель для сводок</label><input id="summaryModel" class="input" list="modelsList" /></div>
         <div class="field"><label>Таймаут запроса, сек</label><input id="requestTimeout" class="input" type="number" min="10" max="180" /></div>
         <div class="field"><label>Лимит истории, сообщений</label><input id="historyLimit" class="input" type="number" min="0" max="200" /></div>
+        <div class="field" style="grid-column:1/-1">
+          <label>Токен модуля для бота</label>
+          <div style="display:flex;gap:8px;min-width:0">
+            <input id="moduleApiToken" class="input mono" readonly />
+            <button id="copyModuleToken" class="btn" type="button">Копировать</button>
+            <button id="rotateModuleToken" class="btn danger" type="button">Новый</button>
+          </div>
+          <p class="hint">Этот Bearer token передается в боте для запросов к Nexus. OpenRouter API key в бот передавать не нужно.</p>
+        </div>
         <div class="field" style="grid-column:1/-1">
           <label>OpenRouter API token</label>
           <input id="openrouterKey" class="input" type="password" autocomplete="off" placeholder="Оставьте пустым, если ключ уже задан в ENV" />
@@ -301,6 +310,7 @@ async function loadSettings(){
   $('requestTimeout').value = state.settings.request_timeout || 90;
   $('historyLimit').value = state.settings.history_limit || 80;
   $('summaryPrompt').value = state.settings.summary_prompt || '';
+  $('moduleApiToken').value = state.settings.module_api_token || '';
   $('openrouterKey').value = '';
 }
 async function saveSettings(){
@@ -323,6 +333,20 @@ async function loadModels(refresh=0){
   state.models = data.items || [];
   $('modelsList').innerHTML = state.models.map(m=>`<option value="${esc(m.id)}">${esc(m.name||m.id)}</option>`).join('');
   if(data.fallback) setMsg('OpenRouter models недоступны, показан fallback','error');
+}
+async function rotateModuleToken(){
+  if(!confirm('Старый токен перестанет работать. Создать новый токен модуля?')) return;
+  const data = await api('/api-token/rotate', {method:'POST'});
+  $('moduleApiToken').value = data.token || '';
+  await loadSettings();
+  await loadEnv();
+  setMsg('Токен модуля обновлен','ok');
+}
+async function copyModuleToken(){
+  const token = $('moduleApiToken').value;
+  if(!token) return;
+  await navigator.clipboard.writeText(token);
+  setMsg('Токен скопирован','ok');
 }
 async function loadPrompts(){
   const data = await api('/prompts');
@@ -463,6 +487,8 @@ $('promptsBody').addEventListener('click', e=>{
 });
 $('saveSettings').addEventListener('click', ()=>saveSettings().catch(e=>setMsg(e.message,'error')));
 $('checkEnv').addEventListener('click', ()=>loadEnv());
+$('copyModuleToken').addEventListener('click', ()=>copyModuleToken().catch(e=>setMsg(e.message,'error')));
+$('rotateModuleToken').addEventListener('click', ()=>rotateModuleToken().catch(e=>setMsg(e.message,'error')));
 $('searchUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
 $('refreshUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
 $('userSearch').addEventListener('keydown', e=>{if(e.key==='Enter') loadUsers().catch(err=>setMsg(err.message,'error'));});

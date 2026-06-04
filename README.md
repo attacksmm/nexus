@@ -107,7 +107,7 @@ nexus/
 
 Ключевые возможности:
 
-- внешний `POST /nexus/openrouter/api/chat` с Bearer token;
+- внешний `POST /nexus/openrouter/api/chat` с Bearer token, который генерируется самим модулем;
 - автоматическое создание `conversation_id`, если он не передан;
 - режимы контекста: `0` не читает и не пишет историю, `1` читает краткий контекст без записи, `2` читает краткий контекст и сохраняет вопрос/ответ, `3` читает полный контекст и сохраняет, `4` делает то же, что `3`, и автоматически обновляет краткую сводку;
 - при кратком чтении сохранённая сводка клиента используется в приоритете вместо истории сообщений;
@@ -121,7 +121,7 @@ nexus/
 
 ```http
 POST /nexus/openrouter/api/chat
-Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Authorization: Bearer <ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК>
 Content-Type: application/json
 
 {
@@ -137,7 +137,7 @@ Content-Type: application/json
 
 ```http
 POST /nexus/openrouter/api/context/append
-Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Authorization: Bearer <ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК>
 Content-Type: application/json
 
 {
@@ -148,23 +148,22 @@ Content-Type: application/json
 }
 ```
 
-Для работы нужны переменные окружения:
+Для работы нужен OpenRouter API key:
 
-- `OPENROUTER_API_KEY` — API ключ OpenRouter;
-- `NEXUS_OPENROUTER_API_TOKEN` — Bearer token для внешних вызовов модуля.
+- `OPENROUTER_API_KEY` — API ключ OpenRouter.
 
-`OPENROUTER_API_KEY` также можно задать во вкладке «Настройки» самого модуля: Nexus сохранит ключ в `.env` и загрузит его в окружение процесса.
+`OPENROUTER_API_KEY` можно задать во вкладке «Настройки» самого модуля: Nexus сохранит ключ в `.env` и загрузит его в окружение процесса. Токен для бота генерируется самим модулем, отображается в настройках и может быть перегенерирован без раскрытия OpenRouter API key.
 
 Контекст можно получить отдельно:
 
 ```http
 GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
-Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Authorization: Bearer <ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК>
 ```
 
 ```http
 GET /nexus/openrouter/api/context/full?conversation_id=or_conv_...
-Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Authorization: Bearer <ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК>
 ```
 
 ### `getcourse-orders`
