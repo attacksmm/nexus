@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from orchestrator.auth import ENV_PATH, _read_env_values, _write_env_values
 from orchestrator.auth import can_access_module, verify_token_from_request
@@ -47,9 +47,9 @@ def setup(ctx):
         loop.run_until_complete(_init_db())
 
 
-def _log(level: str, message: str, *args: Any) -> None:
+def _log(level: str, message: str, *args: Any, **kwargs: Any) -> None:
     if _logger:
-        getattr(_logger, level, _logger.info)(message, *args)
+        getattr(_logger, level, _logger.info)(message, *args, **kwargs)
 
 
 def _must_db() -> Path:
@@ -164,6 +164,15 @@ class ChatIn(BaseModel):
     prompt: str
     message: str
     context: int | bool = 2
+    model: str | None = None
+
+
+class TestChatIn(BaseModel):
+    platform_id: str = ""
+    conversation_id: str | None = None
+    prompt: str
+    message: str
+    context: int | bool = 1
     model: str | None = None
 
 
@@ -578,6 +587,7 @@ def _context_payload(prompt_text: str, summary: str, history: list[dict[str, str
 async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: float) -> tuple[str, dict[str, int]]:
     api_key = _env()["openrouter_key"]
     if not api_key:
+        _log("warning", "OpenRouter call blocked: OPENROUTER_API_KEY is not configured model=%s", model)
         raise HTTPException(503, "OPENROUTER_API_KEY is not configured")
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -588,10 +598,12 @@ async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(OPENROUTER_CHAT_URL, headers=headers, json={"model": model, "messages": messages})
     if resp.status_code >= 400:
+        _log("warning", "OpenRouter HTTP error status=%s model=%s body=%s", resp.status_code, model, resp.text[:500])
         raise HTTPException(502, f"OpenRouter HTTP {resp.status_code}: {resp.text[:1000]}")
     data = resp.json()
     choices = data.get("choices") or []
     if not choices:
+        _log("warning", "OpenRouter response missing choices model=%s body=%s", model, str(data)[:500])
         raise HTTPException(502, "OpenRouter response missing choices")
     content = choices[0].get("message", {}).get("content", "")
     if isinstance(content, list):
@@ -825,9 +837,7 @@ async def get_models(request: Request, refresh: int = 0):
     return {"items": items, "cached": False}
 
 
-@router.post("/chat")
-async def chat(data: ChatIn, request: Request):
-    await _require_bearer(request)
+async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str) -> dict[str, Any]:
     platform_id = _clean(data.platform_id, 300)
     conversation_id = _clean(data.conversation_id, 200) or None
     message = _clean(data.message, 50000)
@@ -837,6 +847,18 @@ async def chat(data: ChatIn, request: Request):
     prompt_path, prompt_text = await _resolve_prompt(data.prompt)
     settings = await _settings()
     model = await _model_for_prompt(prompt_path, settings, data.model)
+    _log(
+        "info",
+        "chat start source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s message_chars=%s",
+        source,
+        allow_write,
+        platform_id or "<by-conversation>",
+        conversation_id or "<auto>",
+        prompt_path,
+        model,
+        mode,
+        len(message),
+    )
     async with aiosqlite.connect(_must_db()) as db:
         if not platform_id and conversation_id:
             platform_id = await _platform_for_conversation(db, conversation_id)
@@ -854,7 +876,7 @@ async def chat(data: ChatIn, request: Request):
     answer, usage = await _call_openrouter(model, _context_payload(prompt_text, summary, history, message, mode), _timeout(settings))
     summary_result = None
     summary_error = ""
-    if mode in (2, 3, 4):
+    if allow_write and mode in (2, 3, 4):
         async with aiosqlite.connect(_must_db()) as db:
             await _save_turn(
                 db,
@@ -874,6 +896,20 @@ async def chat(data: ChatIn, request: Request):
                 summary_result = await _generate_and_save_summary(cid)
             except HTTPException as exc:
                 summary_error = str(exc.detail)
+                _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", cid, summary_error)
+    _log(
+        "info",
+        "chat ok source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s total_tokens=%s answer_chars=%s",
+        source,
+        allow_write,
+        platform_id,
+        cid,
+        prompt_path,
+        model,
+        mode,
+        int((usage or {}).get("total_tokens") or 0),
+        len(answer or ""),
+    )
     return {
         "ok": True,
         "platform_id": platform_id,
@@ -885,6 +921,100 @@ async def chat(data: ChatIn, request: Request):
         "usage": usage,
         "summary": summary_result["summary"] if summary_result else None,
         "summary_error": summary_error,
+    }
+
+
+@router.post("/chat")
+async def chat(request: Request):
+    try:
+        await _require_bearer(request)
+        try:
+            raw = await request.json()
+            data = ChatIn(**raw)
+        except ValidationError as exc:
+            _log("warning", "chat validation failed detail=%s", str(exc)[:1000])
+            raise HTTPException(400, f"invalid chat body: {str(exc)[:1000]}")
+        except Exception as exc:
+            _log("warning", "chat invalid json/body detail=%s", str(exc)[:1000])
+            raise HTTPException(400, "invalid JSON body")
+        return await _run_chat(data, allow_write=True, source="api")
+    except HTTPException as exc:
+        _log("warning", "chat failed status=%s detail=%s", exc.status_code, exc.detail)
+        raise
+    except Exception as exc:
+        _log("error", "chat crashed: %s", exc, exc_info=True)
+        raise
+
+
+@router.post("/test-chat")
+async def test_chat(request: Request):
+    try:
+        await _require_panel_user(request)
+        try:
+            raw = await request.json()
+            data = TestChatIn(**raw)
+        except ValidationError as exc:
+            _log("warning", "test-chat validation failed detail=%s", str(exc)[:1000])
+            raise HTTPException(400, f"invalid test body: {str(exc)[:1000]}")
+        except Exception as exc:
+            _log("warning", "test-chat invalid json/body detail=%s", str(exc)[:1000])
+            raise HTTPException(400, "invalid JSON body")
+        return await _run_chat(data, allow_write=False, source="panel_test")
+    except HTTPException as exc:
+        _log("warning", "test-chat failed status=%s detail=%s", exc.status_code, exc.detail)
+        raise
+    except Exception as exc:
+        _log("error", "test-chat crashed: %s", exc, exc_info=True)
+        raise
+
+
+@router.get("/schema")
+async def api_schema(request: Request):
+    await _require_bearer_or_panel(request)
+    return {
+        "chat": {
+            "method": "POST",
+            "path": "/nexus/openrouter/api/chat",
+            "auth": "Authorization: Bearer <токен модуля из настроек>",
+            "body_fields": {
+                "platform_id": "string, обязательный если не передан conversation_id",
+                "conversation_id": "string|null, если передан без platform_id, platform_id будет найден по чату",
+                "prompt": "string, путь к .txt prompt в file-storage, например prompts/avito_gpt1.txt",
+                "message": "string, вопрос пользователя",
+                "context": "0|1|2|3|4 или boolean; 0 без контекста, 1 краткий без записи, 2 краткий+запись, 3 полный+запись, 4 полный+запись+автосводка",
+                "model": "string|null, необязательный override модели",
+            },
+            "response_fields": {
+                "ok": "boolean",
+                "platform_id": "string",
+                "conversation_id": "string",
+                "prompt": "string",
+                "model": "string",
+                "text": "string, текст ответа",
+                "answer": "string, alias text",
+                "usage": "object с token usage",
+                "summary": "string|null, новая сводка при context=4",
+                "summary_error": "string, ошибка автосводки если ответ был получен, но сводка не обновилась",
+            },
+            "example": {
+                "platform_id": "vk_123",
+                "conversation_id": None,
+                "prompt": "prompts/avito_gpt1.txt",
+                "message": "Вопрос клиента",
+                "context": 2,
+            },
+        },
+        "context": {
+            "brief": "GET /nexus/openrouter/api/context/brief?platform_id=vk_123 или ?conversation_id=or_conv_...",
+            "full": "GET /nexus/openrouter/api/context/full?platform_id=vk_123 или ?conversation_id=or_conv_...",
+            "append": "POST /nexus/openrouter/api/context/append",
+        },
+        "panel_test": {
+            "method": "POST",
+            "path": "/nexus/openrouter/api/test-chat",
+            "auth": "Nexus cookie, только из панели",
+            "writes_context": False,
+        },
     }
 
 

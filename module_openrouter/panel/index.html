@@ -50,10 +50,12 @@
     .btn.icon{width:28px;padding:0}
     .input,.textarea,.select{width:100%;min-height:30px;border:1px solid var(--border-strong);background:#090909;color:var(--text);padding:6px 8px}
     .textarea{min-height:88px;resize:vertical;line-height:1.45;font-family:"IBM Plex Mono","Consolas",monospace;font-size:.78rem}
+    .codebox{min-height:160px;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--border);background:#050505;color:var(--muted);padding:10px;font-family:"IBM Plex Mono","Consolas",monospace;font-size:.78rem;line-height:1.45}
     .field{display:grid;gap:5px;min-width:0}
     .field label{font-size:.7rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
     .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:10px}
     .form-grid.wide{grid-template-columns:minmax(0,1fr)}
+    .test-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:10px}
     .hint{margin:0;color:var(--subtle);font-size:.78rem;line-height:1.45}
     .error{color:var(--bad);background:var(--bad-bg);border:1px solid var(--bad-bd);padding:7px 9px;font-size:.78rem}
 
@@ -93,6 +95,7 @@
       .topbar,.toolbar{align-items:stretch;flex-direction:column}
       .toolbar .grow{width:100%}
       .form-grid{grid-template-columns:minmax(0,1fr)}
+      .test-grid{grid-template-columns:minmax(0,1fr)}
       .col-date,.col-size{display:none}
       th.col-date,td.col-date,th.col-size,td.col-size{display:none}
       .dialog__body{grid-template-columns:minmax(0,1fr);grid-template-rows:150px minmax(0,1fr)}
@@ -105,7 +108,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.2</div>
+    <div class="ver">v1.0.4</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -114,12 +117,13 @@
   <div class="tabs">
     <button class="tab active" data-tab="prompts" type="button">Промпты</button>
     <button class="tab" data-tab="contexts" type="button">Контексты</button>
+    <button class="tab" data-tab="test" type="button">Протестировать</button>
     <button class="tab" data-tab="settings" type="button">Настройки</button>
   </div>
 
   <section id="view-prompts" class="view active">
     <div class="toolbar">
-      <input id="promptFilter" class="input grow" placeholder="Фильтр по пути prompt..." />
+      <input id="promptFilter" class="input grow" placeholder="Фильтр по пути prompt..." autocomplete="new-password" name="openrouter_prompt_filter" autocorrect="off" spellcheck="false" />
       <button id="refreshPrompts" class="btn icon ghost" type="button" title="Обновить">↻</button>
       <button id="refreshModels" class="btn" type="button">Модели</button>
     </div>
@@ -140,7 +144,7 @@
 
   <section id="view-contexts" class="view">
     <div class="toolbar">
-      <input id="userSearch" class="input grow" placeholder="platform_id или conversation_id..." />
+      <input id="userSearch" class="input grow" placeholder="platform_id или conversation_id..." autocomplete="new-password" name="openrouter_context_search" autocorrect="off" spellcheck="false" />
       <button id="searchUsers" class="btn" type="button">Найти</button>
       <button id="refreshUsers" class="btn icon ghost" type="button" title="Обновить">↻</button>
     </div>
@@ -157,6 +161,27 @@
         <tbody id="usersBody"></tbody>
       </table>
       <div id="usersEmpty" class="empty" hidden>Контексты не найдены</div>
+    </div>
+  </section>
+
+  <section id="view-test" class="view">
+    <div class="toolbar">
+      <button id="sendTest" class="btn primary" type="button">Отправить</button>
+      <button id="showSchema" class="btn" type="button">Поля API</button>
+      <button id="clearTest" class="btn ghost" type="button">Очистить</button>
+    </div>
+    <div class="content">
+      <div class="test-grid">
+        <div class="field"><label>Prompt</label><select id="testPrompt" class="select"></select></div>
+        <div class="field"><label>Модель</label><input id="testModel" class="input" list="modelsList" placeholder="по умолчанию для prompt" autocomplete="off" /></div>
+        <div class="field"><label>Контекст</label><select id="testContext" class="select"><option value="0">0 — без контекста</option><option value="1" selected>1 — краткий, без записи</option><option value="3">3 — полный, без записи</option></select></div>
+        <div class="field"><label>platform_id</label><input id="testPlatform" class="input" autocomplete="new-password" name="openrouter_test_platform" placeholder="например vk_123" /></div>
+        <div class="field"><label>conversation_id</label><input id="testConversation" class="input" autocomplete="new-password" name="openrouter_test_conversation" placeholder="можно вместо platform_id" /></div>
+        <div class="field"><label>Статус</label><input id="testStatus" class="input" readonly value="Готово" /></div>
+        <div class="field" style="grid-column:1/-1"><label>Тестовый вопрос</label><textarea id="testMessage" class="textarea" placeholder="Введите вопрос для OpenRouter. Контекст будет только прочитан, запись в историю не выполняется."></textarea></div>
+        <div class="field" style="grid-column:1/-1"><label>Request JSON</label><pre id="testRequest" class="codebox">{}</pre></div>
+        <div class="field" style="grid-column:1/-1"><label>Response JSON</label><pre id="testResponse" class="codebox">{}</pre></div>
+      </div>
     </div>
   </section>
 
@@ -352,7 +377,20 @@ async function loadPrompts(){
   const data = await api('/prompts');
   state.prompts = data.items || [];
   renderPrompts();
+  renderTestPrompts();
   setLeft(`${state.prompts.length} промптов`);
+}
+function renderTestPrompts(){
+  const current = $('testPrompt')?.value || '';
+  if(!$('testPrompt')) return;
+  $('testPrompt').innerHTML = state.prompts.map(p=>`<option value="${esc(p.path)}">${esc(p.path)}</option>`).join('');
+  if(current && state.prompts.some(p=>p.path===current)) $('testPrompt').value = current;
+  if(!$('testPrompt').value && state.prompts[0]) $('testPrompt').value = state.prompts[0].path;
+  syncTestModelPlaceholder();
+}
+function syncTestModelPlaceholder(){
+  const prompt = state.prompts.find(p=>p.path === $('testPrompt')?.value);
+  if(prompt) $('testModel').placeholder = prompt.effective_model || 'по умолчанию';
 }
 function renderPrompts(){
   const q = $('promptFilter').value.trim().toLowerCase();
@@ -468,6 +506,37 @@ async function generateSummary(){
   await loadUsers();
   setMsg('Сводка сохранена','ok');
 }
+function testPayload(){
+  return {
+    platform_id:$('testPlatform').value.trim(),
+    conversation_id:$('testConversation').value.trim() || null,
+    prompt:$('testPrompt').value,
+    message:$('testMessage').value,
+    context:Number($('testContext').value),
+    model:$('testModel').value.trim() || null
+  };
+}
+async function sendTest(){
+  const payload = testPayload();
+  $('testRequest').textContent = JSON.stringify(payload, null, 2);
+  $('testStatus').value = 'Отправка...';
+  const data = await api('/test-chat', jsonPost('POST', payload));
+  $('testResponse').textContent = JSON.stringify(data, null, 2);
+  $('testStatus').value = 'Готово';
+  setMsg('Тестовый запрос выполнен без записи контекста','ok');
+}
+async function showSchema(){
+  const data = await api('/schema');
+  $('testRequest').textContent = 'GET /schema';
+  $('testResponse').textContent = JSON.stringify(data, null, 2);
+  $('testStatus').value = 'Поля API';
+}
+function clearTest(){
+  $('testMessage').value = '';
+  $('testRequest').textContent = '{}';
+  $('testResponse').textContent = '{}';
+  $('testStatus').value = 'Готово';
+}
 
 document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=>{
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b===btn));
@@ -476,6 +545,10 @@ document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=
 $('promptFilter').addEventListener('input', renderPrompts);
 $('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(e.message,'error')));
 $('refreshModels').addEventListener('click', ()=>loadModels(1).catch(e=>setMsg(e.message,'error')));
+$('testPrompt').addEventListener('change', syncTestModelPlaceholder);
+$('sendTest').addEventListener('click', ()=>sendTest().catch(e=>{ $('testStatus').value='Ошибка'; setMsg(e.message,'error'); $('testResponse').textContent=JSON.stringify({error:e.message}, null, 2); }));
+$('showSchema').addEventListener('click', ()=>showSchema().catch(e=>setMsg(e.message,'error')));
+$('clearTest').addEventListener('click', clearTest);
 $('promptsBody').addEventListener('click', e=>{
   const btn = e.target.closest('.save-model');
   if(btn) {

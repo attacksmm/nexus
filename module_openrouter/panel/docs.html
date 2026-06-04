@@ -28,6 +28,12 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
   <h2>Получение контекста</h2>
   <pre>GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
 Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>
+  <h2>Поля API</h2>
+  <pre>GET /nexus/openrouter/api/schema
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>
+  <h2>Тестирование</h2>
+  <p>Во вкладке «Протестировать» можно выбрать prompt, модель и пользователя/чат, контекст которого нужно только прочитать. Тестовый запрос не записывает вопрос и ответ в историю.</p>
+  <p>Все внешние <code>/chat</code> запросы логируются в модульный лог: старт, успешный ответ, HTTP-ошибки OpenRouter и ошибки валидации.</p>
   <pre>GET /nexus/openrouter/api/context/full?conversation_id=or_conv_...
 Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;</pre>
   <h2>Ручное пополнение</h2>

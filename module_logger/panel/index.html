@@ -42,7 +42,10 @@
       padding:1px 5px;font-weight:700;min-width:16px;text-align:center;}
 
     .tabbar__actions{margin-left:auto;display:flex;align-items:center;gap:6px;
-      padding:0 10px;flex-shrink:0;border-left:1px solid var(--border);}
+      padding:0 10px;flex-shrink:0;border-left:1px solid var(--border);
+      position:sticky;right:0;z-index:3;background:var(--panel);}
+    .search{width:min(220px,22vw);min-width:150px;min-height:26px;border:1px solid var(--border-strong);background:#090909;color:var(--text);padding:3px 8px;font-size:.78rem;}
+    .search::placeholder{color:var(--text-subtle);}
 
     /* ── Terminal ── */
     .term-area{display:grid;grid-template-rows:minmax(0,1fr);min-height:0;position:relative;}
@@ -54,6 +57,7 @@
     .l-warn{color:var(--term-warn);}
     .l-info{color:var(--term-info);}
     .l-dim{color:var(--term-dim);}
+    mark{background:#4d4213;color:#fff1a8;padding:0 1px;}
 
     .live-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
       display:inline-block;animation:pulse 1.4s ease-in-out infinite;}
@@ -82,6 +86,7 @@
   <div class="tabbar" id="tabbar">
     <div class="tabbar__actions">
       <span class="live-dot live-dot--off" id="liveDot"></span>
+      <input id="searchInput" class="search" placeholder="Поиск в этой вкладке" autocomplete="new-password" spellcheck="false" />
       <button id="liveBtn"     class="btn"         type="button">Live</button>
       <button id="errBtn"      class="btn btn--err" type="button">Ошибки</button>
       <button id="downloadBtn" class="btn btn--ghost" type="button" title="Скачать">↓</button>
@@ -95,6 +100,7 @@
     <div class="status-bar">
       <span id="statusLines">0 строк</span>
       <span id="statusErrMode" style="color:var(--bad);display:none">● режим ошибок</span>
+      <span id="statusSearch" style="display:none"></span>
       <span style="margin-left:auto;color:var(--text-subtle)" id="statusModule"></span>
     </div>
   </div>
@@ -115,11 +121,13 @@ let liveReplayUntil = 0;
 let errMode = false;
 let lineCount = 0;
 let allLines = [];      // полный буфер для фильтрации
+let searchQuery = '';
 
 const term   = document.getElementById('terminal');
 const tabbar = document.getElementById('tabbar');
 const liveDot = document.getElementById('liveDot');
 const errBtn  = document.getElementById('errBtn');
+const searchInput = document.getElementById('searchInput');
 
 // ── Modules & tabs ────────────────────────────────────────────────────────────
 
@@ -168,14 +176,30 @@ async function loadLogs() {
   if (!res?.ok) { term.textContent = '[ошибка загрузки]'; return; }
   const text = await res.text();
   allLines = text.split('\n');
-  renderLines(errMode ? allLines.filter(isError) : allLines);
+  applyFilters();
   scrollBottom();
 }
 
 function renderLines(lines) {
   lineCount = lines.filter(l => l.trim()).length;
-  term.innerHTML = lines.map(colorize).join('\n');
+  term.innerHTML = lines.map(line => colorize(line, searchQuery)).join('\n');
   document.getElementById('statusLines').textContent = `${lineCount} строк`;
+  const searchStatus = document.getElementById('statusSearch');
+  searchStatus.style.display = searchQuery ? 'inline' : 'none';
+  searchStatus.textContent = searchQuery ? `поиск: ${lineCount}` : '';
+}
+
+function filteredLines() {
+  let lines = errMode ? allLines.filter(isError) : allLines;
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    lines = lines.filter(line => line.toLowerCase().includes(q));
+  }
+  return lines;
+}
+
+function applyFilters() {
+  renderLines(filteredLines());
 }
 
 function isError(line) {
@@ -188,21 +212,28 @@ function appendLine(line) {
   allLines.push(line);
   if (allLines.length > 5000) allLines.shift();
   if (errMode && !isError(line)) return;
+  if (searchQuery && !line.toLowerCase().includes(searchQuery.toLowerCase())) return;
   lineCount++;
   const span = document.createElement('span');
-  span.innerHTML = colorize(line) + '\n';
+  span.innerHTML = colorize(line, searchQuery) + '\n';
   term.appendChild(span);
   document.getElementById('statusLines').textContent = `${lineCount} строк`;
   if (term.scrollTop + term.clientHeight >= term.scrollHeight - 80) scrollBottom();
   while (term.childNodes.length > 3000) term.removeChild(term.firstChild);
 }
 
-function colorize(line) {
+function highlight(text, query) {
+  if (!query) return text;
+  const safe = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(safe, 'ig'), m => `<mark>${m}</mark>`);
+}
+
+function colorize(line, query='') {
   const l = line.toLowerCase();
-  const e = esc(line);
+  const e = highlight(esc(line), esc(query));
   if (/\b(error|exception|traceback|critical|fatal)\b/.test(l)) return `<span class="l-err">${e}</span>`;
   if (/\bwarn(ing)?\b/.test(l))   return `<span class="l-warn">${e}</span>`;
-  if (/\b(info|started|active)\b/.test(l)) return `<span class="l-info">${e}</span>`;
+  if (/\b(info|started|active|ok|success)\b/.test(l)) return `<span class="l-info">${e}</span>`;
   if (/\bdebug\b/.test(l))        return `<span class="l-dim">${e}</span>`;
   return e;
 }
@@ -213,9 +244,13 @@ errBtn.addEventListener('click', () => {
   errMode = !errMode;
   errBtn.classList.toggle('active', errMode);
   document.getElementById('statusErrMode').style.display = errMode ? 'inline' : 'none';
-  const filtered = errMode ? allLines.filter(isError) : allLines;
-  renderLines(filtered);
+  applyFilters();
   scrollBottom();
+});
+
+searchInput.addEventListener('input', () => {
+  searchQuery = searchInput.value.trim();
+  applyFilters();
 });
 
 // ── Live WebSocket ────────────────────────────────────────────────────────────
