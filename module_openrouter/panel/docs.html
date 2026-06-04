@@ -23,7 +23,13 @@ Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
   "message": "Вопрос клиента",
   "context": 2
 }</pre>
-  <p><code>context=0</code> не читает и не пишет историю, <code>context=1</code> читает, но не пишет, <code>context=2</code> читает и сохраняет вопрос/ответ.</p>
+  <p><code>context=0</code> не читает и не пишет историю, <code>context=1</code> читает краткий контекст, но не пишет, <code>context=2</code> читает краткий контекст и сохраняет вопрос/ответ, <code>context=3</code> читает полный контекст и сохраняет, <code>context=4</code> делает то же, что <code>3</code>, и после ответа автоматически обновляет краткую сводку.</p>
+  <p>Если у клиента уже есть краткая сводка, при кратком чтении она используется в приоритете вместо истории сообщений.</p>
+  <h2>Получение контекста</h2>
+  <pre>GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
+Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;</pre>
+  <pre>GET /nexus/openrouter/api/context/full?conversation_id=or_conv_...
+Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;</pre>
   <h2>Ручное пополнение</h2>
   <pre>POST /nexus/openrouter/api/context/append
 Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
@@ -34,4 +40,6 @@ Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
   "question": "1) вопрос пользователя",
   "answer": "1) ответ пользователя"
 }</pre>
+  <h2>Настройки</h2>
+  <p>OpenRouter API token можно указать во вкладке «Настройки». Непустое значение сохраняется в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
 </main></body></html>

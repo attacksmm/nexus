@@ -14,6 +14,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from orchestrator.auth import ENV_PATH, _read_env_values, _write_env_values
 from orchestrator.auth import can_access_module, verify_token_from_request
 
 router = APIRouter()
@@ -149,7 +150,7 @@ async def _init_db():
 
 
 class ChatIn(BaseModel):
-    platform_id: str
+    platform_id: str = ""
     conversation_id: str | None = None
     prompt: str
     message: str
@@ -158,7 +159,7 @@ class ChatIn(BaseModel):
 
 
 class AppendIn(BaseModel):
-    platform_id: str
+    platform_id: str = ""
     conversation_id: str | None = None
     question: str = ""
     answer: str = ""
@@ -171,6 +172,7 @@ class SettingsIn(BaseModel):
     request_timeout: int | None = None
     history_limit: int | None = None
     summary_prompt: str | None = None
+    openrouter_api_key: str | None = None
 
 
 class PromptModelIn(BaseModel):
@@ -217,8 +219,8 @@ def _context_mode(value: int | bool) -> int:
         mode = int(value)
     except Exception:
         mode = 2
-    if mode not in (0, 1, 2):
-        raise HTTPException(400, "context должен быть 0, 1 или 2")
+    if mode not in (0, 1, 2, 3, 4):
+        raise HTTPException(400, "context должен быть 0, 1, 2, 3 или 4")
     return mode
 
 
@@ -263,6 +265,7 @@ async def _save_settings(data: SettingsIn) -> dict[str, str]:
         updates["history_limit"] = str(max(0, min(200, int(data.history_limit))))
     if data.summary_prompt is not None:
         updates["summary_prompt"] = _clean(data.summary_prompt, 4000)
+    openrouter_api_key = _clean(data.openrouter_api_key, 2000) if data.openrouter_api_key is not None else None
     async with aiosqlite.connect(_must_db()) as db:
         for key, value in updates.items():
             await db.execute(
@@ -270,6 +273,11 @@ async def _save_settings(data: SettingsIn) -> dict[str, str]:
                 (key, value),
             )
         await db.commit()
+    if openrouter_api_key:
+        values = _read_env_values()
+        values["OPENROUTER_API_KEY"] = openrouter_api_key
+        _write_env_values(values)
+        os.environ["OPENROUTER_API_KEY"] = openrouter_api_key
     return await _settings()
 
 
@@ -426,6 +434,45 @@ async def _resolve_conversation(
     return cid
 
 
+async def _platform_for_conversation(db: aiosqlite.Connection, conversation_id: str) -> str:
+    cur = await db.execute("SELECT platform_id FROM conversations WHERE conversation_id=?", (conversation_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "conversation_id not found")
+    return row[0]
+
+
+async def _context_target(
+    db: aiosqlite.Connection,
+    *,
+    platform_id: str = "",
+    conversation_id: str | None = None,
+) -> tuple[str, str]:
+    if conversation_id:
+        cur = await db.execute("SELECT conversation_id, platform_id FROM conversations WHERE conversation_id=?", (conversation_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "conversation_id not found")
+        if platform_id and row[1] != platform_id:
+            raise HTTPException(403, "conversation_id belongs to another platform_id")
+        return row[1], row[0]
+    if not platform_id:
+        raise HTTPException(400, "platform_id or conversation_id is required")
+    cur = await db.execute(
+        """
+        SELECT conversation_id FROM conversations
+        WHERE platform_id=? AND active=1
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (platform_id,),
+    )
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "conversation not found")
+    return platform_id, row[0]
+
+
 async def _model_for_prompt(prompt_path: str, settings: dict[str, str], requested: str | None = None) -> str:
     if requested and requested.strip():
         return requested.strip()
@@ -438,20 +485,32 @@ async def _model_for_prompt(prompt_path: str, settings: dict[str, str], requeste
 
 
 async def _load_history(db: aiosqlite.Connection, conversation_id: str, limit: int) -> list[dict[str, str]]:
-    if limit <= 0:
+    if limit == 0:
         return []
-    cur = await db.execute(
-        """
-        SELECT role, content FROM messages
-        WHERE conversation_id=?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (conversation_id, limit),
-    )
-    rows = await cur.fetchall()
+    if limit < 0:
+        cur = await db.execute(
+            """
+            SELECT role, content FROM messages
+            WHERE conversation_id=?
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        )
+        rows = await cur.fetchall()
+    else:
+        cur = await db.execute(
+            """
+            SELECT role, content FROM messages
+            WHERE conversation_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        )
+        rows = await cur.fetchall()
+        rows = list(reversed(rows))
     result = []
-    for role, content in reversed(rows):
+    for role, content in rows:
         mapped = "assistant" if role in ("assistant", "manual_assistant") else "user" if role in ("user", "manual_user") else ""
         if mapped and content:
             result.append({"role": mapped, "content": content})
@@ -473,6 +532,12 @@ def _messages_for_api(prompt_text: str, summary: str, history: list[dict[str, st
     messages.extend(history)
     messages.append({"role": "user", "content": message.strip()})
     return messages
+
+
+def _context_payload(prompt_text: str, summary: str, history: list[dict[str, str]], message: str, mode: int) -> list[dict[str, str]]:
+    if mode in (1, 2) and summary.strip():
+        return _messages_for_api(prompt_text, summary, [], message)
+    return _messages_for_api(prompt_text, summary if mode in (1, 2) else "", history, message)
 
 
 async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: float) -> tuple[str, dict[str, int]]:
@@ -538,6 +603,68 @@ async def _save_turn(
     await db.execute("UPDATE users SET updated_at=?, total_tokens_used=total_tokens_used+? WHERE platform_id=?", (now, int((usage or {}).get("total_tokens") or 0), platform_id))
 
 
+async def _conversation_transcript(db: aiosqlite.Connection, conversation_id: str) -> list[str]:
+    cur = await db.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id ASC", (conversation_id,))
+    messages = await cur.fetchall()
+    transcript = []
+    for role, content in messages:
+        if role in ("user", "manual_user"):
+            transcript.append("Вопрос: " + content)
+        elif role in ("assistant", "manual_assistant"):
+            transcript.append("Ответ: " + content)
+    return transcript
+
+
+def _message_pairs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pairs: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = pairs.setdefault(
+            row["pair_id"],
+            {
+                "pair_id": row["pair_id"],
+                "question": "",
+                "answer": "",
+                "source": row["source"],
+                "created_at": row["created_at"],
+                "messages": [],
+            },
+        )
+        if row["role"] in ("user", "manual_user"):
+            entry["question"] = row["content"]
+        elif row["role"] in ("assistant", "manual_assistant"):
+            entry["answer"] = row["content"]
+        entry["messages"].append(row)
+    return list(pairs.values())
+
+
+async def _generate_and_save_summary(conversation_id: str, model: str | None = None) -> dict[str, Any]:
+    settings = await _settings()
+    summary_model = model or settings.get("summary_model") or DEFAULT_MODEL
+    async with aiosqlite.connect(_must_db()) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,))
+        conv = await cur.fetchone()
+        if not conv:
+            raise HTTPException(404, "conversation not found")
+        transcript = await _conversation_transcript(db, conversation_id)
+    if not transcript:
+        raise HTTPException(400, "conversation has no messages")
+    summary_prompt = settings.get("summary_prompt") or "Сделай краткую сводку диалога."
+    summary, usage = await _call_openrouter(
+        summary_model,
+        [{"role": "system", "content": summary_prompt}, {"role": "user", "content": "\n\n".join(transcript)[-60000:]}],
+        _timeout(settings),
+    )
+    summary = summary[:SUMMARY_MAX_CHARS]
+    async with aiosqlite.connect(_must_db()) as db:
+        await db.execute(
+            "UPDATE users SET summary=?, updated_at=?, total_tokens_used=total_tokens_used+? WHERE platform_id=?",
+            (summary, _now(), int(usage.get("total_tokens") or 0), conv["platform_id"]),
+        )
+        await db.commit()
+    return {"platform_id": conv["platform_id"], "conversation_id": conversation_id, "model": summary_model, "summary": summary, "usage": usage}
+
+
 @router.get("/env-status")
 async def env_status(request: Request):
     await _require_panel_user(request)
@@ -548,6 +675,7 @@ async def env_status(request: Request):
         "OPENROUTER_API_KEY": bool(env["openrouter_key"]),
         "NEXUS_OPENROUTER_API_TOKEN": bool(env["api_token"]),
         "file_storage_db": fs_db.exists(),
+        "env_path": str(ENV_PATH),
     }
 
 
@@ -652,9 +780,8 @@ async def get_models(request: Request, refresh: int = 0):
 async def chat(data: ChatIn, request: Request):
     await _require_bearer(request)
     platform_id = _clean(data.platform_id, 300)
+    conversation_id = _clean(data.conversation_id, 200) or None
     message = _clean(data.message, 50000)
-    if not platform_id:
-        raise HTTPException(400, "platform_id is required")
     if not message:
         raise HTTPException(400, "message is required")
     mode = _context_mode(data.context)
@@ -662,12 +789,23 @@ async def chat(data: ChatIn, request: Request):
     settings = await _settings()
     model = await _model_for_prompt(prompt_path, settings, data.model)
     async with aiosqlite.connect(_must_db()) as db:
-        cid = await _resolve_conversation(db, platform_id=platform_id, conversation_id=data.conversation_id, prompt_path=prompt_path, model=model)
+        if not platform_id and conversation_id:
+            platform_id = await _platform_for_conversation(db, conversation_id)
+        if not platform_id:
+            raise HTTPException(400, "platform_id is required when conversation_id is not provided")
+        cid = await _resolve_conversation(db, platform_id=platform_id, conversation_id=conversation_id, prompt_path=prompt_path, model=model)
         summary = await _user_summary(db, platform_id) if mode in (1, 2) else ""
-        history = await _load_history(db, cid, _history_limit(settings)) if mode in (1, 2) else []
+        if mode in (1, 2):
+            history = [] if summary else await _load_history(db, cid, _history_limit(settings))
+        elif mode in (3, 4):
+            history = await _load_history(db, cid, -1)
+        else:
+            history = []
         await db.commit()
-    answer, usage = await _call_openrouter(model, _messages_for_api(prompt_text, summary, history, message), _timeout(settings))
-    if mode == 2:
+    answer, usage = await _call_openrouter(model, _context_payload(prompt_text, summary, history, message, mode), _timeout(settings))
+    summary_result = None
+    summary_error = ""
+    if mode in (2, 3, 4):
         async with aiosqlite.connect(_must_db()) as db:
             await _save_turn(
                 db,
@@ -682,14 +820,22 @@ async def chat(data: ChatIn, request: Request):
                 usage=usage,
             )
             await db.commit()
+        if mode == 4:
+            try:
+                summary_result = await _generate_and_save_summary(cid)
+            except HTTPException as exc:
+                summary_error = str(exc.detail)
     return {
         "ok": True,
         "platform_id": platform_id,
         "conversation_id": cid,
         "prompt": prompt_path,
         "model": model,
+        "text": answer,
         "answer": answer,
         "usage": usage,
+        "summary": summary_result["summary"] if summary_result else None,
+        "summary_error": summary_error,
     }
 
 
@@ -699,19 +845,70 @@ async def append_context(data: AppendIn, request: Request):
     platform_id = _clean(data.platform_id, 300)
     question = _clean(data.question, 50000)
     answer = _clean(data.answer, 50000)
-    if not platform_id:
-        raise HTTPException(400, "platform_id is required")
     if not question and not answer:
         raise HTTPException(400, "question or answer is required")
     prompt_path = ""
     if data.prompt:
         prompt_path, _ = await _resolve_prompt(data.prompt)
     async with aiosqlite.connect(_must_db()) as db:
+        if not platform_id and data.conversation_id:
+            platform_id = await _platform_for_conversation(db, data.conversation_id)
+        if not platform_id:
+            raise HTTPException(400, "platform_id is required when conversation_id is not provided")
         cid = await _resolve_conversation(db, platform_id=platform_id, conversation_id=data.conversation_id, prompt_path=prompt_path)
         pair_id = _new_pair_id()
         await _save_turn(db, conversation_id=cid, platform_id=platform_id, pair_id=pair_id, question=question, answer=answer, source="manual", prompt_path=prompt_path)
         await db.commit()
     return {"ok": True, "platform_id": platform_id, "conversation_id": cid, "pair_id": pair_id}
+
+
+@router.get("/context/brief")
+async def brief_context(request: Request, platform_id: str = "", conversation_id: str = ""):
+    await _require_bearer_or_panel(request)
+    settings = await _settings()
+    async with aiosqlite.connect(_must_db()) as db:
+        db.row_factory = aiosqlite.Row
+        resolved_platform, cid = await _context_target(
+            db,
+            platform_id=_clean(platform_id, 300),
+            conversation_id=_clean(conversation_id, 200) or None,
+        )
+        summary = await _user_summary(db, resolved_platform)
+        history = [] if summary else await _load_history(db, cid, _history_limit(settings))
+    return {
+        "ok": True,
+        "platform_id": resolved_platform,
+        "conversation_id": cid,
+        "type": "summary" if summary else "history",
+        "summary": summary,
+        "messages": history,
+    }
+
+
+@router.get("/context/full")
+async def full_context(request: Request, platform_id: str = "", conversation_id: str = ""):
+    await _require_bearer_or_panel(request)
+    async with aiosqlite.connect(_must_db()) as db:
+        db.row_factory = aiosqlite.Row
+        resolved_platform, cid = await _context_target(
+            db,
+            platform_id=_clean(platform_id, 300),
+            conversation_id=_clean(conversation_id, 200) or None,
+        )
+        cur = await db.execute("SELECT * FROM conversations WHERE conversation_id=?", (cid,))
+        conv = await cur.fetchone()
+        cur = await db.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY id ASC", (cid,))
+        rows = [dict(r) for r in await cur.fetchall()]
+        summary = await _user_summary(db, resolved_platform)
+    return {
+        "ok": True,
+        "platform_id": resolved_platform,
+        "conversation_id": cid,
+        "conversation": dict(conv) if conv else None,
+        "summary": summary,
+        "items": _message_pairs(rows),
+        "messages": rows,
+    }
 
 
 @router.get("/users")
@@ -781,46 +978,11 @@ async def conversation_messages(conversation_id: str, request: Request):
         rows = [dict(r) for r in await cur.fetchall()]
         cur = await db.execute("SELECT summary FROM users WHERE platform_id=?", (conv["platform_id"],))
         user = await cur.fetchone()
-    pairs: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        entry = pairs.setdefault(row["pair_id"], {"pair_id": row["pair_id"], "question": "", "answer": "", "source": row["source"], "created_at": row["created_at"], "messages": []})
-        if row["role"] in ("user", "manual_user"):
-            entry["question"] = row["content"]
-        elif row["role"] in ("assistant", "manual_assistant"):
-            entry["answer"] = row["content"]
-        entry["messages"].append(row)
-    return {"conversation": dict(conv), "summary": user["summary"] if user else "", "items": list(pairs.values())}
+    return {"conversation": dict(conv), "summary": user["summary"] if user else "", "items": _message_pairs(rows)}
 
 
 @router.post("/conversations/{conversation_id}/summary")
 async def conversation_summary(conversation_id: str, data: SummaryIn, request: Request):
     await _require_panel_user(request)
-    settings = await _settings()
-    model = data.model or settings.get("summary_model") or DEFAULT_MODEL
-    async with aiosqlite.connect(_must_db()) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM conversations WHERE conversation_id=?", (conversation_id,))
-        conv = await cur.fetchone()
-        if not conv:
-            raise HTTPException(404, "conversation not found")
-        cur = await db.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id ASC", (conversation_id,))
-        messages = await cur.fetchall()
-    transcript = []
-    for role, content in messages:
-        if role in ("user", "manual_user"):
-            transcript.append("Вопрос: " + content)
-        elif role in ("assistant", "manual_assistant"):
-            transcript.append("Ответ: " + content)
-    if not transcript:
-        raise HTTPException(400, "conversation has no messages")
-    summary_prompt = settings.get("summary_prompt") or "Сделай краткую сводку диалога."
-    summary, usage = await _call_openrouter(
-        model,
-        [{"role": "system", "content": summary_prompt}, {"role": "user", "content": "\n\n".join(transcript)[-60000:]}],
-        _timeout(settings),
-    )
-    summary = summary[:SUMMARY_MAX_CHARS]
-    async with aiosqlite.connect(_must_db()) as db:
-        await db.execute("UPDATE users SET summary=?, updated_at=?, total_tokens_used=total_tokens_used+? WHERE platform_id=?", (summary, _now(), int(usage.get("total_tokens") or 0), conv["platform_id"]))
-        await db.commit()
-    return {"ok": True, "platform_id": conv["platform_id"], "conversation_id": conversation_id, "model": model, "summary": summary, "usage": usage}
+    result = await _generate_and_save_summary(conversation_id, data.model)
+    return {"ok": True, **result}

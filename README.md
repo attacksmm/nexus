@@ -109,7 +109,8 @@ nexus/
 
 - внешний `POST /nexus/openrouter/api/chat` с Bearer token;
 - автоматическое создание `conversation_id`, если он не передан;
-- режимы контекста: `0` не читает и не пишет историю, `1` читает без записи, `2` читает и сохраняет вопрос/ответ;
+- режимы контекста: `0` не читает и не пишет историю, `1` читает краткий контекст без записи, `2` читает краткий контекст и сохраняет вопрос/ответ, `3` читает полный контекст и сохраняет, `4` делает то же, что `3`, и автоматически обновляет краткую сводку;
+- при кратком чтении сохранённая сводка клиента используется в приоритете вместо истории сообщений;
 - глобальная модель по умолчанию и override модели для каждого prompt-файла;
 - поиск клиентов по `platform_id` и `conversation_id`;
 - просмотр всех пар вопрос/ответ в аккуратной таблице;
@@ -151,6 +152,20 @@ Content-Type: application/json
 
 - `OPENROUTER_API_KEY` — API ключ OpenRouter;
 - `NEXUS_OPENROUTER_API_TOKEN` — Bearer token для внешних вызовов модуля.
+
+`OPENROUTER_API_KEY` также можно задать во вкладке «Настройки» самого модуля: Nexus сохранит ключ в `.env` и загрузит его в окружение процесса.
+
+Контекст можно получить отдельно:
+
+```http
+GET /nexus/openrouter/api/context/brief?conversation_id=or_conv_...
+Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+```
+
+```http
+GET /nexus/openrouter/api/context/full?conversation_id=or_conv_...
+Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+```
 
 ### `getcourse-orders`
 

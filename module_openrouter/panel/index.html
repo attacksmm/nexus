@@ -62,6 +62,8 @@
     th{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--subtle);font-weight:500}
     tr.clickable{cursor:pointer}
     tr.clickable:hover td{background:var(--panel-strong)}
+    .link-btn{display:inline;max-width:100%;border:0;background:transparent;color:var(--text);padding:0;text-align:left;cursor:pointer;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .link-btn:hover{color:var(--ok);text-decoration:underline}
     .mono{font-family:"IBM Plex Mono","Consolas",monospace}
     .muted{color:var(--subtle)}
     .source-api{color:#9fd4ff}.source-manual{color:var(--warn)}
@@ -71,6 +73,7 @@
 
     .overlay{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.68);z-index:30;padding:14px}
     .dialog{width:min(1120px,100%);height:min(760px,94vh);display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:var(--panel);border:1px solid var(--border-strong);box-shadow:0 20px 80px rgba(0,0,0,.5)}
+    .dialog--edit{width:min(980px,100%);height:min(740px,94vh)}
     .dialog__head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)}
     .dialog__title{font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .dialog__body{min-height:0;display:grid;grid-template-columns:260px minmax(0,1fr);overflow:hidden}
@@ -102,7 +105,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.0</div>
+    <div class="ver">v1.0.1</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -168,6 +171,11 @@
         <div class="field"><label>Модель для сводок</label><input id="summaryModel" class="input" list="modelsList" /></div>
         <div class="field"><label>Таймаут запроса, сек</label><input id="requestTimeout" class="input" type="number" min="10" max="180" /></div>
         <div class="field"><label>Лимит истории, сообщений</label><input id="historyLimit" class="input" type="number" min="0" max="200" /></div>
+        <div class="field" style="grid-column:1/-1">
+          <label>OpenRouter API token</label>
+          <input id="openrouterKey" class="input" type="password" autocomplete="off" placeholder="Оставьте пустым, если ключ уже задан в ENV" />
+          <p class="hint">При сохранении непустое значение записывается в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
+        </div>
         <div class="field" style="grid-column:1/-1"><label>Промпт сводки</label><textarea id="summaryPrompt" class="textarea"></textarea></div>
       </div>
     </div>
@@ -214,13 +222,37 @@
   </div>
 </div>
 
+<div id="promptDialog" class="overlay" hidden>
+  <div class="dialog dialog--edit">
+    <div class="dialog__head">
+      <div id="promptTitle" class="dialog__title">Prompt</div>
+      <button id="closePrompt" class="btn icon ghost" type="button">×</button>
+    </div>
+    <div class="dialog__main">
+      <div class="form-grid wide" style="min-height:0;overflow:hidden">
+        <div class="field" style="min-height:0">
+          <label>Текст prompt-файла</label>
+          <textarea id="promptContent" class="textarea" spellcheck="false" style="min-height:0;height:100%;resize:none"></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button id="reloadPrompt" class="btn" type="button">Обновить</button>
+      <button id="savePromptText" class="btn primary" type="button">Сохранить</button>
+      <button id="closePrompt2" class="btn ghost" type="button">Закрыть</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const parts = location.pathname.split('/');
 const panelIdx = parts.indexOf('panel');
 const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
 const API = modBase + '/api';
+const rootBase = modBase.replace(/\/openrouter$/, '');
+const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[]};
+const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -230,6 +262,14 @@ function setLeft(msg){ $('statusLeft').textContent=msg||'Готово'; }
 function badge(id, ok, text){ const el=$(id); el.className='pill '+(ok?'ok':'bad'); el.textContent=text; }
 async function api(url, opts={}){
   const res = await fetch(API + url, opts);
+  if(!res.ok){
+    let data={}; try{data=await res.json();}catch{}
+    throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+async function fsApi(url, opts={}){
+  const res = await fetch(FS_API + url, opts);
   if(!res.ok){
     let data={}; try{data=await res.json();}catch{}
     throw new Error(data.detail || data.error || `HTTP ${res.status}`);
@@ -261,16 +301,21 @@ async function loadSettings(){
   $('requestTimeout').value = state.settings.request_timeout || 90;
   $('historyLimit').value = state.settings.history_limit || 80;
   $('summaryPrompt').value = state.settings.summary_prompt || '';
+  $('openrouterKey').value = '';
 }
 async function saveSettings(){
-  await api('/settings', jsonPost('PUT', {
+  const body = {
     default_model:$('defaultModel').value,
     summary_model:$('summaryModel').value,
     request_timeout:Number($('requestTimeout').value||90),
     history_limit:Number($('historyLimit').value||80),
     summary_prompt:$('summaryPrompt').value
-  }));
+  };
+  if($('openrouterKey').value.trim()) body.openrouter_api_key = $('openrouterKey').value.trim();
+  await api('/settings', jsonPost('PUT', body));
   await loadSettings();
+  await loadPrompts();
+  await loadEnv();
   setMsg('Настройки сохранены','ok');
 }
 async function loadModels(refresh=0){
@@ -291,12 +336,30 @@ function renderPrompts(){
   $('promptsEmpty').hidden = rows.length > 0;
   $('promptsBody').innerHTML = rows.map(p=>`
     <tr>
-      <td class="col-path mono" title="${esc(p.path)}">${esc(p.path)}</td>
+      <td class="col-path mono" title="${esc(p.path)}"><button class="link-btn prompt-open mono" data-path="${esc(p.path)}" type="button">${esc(p.path)}</button></td>
       <td class="col-model"><input class="input model-input" data-path="${esc(p.path)}" list="modelsList" value="${esc(p.model || '')}" placeholder="${esc(p.effective_model || '')}" /></td>
       <td class="col-size">${fmtSize(p.size)}</td>
       <td class="col-date">${fmtDate(p.updated_at)}</td>
       <td class="col-actions"><button class="btn primary save-model" data-path="${esc(p.path)}" type="button">OK</button></td>
     </tr>`).join('');
+}
+async function openPrompt(path){
+  const resolved = await fsApi('/path?path=' + encodeURIComponent(path));
+  if(!resolved.item || resolved.item.kind !== 'file' || !resolved.item.is_text_editable){
+    throw new Error('Prompt нельзя открыть как редактируемый текст');
+  }
+  const text = await fsApi('/items/' + resolved.item.id + '/text');
+  state.editingPrompt = {path, item:resolved.item};
+  $('promptTitle').textContent = path;
+  $('promptContent').value = text.content || '';
+  $('promptDialog').hidden = false;
+}
+async function savePromptText(){
+  if(!state.editingPrompt) return;
+  const name = state.editingPrompt.item.name || state.editingPrompt.path.split('/').pop();
+  await fsApi('/items/' + state.editingPrompt.item.id + '/text', jsonPost('PUT', {name, content:$('promptContent').value}));
+  await loadPrompts();
+  setMsg('Prompt сохранен','ok');
 }
 async function savePromptModel(path){
   const input = document.querySelector(`.model-input[data-path="${CSS.escape(path)}"]`);
@@ -391,7 +454,12 @@ $('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(
 $('refreshModels').addEventListener('click', ()=>loadModels(1).catch(e=>setMsg(e.message,'error')));
 $('promptsBody').addEventListener('click', e=>{
   const btn = e.target.closest('.save-model');
-  if(btn) savePromptModel(btn.dataset.path).catch(err=>setMsg(err.message,'error'));
+  if(btn) {
+    savePromptModel(btn.dataset.path).catch(err=>setMsg(err.message,'error'));
+    return;
+  }
+  const promptBtn = e.target.closest('.prompt-open');
+  if(promptBtn) openPrompt(promptBtn.dataset.path).catch(err=>setMsg(err.message,'error'));
 });
 $('saveSettings').addEventListener('click', ()=>saveSettings().catch(e=>setMsg(e.message,'error')));
 $('checkEnv').addEventListener('click', ()=>loadEnv());
@@ -411,6 +479,10 @@ $('generateSummary').addEventListener('click', ()=>generateSummary().catch(e=>se
 $('reloadClient').addEventListener('click', ()=>loadClientConversations().catch(e=>setMsg(e.message,'error')));
 $('closeClient').addEventListener('click', ()=>$('clientDialog').hidden=true);
 $('closeClient2').addEventListener('click', ()=>$('clientDialog').hidden=true);
+$('closePrompt').addEventListener('click', ()=>$('promptDialog').hidden=true);
+$('closePrompt2').addEventListener('click', ()=>$('promptDialog').hidden=true);
+$('reloadPrompt').addEventListener('click', ()=>state.editingPrompt && openPrompt(state.editingPrompt.path).catch(e=>setMsg(e.message,'error')));
+$('savePromptText').addEventListener('click', ()=>savePromptText().catch(e=>setMsg(e.message,'error')));
 
 (async function init(){
   try{
