@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Файловое хранилище — документация</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--panel:#101010;--text:#f2f2f2;--muted:#bababa;--subtle:#848484;--border:#2d2d2d;--accent:#f4f4f4;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *,*::before,*::after{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text)}body{padding:22px;line-height:1.55}*{scrollbar-color:#545454 #080808;scrollbar-width:thin}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:#545454;border:2px solid #080808}
+    main{max-width:920px}h1{font-size:1.4rem;margin:0 0 10px}h2{font-size:1rem;margin:22px 0 8px}p,li{color:var(--muted)}code{font-family:"IBM Plex Mono","Fira Code",monospace;background:#030303;border:1px solid var(--border);padding:1px 5px;color:var(--accent)}ul{padding-left:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#030303;border:1px solid var(--border);padding:12px;color:var(--muted)}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Файловое хранилище</h1>
+  <p>Модуль хранит файлы в данных модуля Nexus, позволяет создавать папки, текстовые файлы и загружать разрешённые безопасные типы.</p>
+
+  <h2>Прямые ссылки</h2>
+  <p>У каждого файла есть публичная ссылка вида <code>/file-storage/api/f/{token}/{filename}</code>. Она открывается без входа в Nexus, но содержит длинный случайный токен.</p>
+
+  <h2>Разрешённые типы</h2>
+  <p>Разрешены изображения, видео, аудио, <code>txt</code>, <code>md</code>, <code>csv</code>, <code>json</code>, <code>jsonl</code>, <code>log</code>, <code>pdf</code>, <code>docx</code>, <code>xlsx</code>, <code>zip</code>. Исполняемые, HTML, JS и SVG запрещены.</p>
+
+  <h2>Ограничения</h2>
+  <ul>
+    <li>Один файл: до 100 MB.</li>
+    <li>Редактирование текста в панели: до 1 MB.</li>
+    <li>Системные пути не используют пользовательские имена файлов.</li>
+    <li>Удаление папки удаляет все вложенные файлы и публичные ссылки.</li>
+  </ul>
+</main>
+</body>
+</html>

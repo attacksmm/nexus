@@ -163,7 +163,7 @@ function selectModule(id, pushHistory = true) {
   updateToolbar(m);
   $("contentWelcome").hidden = true;
   $("contentModule").hidden = false;
-  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html` : "about:blank";
+  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html?v=${encodeURIComponent(m.version || "")}` : "about:blank";
 
   // уведомления о статусе модуля
   if (m.status === "error") {

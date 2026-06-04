@@ -1,4 +1,5 @@
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 router = APIRouter()
 _modules_dir: Path = None
 _log_dir: Path = None   # data/logs/ самого логгера (не используется для чтения)
+SAFE_MODULE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def setup(ctx):
@@ -24,17 +26,50 @@ async def list_modules():
     result = [{"id": "nexus", "name": "Nexus (system)", "size": 0, "has_logs": True}]
     if not _modules_dir:
         return result
-    for d in sorted(_modules_dir.iterdir()):
-        if not d.is_dir():
-            continue
-        log_file = d / "data" / "logs" / "module.log"
+    for module in await _list_real_modules():
+        log_file = _modules_dir / module["id"] / "data" / "logs" / "module.log"
         result.append({
-            "id": d.name,
-            "name": d.name,
+            "id": module["id"],
+            "name": module["name"],
             "has_logs": log_file.exists(),
             "size": log_file.stat().st_size if log_file.exists() else 0,
         })
     return result
+
+
+async def _list_real_modules() -> list[dict]:
+    """Return modules registered in Nexus, not every backup directory on disk."""
+    try:
+        from orchestrator.db import get_modules_by_status
+        rows = await get_modules_by_status()
+        result = []
+        for row in rows:
+            module_id = row.get("id", "")
+            if _valid_module_id(module_id):
+                result.append({"id": module_id, "name": row.get("name") or module_id})
+        return result
+    except Exception:
+        # Fallback for early startup or DB errors: still hide backup folders.
+        if not _modules_dir:
+            return []
+        return [
+            {"id": d.name, "name": d.name}
+            for d in sorted(_modules_dir.iterdir())
+            if d.is_dir() and _valid_module_id(d.name)
+        ]
+
+
+async def _module_log_file(module_id: str) -> Path | None:
+    if not _modules_dir or not _valid_module_id(module_id):
+        return None
+    real_ids = {m["id"] for m in await _list_real_modules()}
+    if module_id not in real_ids:
+        return None
+    return _modules_dir / module_id / "data" / "logs" / "module.log"
+
+
+def _valid_module_id(module_id: str) -> bool:
+    return bool(module_id and SAFE_MODULE_ID.match(module_id))
 
 
 # ── Read logs ────────────────────────────────────────────────────────────────
@@ -55,9 +90,9 @@ async def get_nexus_logs(lines: int = 300):
 
 @router.get("/logs/{module_id}")
 async def get_module_logs(module_id: str, lines: int = 300):
-    if not _modules_dir:
-        return PlainTextResponse("[логгер не инициализирован]")
-    log_file = _modules_dir / module_id / "data" / "logs" / "module.log"
+    log_file = await _module_log_file(module_id)
+    if not log_file:
+        return PlainTextResponse("[модуль не найден]", status_code=404)
     if not log_file.exists():
         return PlainTextResponse(f"[лог файл отсутствует: {log_file.name}]")
     text = log_file.read_text(errors="replace")
@@ -74,9 +109,9 @@ async def clear_nexus_logs():
 
 @router.delete("/logs/{module_id}")
 async def clear_module_logs(module_id: str):
-    if not _modules_dir:
-        return JSONResponse({"error": "не инициализировано"}, status_code=500)
-    log_file = _modules_dir / module_id / "data" / "logs" / "module.log"
+    log_file = await _module_log_file(module_id)
+    if not log_file:
+        return JSONResponse({"error": "модуль не найден"}, status_code=404)
     if log_file.exists():
         log_file.write_text("", encoding="utf-8")
     return {"ok": True}
@@ -101,9 +136,9 @@ async def download_nexus_logs():
 
 @router.get("/logs/{module_id}/download")
 async def download_module_logs(module_id: str):
-    if not _modules_dir:
-        return JSONResponse({"error": "не инициализировано"}, status_code=500)
-    log_file = _modules_dir / module_id / "data" / "logs" / "module.log"
+    log_file = await _module_log_file(module_id)
+    if not log_file:
+        return JSONResponse({"error": "модуль не найден"}, status_code=404)
     if not log_file.exists():
         return JSONResponse({"error": "файл не найден"}, status_code=404)
     return FileResponse(str(log_file), filename=f"{module_id}.log", media_type="text/plain")
@@ -122,10 +157,10 @@ async def ws_tail(websocket: WebSocket, module_id: str):
                 stdout=asyncio.subprocess.PIPE,
             )
         else:
-            if not _modules_dir:
-                await websocket.send_text("[логгер не инициализирован]\n")
+            log_file = await _module_log_file(module_id)
+            if not log_file:
+                await websocket.send_text("[модуль не найден]\n")
                 return
-            log_file = _modules_dir / module_id / "data" / "logs" / "module.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             if not log_file.exists():
                 log_file.touch()

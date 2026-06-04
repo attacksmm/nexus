@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Заказы GetCourse</title></head>
+<body style="font-family:system-ui,sans-serif;line-height:1.5;max-width:900px;margin:24px auto;color:#eee;background:#080808">
+  <h1>Заказы GetCourse</h1>
+  <p>Модуль принимает webhook GetCourse, сохраняет заказ в таблицу customer-db <code>getcourse_orders</code> с названием «Заказы GetCourse» и по правилам добавляет VK ID в группы Senler.</p>
+
+  <h2>Webhook</h2>
+  <p>Основные endpoint для трёх отдельных процессов GetCourse: <code>/getcourse-orders/api/webhook/created?secret=...</code>, <code>/getcourse-orders/api/webhook/partial?secret=...</code>, <code>/getcourse-orders/api/webhook/paid?secret=...</code>. Каждый URL принудительно задаёт состояние заказа, независимо от сырого поля <code>status</code>. Старый <code>/webhook</code> оставлен для совместимости и определяет состояние по <code>status</code>.</p>
+  <p><code>order_id</code> используется как <code>platform_id</code>. Если запись с таким <code>platform_id</code> уже есть, модуль обновляет её актуальными данными.</p>
+
+  <h2>Оплата</h2>
+  <p>Статусы GetCourse сопоставляются в настройках: оплаченные, частичные и неоплаченные. Senler запускается для <code>paid</code>, <code>partial</code> и <code>unpaid</code>, если есть подходящее активное правило.</p>
+
+  <h2>Правила Senler</h2>
+  <p>Каждое правило содержит группу Senler, режим условий <code>AND</code> или <code>OR</code>, набор условий и чекбокс «Убирать из остальных».</p>
+  <p>Если чекбокс включён, пользователь добавляется в целевую группу и удаляется только из групп других активных правил этого модуля. Если выключен, выполняется только добавление.</p>
+  <p>После успешного добавления модуль записывает переменные пользователя Senler: <code>getcourse_deal_name</code>, <code>getcourse_deal_number</code>, <code>getcourse_deal_cost</code>, <code>getcourse_deal_payed</code>, <code>getcourse_deal_id</code>, <code>getcourse_deal_paylink</code>, <code>getcourse_user_email</code>, <code>getcourse_user_phone</code>. Суммы пишутся только цифрами, без валюты; телефон нормализуется к виду <code>+7XXXXXXXXXX</code>; из названия заказа убирается хвостовой числовой ID GetCourse.</p>
+
+  <h2>ENV</h2>
+  <ul>
+    <li><code>SENLER_ACCESS_TOKEN</code> — токен Senler.</li>
+    <li><code>SENLER_GROUP_ID</code> — ID группы ВКонтакте в Senler.</li>
+    <li><code>GETCOURSE_ORDERS_WEBHOOK_SECRET</code> — необязательный секрет webhook, имеет приоритет над настройкой в UI.</li>
+    <li><code>GETCOURSE_CUSTOMER_DB_PATH</code> — необязательный путь к SQLite БД customer-db, если автоопределение не подходит.</li>
+  </ul>
+</body>
+</html>

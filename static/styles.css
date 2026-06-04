@@ -20,7 +20,7 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; color-scheme: dark; }
 button, input, textarea, select { font: inherit; }
 a { color: inherit; text-decoration: none; }
 
@@ -30,6 +30,10 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-track { background: #080808; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border: 2px solid #080808; }
 ::-webkit-scrollbar-corner { background: #080808; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: #080808; }
+*::-webkit-scrollbar-thumb { background: var(--border-strong); border: 2px solid #080808; }
+*::-webkit-scrollbar-corner { background: #080808; }
 
 /* ── App shell ─────────────────────────────────── */
 .app-shell { height: 100vh; display: flex; flex-direction: column; }

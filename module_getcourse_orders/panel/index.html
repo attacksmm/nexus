@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Заказы GetCourse</title>
+  <style>
+    :root{
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    .shell{width:100%;height:100vh;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;background:var(--bg)}
+    .tabs{min-width:0;display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto;overflow-y:hidden}
+    .tab{flex:0 0 auto;height:36px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:.82rem}
+    .tab:hover{color:var(--muted)}.tab.is-active{color:var(--text);border-bottom-color:var(--accent)}
+    .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
+    .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
+    .form-grid{flex-shrink:0;display:grid;grid-template-columns:minmax(150px,1fr) minmax(120px,.7fr) minmax(170px,.9fr) minmax(150px,.8fr) auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
+    .f-input{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text)}
+    textarea.f-input{min-height:82px;resize:vertical}.check-field{min-height:30px;display:flex;gap:8px;align-items:center;color:var(--text);white-space:nowrap}.check-field input{width:14px;height:14px}
+    .condition-row{display:grid;grid-template-columns:minmax(150px,1fr) 150px minmax(170px,1fr) auto;gap:6px;align-items:center}.condition-list{display:grid;gap:6px;min-width:0}
+    .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .form-actions{display:flex;gap:8px;align-items:end;justify-content:flex-end;min-width:0}
+    .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
+    .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}.empty{padding:24px;text-align:center;color:var(--subtle)}
+    .split{display:grid;grid-template-columns:minmax(0,1fr) 390px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.kv{display:grid;grid-template-columns:132px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}.pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:360px;overflow:auto}.panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}.event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
+    @media(max-width:1180px){.form-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.form-actions{grid-column:1 / -1}.condition-row{grid-template-columns:minmax(0,1fr) minmax(130px,.7fr)}}
+    @media(max-width:760px){.form-grid,.condition-row{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="tabs">
+    <button class="tab is-active" type="button" data-view="rules">Правила</button>
+    <button class="tab" type="button" data-view="webhook">Webhook</button>
+    <button class="tab" type="button" data-view="events">Журнал</button>
+    <button class="tab" type="button" data-view="settings">Настройки</button>
+    <div class="tabs__right"><button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button></div>
+  </div>
+
+  <section id="viewRules" class="view is-active">
+    <div class="form-grid">
+      <input id="ruleId" type="hidden">
+      <div class="f-group"><label>Название</label><input id="ruleName" class="f-input" placeholder="Послушная собака оплачена"></div>
+      <div class="f-group"><label>Логика</label><select id="ruleMode" class="f-input"><option value="and">AND</option><option value="or">OR</option></select></div>
+      <div class="f-group"><label>Группа Senler</label><input id="ruleSubId" class="f-input" placeholder="3713900"></div>
+      <div class="f-group"><label>Группы</label><label class="check-field"><input id="ruleExclusive" type="checkbox"> Убирать из остальных</label></div>
+      <div class="form-actions">
+        <button id="newRuleBtn" class="btn btn--ghost" type="button">Новая</button>
+        <button id="saveRuleBtn" class="btn btn--primary" type="button">Сохранить</button>
+      </div>
+      <div class="f-group" style="grid-column:1/-1"><label>Условия</label><div id="conditions" class="condition-list"></div><div><button id="addConditionBtn" class="btn btn--ghost btn--sm" type="button">+ Условие</button></div></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <colgroup><col style="width:20%"><col style="width:10%"><col style="width:16%"><col style="width:34%"><col style="width:8%"><col style="width:12%"></colgroup>
+        <thead><tr><th>Название</th><th>Логика</th><th>Senler</th><th>Условия</th><th>Статус</th><th></th></tr></thead>
+        <tbody id="rulesTable"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="viewWebhook" class="view">
+    <div class="panel-body">
+      <div class="form-grid" style="padding:0;border:0;background:transparent;grid-template-columns:minmax(280px,1fr) auto">
+        <div class="f-group"><label>Создан заказ</label><input id="webhookCreatedUrl" class="f-input mono" readonly></div>
+        <button class="btn copy-webhook" data-copy="webhookCreatedUrl" type="button">Скопировать</button>
+        <div class="f-group"><label>Частично оплачен</label><input id="webhookPartialUrl" class="f-input mono" readonly></div>
+        <button class="btn copy-webhook" data-copy="webhookPartialUrl" type="button">Скопировать</button>
+        <div class="f-group"><label>Оплачен</label><input id="webhookPaidUrl" class="f-input mono" readonly></div>
+        <button class="btn copy-webhook" data-copy="webhookPaidUrl" type="button">Скопировать</button>
+      </div>
+      <div class="form-grid" style="align-items:start;grid-template-columns:minmax(260px,1fr) auto">
+        <div class="f-group"><label>Тестовый payload JSON</label><textarea id="testPayload" class="f-input mono"></textarea></div>
+        <button id="sendTestBtn" class="btn btn--primary" type="button">Отправить тест</button>
+      </div>
+      <pre id="testResult" class="pre" hidden></pre>
+    </div>
+  </section>
+
+  <section id="viewEvents" class="view">
+    <div class="form-grid" style="grid-template-columns:170px 120px auto">
+      <div class="f-group"><label>Фильтр</label><select id="eventFilter" class="f-input"><option value="all">Все</option><option value="ok">OK</option><option value="error">Ошибки</option><option value="ignored">Игнор</option></select></div>
+      <div class="f-group"><label>Лимит</label><input id="eventLimit" class="f-input" value="200"></div>
+      <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
+    </div>
+    <div class="split">
+      <div class="table-wrap">
+        <table>
+          <colgroup><col style="width:17%"><col style="width:15%"><col style="width:14%"><col style="width:14%"><col style="width:28%"><col style="width:12%"></colgroup>
+          <thead><tr><th>Время</th><th>Заказ</th><th>Оплата</th><th>VK ID</th><th>Статус GC</th><th>Итог</th></tr></thead>
+          <tbody id="eventsTable"></tbody>
+        </table>
+      </div>
+      <aside id="eventDetail" class="side"><div class="empty">Выберите событие</div></aside>
+    </div>
+  </section>
+
+  <section id="viewSettings" class="view">
+    <div class="panel-body">
+      <div id="envBox" class="pre"></div>
+      <div class="form-grid" style="grid-template-columns:minmax(180px,1fr) 150px auto">
+        <div class="f-group"><label>Webhook secret</label><input id="secret" class="f-input"></div>
+        <div class="f-group"><label>Timeout, sec</label><input id="timeout" class="f-input" value="12"></div>
+        <button id="saveSettingsBtn" class="btn btn--primary" type="button">Сохранить</button>
+      </div>
+      <div class="form-grid" style="align-items:start;grid-template-columns:1fr 1fr 1fr">
+        <div class="f-group"><label>Оплаченные статусы</label><textarea id="paidStatuses" class="f-input"></textarea></div>
+        <div class="f-group"><label>Частичные статусы</label><textarea id="partialStatuses" class="f-input"></textarea></div>
+        <div class="f-group"><label>Неоплаченные статусы</label><textarea id="unpaidStatuses" class="f-input"></textarea></div>
+      </div>
+      <div class="f-group"><label>Поля VK ID</label><input id="vkFields" class="f-input" value="utmT,utm_term,user_term"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+let settings = {};
+let rules = [];
+let activeEventRow = null;
+const fields = [
+  ['title','Название/позиции/предложения'],
+  ['payment_state','Состояние оплаты'],
+  ['status','Статус GetCourse'],
+  ['cost_money','Сумма заказа'],
+  ['payed_money','Оплачено'],
+  ['left_cost_money','Осталось оплатить'],
+  ['email','Email'],
+  ['phone','Телефон'],
+  ['utm_source','utm_source'],
+  ['utm_campaign','utm_campaign'],
+  ['utm_term','utm_term'],
+  ['user_term','user_term'],
+  ['vk_id','VK ID']
+];
+const ops = [
+  ['contains','содержит'],
+  ['equals','равно'],
+  ['not_equals','не равно'],
+  ['greater_than','больше'],
+  ['less_than','меньше'],
+  ['exists','заполнено'],
+  ['not_exists','не заполнено']
+];
+
+function esc(s){return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function notify(msg, level='warn'){(window.parent?.notify || console.warn)(msg, level)}
+async function fetchJson(url, opts){
+  const r = await fetch(url, opts).catch(e => ({ok:false,json:async()=>({error:String(e)})}));
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Ошибка запроса');
+  return data;
+}
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('is-active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('is-active'));
+  btn.classList.add('is-active');
+  $('view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)).classList.add('is-active');
+  if (btn.dataset.view === 'rules') loadRules();
+  if (btn.dataset.view === 'webhook') renderWebhook();
+  if (btn.dataset.view === 'events') loadEvents();
+  if (btn.dataset.view === 'settings') loadSettings();
+}));
+$('refreshBtn').addEventListener('click', () => { loadSettings(); loadRules(); loadEvents(); });
+
+function conditionRow(c = {}) {
+  const row = document.createElement('div');
+  row.className = 'condition-row';
+  row.innerHTML = `
+    <select class="f-input cond-field">${fields.map(([v,l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>
+    <select class="f-input cond-op">${ops.map(([v,l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}</select>
+    <input class="f-input cond-value" placeholder="значение">
+    <button class="btn btn--danger btn--sm" type="button">×</button>`;
+  row.querySelector('.cond-field').value = c.field || 'title';
+  row.querySelector('.cond-op').value = c.op || 'contains';
+  row.querySelector('.cond-value').value = c.value || '';
+  row.querySelector('button').addEventListener('click', () => row.remove());
+  return row;
+}
+function addCondition(c){ $('conditions').appendChild(conditionRow(c)); }
+$('addConditionBtn').addEventListener('click', () => addCondition());
+
+function clearRule(){
+  $('ruleId').value = ''; $('ruleName').value = ''; $('ruleMode').value = 'and'; $('ruleSubId').value = ''; $('ruleExclusive').checked = false;
+  $('conditions').innerHTML = ''; addCondition({field:'title', op:'contains', value:''}); addCondition({field:'payment_state', op:'equals', value:'paid'});
+}
+$('newRuleBtn').addEventListener('click', clearRule);
+
+function collectConditions(){
+  return [...document.querySelectorAll('.condition-row')].map(row => ({
+    field: row.querySelector('.cond-field').value,
+    op: row.querySelector('.cond-op').value,
+    value: row.querySelector('.cond-value').value.trim()
+  })).filter(c => c.field && c.op);
+}
+$('saveRuleBtn').addEventListener('click', async () => {
+  try {
+    await fetchJson(API + '/rules', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        id: $('ruleId').value || undefined,
+        name: $('ruleName').value.trim(),
+        subscription_id: $('ruleSubId').value.trim(),
+        exclusive_groups: $('ruleExclusive').checked,
+        active: true,
+        conditions: {mode: $('ruleMode').value, conditions: collectConditions()}
+      })
+    });
+    notify('Правило сохранено', 'ok');
+    clearRule(); loadRules();
+  } catch(e) { notify(e.message, 'error'); }
+});
+
+async function loadRules(){
+  rules = await fetchJson(API + '/rules').catch(e => (notify(e.message, 'error'), []));
+  const tbody = $('rulesTable');
+  if (!rules.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">Правил нет</td></tr>'; return; }
+  tbody.innerHTML = rules.map(r => {
+    const cp = r.conditions || {mode:'and', conditions:[]};
+    const condText = (cp.conditions || []).map(c => `${c.field} ${c.op} ${c.value || ''}`).join(` ${String(cp.mode || 'and').toUpperCase()} `);
+    return `<tr>
+      <td>${esc(r.name)}</td>
+      <td>${esc(String(cp.mode || 'and').toUpperCase())}</td>
+      <td class="mono">${esc(r.subscription_id)}${r.exclusive_groups ? ' · exclusive' : ''}</td>
+      <td title="${esc(condText)}">${esc(condText)}</td>
+      <td>${r.active ? '<span class="badge badge--ok">активно</span>' : '<span class="badge badge--off">выкл</span>'}</td>
+      <td style="display:flex;gap:4px">
+        <button class="btn btn--sm" onclick="editRule(${r.id})">✎</button>
+        <button class="btn btn--sm btn--ghost" onclick="toggleRule(${r.id})">${r.active ? 'выкл' : 'вкл'}</button>
+        <button class="btn btn--sm btn--danger" onclick="deleteRule(${r.id})">×</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+window.editRule = id => {
+  const r = rules.find(item => item.id === id); if (!r) return;
+  const cp = r.conditions || {mode:'and', conditions:[]};
+  $('ruleId').value = r.id; $('ruleName').value = r.name || ''; $('ruleMode').value = cp.mode || 'and'; $('ruleSubId').value = r.subscription_id || ''; $('ruleExclusive').checked = !!r.exclusive_groups;
+  $('conditions').innerHTML = ''; (cp.conditions || []).forEach(addCondition); if (!$('conditions').children.length) addCondition();
+};
+window.toggleRule = async id => { await fetchJson(API + `/rules/${id}/toggle`, {method:'PUT'}); loadRules(); };
+window.deleteRule = async id => { if (!confirm('Удалить правило?')) return; await fetchJson(API + `/rules/${id}`, {method:'DELETE'}); loadRules(); };
+
+async function loadSettings(){
+  settings = await fetchJson(API + '/settings').catch(e => (notify(e.message, 'error'), {}));
+  $('secret').value = settings.webhook_secret || '';
+  $('timeout').value = settings.request_timeout || '12';
+  $('paidStatuses').value = settings.paid_statuses || '';
+  $('partialStatuses').value = settings.partial_statuses || '';
+  $('unpaidStatuses').value = settings.unpaid_statuses || '';
+  $('vkFields').value = settings.vk_fields || 'utmT,utm_term,user_term';
+  const env = await fetchJson(API + '/env-status').catch(() => ({}));
+  $('envBox').textContent = [
+    ['SENLER_ACCESS_TOKEN', env.SENLER_ACCESS_TOKEN],
+    ['SENLER_GROUP_ID', env.SENLER_GROUP_ID],
+    ['webhook_secret', env.webhook_secret],
+    ['customer-db', env.customer_db_ready]
+  ].map(([k,v]) => `${k}: ${v ? 'OK' : 'нет'}`).join('\n') + `\ncustomer_db_path: ${env.customer_db_path || ''}`;
+  renderWebhook();
+}
+$('saveSettingsBtn').addEventListener('click', async () => {
+  try {
+    settings = await fetchJson(API + '/settings', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        webhook_secret:$('secret').value.trim(),
+        request_timeout:$('timeout').value.trim() || '12',
+        paid_statuses:$('paidStatuses').value,
+        partial_statuses:$('partialStatuses').value,
+        unpaid_statuses:$('unpaidStatuses').value,
+        vk_fields:$('vkFields').value.trim() || 'utmT,utm_term,user_term'
+      })
+    });
+    notify('Настройки сохранены', 'ok'); renderWebhook();
+  } catch(e) { notify(e.message, 'error'); }
+});
+
+function renderWebhook(){
+  const secret = $('secret')?.value || settings.webhook_secret || 'SECRET';
+  const params = 'secret=' + encodeURIComponent(secret) + '&number={object.number}&id={object.user.id}&order_id={object.id}&positions={object.positions}&costMoney={object.cost_money}&leftCostMoney={object.left_cost_money}&payedMoney={object.payed_money}&status={object.status}&paymentLink={object.payment_link}&firstName={object.user.first_name}&lastName={object.user.last_name}&name={object.user.name}&email={object.user.email}&phone={object.user.phone}&manager_name={object.manager}&manager_email={object.manager_email}&manager_phone={object.manager_phone}&offers={object.offers}&avatarUrl={object.user.avatar_url}&utmS={object.user.create_session.utm_source}&utmM={object.user.create_session.utm_medium}&utmCa={object.user.create_session.utm_campaign}&utmCo={object.user.create_session.utm_content}&utmT={object.user.create_session.utm_term}&user_yclid={object.user.yclid}&user_ym_uid={object.user.ym_uid}&user_source={object.user.source}&user_content={object.user.content}&user_campaign={object.user.campaign}&user_term={object.user.term}&user_medium={object.user.medium}';
+  $('webhookCreatedUrl').value = location.origin + API + '/webhook/created?' + params;
+  $('webhookPartialUrl').value = location.origin + API + '/webhook/partial?' + params;
+  $('webhookPaidUrl').value = location.origin + API + '/webhook/paid?' + params;
+}
+document.querySelectorAll('.copy-webhook').forEach(btn => btn.addEventListener('click', async () => {
+  renderWebhook();
+  await navigator.clipboard.writeText($(btn.dataset.copy).value);
+  notify('URL скопирован', 'ok');
+}));
+$('testPayload').value = JSON.stringify({order_id:'test-1', number:'1001', positions:'Послушная собака', costMoney:'9900', leftCostMoney:'0', payedMoney:'9900', status:'Оплачен', utmT:'123456789'}, null, 2);
+$('sendTestBtn').addEventListener('click', async () => {
+  try {
+    const payload = JSON.parse($('testPayload').value || '{}');
+    const url = API + '/webhook/paid?secret=' + encodeURIComponent(settings.webhook_secret || $('secret').value || '');
+    const data = await fetchJson(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    $('testResult').hidden = false; $('testResult').textContent = JSON.stringify(data, null, 2);
+  } catch(e) { $('testResult').hidden = false; $('testResult').textContent = e.message; notify(e.message, 'error'); }
+});
+
+async function loadEvents(){
+  const limit = encodeURIComponent($('eventLimit').value || '200');
+  const result = encodeURIComponent($('eventFilter').value || 'all');
+  const events = await fetchJson(API + `/events?limit=${limit}&result=${result}`).catch(e => (notify(e.message, 'error'), []));
+  const tbody = $('eventsTable');
+  if (!events.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">Событий нет</td></tr>'; return; }
+  tbody.innerHTML = events.map(e => `<tr class="event-row" data-id="${e.id}">
+    <td class="mono">${esc((e.received_at || '').replace('T',' ').replace('Z',''))}</td>
+    <td class="mono">${esc(e.platform_id || e.order_id)}</td>
+    <td>${badgePayment(e.payment_state)}</td>
+    <td class="mono">${esc(e.vk_id)}</td>
+    <td>${esc(e.status || e.error)}</td>
+    <td>${e.success ? '<span class="badge badge--ok">OK</span>' : e.ignored ? '<span class="badge badge--warn">игнор</span>' : '<span class="badge badge--bad">ошибка</span>'}</td>
+  </tr>`).join('');
+  tbody.querySelectorAll('tr').forEach(row => row.addEventListener('click', () => selectEvent(row.dataset.id, row)));
+}
+function badgePayment(s){
+  if (s === 'paid') return '<span class="badge badge--ok">paid</span>';
+  if (s === 'partial') return '<span class="badge badge--warn">partial</span>';
+  if (s === 'unpaid') return '<span class="badge badge--off">unpaid</span>';
+  return '<span class="badge badge--bad">unknown</span>';
+}
+async function selectEvent(id, row){
+  if (activeEventRow) activeEventRow.classList.remove('is-active');
+  activeEventRow = row; row.classList.add('is-active');
+  const e = await fetchJson(API + `/events/${id}`).catch(err => ({error:err.message}));
+  $('eventDetail').innerHTML = `
+    <div class="kv">
+      <span>ID</span><span class="mono">${esc(e.id)}</span>
+      <span>Заказ</span><span class="mono">${esc(e.platform_id || e.order_id)}</span>
+      <span>Оплата</span><span>${badgePayment(e.payment_state)}</span>
+      <span>VK ID</span><span class="mono">${esc(e.vk_id)}</span>
+      <span>Ошибка</span><span>${esc(e.error || '')}</span>
+    </div>
+    <pre class="pre">${esc(JSON.stringify(e.details || e, null, 2))}</pre>`;
+}
+$('loadEventsBtn').addEventListener('click', loadEvents);
+$('eventFilter').addEventListener('change', loadEvents);
+
+clearRule();
+loadSettings();
+loadRules();
+</script>
+</body>
+</html>

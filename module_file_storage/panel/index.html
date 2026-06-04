@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Файловое хранилище</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--text-muted:#bababa;--text-subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent-bg:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;
+      --bad-bg:#251315;--bad-bd:#5f3137;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);}
+    body{min-width:0;}button,input,textarea,select{font:inherit;}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
+    ::-webkit-scrollbar{width:8px;height:8px;}
+    ::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+
+    .shell{width:100vw;height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden;background:var(--bg);}
+
+    .toolbar{display:flex;align-items:center;gap:8px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel);}
+    .crumbs{display:flex;align-items:center;gap:0;min-width:0;flex:1;overflow:hidden;}
+    .crumb{display:inline-flex;align-items:center;min-height:28px;padding:0 8px;border:1px solid transparent;background:transparent;color:var(--text-muted);cursor:pointer;white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis;}
+    .crumb:hover{background:var(--panel-strong);color:var(--text);}
+    .crumb-sep{color:var(--text-subtle);padding:0 1px;}
+    .actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;padding:4px 10px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);cursor:pointer;white-space:nowrap;font-size:.8rem;}
+    .btn:hover{background:var(--panel-soft);}
+    .btn:disabled{opacity:.35;cursor:default;}
+    .btn--primary{background:var(--accent-bg);border-color:var(--accent-bg);color:var(--accent-text);}
+    .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
+    .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+    .btn--icon{width:28px;padding:0;font-size:.9rem;}
+
+    .file-body{min-height:0;overflow:auto;position:relative;}
+    .drop-active::after{content:"";position:absolute;inset:10px;border:1px dashed var(--accent-bg);background:rgba(244,244,244,.04);pointer-events:none;}
+    table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem;}
+    th,td{height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    th{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--text-subtle);font-weight:500;user-select:none;}
+    th[data-sort]{cursor:pointer;}
+    tr.item-row{cursor:default;}
+    tr.item-row:hover td{background:var(--panel-strong);}
+    tr.item-row--active td{background:var(--panel-soft);}
+    .c-name{width:46%}.c-date{width:190px}.c-type{width:150px}.c-size{width:110px}.c-actions{width:132px;text-align:right;}
+    .name-cell{display:flex;align-items:center;gap:9px;min-width:0;}
+    .file-mark{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border-mid);background:#090909;color:var(--text-muted);font-size:.66rem;line-height:1;flex-shrink:0;}
+    .file-mark--folder{background:#15120a;color:var(--warn);border-color:#5c4b1c;}
+    .file-mark--image{color:#9fd4ff}.file-mark--video{color:#d8b4fe}.file-mark--text{color:#9fe0aa}
+    .item-name{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+    .row-actions{display:inline-flex;gap:4px;justify-content:flex-end;}
+    .row-actions .btn{min-height:24px;width:25px;padding:0;font-size:.72rem;}
+
+    .statusbar{display:flex;align-items:center;gap:12px;min-width:0;height:28px;padding:0 10px;border-top:1px solid var(--border);background:var(--panel);color:var(--text-subtle);font-size:.76rem;}
+    .statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+    .empty{height:100%;display:grid;place-items:center;color:var(--text-subtle);padding:30px;text-align:center;}
+
+    .overlay{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.62);z-index:20;padding:16px;}
+    .dialog{width:min(560px,100%);max-height:min(720px,92vh);display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:var(--panel);border:1px solid var(--border-strong);box-shadow:0 20px 80px rgba(0,0,0,.45);}
+    .dialog--wide{width:min(860px,100%);}
+    .dialog__head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border);}
+    .dialog__title{font-size:.9rem;font-weight:600;}
+    .dialog__body{min-height:0;overflow:auto;padding:12px;display:grid;gap:10px;}
+    .dialog__foot{display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid var(--border);}
+    .field{display:grid;gap:5px;}
+    .field label{font-size:.72rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.08em;}
+    .input,.textarea{width:100%;border:1px solid var(--border-strong);background:#090909;color:var(--text);padding:7px 9px;min-height:32px;}
+    .textarea{min-height:280px;resize:vertical;font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;line-height:1.5;white-space:pre;overflow:auto;}
+    .hint{margin:0;color:var(--text-subtle);font-size:.78rem;line-height:1.45;}
+    .error{color:var(--bad);background:var(--bad-bg);border:1px solid var(--bad-bd);padding:7px 9px;font-size:.78rem;}
+
+    .preview-box{min-height:220px;display:grid;place-items:center;background:#030303;border:1px solid var(--border);overflow:auto;}
+    .preview-box img,.preview-box video{max-width:100%;max-height:58vh;display:block;}
+    .preview-box audio{width:min(520px,100%);}
+    .preview-text{width:100%;height:58vh;margin:0;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-muted);font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;line-height:1.5;}
+
+    @media (max-width:720px){
+      .toolbar{align-items:stretch;flex-direction:column;}
+      .actions{width:100%;overflow-x:auto;padding-bottom:1px;}
+      .c-date{width:132px}.c-type{display:none}.c-size{width:82px}.c-actions{width:104px}
+      th.c-type,td.c-type{display:none}
+      .btn{padding-inline:8px;}
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="toolbar">
+    <div class="crumbs" id="crumbs"></div>
+    <div class="actions">
+      <button id="upBtn" class="btn btn--icon btn--ghost" type="button" title="Вверх">↑</button>
+      <button id="refreshBtn" class="btn btn--icon btn--ghost" type="button" title="Обновить">↻</button>
+      <button id="newFolderBtn" class="btn" type="button">+ Папка</button>
+      <button id="newTextBtn" class="btn" type="button">+ Текст</button>
+      <label class="btn btn--primary" for="uploadInput">↑ Загрузить</label>
+      <input id="uploadInput" type="file" multiple hidden />
+    </div>
+  </div>
+
+  <div id="fileBody" class="file-body">
+    <table id="fileTable">
+      <thead>
+        <tr>
+          <th class="c-name" data-sort="name">Имя</th>
+          <th class="c-date" data-sort="updated_at">Дата изменения</th>
+          <th class="c-type" data-sort="category">Тип</th>
+          <th class="c-size" data-sort="size">Размер</th>
+          <th class="c-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="itemsBody"></tbody>
+    </table>
+    <div id="emptyState" class="empty" hidden>Папка пустая</div>
+  </div>
+
+  <div class="statusbar">
+    <span id="statusCount">0 объектов</span>
+    <span id="statusLimit"></span>
+    <span id="statusMsg" style="margin-left:auto"></span>
+  </div>
+</div>
+
+<div id="folderDialog" class="overlay" hidden>
+  <div class="dialog">
+    <div class="dialog__head">
+      <div class="dialog__title">Новая папка</div>
+      <button class="btn btn--icon btn--ghost" data-close="folderDialog" type="button">×</button>
+    </div>
+    <form id="folderForm">
+      <div class="dialog__body">
+        <div class="field"><label>Имя</label><input id="folderName" class="input" autocomplete="off" /></div>
+        <div id="folderError" class="error" hidden></div>
+      </div>
+      <div class="dialog__foot">
+        <button class="btn btn--ghost" data-close="folderDialog" type="button">Отмена</button>
+        <button class="btn btn--primary" type="submit">Создать</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="textDialog" class="overlay" hidden>
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <div class="dialog__title" id="textTitle">Текстовый файл</div>
+      <button class="btn btn--icon btn--ghost" data-close="textDialog" type="button">×</button>
+    </div>
+    <form id="textForm">
+      <div class="dialog__body">
+        <div class="field"><label>Имя файла</label><input id="textName" class="input" autocomplete="off" placeholder="notes.txt" /></div>
+        <div class="field"><label>Содержимое</label><textarea id="textContent" class="textarea" spellcheck="false"></textarea></div>
+        <p class="hint">Редактор сохраняет UTF-8 текст до 1 MB.</p>
+        <div id="textError" class="error" hidden></div>
+      </div>
+      <div class="dialog__foot">
+        <button class="btn btn--ghost" data-close="textDialog" type="button">Отмена</button>
+        <button class="btn btn--primary" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="previewDialog" class="overlay" hidden>
+  <div class="dialog dialog--wide">
+    <div class="dialog__head">
+      <div class="dialog__title" id="previewTitle">Файл</div>
+      <button class="btn btn--icon btn--ghost" data-close="previewDialog" type="button">×</button>
+    </div>
+    <div class="dialog__body">
+      <div id="previewBox" class="preview-box"></div>
+      <div class="field"><label>Прямая ссылка</label><input id="previewUrl" class="input" readonly /></div>
+      <div id="previewError" class="error" hidden></div>
+    </div>
+    <div class="dialog__foot">
+      <button id="copyPreviewBtn" class="btn" type="button">Копировать</button>
+      <a id="openPreviewBtn" class="btn btn--primary" target="_blank" rel="noopener">Открыть</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+
+const $ = id => document.getElementById(id);
+const state = {
+  folderId: 1,
+  path: [],
+  items: [],
+  selectedId: null,
+  sortKey: 'name',
+  sortDir: 1,
+  config: { max_file_size: 104857600, allowed_extensions: [] },
+  editingId: null
+};
+
+function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function fmtSize(n){if(!n)return '—';const u=['Б','КБ','МБ','ГБ'];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++;}return `${v>=10||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`;}
+function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function typeLabel(item){
+  if(item.kind==='folder')return 'Папка с файлами';
+  const map={image:'Изображение',video:'Видео',audio:'Аудио',text:'Текстовый файл',pdf:'PDF',document:'Документ',archive:'Архив'};
+  return map[item.category] || (item.ext ? item.ext.toUpperCase() : 'Файл');
+}
+function markLabel(item){
+  if(item.kind==='folder')return 'DIR';
+  if(item.category==='image')return 'IMG';
+  if(item.category==='video')return 'VID';
+  if(item.category==='audio')return 'AUD';
+  if(item.category==='text')return 'TXT';
+  if(item.ext)return item.ext.slice(0,3).toUpperCase();
+  return 'FIL';
+}
+function setMsg(msg, level='info'){
+  $('statusMsg').textContent = msg || '';
+  $('statusMsg').style.color = level === 'error' ? 'var(--bad)' : level === 'ok' ? 'var(--ok)' : 'var(--text-subtle)';
+  if(msg) setTimeout(()=>{ if($('statusMsg').textContent===msg) $('statusMsg').textContent=''; }, 4500);
+}
+async function api(url, opts={}){
+  const res = await fetch(API + url, opts);
+  if(!res.ok){
+    let data = {};
+    try{ data = await res.json(); }catch{}
+    throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+  }
+  if(res.status === 204) return null;
+  return await res.json();
+}
+
+async function init(){
+  try{
+    state.config = await api('/config');
+    $('statusLimit').textContent = `Лимит файла: ${fmtSize(state.config.max_file_size)}`;
+  }catch(e){ setMsg(e.message, 'error'); }
+  await loadFolder(1);
+}
+
+async function loadFolder(id){
+  state.folderId = id;
+  state.selectedId = null;
+  try{
+    const data = await api(`/folders/${id}/items`);
+    state.path = data.path;
+    state.items = data.items;
+    render();
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+
+function render(){
+  renderCrumbs();
+  renderItems();
+  const parent = state.path.length > 1 ? state.path[state.path.length - 2].id : null;
+  $('upBtn').disabled = !parent;
+  $('statusCount').textContent = `${state.items.length} ${plural(state.items.length, 'объект', 'объекта', 'объектов')}`;
+}
+function plural(n,a,b,c){const m=Math.abs(n)%100,l=m%10;if(m>10&&m<20)return c;if(l>1&&l<5)return b;if(l===1)return a;return c;}
+function renderCrumbs(){
+  $('crumbs').innerHTML = '';
+  state.path.forEach((p, idx) => {
+    if(idx) $('crumbs').insertAdjacentHTML('beforeend','<span class="crumb-sep">›</span>');
+    const btn = document.createElement('button');
+    btn.className = 'crumb';
+    btn.type = 'button';
+    btn.textContent = p.name;
+    btn.title = p.name;
+    btn.addEventListener('click', () => loadFolder(p.id));
+    $('crumbs').appendChild(btn);
+  });
+}
+function renderItems(){
+  const rows = [...state.items].sort(sortItems);
+  $('itemsBody').innerHTML = '';
+  $('emptyState').hidden = rows.length !== 0;
+  $('fileTable').hidden = rows.length === 0;
+  for(const item of rows){
+    const tr = document.createElement('tr');
+    tr.className = 'item-row' + (item.id === state.selectedId ? ' item-row--active' : '');
+    tr.innerHTML = `
+      <td class="c-name"><div class="name-cell">
+        <span class="file-mark file-mark--${esc(item.category)}">${esc(markLabel(item))}</span>
+        <span class="item-name" title="${esc(item.name)}">${esc(item.name)}</span>
+      </div></td>
+      <td class="c-date">${esc(fmtDate(item.updated_at))}</td>
+      <td class="c-type">${esc(typeLabel(item))}</td>
+      <td class="c-size">${item.kind === 'folder' ? '—' : esc(fmtSize(item.size))}</td>
+      <td class="c-actions"><span class="row-actions">
+        ${item.kind === 'file' ? '<button class="btn btn--ghost" data-act="preview" title="Открыть" type="button">□</button><button class="btn btn--ghost" data-act="copy" title="Копировать ссылку" type="button">⛓</button>' : ''}
+        ${item.is_text_editable ? '<button class="btn btn--ghost" data-act="edit" title="Редактировать" type="button">T</button>' : ''}
+        <button class="btn btn--ghost" data-act="rename" title="Переименовать" type="button">A</button>
+        <button class="btn btn--danger" data-act="delete" title="Удалить" type="button">×</button>
+      </span></td>`;
+    tr.addEventListener('click', () => { state.selectedId = item.id; document.querySelectorAll('.item-row').forEach(r=>r.classList.remove('item-row--active')); tr.classList.add('item-row--active'); });
+    tr.addEventListener('dblclick', () => item.kind === 'folder' ? loadFolder(item.id) : previewItem(item));
+    tr.querySelectorAll('button[data-act]').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); handleAction(btn.dataset.act, item); }));
+    $('itemsBody').appendChild(tr);
+  }
+}
+function sortItems(a,b){
+  if(a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+  let av = a[state.sortKey], bv = b[state.sortKey];
+  if(state.sortKey === 'name' || state.sortKey === 'category'){av=String(av||a.name).toLowerCase();bv=String(bv||b.name).toLowerCase();}
+  if(av < bv) return -1 * state.sortDir;
+  if(av > bv) return 1 * state.sortDir;
+  return a.name.localeCompare(b.name, 'ru');
+}
+function handleAction(act, item){
+  if(act === 'preview') previewItem(item);
+  if(act === 'copy') copyLink(item);
+  if(act === 'edit') editText(item);
+  if(act === 'rename') renameItem(item);
+  if(act === 'delete') deleteItem(item);
+}
+
+async function createFolder(name){
+  await api('/folders', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:state.folderId,name})});
+  await loadFolder(state.folderId);
+}
+async function saveText(){
+  const payload = {folder_id:state.folderId,name:$('textName').value,content:$('textContent').value};
+  if(state.editingId){
+    await api(`/items/${state.editingId}/text`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  }else{
+    await api('/text-files', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  }
+  closeDialog('textDialog');
+  await loadFolder(state.folderId);
+}
+async function uploadFiles(files){
+  for(const file of files){
+    const fd = new FormData();
+    fd.append('folder_id', String(state.folderId));
+    fd.append('file', file);
+    setMsg(`Загрузка: ${file.name}`);
+    await api('/uploads', {method:'POST', body:fd});
+  }
+  setMsg('Загрузка завершена', 'ok');
+  await loadFolder(state.folderId);
+}
+async function getLink(item){
+  const data = await api(`/items/${item.id}/link`);
+  return data.url;
+}
+async function copyLink(item){
+  try{
+    const url = await getLink(item);
+    await navigator.clipboard.writeText(url);
+    setMsg('Ссылка скопирована', 'ok');
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+async function previewItem(item){
+  try{
+    const url = await getLink(item);
+    $('previewTitle').textContent = item.name;
+    $('previewUrl').value = url;
+    $('openPreviewBtn').href = url;
+    $('previewError').hidden = true;
+    const box = $('previewBox');
+    if(item.category === 'image') box.innerHTML = `<img alt="" src="${esc(url)}">`;
+    else if(item.category === 'video') box.innerHTML = `<video src="${esc(url)}" controls></video>`;
+    else if(item.category === 'audio') box.innerHTML = `<audio src="${esc(url)}" controls></audio>`;
+    else if(item.category === 'text' && item.size <= state.config.max_text_edit_size){
+      const text = await (await fetch(url)).text();
+      box.innerHTML = `<pre class="preview-text">${esc(text)}</pre>`;
+    }else{
+      box.innerHTML = `<div class="hint">Предпросмотр недоступен для этого типа. Файл можно открыть по прямой ссылке.</div>`;
+    }
+    openDialog('previewDialog');
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+async function editText(item){
+  try{
+    const data = await api(`/items/${item.id}/text`);
+    state.editingId = item.id;
+    $('textTitle').textContent = 'Редактирование файла';
+    $('textName').value = item.name;
+    $('textName').disabled = true;
+    $('textContent').value = data.content;
+    $('textError').hidden = true;
+    openDialog('textDialog');
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+async function renameItem(item){
+  const name = prompt('Новое имя', item.name);
+  if(name === null) return;
+  try{
+    await api(`/items/${item.id}/rename`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    await loadFolder(state.folderId);
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+async function deleteItem(item){
+  if(!confirm(`Удалить «${item.name}»?`)) return;
+  try{
+    await api(`/items/${item.id}`, {method:'DELETE'});
+    await loadFolder(state.folderId);
+  }catch(e){ setMsg(e.message, 'error'); }
+}
+
+function openDialog(id){$(id).hidden=false;}
+function closeDialog(id){$(id).hidden=true;}
+document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => closeDialog(btn.dataset.close)));
+document.querySelectorAll('.overlay').forEach(ov => ov.addEventListener('click', e => { if(e.target === ov) ov.hidden = true; }));
+
+$('newFolderBtn').addEventListener('click', () => {$('folderName').value='';$('folderError').hidden=true;openDialog('folderDialog');setTimeout(()=>$('folderName').focus(),20);});
+$('newTextBtn').addEventListener('click', () => {state.editingId=null;$('textTitle').textContent='Новый текстовый файл';$('textName').disabled=false;$('textName').value='';$('textContent').value='';$('textError').hidden=true;openDialog('textDialog');setTimeout(()=>$('textName').focus(),20);});
+$('refreshBtn').addEventListener('click', () => loadFolder(state.folderId));
+$('upBtn').addEventListener('click', () => {const parent = state.path.length > 1 ? state.path[state.path.length - 2].id : null;if(parent) loadFolder(parent);});
+$('uploadInput').addEventListener('change', e => { if(e.target.files.length) uploadFiles(e.target.files).catch(err=>setMsg(err.message,'error')); e.target.value=''; });
+$('folderForm').addEventListener('submit', async e => {e.preventDefault();try{await createFolder($('folderName').value);closeDialog('folderDialog');}catch(err){$('folderError').textContent=err.message;$('folderError').hidden=false;}});
+$('textForm').addEventListener('submit', async e => {e.preventDefault();try{await saveText();}catch(err){$('textError').textContent=err.message;$('textError').hidden=false;}});
+$('copyPreviewBtn').addEventListener('click', async () => {await navigator.clipboard.writeText($('previewUrl').value);setMsg('Ссылка скопирована','ok');});
+document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
+  const key = th.dataset.sort;
+  if(state.sortKey === key) state.sortDir *= -1; else {state.sortKey = key; state.sortDir = 1;}
+  renderItems();
+}));
+
+const body = $('fileBody');
+body.addEventListener('dragover', e => {e.preventDefault();body.classList.add('drop-active');});
+body.addEventListener('dragleave', e => {if(e.currentTarget === body) body.classList.remove('drop-active');});
+body.addEventListener('drop', e => {e.preventDefault();body.classList.remove('drop-active');if(e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files).catch(err=>setMsg(err.message,'error'));});
+
+init();
+</script>
+</body>
+</html>

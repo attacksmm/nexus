@@ -16,18 +16,29 @@
     }
     *,*::before,*::after{box-sizing:border-box;}
     [hidden]{display:none!important;}
-    html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-size:14px;}
+    html,body{margin:0;width:100%;height:100%;max-width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-size:14px;color-scheme:dark;}
     button,input,textarea,select{font:inherit;}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
+    ::-webkit-scrollbar{width:8px;height:8px;}
+    ::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+    ::-webkit-scrollbar-corner{background:#080808;}
+    *::-webkit-scrollbar{width:8px;height:8px;}
+    *::-webkit-scrollbar-track{background:#080808;}
+    *::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+    *::-webkit-scrollbar-corner{background:#080808;}
+    .scroll-zone{scrollbar-width:none;-ms-overflow-style:none;}
+    .scroll-zone::-webkit-scrollbar{display:none;width:0;height:0;}
 
-    .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;}
+    .shell{width:100vw;max-width:100%;height:100vh;min-width:0;overflow:hidden;display:grid;grid-template-rows:auto minmax(0,1fr) auto;}
 
     /* toolbar */
-    .toolbar{display:flex;align-items:center;gap:8px;padding:0 10px;height:42px;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;}
-    .toolbar__divider{width:1px;height:20px;background:var(--border-mid);margin:0 2px;}
-    .toolbar__stats{margin-left:auto;color:var(--text-subtle);font-size:.76rem;}
+    .toolbar{display:flex;align-items:center;gap:8px;padding:0 10px;height:42px;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;min-width:0;overflow:hidden;}
+    .toolbar__divider{width:1px;height:20px;background:var(--border-mid);margin:0 2px;flex-shrink:0;}
+    .toolbar__stats{margin-left:auto;color:var(--text-subtle);font-size:.76rem;flex-shrink:0;}
 
     /* table selector */
-    .table-tabs{display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow-x:auto;}
+    .table-tabs{display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;}
     .table-tab{
       display:inline-flex;align-items:center;gap:6px;padding:4px 10px;
       border:1px solid transparent;background:transparent;color:var(--text-muted);
@@ -39,15 +50,15 @@
     .table-tab__del:hover{opacity:1;color:var(--bad);}
 
     /* table */
-    .table-wrap{overflow:auto;scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
-    table{width:100%;border-collapse:collapse;font-size:.83rem;}
+    .table-wrap{overflow:auto;min-width:0;}
+    table{width:100%;min-width:720px;border-collapse:collapse;font-size:.83rem;}
     th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
     th{color:var(--text-subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1;}
     tr:hover td{background:var(--panel-strong);}
     .cf-badge{display:inline-block;padding:1px 5px;border:1px solid var(--border-mid);color:var(--text-subtle);font-size:.71rem;margin:0 2px 2px 0;}
 
     /* pagination */
-    .pagination{display:flex;align-items:center;gap:8px;padding:7px 10px;border-top:1px solid var(--border);background:var(--panel);font-size:.78rem;color:var(--text-muted);}
+    .pagination{display:flex;align-items:center;gap:8px;padding:7px 10px;border-top:1px solid var(--border);background:var(--panel);font-size:.78rem;color:var(--text-muted);min-width:0;overflow:hidden;}
     .pagination__spacer{flex:1;}
 
     /* buttons */
@@ -59,7 +70,7 @@
     .btn--xs{min-height:22px;padding:1px 6px;font-size:.73rem;}
 
     /* search */
-    .search{flex:1;max-width:260px;min-height:28px;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);}
+    .search{flex:1 1 170px;max-width:260px;min-width:120px;min-height:28px;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);}
 
     /* overlay */
     .overlay{position:fixed;inset:0;background:rgba(0,0,0,.72);display:grid;place-items:center;padding:16px;z-index:50;}
@@ -84,7 +95,7 @@
 
   <!-- Toolbar -->
   <div class="toolbar">
-    <div class="table-tabs" id="tableTabs"></div>
+    <div class="table-tabs scroll-zone" id="tableTabs"></div>
     <div class="toolbar__divider"></div>
     <button id="newTableBtn" class="btn btn--ghost btn--xs" type="button" title="Новая таблица">+ Таблица</button>
     <div class="toolbar__divider"></div>
@@ -96,7 +107,7 @@
   </div>
 
   <!-- Table -->
-  <div class="table-wrap">
+  <div class="table-wrap scroll-zone">
     <table>
       <thead id="tableHead"><tr><th>id</th><th>platform_id</th><th>Поля</th><th>Создан</th><th></th></tr></thead>
       <tbody id="tableBody"></tbody>
@@ -120,7 +131,7 @@
       <div><p class="eyebrow">Клиент</p><h2 id="recTitle">Новая запись</h2></div>
       <button id="recClose" class="btn btn--xs btn--ghost" type="button">×</button>
     </div>
-    <div class="dialog__body">
+    <div class="dialog__body scroll-zone">
       <input id="recId" type="hidden" />
       <label class="form-label">platform_id
         <input id="recPlatformId" class="form-input" placeholder="ID на платформе (VK, TG, …)" />
@@ -145,7 +156,7 @@
       <div><p class="eyebrow">Таблицы</p><h2>Новая таблица</h2></div>
       <button id="tblClose" class="btn btn--xs btn--ghost" type="button">×</button>
     </div>
-    <div class="dialog__body">
+    <div class="dialog__body scroll-zone">
       <label class="form-label">Системное имя (латиница, _)
         <input id="tblName" class="form-input" placeholder="vk_clients" />
       </label>
@@ -178,6 +189,37 @@ let offset = 0, total = 0, query = "";
 const LIMIT = 50;
 
 const $ = id => document.getElementById(id);
+
+// ── Pointer-local scrolling without visible scrollbars ───────────────────────
+
+function canScroll(el, axis) {
+  if (!el) return false;
+  if (axis === "x") return el.scrollWidth > el.clientWidth + 1;
+  return el.scrollHeight > el.clientHeight + 1;
+}
+
+function installHoverScroll() {
+  document.addEventListener("wheel", event => {
+    const zone = event.target.closest?.(".scroll-zone");
+    if (!zone) return;
+    const xScrollable = canScroll(zone, "x");
+    const yScrollable = canScroll(zone, "y");
+    if (!xScrollable && !yScrollable) return;
+    const wantsHorizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey || !yScrollable;
+    if (wantsHorizontal && xScrollable) {
+      zone.scrollLeft += event.deltaX || event.deltaY;
+      event.preventDefault();
+      return;
+    }
+    if (yScrollable) {
+      zone.scrollTop += event.deltaY;
+      if (event.deltaX && xScrollable) zone.scrollLeft += event.deltaX;
+      event.preventDefault();
+    }
+  }, { passive: false });
+}
+
+installHoverScroll();
 
 // ── Tables ────────────────────────────────────────────────────────────────────
 
