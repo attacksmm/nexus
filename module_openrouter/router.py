@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from orchestrator.auth import ENV_PATH, _read_env_values, _write_env_values
 from orchestrator.auth import can_access_module, verify_token_from_request
@@ -80,6 +80,14 @@ def _validation_detail(exc: ValidationError) -> str:
         loc = ".".join(str(p) for p in err.get("loc", [])) or "body"
         parts.append(f"{loc}: {err.get('msg', 'invalid')}")
     return "; ".join(parts)[:500] or "invalid body"
+
+
+def _coerce_text_input(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    raise ValueError("must be a string or number")
 
 
 def _env() -> dict[str, str]:
@@ -166,7 +174,14 @@ async def _init_db():
     _log("info", "openrouter DB initialized")
 
 
-class ChatIn(BaseModel):
+class TextInputMixin(BaseModel):
+    @field_validator("platform_id", "conversation_id", "prompt", "message", "question", "answer", mode="before", check_fields=False)
+    @classmethod
+    def _normalize_text_input(cls, value: Any) -> str:
+        return _coerce_text_input(value)
+
+
+class ChatIn(TextInputMixin):
     platform_id: str = ""
     conversation_id: str | None = None
     prompt: str
@@ -175,7 +190,7 @@ class ChatIn(BaseModel):
     model: str | None = None
 
 
-class TestChatIn(BaseModel):
+class TestChatIn(TextInputMixin):
     platform_id: str = ""
     conversation_id: str | None = None
     prompt: str
@@ -184,7 +199,7 @@ class TestChatIn(BaseModel):
     model: str | None = None
 
 
-class AppendIn(BaseModel):
+class AppendIn(TextInputMixin):
     platform_id: str = ""
     conversation_id: str | None = None
     question: str = ""
@@ -987,8 +1002,8 @@ async def api_schema(request: Request):
             "path": "/nexus/openrouter/api/chat",
             "auth": "Authorization: Bearer <токен модуля из настроек>",
             "body_fields": {
-                "platform_id": "string, обязательный если не передан conversation_id",
-                "conversation_id": "string|null, если передан без platform_id, platform_id будет найден по чату",
+                "platform_id": "string|number, обязательный если не передан conversation_id; number будет сохранен как строка",
+                "conversation_id": "string|number|null, если передан без platform_id, platform_id будет найден по чату",
                 "prompt": "string, путь к .txt prompt в file-storage, например prompts/avito_gpt1.txt",
                 "message": "string, вопрос пользователя",
                 "context": "0|1|2|3|4 или boolean; 0 без контекста, 1 краткий без записи, 2 краткий+запись, 3 полный+запись, 4 полный+запись+автосводка",
