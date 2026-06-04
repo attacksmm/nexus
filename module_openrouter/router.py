@@ -27,6 +27,28 @@ DEFAULT_TIMEOUT = 90
 MAX_HISTORY_MESSAGES = 80
 SUMMARY_MAX_CHARS = 1800
 MODULE_TOKEN_SETTING = "module_api_token"
+LEGACY_SUMMARY_PROMPT = (
+    "Сделай краткую сводку диалога с клиентом на русском языке. "
+    "Сохрани факты о клиенте, собаке, проблемах, уже данных советах и текущем состоянии. "
+    "Пиши структурно, без воды, не больше 10 пунктов."
+)
+SALES_SUMMARY_PROMPT = """Сделай краткую сводку диалога для отдела продаж на русском языке.
+Цель сводки: менеджер должен за 20-30 секунд понять клиента и продолжить продажу без перечитывания всей переписки.
+
+Пиши коротко, прикладно, без воды и без художественного пересказа. Если данных нет, пиши "нет данных".
+
+Структура:
+1. Статус лида: холодный / теплый / горячий и почему.
+2. Кто клиент: имя, город, роль в покупке, важные личные детали.
+3. Собака / ситуация: порода, возраст, проблема, срочность, контекст.
+4. Главная боль клиента: что его реально беспокоит и какой результат он хочет.
+5. Интерес к продукту: что заинтересовало, на что реагирует, какие форматы/услуги подходят.
+6. Возражения и риски: цена, время, доверие, сомнения, негативный опыт, ограничения.
+7. Что уже сказали/обещали: важные ответы, договоренности, упомянутые условия.
+8. Следующий лучший шаг: что менеджеру сделать или спросить дальше одной конкретной фразой.
+9. Тон общения: как с этим клиентом лучше говорить, что не давить, на чем сделать акцент.
+
+Не придумывай факты. Не ставь диагнозы. Не добавляй внутренние рассуждения модели."""
 
 _ctx = None
 _db_path: Path | None = None
@@ -154,14 +176,14 @@ async def _init_db():
             "summary_model": DEFAULT_MODEL,
             "request_timeout": str(DEFAULT_TIMEOUT),
             "history_limit": str(MAX_HISTORY_MESSAGES),
-            "summary_prompt": (
-                "Сделай краткую сводку диалога с клиентом на русском языке. "
-                "Сохрани факты о клиенте, собаке, проблемах, уже данных советах и текущем состоянии. "
-                "Пиши структурно, без воды, не больше 10 пунктов."
-            ),
+            "summary_prompt": SALES_SUMMARY_PROMPT,
         }
         for key, value in defaults.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+        await db.execute(
+            "UPDATE settings SET value=? WHERE key='summary_prompt' AND value=?",
+            (SALES_SUMMARY_PROMPT, LEGACY_SUMMARY_PROMPT),
+        )
         cur = await db.execute("SELECT value FROM settings WHERE key=?", (MODULE_TOKEN_SETTING,))
         row = await cur.fetchone()
         if not row or not row[0]:
@@ -298,7 +320,7 @@ async def _settings() -> dict[str, str]:
         "summary_model": DEFAULT_MODEL,
         "request_timeout": str(DEFAULT_TIMEOUT),
         "history_limit": str(MAX_HISTORY_MESSAGES),
-        "summary_prompt": "",
+        "summary_prompt": SALES_SUMMARY_PROMPT,
     }
     data.update({row[0]: row[1] for row in rows})
     return data
@@ -743,7 +765,7 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
         transcript = await _conversation_transcript(db, conversation_id)
     if not transcript:
         raise HTTPException(400, "conversation has no messages")
-    summary_prompt = settings.get("summary_prompt") or "Сделай краткую сводку диалога."
+    summary_prompt = settings.get("summary_prompt") or SALES_SUMMARY_PROMPT
     summary, usage = await _call_openrouter(
         summary_model,
         [{"role": "system", "content": summary_prompt}, {"role": "user", "content": "\n\n".join(transcript)[-60000:]}],
