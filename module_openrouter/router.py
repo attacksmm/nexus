@@ -74,6 +74,14 @@ def _clean(value: Any, limit: int = 10000) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _validation_detail(exc: ValidationError) -> str:
+    parts = []
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", [])) or "body"
+        parts.append(f"{loc}: {err.get('msg', 'invalid')}")
+    return "; ".join(parts)[:500] or "invalid body"
+
+
 def _env() -> dict[str, str]:
     return {
         "openrouter_key": os.environ.get("OPENROUTER_API_KEY", "").strip(),
@@ -758,6 +766,12 @@ async def rotate_api_token(request: Request):
     return {"token": await _rotate_module_api_token()}
 
 
+@router.get("/me")
+async def get_me(request: Request):
+    user = await _require_panel_user(request)
+    return {"username": user.get("username") or "", "role": user.get("role") or ""}
+
+
 @router.get("/prompts")
 async def list_prompts(request: Request):
     await _require_panel_user(request)
@@ -847,18 +861,6 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
     prompt_path, prompt_text = await _resolve_prompt(data.prompt)
     settings = await _settings()
     model = await _model_for_prompt(prompt_path, settings, data.model)
-    _log(
-        "info",
-        "chat start source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s message_chars=%s",
-        source,
-        allow_write,
-        platform_id or "<by-conversation>",
-        conversation_id or "<auto>",
-        prompt_path,
-        model,
-        mode,
-        len(message),
-    )
     async with aiosqlite.connect(_must_db()) as db:
         if not platform_id and conversation_id:
             platform_id = await _platform_for_conversation(db, conversation_id)
@@ -873,6 +875,18 @@ async def _run_chat(data: ChatIn | TestChatIn, *, allow_write: bool, source: str
         else:
             history = []
         await db.commit()
+    _log(
+        "info",
+        "chat start source=%s write=%s platform_id=%s conversation_id=%s prompt=%s model=%s context=%s message_chars=%s",
+        source,
+        allow_write,
+        platform_id,
+        cid,
+        prompt_path,
+        model,
+        mode,
+        len(message),
+    )
     answer, usage = await _call_openrouter(model, _context_payload(prompt_text, summary, history, message, mode), _timeout(settings))
     summary_result = None
     summary_error = ""
@@ -932,10 +946,8 @@ async def chat(request: Request):
             raw = await request.json()
             data = ChatIn(**raw)
         except ValidationError as exc:
-            _log("warning", "chat validation failed detail=%s", str(exc)[:1000])
-            raise HTTPException(400, f"invalid chat body: {str(exc)[:1000]}")
+            raise HTTPException(400, f"invalid chat body: {_validation_detail(exc)}")
         except Exception as exc:
-            _log("warning", "chat invalid json/body detail=%s", str(exc)[:1000])
             raise HTTPException(400, "invalid JSON body")
         return await _run_chat(data, allow_write=True, source="api")
     except HTTPException as exc:
@@ -954,10 +966,8 @@ async def test_chat(request: Request):
             raw = await request.json()
             data = TestChatIn(**raw)
         except ValidationError as exc:
-            _log("warning", "test-chat validation failed detail=%s", str(exc)[:1000])
-            raise HTTPException(400, f"invalid test body: {str(exc)[:1000]}")
+            raise HTTPException(400, f"invalid test body: {_validation_detail(exc)}")
         except Exception as exc:
-            _log("warning", "test-chat invalid json/body detail=%s", str(exc)[:1000])
             raise HTTPException(400, "invalid JSON body")
         return await _run_chat(data, allow_write=False, source="panel_test")
     except HTTPException as exc:

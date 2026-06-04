@@ -82,6 +82,11 @@
     .dialog__side{min-height:0;overflow:auto;border-right:1px solid var(--border);background:#090909}
     .dialog__main{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
     .dialog__foot{display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid var(--border)}
+    #promptDialog .dialog{width:min(1220px,100%);height:min(720px,94vh);grid-template-rows:auto minmax(0,1fr) auto}
+    #promptDialog .dialog__main{display:grid;grid-template-rows:minmax(0,1fr);min-height:0;overflow:hidden}
+    .prompt-editor-grid{display:grid;grid-template-rows:minmax(0,1fr);min-height:0;overflow:hidden;padding:10px}
+    .prompt-editor-field{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0}
+    #promptContent{height:100%;min-height:0;resize:none;white-space:pre-wrap;overflow:auto}
     .side-row{display:grid;gap:4px;padding:9px 10px;border-bottom:1px solid var(--border);cursor:pointer}
     .side-row:hover,.side-row.active{background:var(--panel-strong)}
     .summary-box{max-height:120px;overflow:auto;white-space:pre-wrap;color:var(--muted);border-bottom:1px solid var(--border);padding:10px;background:#080808;font-size:.8rem;line-height:1.45}
@@ -108,7 +113,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.4</div>
+    <div class="ver">v1.0.5</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -123,7 +128,7 @@
 
   <section id="view-prompts" class="view active">
     <div class="toolbar">
-      <input id="promptFilter" class="input grow" placeholder="Фильтр по пути prompt..." autocomplete="new-password" name="openrouter_prompt_filter" autocorrect="off" spellcheck="false" />
+      <input id="promptFilter" class="input grow no-autofill" placeholder="Фильтр по пути prompt..." autocomplete="off" name="openrouter_prompt_filter" autocorrect="off" spellcheck="false" />
       <button id="refreshPrompts" class="btn icon ghost" type="button" title="Обновить">↻</button>
       <button id="refreshModels" class="btn" type="button">Модели</button>
     </div>
@@ -144,7 +149,7 @@
 
   <section id="view-contexts" class="view">
     <div class="toolbar">
-      <input id="userSearch" class="input grow" placeholder="platform_id или conversation_id..." autocomplete="new-password" name="openrouter_context_search" autocorrect="off" spellcheck="false" />
+      <input id="userSearch" class="input grow no-autofill" placeholder="platform_id или conversation_id..." autocomplete="off" name="openrouter_context_search" autocorrect="off" spellcheck="false" />
       <button id="searchUsers" class="btn" type="button">Найти</button>
       <button id="refreshUsers" class="btn icon ghost" type="button" title="Обновить">↻</button>
     </div>
@@ -175,8 +180,8 @@
         <div class="field"><label>Prompt</label><select id="testPrompt" class="select"></select></div>
         <div class="field"><label>Модель</label><input id="testModel" class="input" list="modelsList" placeholder="по умолчанию для prompt" autocomplete="off" /></div>
         <div class="field"><label>Контекст</label><select id="testContext" class="select"><option value="0">0 — без контекста</option><option value="1" selected>1 — краткий, без записи</option><option value="3">3 — полный, без записи</option></select></div>
-        <div class="field"><label>platform_id</label><input id="testPlatform" class="input" autocomplete="new-password" name="openrouter_test_platform" placeholder="например vk_123" /></div>
-        <div class="field"><label>conversation_id</label><input id="testConversation" class="input" autocomplete="new-password" name="openrouter_test_conversation" placeholder="можно вместо platform_id" /></div>
+        <div class="field"><label>platform_id</label><input id="testPlatform" class="input" autocomplete="off" name="openrouter_test_platform" placeholder="по умолчанию ваш логин" /></div>
+        <div class="field"><label>conversation_id</label><input id="testConversation" class="input no-autofill" autocomplete="off" name="openrouter_test_conversation" placeholder="можно вместо platform_id" /></div>
         <div class="field"><label>Статус</label><input id="testStatus" class="input" readonly value="Готово" /></div>
         <div class="field" style="grid-column:1/-1"><label>Тестовый вопрос</label><textarea id="testMessage" class="textarea" placeholder="Введите вопрос для OpenRouter. Контекст будет только прочитан, запись в историю не выполняется."></textarea></div>
         <div class="field" style="grid-column:1/-1"><label>Request JSON</label><pre id="testRequest" class="codebox">{}</pre></div>
@@ -263,10 +268,10 @@
       <button id="closePrompt" class="btn icon ghost" type="button">×</button>
     </div>
     <div class="dialog__main">
-      <div class="form-grid wide" style="min-height:0;overflow:hidden">
-        <div class="field" style="min-height:0">
+      <div class="prompt-editor-grid">
+        <div class="field prompt-editor-field">
           <label>Текст prompt-файла</label>
-          <textarea id="promptContent" class="textarea" spellcheck="false" style="min-height:0;height:100%;resize:none"></textarea>
+          <textarea id="promptContent" class="textarea" spellcheck="false" wrap="soft"></textarea>
         </div>
       </div>
     </div>
@@ -286,7 +291,7 @@ const API = modBase + '/api';
 const rootBase = modBase.replace(/\/openrouter$/, '');
 const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null};
+const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -311,6 +316,46 @@ async function fsApi(url, opts={}){
   return await res.json();
 }
 function jsonPost(method, body){return {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};}
+
+function installAntiAutofill(el){
+  if(!el) return;
+  let userTouched = false;
+  let timer = null;
+  el.name = `${el.name || el.id}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  el.autocomplete = 'off';
+  el.setAttribute('autocomplete','off');
+  el.setAttribute('data-lpignore','true');
+  el.setAttribute('data-1p-ignore','true');
+  const markTouched = () => {
+    userTouched = true;
+    if(timer) clearInterval(timer);
+  };
+  el.addEventListener('keydown', markTouched);
+  el.addEventListener('paste', markTouched);
+  const clear = () => {
+    if(!userTouched && el.value) {
+      el.value = '';
+      if(el.id === 'promptFilter') renderPrompts();
+      if(el.id === 'userSearch') loadUsers().catch(()=>{});
+    }
+  };
+  clear();
+  setTimeout(clear, 80);
+  setTimeout(clear, 350);
+  setTimeout(clear, 900);
+  const stopAt = Date.now() + 3500;
+  timer = setInterval(() => {
+    clear();
+    if(userTouched || Date.now() > stopAt) clearInterval(timer);
+  }, 250);
+}
+
+async function loadMe(){
+  try{
+    state.me = await api('/me');
+    if(!$('testPlatform').value.trim()) $('testPlatform').value = state.me.username || '';
+  }catch(e){}
+}
 
 async function loadEnv(){
   try{
@@ -337,6 +382,7 @@ async function loadSettings(){
   $('summaryPrompt').value = state.settings.summary_prompt || '';
   $('moduleApiToken').value = state.settings.module_api_token || '';
   $('openrouterKey').value = '';
+  if(state.me && !$('testPlatform').value.trim()) $('testPlatform').value = state.me.username || '';
 }
 async function saveSettings(){
   const body = {
@@ -586,6 +632,10 @@ $('savePromptText').addEventListener('click', ()=>savePromptText().catch(e=>setM
 (async function init(){
   try{
     await loadEnv();
+    installAntiAutofill($('promptFilter'));
+    installAntiAutofill($('userSearch'));
+    installAntiAutofill($('testConversation'));
+    await loadMe();
     await loadSettings();
     await loadModels();
     await loadPrompts();
