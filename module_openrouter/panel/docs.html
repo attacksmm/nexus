@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenRouter API — документация</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--text:#f2f2f2;--muted:#bababa;--border:#2d2d2d;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text)}body{padding:22px;line-height:1.55}main{max-width:920px}p,li{color:var(--muted)}code,pre{font-family:"IBM Plex Mono","Consolas",monospace;background:#030303;border:1px solid var(--border)}code{padding:1px 5px}pre{padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+  </style>
+</head>
+<body><main>
+  <h1>OpenRouter API</h1>
+  <p>Модуль принимает внешние запросы с Bearer token, читает промпты из file-storage и хранит локальный контекст по <code>platform_id</code>.</p>
+  <h2>Генерация</h2>
+  <pre>POST /nexus/openrouter/api/chat
+Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
+
+{
+  "platform_id": "vk_123",
+  "conversation_id": null,
+  "prompt": "prompts/avito_gpt1.txt",
+  "message": "Вопрос клиента",
+  "context": 2
+}</pre>
+  <p><code>context=0</code> не читает и не пишет историю, <code>context=1</code> читает, но не пишет, <code>context=2</code> читает и сохраняет вопрос/ответ.</p>
+  <h2>Ручное пополнение</h2>
+  <pre>POST /nexus/openrouter/api/context/append
+Authorization: Bearer &lt;NEXUS_OPENROUTER_API_TOKEN&gt;
+
+{
+  "platform_id": "vk_123",
+  "conversation_id": "or_conv_...",
+  "question": "1) вопрос пользователя",
+  "answer": "1) ответ пользователя"
+}</pre>
+</main></body></html>

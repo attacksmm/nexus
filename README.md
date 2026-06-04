@@ -101,6 +101,57 @@ nexus/
 /nexus/#file-storage/prompts/avito_gpt1.txt
 ```
 
+### `openrouter`
+
+Модуль генерации ответов через OpenRouter API. Использует промпты из `file-storage`, хранит контекст по неизменяемому `platform_id`, позволяет назначать модель отдельно на каждый prompt и вручную пополнять историю диалога.
+
+Ключевые возможности:
+
+- внешний `POST /nexus/openrouter/api/chat` с Bearer token;
+- автоматическое создание `conversation_id`, если он не передан;
+- режимы контекста: `0` не читает и не пишет историю, `1` читает без записи, `2` читает и сохраняет вопрос/ответ;
+- глобальная модель по умолчанию и override модели для каждого prompt-файла;
+- поиск клиентов по `platform_id` и `conversation_id`;
+- просмотр всех пар вопрос/ответ в аккуратной таблице;
+- ручное добавление пары вопрос/ответ через API или панель;
+- генерация и сохранение краткой сводки по диалогу выбранной моделью.
+
+Основной запрос:
+
+```http
+POST /nexus/openrouter/api/chat
+Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Content-Type: application/json
+
+{
+  "platform_id": "vk_123",
+  "conversation_id": null,
+  "prompt": "prompts/avito_gpt1.txt",
+  "message": "Вопрос клиента",
+  "context": 2
+}
+```
+
+Ручное пополнение контекста:
+
+```http
+POST /nexus/openrouter/api/context/append
+Authorization: Bearer <NEXUS_OPENROUTER_API_TOKEN>
+Content-Type: application/json
+
+{
+  "platform_id": "vk_123",
+  "conversation_id": "or_conv_...",
+  "question": "1) вопрос пользователя",
+  "answer": "1) ответ"
+}
+```
+
+Для работы нужны переменные окружения:
+
+- `OPENROUTER_API_KEY` — API ключ OpenRouter;
+- `NEXUS_OPENROUTER_API_TOKEN` — Bearer token для внешних вызовов модуля.
+
 ### `getcourse-orders`
 
 Webhook-модуль GetCourse. Принимает события заказов, нормализует состояние оплаты, пишет данные в `customer-db` и применяет правила распределения по группам Senler.

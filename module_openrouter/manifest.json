@@ -1,0 +1,14 @@
+{
+  "id": "openrouter",
+  "name": "OpenRouter API",
+  "version": "1.0.0",
+  "description": "Генерация ответов через OpenRouter с промптами из file-storage, контекстами пользователей и настройкой моделей.",
+  "env_vars": {
+    "OPENROUTER_API_KEY": "API ключ OpenRouter",
+    "NEXUS_OPENROUTER_API_TOKEN": "Bearer token для внешних запросов к API модуля"
+  },
+  "env_required": [
+    "OPENROUTER_API_KEY",
+    "NEXUS_OPENROUTER_API_TOKEN"
+  ]
+}

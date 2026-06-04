@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenRouter API</title>
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;--ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;
+      --bad-bg:#251315;--bad-bd:#5f3137;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+    button,input,textarea,select{font:inherit}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}
+    ::-webkit-scrollbar-track{background:#080808}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+
+    .shell{width:100vw;height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;background:var(--bg)}
+    .topbar{display:flex;align-items:center;gap:10px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel)}
+    .title{font-weight:700;font-size:.98rem;white-space:nowrap}
+    .ver{color:var(--subtle);font-size:.78rem}
+    .pill{display:inline-flex;align-items:center;min-height:22px;padding:2px 8px;border:1px solid var(--border-mid);background:#0b0b0b;color:var(--muted);font-size:.75rem}
+    .pill.ok{border-color:#265733;background:#07160b;color:var(--ok)}
+    .pill.bad{border-color:var(--bad-bd);background:var(--bad-bg);color:var(--bad)}
+    .tabs{display:flex;gap:6px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:#090909;overflow-x:auto}
+    .tab{min-height:28px;padding:4px 10px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}
+    .tab.active{background:var(--panel-strong);border-color:var(--border-strong);color:var(--text)}
+    .view{min-height:0;overflow:hidden;display:none}
+    .view.active{display:grid;grid-template-rows:auto minmax(0,1fr)}
+    .toolbar{display:flex;align-items:center;gap:8px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel)}
+    .toolbar .grow{flex:1;min-width:140px}
+    .content{min-height:0;overflow:auto}
+    .statusbar{display:flex;align-items:center;gap:12px;height:28px;padding:0 10px;border-top:1px solid var(--border);background:var(--panel);color:var(--subtle);font-size:.76rem}
+    .statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .right{margin-left:auto}
+
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;padding:4px 10px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);cursor:pointer;white-space:nowrap;font-size:.8rem;text-decoration:none}
+    .btn:hover{background:var(--panel-soft)}
+    .btn:disabled{opacity:.4;cursor:default}
+    .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}
+    .btn.danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad)}
+    .btn.icon{width:28px;padding:0}
+    .input,.textarea,.select{width:100%;min-height:30px;border:1px solid var(--border-strong);background:#090909;color:var(--text);padding:6px 8px}
+    .textarea{min-height:88px;resize:vertical;line-height:1.45;font-family:"IBM Plex Mono","Consolas",monospace;font-size:.78rem}
+    .field{display:grid;gap:5px;min-width:0}
+    .field label{font-size:.7rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
+    .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:10px}
+    .form-grid.wide{grid-template-columns:minmax(0,1fr)}
+    .hint{margin:0;color:var(--subtle);font-size:.78rem;line-height:1.45}
+    .error{color:var(--bad);background:var(--bad-bg);border:1px solid var(--bad-bd);padding:7px 9px;font-size:.78rem}
+
+    table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem}
+    th,td{height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    th{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--subtle);font-weight:500}
+    tr.clickable{cursor:pointer}
+    tr.clickable:hover td{background:var(--panel-strong)}
+    .mono{font-family:"IBM Plex Mono","Consolas",monospace}
+    .muted{color:var(--subtle)}
+    .source-api{color:#9fd4ff}.source-manual{color:var(--warn)}
+    .col-path{width:34%}.col-model{width:30%}.col-size{width:95px}.col-date{width:150px}.col-actions{width:96px;text-align:right}
+    .col-user{width:28%}.col-small{width:90px}.col-wide{width:28%}
+    .empty{height:100%;display:grid;place-items:center;color:var(--subtle);padding:30px;text-align:center}
+
+    .overlay{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.68);z-index:30;padding:14px}
+    .dialog{width:min(1120px,100%);height:min(760px,94vh);display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:var(--panel);border:1px solid var(--border-strong);box-shadow:0 20px 80px rgba(0,0,0,.5)}
+    .dialog__head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)}
+    .dialog__title{font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .dialog__body{min-height:0;display:grid;grid-template-columns:260px minmax(0,1fr);overflow:hidden}
+    .dialog__side{min-height:0;overflow:auto;border-right:1px solid var(--border);background:#090909}
+    .dialog__main{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
+    .dialog__foot{display:flex;justify-content:flex-end;gap:8px;padding:10px 12px;border-top:1px solid var(--border)}
+    .side-row{display:grid;gap:4px;padding:9px 10px;border-bottom:1px solid var(--border);cursor:pointer}
+    .side-row:hover,.side-row.active{background:var(--panel-strong)}
+    .summary-box{max-height:120px;overflow:auto;white-space:pre-wrap;color:var(--muted);border-bottom:1px solid var(--border);padding:10px;background:#080808;font-size:.8rem;line-height:1.45}
+    .pairs{min-height:0;overflow:auto}
+    .pair-table{table-layout:auto}
+    .pair-table th,.pair-table td{height:auto;vertical-align:top;white-space:normal;line-height:1.45}
+    .pair-table th:nth-child(1){width:70px}.pair-table th:nth-child(2){width:36%}.pair-table th:nth-child(3){width:42%}.pair-table th:nth-child(4){width:88px}
+    .append-box{border-top:1px solid var(--border);padding:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end;background:var(--panel)}
+
+    @media(max-width:760px){
+      .topbar,.toolbar{align-items:stretch;flex-direction:column}
+      .toolbar .grow{width:100%}
+      .form-grid{grid-template-columns:minmax(0,1fr)}
+      .col-date,.col-size{display:none}
+      th.col-date,td.col-date,th.col-size,td.col-size{display:none}
+      .dialog__body{grid-template-columns:minmax(0,1fr);grid-template-rows:150px minmax(0,1fr)}
+      .dialog__side{border-right:0;border-bottom:1px solid var(--border)}
+      .append-box{grid-template-columns:minmax(0,1fr)}
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar">
+    <div class="title">OpenRouter API</div>
+    <div class="ver">v1.0.0</div>
+    <span id="envReady" class="pill">проверка</span>
+    <span id="tokenState" class="pill">Bearer</span>
+    <span id="keyState" class="pill">OpenRouter</span>
+    <span id="fsState" class="pill">file-storage</span>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="prompts" type="button">Промпты</button>
+    <button class="tab" data-tab="contexts" type="button">Контексты</button>
+    <button class="tab" data-tab="settings" type="button">Настройки</button>
+  </div>
+
+  <section id="view-prompts" class="view active">
+    <div class="toolbar">
+      <input id="promptFilter" class="input grow" placeholder="Фильтр по пути prompt..." />
+      <button id="refreshPrompts" class="btn icon ghost" type="button" title="Обновить">↻</button>
+      <button id="refreshModels" class="btn" type="button">Модели</button>
+    </div>
+    <div class="content">
+      <table>
+        <thead><tr>
+          <th class="col-path">Файл</th>
+          <th class="col-model">Модель</th>
+          <th class="col-size">Размер</th>
+          <th class="col-date">Изменен</th>
+          <th class="col-actions"></th>
+        </tr></thead>
+        <tbody id="promptsBody"></tbody>
+      </table>
+      <div id="promptsEmpty" class="empty" hidden>В file-storage нет .txt промптов</div>
+    </div>
+  </section>
+
+  <section id="view-contexts" class="view">
+    <div class="toolbar">
+      <input id="userSearch" class="input grow" placeholder="platform_id или conversation_id..." />
+      <button id="searchUsers" class="btn" type="button">Найти</button>
+      <button id="refreshUsers" class="btn icon ghost" type="button" title="Обновить">↻</button>
+    </div>
+    <div class="content">
+      <table>
+        <thead><tr>
+          <th class="col-user">platform_id</th>
+          <th class="col-small">Чатов</th>
+          <th class="col-small">Сообщений</th>
+          <th class="col-small">Токены</th>
+          <th class="col-wide">Сводка</th>
+          <th class="col-date">Обновлен</th>
+        </tr></thead>
+        <tbody id="usersBody"></tbody>
+      </table>
+      <div id="usersEmpty" class="empty" hidden>Контексты не найдены</div>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view">
+    <div class="toolbar">
+      <button id="saveSettings" class="btn primary" type="button">Сохранить</button>
+      <button id="checkEnv" class="btn" type="button">Проверить окружение</button>
+    </div>
+    <div class="content">
+      <div class="form-grid">
+        <div class="field"><label>Модель по умолчанию</label><input id="defaultModel" class="input" list="modelsList" /></div>
+        <div class="field"><label>Модель для сводок</label><input id="summaryModel" class="input" list="modelsList" /></div>
+        <div class="field"><label>Таймаут запроса, сек</label><input id="requestTimeout" class="input" type="number" min="10" max="180" /></div>
+        <div class="field"><label>Лимит истории, сообщений</label><input id="historyLimit" class="input" type="number" min="0" max="200" /></div>
+        <div class="field" style="grid-column:1/-1"><label>Промпт сводки</label><textarea id="summaryPrompt" class="textarea"></textarea></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="statusbar">
+    <span id="statusLeft">Готово</span>
+    <span id="statusMsg" class="right"></span>
+  </div>
+</div>
+
+<datalist id="modelsList"></datalist>
+
+<div id="clientDialog" class="overlay" hidden>
+  <div class="dialog">
+    <div class="dialog__head">
+      <div id="clientTitle" class="dialog__title">Клиент</div>
+      <button id="generateSummary" class="btn" type="button">Сводка</button>
+      <input id="summaryModelPick" class="input" list="modelsList" style="width:260px" />
+      <button id="closeClient" class="btn icon ghost" type="button">×</button>
+    </div>
+    <div class="dialog__body">
+      <div id="conversationList" class="dialog__side"></div>
+      <div class="dialog__main">
+        <div id="summaryBox" class="summary-box muted">Сводка не создана</div>
+        <div class="pairs">
+          <table class="pair-table">
+            <thead><tr><th>#</th><th>Вопрос</th><th>Ответ</th><th>Источник</th></tr></thead>
+            <tbody id="pairsBody"></tbody>
+          </table>
+          <div id="pairsEmpty" class="empty" hidden>В этом чате пока нет сообщений</div>
+        </div>
+        <div class="append-box">
+          <div class="field"><label>Вопрос пользователя</label><textarea id="manualQuestion" class="textarea" placeholder="1) вопрос пользователя"></textarea></div>
+          <div class="field"><label>Ответ</label><textarea id="manualAnswer" class="textarea" placeholder="1) ответ"></textarea></div>
+          <button id="appendPair" class="btn primary" type="button">Добавить</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button id="reloadClient" class="btn" type="button">Обновить</button>
+      <button id="closeClient2" class="btn ghost" type="button">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[]};
+
+function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function fmtSize(n){if(!n)return '—';const u=['Б','КБ','МБ'];let i=0,v=Number(n||0);while(v>=1024&&i<u.length-1){v/=1024;i++;}return `${v>=10||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`;}
+function setMsg(msg, kind='info'){ $('statusMsg').textContent=msg||''; $('statusMsg').style.color=kind==='error'?'var(--bad)':kind==='ok'?'var(--ok)':'var(--subtle)'; }
+function setLeft(msg){ $('statusLeft').textContent=msg||'Готово'; }
+function badge(id, ok, text){ const el=$(id); el.className='pill '+(ok?'ok':'bad'); el.textContent=text; }
+async function api(url, opts={}){
+  const res = await fetch(API + url, opts);
+  if(!res.ok){
+    let data={}; try{data=await res.json();}catch{}
+    throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+function jsonPost(method, body){return {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};}
+
+async function loadEnv(){
+  try{
+    const env = await api('/env-status');
+    badge('envReady', env.ready, env.ready ? 'готов' : 'не готов');
+    badge('tokenState', env.NEXUS_OPENROUTER_API_TOKEN, 'Bearer');
+    badge('keyState', env.OPENROUTER_API_KEY, 'OpenRouter');
+    badge('fsState', env.file_storage_db, 'file-storage');
+  }catch(e){
+    badge('envReady', false, 'нет доступа');
+    badge('tokenState', false, 'Bearer');
+    badge('keyState', false, 'OpenRouter');
+    badge('fsState', false, 'file-storage');
+    setMsg(e.message, 'error');
+  }
+}
+async function loadSettings(){
+  state.settings = await api('/settings');
+  $('defaultModel').value = state.settings.default_model || '';
+  $('summaryModel').value = state.settings.summary_model || '';
+  $('summaryModelPick').value = state.settings.summary_model || state.settings.default_model || '';
+  $('requestTimeout').value = state.settings.request_timeout || 90;
+  $('historyLimit').value = state.settings.history_limit || 80;
+  $('summaryPrompt').value = state.settings.summary_prompt || '';
+}
+async function saveSettings(){
+  await api('/settings', jsonPost('PUT', {
+    default_model:$('defaultModel').value,
+    summary_model:$('summaryModel').value,
+    request_timeout:Number($('requestTimeout').value||90),
+    history_limit:Number($('historyLimit').value||80),
+    summary_prompt:$('summaryPrompt').value
+  }));
+  await loadSettings();
+  setMsg('Настройки сохранены','ok');
+}
+async function loadModels(refresh=0){
+  const data = await api('/models' + (refresh ? '?refresh=1' : ''));
+  state.models = data.items || [];
+  $('modelsList').innerHTML = state.models.map(m=>`<option value="${esc(m.id)}">${esc(m.name||m.id)}</option>`).join('');
+  if(data.fallback) setMsg('OpenRouter models недоступны, показан fallback','error');
+}
+async function loadPrompts(){
+  const data = await api('/prompts');
+  state.prompts = data.items || [];
+  renderPrompts();
+  setLeft(`${state.prompts.length} промптов`);
+}
+function renderPrompts(){
+  const q = $('promptFilter').value.trim().toLowerCase();
+  const rows = state.prompts.filter(p=>!q || p.path.toLowerCase().includes(q));
+  $('promptsEmpty').hidden = rows.length > 0;
+  $('promptsBody').innerHTML = rows.map(p=>`
+    <tr>
+      <td class="col-path mono" title="${esc(p.path)}">${esc(p.path)}</td>
+      <td class="col-model"><input class="input model-input" data-path="${esc(p.path)}" list="modelsList" value="${esc(p.model || '')}" placeholder="${esc(p.effective_model || '')}" /></td>
+      <td class="col-size">${fmtSize(p.size)}</td>
+      <td class="col-date">${fmtDate(p.updated_at)}</td>
+      <td class="col-actions"><button class="btn primary save-model" data-path="${esc(p.path)}" type="button">OK</button></td>
+    </tr>`).join('');
+}
+async function savePromptModel(path){
+  const input = document.querySelector(`.model-input[data-path="${CSS.escape(path)}"]`);
+  await api('/prompt-models', jsonPost('PUT', {prompt_path:path, model:input ? input.value.trim() : ''}));
+  await loadPrompts();
+  setMsg('Модель промпта сохранена','ok');
+}
+
+async function loadUsers(){
+  const q = encodeURIComponent($('userSearch').value.trim());
+  const data = await api('/users?q=' + q);
+  state.users = data.items || [];
+  $('usersEmpty').hidden = state.users.length > 0;
+  $('usersBody').innerHTML = state.users.map(u=>`
+    <tr class="clickable user-row" data-platform="${esc(u.platform_id)}">
+      <td class="col-user mono" title="${esc(u.platform_id)}">${esc(u.platform_id)}</td>
+      <td class="col-small">${u.conversations || 0}</td>
+      <td class="col-small">${u.messages || 0}</td>
+      <td class="col-small">${u.total_tokens_used || 0}</td>
+      <td class="col-wide">${u.summary ? 'есть' : '<span class="muted">нет</span>'}</td>
+      <td class="col-date">${fmtDate(u.updated_at)}</td>
+    </tr>`).join('');
+  setLeft(`${state.users.length} клиентов`);
+}
+async function openClient(platformId){
+  state.currentPlatform = platformId;
+  $('clientTitle').textContent = platformId;
+  $('clientDialog').hidden = false;
+  await loadClientConversations();
+}
+async function loadClientConversations(){
+  const data = await api('/users/' + encodeURIComponent(state.currentPlatform) + '/conversations');
+  state.conversations = data.items || [];
+  $('summaryBox').textContent = data.summary || 'Сводка не создана';
+  $('summaryBox').classList.toggle('muted', !data.summary);
+  $('conversationList').innerHTML = state.conversations.map((c,i)=>`
+    <div class="side-row ${c.conversation_id===state.currentConversation||(!state.currentConversation&&i===0)?'active':''}" data-conversation="${esc(c.conversation_id)}">
+      <div class="mono">${esc(c.conversation_id)}</div>
+      <div class="muted">${esc(c.prompt_path || 'prompt не задан')}</div>
+      <div class="muted">${c.messages || 0} сообщений · ${fmtDate(c.updated_at)}</div>
+    </div>`).join('');
+  if(!state.currentConversation && state.conversations[0]) state.currentConversation = state.conversations[0].conversation_id;
+  if(state.currentConversation) await loadPairs(state.currentConversation);
+  else renderPairs([]);
+}
+async function loadPairs(conversationId){
+  state.currentConversation = conversationId;
+  document.querySelectorAll('.side-row').forEach(r=>r.classList.toggle('active', r.dataset.conversation===conversationId));
+  const data = await api('/conversations/' + encodeURIComponent(conversationId) + '/messages');
+  $('summaryBox').textContent = data.summary || 'Сводка не создана';
+  $('summaryBox').classList.toggle('muted', !data.summary);
+  renderPairs(data.items || []);
+}
+function renderPairs(items){
+  $('pairsEmpty').hidden = items.length > 0;
+  $('pairsBody').innerHTML = items.map((p,i)=>`
+    <tr>
+      <td class="muted">${i+1}</td>
+      <td>${esc(p.question || '')}</td>
+      <td>${esc(p.answer || '')}</td>
+      <td class="${p.source==='manual'?'source-manual':'source-api'}">${esc(p.source || '')}</td>
+    </tr>`).join('');
+}
+async function appendPair(){
+  if(!state.currentPlatform) return;
+  await api('/context/append', jsonPost('POST', {
+    platform_id:state.currentPlatform,
+    conversation_id:state.currentConversation || null,
+    question:$('manualQuestion').value,
+    answer:$('manualAnswer').value
+  }));
+  $('manualQuestion').value='';
+  $('manualAnswer').value='';
+  await loadClientConversations();
+  setMsg('Пара добавлена','ok');
+}
+async function generateSummary(){
+  if(!state.currentConversation) return;
+  const data = await api('/conversations/' + encodeURIComponent(state.currentConversation) + '/summary', jsonPost('POST', {model:$('summaryModelPick').value || null}));
+  $('summaryBox').textContent = data.summary || '';
+  $('summaryBox').classList.toggle('muted', !data.summary);
+  await loadUsers();
+  setMsg('Сводка сохранена','ok');
+}
+
+document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=>{
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b===btn));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id === 'view-' + btn.dataset.tab));
+}));
+$('promptFilter').addEventListener('input', renderPrompts);
+$('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(e.message,'error')));
+$('refreshModels').addEventListener('click', ()=>loadModels(1).catch(e=>setMsg(e.message,'error')));
+$('promptsBody').addEventListener('click', e=>{
+  const btn = e.target.closest('.save-model');
+  if(btn) savePromptModel(btn.dataset.path).catch(err=>setMsg(err.message,'error'));
+});
+$('saveSettings').addEventListener('click', ()=>saveSettings().catch(e=>setMsg(e.message,'error')));
+$('checkEnv').addEventListener('click', ()=>loadEnv());
+$('searchUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
+$('refreshUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
+$('userSearch').addEventListener('keydown', e=>{if(e.key==='Enter') loadUsers().catch(err=>setMsg(err.message,'error'));});
+$('usersBody').addEventListener('click', e=>{
+  const row = e.target.closest('.user-row');
+  if(row) openClient(row.dataset.platform).catch(err=>setMsg(err.message,'error'));
+});
+$('conversationList').addEventListener('click', e=>{
+  const row = e.target.closest('.side-row');
+  if(row) loadPairs(row.dataset.conversation).catch(err=>setMsg(err.message,'error'));
+});
+$('appendPair').addEventListener('click', ()=>appendPair().catch(e=>setMsg(e.message,'error')));
+$('generateSummary').addEventListener('click', ()=>generateSummary().catch(e=>setMsg(e.message,'error')));
+$('reloadClient').addEventListener('click', ()=>loadClientConversations().catch(e=>setMsg(e.message,'error')));
+$('closeClient').addEventListener('click', ()=>$('clientDialog').hidden=true);
+$('closeClient2').addEventListener('click', ()=>$('clientDialog').hidden=true);
+
+(async function init(){
+  try{
+    await loadEnv();
+    await loadSettings();
+    await loadModels();
+    await loadPrompts();
+    await loadUsers();
+    setMsg('');
+  }catch(e){
+    setMsg(e.message,'error');
+  }
+})();
+</script>
+</body>
+</html>
