@@ -35,6 +35,7 @@
   <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
   <tr><td>GET</td><td><code>/tables/{table}/records</code></td><td>Список записей. Параметры: <code>q</code>, <code>limit</code>, <code>offset</code></td></tr>
   <tr><td>POST</td><td><code>/tables/{table}/records</code></td><td>Создать запись <code>{platform_id, custom_fields}</code></td></tr>
+  <tr><td>POST</td><td><code>/tables/{table}/records/batch-upsert</code></td><td>Пачками до 1000 записей: создать новые и обновить существующие по <code>platform_id</code></td></tr>
   <tr><td>GET</td><td><code>/tables/{table}/records/{id}</code></td><td>Одна запись по id</td></tr>
   <tr><td>PUT</td><td><code>/tables/{table}/records/{id}</code></td><td>Обновить запись</td></tr>
   <tr><td>DELETE</td><td><code>/tables/{table}/records/{id}</code></td><td>Удалить запись</td></tr>
@@ -53,6 +54,22 @@ Content-Type: application/json
     "email": "ivan@example.com",
     "source": "ВКонтакте"
   }
+}</code></pre>
+
+<h3>Пачечный upsert</h3>
+<pre><code>POST /nexus/customer-db/api/tables/vk_clients/records/batch-upsert
+Content-Type: application/json
+
+{
+  "records": [
+    {
+      "platform_id": "vk_123456",
+      "custom_fields": {
+        "name": "Иван Иванов",
+        "source": "ВКонтакте"
+      }
+    }
+  ]
 }</code></pre>
 
 <h2>Архитектура модуля</h2>

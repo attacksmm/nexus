@@ -9,7 +9,7 @@ import re
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 _db_path = None
@@ -49,6 +49,11 @@ async def _init_db():
                 ("default", "Основная", "Таблица клиентов по умолчанию"),
             )
             await db.execute(_create_table_sql("default"))
+        cur = await db.execute("SELECT name FROM _cdb_tables ORDER BY id")
+        for (name,) in await cur.fetchall():
+            if SAFE_NAME.match(name):
+                await db.execute(_create_table_sql(name))
+                await db.execute(_create_index_sql(name))
         await db.commit()
 
 
@@ -62,6 +67,10 @@ def _create_table_sql(name: str) -> str:
             updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         );
     """
+
+
+def _create_index_sql(name: str) -> str:
+    return f"CREATE INDEX IF NOT EXISTS idx_cdb_{name}_platform_id ON cdb_{name} (platform_id);"
 
 
 def _check_name(name: str):
@@ -99,6 +108,7 @@ async def create_table(data: TableIn):
                 (data.name, data.display_name, data.description, json.dumps(data.schema_json)),
             )
             await db.execute(_create_table_sql(data.name))
+            await db.execute(_create_index_sql(data.name))
             await db.commit()
         except Exception as e:
             raise HTTPException(409, f"Таблица уже существует: {e}")
@@ -159,10 +169,16 @@ class RecordIn(BaseModel):
     custom_fields: dict = {}
 
 
+class BatchRecordsIn(BaseModel):
+    records: list[RecordIn] = Field(default_factory=list)
+    dry_run: bool = False
+
+
 @router.post("/tables/{table}/records", status_code=201)
 async def create_record(table: str, data: RecordIn):
     _check_name(table)
     async with aiosqlite.connect(_db_path) as db:
+        await db.execute(_create_index_sql(table))
         cur = await db.execute(
             f"INSERT INTO cdb_{table} (platform_id, custom_fields) VALUES (?, ?)",
             (data.platform_id, json.dumps(data.custom_fields, ensure_ascii=False)),
@@ -170,6 +186,99 @@ async def create_record(table: str, data: RecordIn):
         await db.commit()
         rid = cur.lastrowid
     return {"id": rid, "platform_id": data.platform_id, "custom_fields": data.custom_fields}
+
+
+@router.post("/tables/{table}/records/batch-upsert")
+async def batch_upsert_records(table: str, data: BatchRecordsIn):
+    _check_name(table)
+    if len(data.records) > 1000:
+        raise HTTPException(400, "batch-upsert принимает максимум 1000 записей за запрос")
+
+    ordered_platform_ids: list[str] = []
+    records_by_platform_id: dict[str, RecordIn] = {}
+    skipped = 0
+    for record in data.records:
+        platform_id = str(record.platform_id or "").strip()
+        if not platform_id:
+            skipped += 1
+            continue
+        if platform_id not in records_by_platform_id:
+            ordered_platform_ids.append(platform_id)
+        records_by_platform_id[platform_id] = RecordIn(
+            platform_id=platform_id,
+            custom_fields=record.custom_fields or {},
+        )
+
+    if not ordered_platform_ids:
+        return {
+            "ok": True,
+            "total": len(data.records),
+            "unique": 0,
+            "created": 0,
+            "updated": 0,
+            "skipped": skipped,
+        }
+
+    tbl = f"cdb_{table}"
+    async with aiosqlite.connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(_create_index_sql(table))
+        placeholders = ",".join("?" for _ in ordered_platform_ids)
+        cur = await db.execute(
+            f"SELECT id, platform_id FROM {tbl} WHERE platform_id IN ({placeholders}) ORDER BY id ASC",
+            ordered_platform_ids,
+        )
+        existing: dict[str, int] = {}
+        for row in await cur.fetchall():
+            existing.setdefault(row["platform_id"], int(row["id"]))
+
+        if data.dry_run:
+            updated = sum(1 for platform_id in ordered_platform_ids if platform_id in existing)
+            created = len(ordered_platform_ids) - updated
+            return {
+                "ok": True,
+                "dry_run": True,
+                "total": len(data.records),
+                "unique": len(ordered_platform_ids),
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+            }
+
+        created = 0
+        updated = 0
+        ids: dict[str, int] = {}
+        for platform_id in ordered_platform_ids:
+            record = records_by_platform_id[platform_id]
+            custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
+            record_id = existing.get(platform_id)
+            if record_id is None:
+                cur = await db.execute(
+                    f"INSERT INTO {tbl} (platform_id, custom_fields) VALUES (?, ?)",
+                    (platform_id, custom_json),
+                )
+                record_id = int(cur.lastrowid)
+                existing[platform_id] = record_id
+                created += 1
+            else:
+                await db.execute(
+                    f"UPDATE {tbl} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (custom_json, record_id),
+                )
+                updated += 1
+            ids[platform_id] = record_id
+
+        await db.commit()
+
+    return {
+        "ok": True,
+        "total": len(data.records),
+        "unique": len(ordered_platform_ids),
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "ids": ids,
+    }
 
 
 @router.get("/tables/{table}/records/{rid}")
