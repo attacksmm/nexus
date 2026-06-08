@@ -189,6 +189,24 @@ let offset = 0, total = 0, query = "";
 const LIMIT = 50;
 
 const $ = id => document.getElementById(id);
+const SAFE_TABLE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+
+function tableFromHash() {
+  const raw = decodeURIComponent((location.hash || "").replace(/^#\/?/, "")).trim();
+  return SAFE_TABLE.test(raw) ? raw : "default";
+}
+
+function setCurrentTable(name, syncPath = true) {
+  currentTable = SAFE_TABLE.test(name) ? name : "default";
+  offset = 0;
+  query = "";
+  if (syncPath) syncModulePath();
+}
+
+function syncModulePath() {
+  const path = currentTable === "default" ? "" : currentTable;
+  window.parent?.postMessage({type:"nexus:set-module-path", moduleId:"customer-db", path}, location.origin);
+}
 
 // ── Pointer-local scrolling without visible scrollbars ───────────────────────
 
@@ -228,6 +246,10 @@ async function loadTables() {
   const tables = await res.json();
   const tabs = $("tableTabs");
   tabs.innerHTML = "";
+  if (!tables.some(t => t.name === currentTable)) {
+    currentTable = "default";
+    syncModulePath();
+  }
   for (const t of tables) {
     const btn = document.createElement("button");
     btn.className = "table-tab" + (t.name === currentTable ? " table-tab--active" : "");
@@ -236,7 +258,9 @@ async function loadTables() {
     btn.innerHTML = `${esc(t.display_name)}${t.name !== "default" ? `<span class="table-tab__del" data-del="${esc(t.name)}" title="Удалить таблицу">×</span>` : ""}`;
     btn.addEventListener("click", e => {
       if (e.target.dataset.del) { delTable(e.target.dataset.del); return; }
-      currentTable = t.name; offset = 0; loadTables(); loadRecords();
+      setCurrentTable(t.name);
+      loadTables();
+      loadRecords();
     });
     tabs.appendChild(btn);
   }
@@ -245,7 +269,7 @@ async function loadTables() {
 async function delTable(name) {
   if (!confirm(`Удалить таблицу «${name}»? Все данные будут потеряны.`)) return;
   await fetch(API + `/tables/${name}`, { method: "DELETE" });
-  currentTable = "default";
+  setCurrentTable("default");
   loadTables();
   loadRecords();
 }
@@ -383,7 +407,7 @@ $("tblSave").addEventListener("click", async () => {
   const data = await res.json();
   if (!res.ok) { $("tblStatus").textContent = data.error || data.detail || "Ошибка"; $("tblStatus").className="status-line status-line--err"; return; }
   $("tblDialog").hidden = true;
-  currentTable = name;
+  setCurrentTable(name);
   loadTables();
   loadRecords();
 });
@@ -392,9 +416,17 @@ $("tblSave").addEventListener("click", async () => {
 
 function esc(s) { return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
+window.addEventListener("hashchange", () => {
+  const table = tableFromHash();
+  if (table === currentTable) return;
+  setCurrentTable(table, false);
+  loadTables();
+  loadRecords();
+});
+
 // init
-loadTables();
-loadRecords();
+currentTable = tableFromHash();
+loadTables().then(loadRecords);
 </script>
 </body>
 </html>
