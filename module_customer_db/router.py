@@ -18,6 +18,7 @@ _logger: logging.Logger | None = None
 
 SAFE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
 PLACEHOLDER_VALUE = re.compile(r"^#\{[^{}]+\}$")
+PROTECTED_ATTRIBUTION_KEYS = {"yclid", "ym_uid", "_ym_uid"}
 
 
 def setup(ctx):
@@ -175,9 +176,16 @@ def _json_dict(value) -> dict:
         return {}
 
 
+def _is_protected_attribution_key(key: str) -> bool:
+    normalized = str(key).strip().lower()
+    return normalized.startswith("utm_") or normalized in PROTECTED_ATTRIBUTION_KEYS
+
+
 def _deep_merge(existing: dict, incoming: dict) -> dict:
     result = dict(existing or {})
     for key, value in (incoming or {}).items():
+        if _is_protected_attribution_key(key) and not _is_empty_value(result.get(key)):
+            continue
         if isinstance(result.get(key), dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         else:
@@ -185,7 +193,7 @@ def _deep_merge(existing: dict, incoming: dict) -> dict:
     return result
 
 
-async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str, dict]:
+async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str, dict, int]:
     record = _clean_record(data)
     if not record.platform_id:
         raise HTTPException(400, "platform_id обязателен для upsert")
@@ -193,26 +201,33 @@ async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str, dict]
     tbl = f"cdb_{table}"
     await db.execute(_create_index_sql(table))
     cur = await db.execute(
-        f"SELECT id, custom_fields FROM {tbl} WHERE platform_id = ? ORDER BY id ASC LIMIT 1",
+        f"SELECT id, custom_fields FROM {tbl} WHERE platform_id = ? ORDER BY id ASC",
         (record.platform_id,),
     )
-    row = await cur.fetchone()
-    if row:
-        record_id = int(row[0])
-        stored_fields = _deep_merge(_json_dict(row[1]), record.custom_fields)
+    rows = await cur.fetchall()
+    if rows:
+        record_id = int(rows[0][0])
+        stored_fields = _json_dict(rows[0][1])
+        duplicate_ids = []
+        for row in rows[1:]:
+            duplicate_ids.append(int(row[0]))
+            stored_fields = _deep_merge(stored_fields, _json_dict(row[1]))
+        stored_fields = _deep_merge(stored_fields, record.custom_fields)
         custom_json = json.dumps(stored_fields, ensure_ascii=False)
         await db.execute(
             f"UPDATE {tbl} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
             (custom_json, record_id),
         )
-        return record_id, "updated", stored_fields
+        for duplicate_id in duplicate_ids:
+            await db.execute(f"DELETE FROM {tbl} WHERE id=?", (duplicate_id,))
+        return record_id, "updated", stored_fields, len(duplicate_ids)
 
     custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
     cur = await db.execute(
         f"INSERT INTO {tbl} (platform_id, custom_fields) VALUES (?, ?)",
         (record.platform_id, custom_json),
     )
-    return int(cur.lastrowid), "created", record.custom_fields
+    return int(cur.lastrowid), "created", record.custom_fields, 0
 
 
 # ── Tables management ─────────────────────────────────────────────────────────
@@ -318,15 +333,16 @@ async def create_record(table: str, data: RecordIn):
     _check_name(table)
     record = _clean_record(data)
     async with aiosqlite.connect(_db_path) as db:
-        await db.execute(_create_index_sql(table))
-        cur = await db.execute(
-            f"INSERT INTO cdb_{table} (platform_id, custom_fields) VALUES (?, ?)",
-            (record.platform_id, json.dumps(record.custom_fields, ensure_ascii=False)),
-        )
+        record_id, status, stored_fields, deduped = await _upsert_one(db, table, record)
         await db.commit()
-        rid = cur.lastrowid
-    _log_record_event("create", table, "created", int(rid), record.platform_id, record.custom_fields)
-    return {"id": rid, "platform_id": record.platform_id, "custom_fields": record.custom_fields}
+    _log_record_event("create", table, status, record_id, record.platform_id, record.custom_fields, {"deduped": deduped})
+    return {
+        "ok": True,
+        "id": record_id,
+        "status": status,
+        "platform_id": record.platform_id,
+        "custom_fields": stored_fields,
+    }
 
 
 @router.post("/tables/{table}/records/upsert")
@@ -334,13 +350,14 @@ async def upsert_record(table: str, data: RecordIn):
     _check_name(table)
     record = _clean_record(data)
     async with aiosqlite.connect(_db_path) as db:
-        record_id, status, stored_fields = await _upsert_one(db, table, record)
+        record_id, status, stored_fields, deduped = await _upsert_one(db, table, record)
         await db.commit()
-    _log_record_event("upsert", table, status, record_id, record.platform_id, record.custom_fields)
+    _log_record_event("upsert", table, status, record_id, record.platform_id, record.custom_fields, {"deduped": deduped})
     return {
         "ok": True,
         "id": record_id,
         "status": status,
+        "deduped": deduped,
         "platform_id": record.platform_id,
         "custom_fields": stored_fields,
     }
@@ -388,10 +405,17 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
         )
         existing: dict[str, dict] = {}
         for row in await cur.fetchall():
-            existing.setdefault(row["platform_id"], {
-                "id": int(row["id"]),
-                "custom_fields": _json_dict(row["custom_fields"]),
-            })
+            platform_id = row["platform_id"]
+            current = existing.get(platform_id)
+            if current is None:
+                existing[platform_id] = {
+                    "id": int(row["id"]),
+                    "custom_fields": _json_dict(row["custom_fields"]),
+                    "duplicate_ids": [],
+                }
+            else:
+                current["custom_fields"] = _deep_merge(current["custom_fields"], _json_dict(row["custom_fields"]))
+                current["duplicate_ids"].append(int(row["id"]))
 
         if data.dry_run:
             updated = sum(1 for platform_id in ordered_platform_ids if platform_id in existing)
@@ -418,6 +442,7 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
 
         created = 0
         updated = 0
+        deduped = 0
         ids: dict[str, int] = {}
         for platform_id in ordered_platform_ids:
             record = records_by_platform_id[platform_id]
@@ -440,6 +465,9 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
                     (custom_json, record_id),
                 )
                 existing_record["custom_fields"] = merged_fields
+                for duplicate_id in existing_record.get("duplicate_ids", []):
+                    await db.execute(f"DELETE FROM {tbl} WHERE id=?", (duplicate_id,))
+                    deduped += 1
                 updated += 1
             ids[platform_id] = record_id
 
@@ -452,6 +480,7 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
         "unique": len(ordered_platform_ids),
         "created": created,
         "updated": updated,
+        "deduped": deduped,
         "skipped": skipped,
         "dry_run": False,
     }, ensure_ascii=False, sort_keys=True))
@@ -461,6 +490,7 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
         "unique": len(ordered_platform_ids),
         "created": created,
         "updated": updated,
+        "deduped": deduped,
         "skipped": skipped,
         "ids": ids,
     }
