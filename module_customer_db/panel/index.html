@@ -74,7 +74,7 @@
 
     /* overlay */
     .overlay{position:fixed;inset:0;background:rgba(0,0,0,.72);display:grid;place-items:center;padding:16px;z-index:50;}
-    .dialog{width:min(520px,100%);background:var(--panel);border:1px solid var(--border-strong);box-shadow:0 24px 80px rgba(0,0,0,.55);}
+    .dialog{width:min(680px,100%);background:var(--panel);border:1px solid var(--border-strong);box-shadow:0 24px 80px rgba(0,0,0,.55);}
     .dialog__head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-bottom:1px solid var(--border);}
     .dialog__head h2{margin:0;font-size:.95rem;font-weight:600;}
     .dialog__body{padding:14px;display:grid;gap:10px;max-height:65vh;overflow-y:auto;}
@@ -84,7 +84,8 @@
     .form-input{width:100%;min-height:32px;padding:5px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);}
     .form-2col{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
     .cf-editor{display:grid;gap:6px;}
-    .cf-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center;}
+    .cf-row{display:grid;grid-template-columns:minmax(130px,.55fr) minmax(0,1fr) auto;gap:6px;align-items:start;}
+    .cf-val--json{min-height:116px;resize:vertical;font-family:"Cascadia Mono","Consolas",monospace;font-size:.78rem;line-height:1.35;}
     .status-line{margin:0;color:var(--text-subtle);font-size:.78rem;min-height:16px;}
     .status-line--ok{color:var(--ok);}
     .status-line--err{color:var(--bad);}
@@ -293,7 +294,7 @@ async function loadRecords() {
       const main = ["name","имя","phone","телефон","email","source","источник"]
         .filter(k => cf[k])
         .slice(0, 4)
-        .map(k => `<span class="cf-badge">${esc(k)}: ${esc(String(cf[k]).slice(0,30))}</span>`)
+        .map(k => `<span class="cf-badge">${esc(k)}: ${esc(previewValue(cf[k]))}</span>`)
         .join("");
       const extra = Object.keys(cf).length - 4;
       return `<tr>
@@ -345,16 +346,31 @@ function buildCfEditor(cf) {
   container.innerHTML = "";
   const entries = Object.entries(cf);
   if (!entries.length) entries.push(["", ""]);
-  for (const [k, v] of entries) addCfRow(k, String(v));
+  for (const [k, v] of entries) addCfRow(k, v);
 }
 
 function addCfRow(k = "", v = "") {
   const row = document.createElement("div");
   row.className = "cf-row";
-  row.innerHTML = `
-    <input class="form-input cf-key" placeholder="ключ" value="${esc(k)}" />
-    <input class="form-input cf-val" placeholder="значение" value="${esc(v)}" />
-    <button class="btn btn--xs btn--danger" type="button" onclick="this.parentElement.remove()">×</button>`;
+  const key = document.createElement("input");
+  key.className = "form-input cf-key";
+  key.placeholder = "ключ";
+  key.value = k;
+
+  const isJson = isStructuredValue(v);
+  const val = document.createElement(isJson ? "textarea" : "input");
+  val.className = "form-input cf-val" + (isJson ? " cf-val--json" : "");
+  val.placeholder = "значение";
+  if (!isJson) val.type = "text";
+  val.value = formatFieldValue(v);
+
+  const del = document.createElement("button");
+  del.className = "btn btn--xs btn--danger";
+  del.type = "button";
+  del.textContent = "×";
+  del.addEventListener("click", () => row.remove());
+
+  row.append(key, val, del);
   $("cfEditor").appendChild(row);
 }
 
@@ -366,8 +382,13 @@ $("recSave").addEventListener("click", async () => {
   const cf = {};
   for (const row of $("cfEditor").querySelectorAll(".cf-row")) {
     const k = row.querySelector(".cf-key").value.trim();
-    const v = row.querySelector(".cf-val").value.trim();
-    if (k) cf[k] = v;
+    const parsed = parseFieldValue(row.querySelector(".cf-val").value);
+    if (parsed.error) {
+      $("recStatus").textContent = `Поле ${k || "без ключа"}: ${parsed.error}`;
+      $("recStatus").className = "status-line status-line--err";
+      return;
+    }
+    if (k) cf[k] = parsed.value;
   }
   const body = { platform_id, custom_fields: cf };
   const url = id ? `${API}/tables/${currentTable}/records/${id}` : `${API}/tables/${currentTable}/records`;
@@ -415,6 +436,36 @@ $("tblSave").addEventListener("click", async () => {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
 function esc(s) { return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function isStructuredValue(value) {
+  return value !== null && typeof value === "object";
+}
+
+function formatFieldValue(value) {
+  if (isStructuredValue(value)) return JSON.stringify(value, null, 2);
+  return String(value ?? "");
+}
+
+function parseFieldValue(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return { value: "" };
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try {
+      return { value: JSON.parse(text) };
+    } catch (err) {
+      return { error: "некорректный JSON" };
+    }
+  }
+  return { value: text };
+}
+
+function previewValue(value) {
+  if (isStructuredValue(value)) {
+    const keys = Object.keys(value);
+    return keys.length ? `{${keys.slice(0, 3).join(", ")}}` : "{}";
+  }
+  return String(value ?? "").slice(0, 30);
+}
 
 window.addEventListener("hashchange", () => {
   const table = tableFromHash();
