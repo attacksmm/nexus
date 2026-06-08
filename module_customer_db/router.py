@@ -4,6 +4,7 @@ customer-db v2.0.0
 Поддерживает несколько именованных таблиц.
 """
 import json
+import logging
 import re
 
 import aiosqlite
@@ -13,14 +14,16 @@ from pydantic import BaseModel, Field
 
 router = APIRouter()
 _db_path = None
+_logger: logging.Logger | None = None
 
 SAFE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
 PLACEHOLDER_VALUE = re.compile(r"^#\{[^{}]+\}$")
 
 
 def setup(ctx):
-    global _db_path
+    global _db_path, _logger
     _db_path = ctx.db_path
+    _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.customer-db"))
     import asyncio
     loop = asyncio.get_event_loop()
     if loop.is_running():
@@ -74,6 +77,52 @@ def _create_index_sql(name: str) -> str:
     return f"CREATE INDEX IF NOT EXISTS idx_cdb_{name}_platform_id ON cdb_{name} (platform_id);"
 
 
+def _log(level: str, message: str, *args):
+    if _logger:
+        getattr(_logger, level, _logger.info)(message, *args)
+
+
+def _record_log_payload(
+    action: str,
+    table: str,
+    status: str,
+    record_id: int | None,
+    platform_id: str,
+    custom_fields: dict,
+    extra: dict | None = None,
+) -> str:
+    payload = {
+        "event": "customer_db_record",
+        "action": action,
+        "table": table,
+        "status": status,
+        "record_id": record_id,
+        "platform_id": platform_id,
+        "custom_keys": sorted(custom_fields.keys())[:30],
+    }
+    if custom_fields.get("platform"):
+        payload["platform"] = custom_fields.get("platform")
+    if custom_fields.get("salebot_id"):
+        payload["salebot_id"] = custom_fields.get("salebot_id")
+    if isinstance(custom_fields.get("utms"), dict):
+        payload["utm_keys"] = sorted(custom_fields["utms"].keys())[:20]
+    if extra:
+        payload.update(extra)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _log_record_event(
+    action: str,
+    table: str,
+    status: str,
+    record_id: int | None,
+    platform_id: str,
+    custom_fields: dict,
+    extra: dict | None = None,
+):
+    _log("info", _record_log_payload(action, table, status, record_id, platform_id, custom_fields, extra))
+
+
 def _check_name(name: str):
     if not SAFE_NAME.match(name):
         raise HTTPException(400, "Имя таблицы: только латинские буквы, цифры, _. Начинается с буквы.")
@@ -116,7 +165,27 @@ def _clean_record(data: "RecordIn") -> "RecordIn":
     return RecordIn(platform_id=platform_id, custom_fields=cleaned if isinstance(cleaned, dict) else {})
 
 
-async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str]:
+def _json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _deep_merge(existing: dict, incoming: dict) -> dict:
+    result = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str, dict]:
     record = _clean_record(data)
     if not record.platform_id:
         raise HTTPException(400, "platform_id обязателен для upsert")
@@ -124,24 +193,26 @@ async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str]:
     tbl = f"cdb_{table}"
     await db.execute(_create_index_sql(table))
     cur = await db.execute(
-        f"SELECT id FROM {tbl} WHERE platform_id = ? ORDER BY id ASC LIMIT 1",
+        f"SELECT id, custom_fields FROM {tbl} WHERE platform_id = ? ORDER BY id ASC LIMIT 1",
         (record.platform_id,),
     )
     row = await cur.fetchone()
-    custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
     if row:
         record_id = int(row[0])
+        stored_fields = _deep_merge(_json_dict(row[1]), record.custom_fields)
+        custom_json = json.dumps(stored_fields, ensure_ascii=False)
         await db.execute(
             f"UPDATE {tbl} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
             (custom_json, record_id),
         )
-        return record_id, "updated"
+        return record_id, "updated", stored_fields
 
+    custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
     cur = await db.execute(
         f"INSERT INTO {tbl} (platform_id, custom_fields) VALUES (?, ?)",
         (record.platform_id, custom_json),
     )
-    return int(cur.lastrowid), "created"
+    return int(cur.lastrowid), "created", record.custom_fields
 
 
 # ── Tables management ─────────────────────────────────────────────────────────
@@ -178,6 +249,7 @@ async def create_table(data: TableIn):
             await db.commit()
         except Exception as e:
             raise HTTPException(409, f"Таблица уже существует: {e}")
+    _log("info", 'customer_db_table action=create table=%s display_name=%s', data.name, data.display_name)
     return {"ok": True, "name": data.name}
 
 
@@ -190,6 +262,7 @@ async def delete_table(name: str):
         await db.execute("DELETE FROM _cdb_tables WHERE name = ?", (name,))
         await db.execute(f"DROP TABLE IF EXISTS cdb_{name}")
         await db.commit()
+    _log("info", 'customer_db_table action=delete table=%s', name)
     return {"ok": True}
 
 
@@ -252,6 +325,7 @@ async def create_record(table: str, data: RecordIn):
         )
         await db.commit()
         rid = cur.lastrowid
+    _log_record_event("create", table, "created", int(rid), record.platform_id, record.custom_fields)
     return {"id": rid, "platform_id": record.platform_id, "custom_fields": record.custom_fields}
 
 
@@ -260,14 +334,15 @@ async def upsert_record(table: str, data: RecordIn):
     _check_name(table)
     record = _clean_record(data)
     async with aiosqlite.connect(_db_path) as db:
-        record_id, status = await _upsert_one(db, table, record)
+        record_id, status, stored_fields = await _upsert_one(db, table, record)
         await db.commit()
+    _log_record_event("upsert", table, status, record_id, record.platform_id, record.custom_fields)
     return {
         "ok": True,
         "id": record_id,
         "status": status,
         "platform_id": record.platform_id,
-        "custom_fields": record.custom_fields,
+        "custom_fields": stored_fields,
     }
 
 
@@ -308,16 +383,29 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
         await db.execute(_create_index_sql(table))
         placeholders = ",".join("?" for _ in ordered_platform_ids)
         cur = await db.execute(
-            f"SELECT id, platform_id FROM {tbl} WHERE platform_id IN ({placeholders}) ORDER BY id ASC",
+            f"SELECT id, platform_id, custom_fields FROM {tbl} WHERE platform_id IN ({placeholders}) ORDER BY id ASC",
             ordered_platform_ids,
         )
-        existing: dict[str, int] = {}
+        existing: dict[str, dict] = {}
         for row in await cur.fetchall():
-            existing.setdefault(row["platform_id"], int(row["id"]))
+            existing.setdefault(row["platform_id"], {
+                "id": int(row["id"]),
+                "custom_fields": _json_dict(row["custom_fields"]),
+            })
 
         if data.dry_run:
             updated = sum(1 for platform_id in ordered_platform_ids if platform_id in existing)
             created = len(ordered_platform_ids) - updated
+            _log("info", json.dumps({
+                "event": "customer_db_batch_upsert",
+                "table": table,
+                "total": len(data.records),
+                "unique": len(ordered_platform_ids),
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "dry_run": True,
+            }, ensure_ascii=False, sort_keys=True))
             return {
                 "ok": True,
                 "dry_run": True,
@@ -333,26 +421,40 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
         ids: dict[str, int] = {}
         for platform_id in ordered_platform_ids:
             record = records_by_platform_id[platform_id]
-            custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
-            record_id = existing.get(platform_id)
-            if record_id is None:
+            existing_record = existing.get(platform_id)
+            if existing_record is None:
+                custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
                 cur = await db.execute(
                     f"INSERT INTO {tbl} (platform_id, custom_fields) VALUES (?, ?)",
                     (platform_id, custom_json),
                 )
                 record_id = int(cur.lastrowid)
-                existing[platform_id] = record_id
+                existing[platform_id] = {"id": record_id, "custom_fields": record.custom_fields}
                 created += 1
             else:
+                record_id = int(existing_record["id"])
+                merged_fields = _deep_merge(existing_record["custom_fields"], record.custom_fields)
+                custom_json = json.dumps(merged_fields, ensure_ascii=False)
                 await db.execute(
                     f"UPDATE {tbl} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (custom_json, record_id),
                 )
+                existing_record["custom_fields"] = merged_fields
                 updated += 1
             ids[platform_id] = record_id
 
         await db.commit()
 
+    _log("info", json.dumps({
+        "event": "customer_db_batch_upsert",
+        "table": table,
+        "total": len(data.records),
+        "unique": len(ordered_platform_ids),
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "dry_run": False,
+    }, ensure_ascii=False, sort_keys=True))
     return {
         "ok": True,
         "total": len(data.records),
@@ -388,6 +490,7 @@ async def update_record(table: str, rid: int, data: RecordIn):
             (record.platform_id, json.dumps(record.custom_fields, ensure_ascii=False), rid),
         )
         await db.commit()
+    _log_record_event("update", table, "updated", rid, record.platform_id, record.custom_fields)
     return {"ok": True}
 
 
@@ -397,6 +500,7 @@ async def delete_record(table: str, rid: int):
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(f"DELETE FROM cdb_{table} WHERE id = ?", (rid,))
         await db.commit()
+    _log("info", 'customer_db_record action=delete table=%s record_id=%s', table, rid)
     return {"ok": True}
 
 

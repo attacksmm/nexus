@@ -113,7 +113,20 @@ const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
 const API = modBase + '/api';
 const WS_BASE = location.origin.replace(/^http/, 'ws') + modBase + '/api';
 
-let activeTab = null;
+const SAFE_MODULE_ID = /^[a-zA-Z0-9_-]+$/;
+
+function tabFromHash() {
+  const raw = decodeURIComponent((location.hash || "").replace(/^#\/?/, "")).trim();
+  return SAFE_MODULE_ID.test(raw) ? raw : "";
+}
+
+function syncModulePath() {
+  const path = activeTab && activeTab !== "nexus" ? activeTab : "";
+  window.parent?.postMessage({type:"nexus:set-module-path", moduleId:"logger", path}, location.origin);
+}
+
+let activeTab = tabFromHash() || null;
+let logsLoadedFor = null;
 let ws = null;
 let live = false;
 let autoLive = true;
@@ -135,6 +148,11 @@ async function loadModules() {
   const res = await fetch(API + '/modules').catch(() => null);
   if (!res?.ok) return;
   const mods = await res.json();
+  const selectedExists = activeTab && mods.some(m => m.id === activeTab);
+  if (!selectedExists) {
+    activeTab = mods.some(m => m.id === 'nexus') ? 'nexus' : (mods[0]?.id || null);
+    logsLoadedFor = null;
+  }
   const actions = document.querySelector('.tabbar__actions');
   tabbar.innerHTML = '';
   tabbar.appendChild(actions);
@@ -153,19 +171,21 @@ async function loadModules() {
     tabbar.insertBefore(tab, actions);
   }
 
-  if (!activeTab && mods.length) selectTab('nexus');
+  if (activeTab && logsLoadedFor !== activeTab) await selectTab(activeTab, false);
 }
 
-async function selectTab(id) {
+async function selectTab(id, syncPath = true) {
   stopLive();
   errMode = false;
   errBtn.classList.remove('active');
   document.getElementById('statusErrMode').style.display = 'none';
   activeTab = id;
+  if (syncPath) syncModulePath();
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab--active', t.dataset.id === id));
   document.getElementById('statusModule').textContent = id;
   document.getElementById('clearBtn').disabled = id === 'nexus';
   await loadLogs();
+  logsLoadedFor = id;
   if (autoLive) startLive();
 }
 
@@ -309,6 +329,10 @@ function fmtSize(b) {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('hashchange', () => {
+  const next = tabFromHash();
+  if (next && next !== activeTab) selectTab(next, false);
+});
 loadModules();
 setInterval(loadModules, 15000);
 </script>
