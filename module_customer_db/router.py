@@ -15,6 +15,7 @@ router = APIRouter()
 _db_path = None
 
 SAFE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+PLACEHOLDER_VALUE = re.compile(r"^#\{[^{}]+\}$")
 
 
 def setup(ctx):
@@ -76,6 +77,71 @@ def _create_index_sql(name: str) -> str:
 def _check_name(name: str):
     if not SAFE_NAME.match(name):
         raise HTTPException(400, "Имя таблицы: только латинские буквы, цифры, _. Начинается с буквы.")
+
+
+def _is_empty_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        text = value.strip()
+        return not text or text.lower() in {"none", "null", "undefined"} or bool(PLACEHOLDER_VALUE.match(text))
+    return False
+
+
+def _clean_json_value(value):
+    if _is_empty_value(value):
+        return None
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if _is_empty_value(key):
+                continue
+            cleaned_item = _clean_json_value(item)
+            if cleaned_item is not None:
+                cleaned[str(key)] = cleaned_item
+        return cleaned or None
+    if isinstance(value, list):
+        cleaned_items = []
+        for item in value:
+            cleaned_item = _clean_json_value(item)
+            if cleaned_item is not None:
+                cleaned_items.append(cleaned_item)
+        return cleaned_items or None
+    return value
+
+
+def _clean_record(data: "RecordIn") -> "RecordIn":
+    platform_id = str(data.platform_id or "").strip()
+    cleaned = _clean_json_value(data.custom_fields or {})
+    return RecordIn(platform_id=platform_id, custom_fields=cleaned if isinstance(cleaned, dict) else {})
+
+
+async def _upsert_one(db, table: str, data: "RecordIn") -> tuple[int, str]:
+    record = _clean_record(data)
+    if not record.platform_id:
+        raise HTTPException(400, "platform_id обязателен для upsert")
+
+    tbl = f"cdb_{table}"
+    await db.execute(_create_index_sql(table))
+    cur = await db.execute(
+        f"SELECT id FROM {tbl} WHERE platform_id = ? ORDER BY id ASC LIMIT 1",
+        (record.platform_id,),
+    )
+    row = await cur.fetchone()
+    custom_json = json.dumps(record.custom_fields, ensure_ascii=False)
+    if row:
+        record_id = int(row[0])
+        await db.execute(
+            f"UPDATE {tbl} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+            (custom_json, record_id),
+        )
+        return record_id, "updated"
+
+    cur = await db.execute(
+        f"INSERT INTO {tbl} (platform_id, custom_fields) VALUES (?, ?)",
+        (record.platform_id, custom_json),
+    )
+    return int(cur.lastrowid), "created"
 
 
 # ── Tables management ─────────────────────────────────────────────────────────
@@ -177,15 +243,32 @@ class BatchRecordsIn(BaseModel):
 @router.post("/tables/{table}/records", status_code=201)
 async def create_record(table: str, data: RecordIn):
     _check_name(table)
+    record = _clean_record(data)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(_create_index_sql(table))
         cur = await db.execute(
             f"INSERT INTO cdb_{table} (platform_id, custom_fields) VALUES (?, ?)",
-            (data.platform_id, json.dumps(data.custom_fields, ensure_ascii=False)),
+            (record.platform_id, json.dumps(record.custom_fields, ensure_ascii=False)),
         )
         await db.commit()
         rid = cur.lastrowid
-    return {"id": rid, "platform_id": data.platform_id, "custom_fields": data.custom_fields}
+    return {"id": rid, "platform_id": record.platform_id, "custom_fields": record.custom_fields}
+
+
+@router.post("/tables/{table}/records/upsert")
+async def upsert_record(table: str, data: RecordIn):
+    _check_name(table)
+    record = _clean_record(data)
+    async with aiosqlite.connect(_db_path) as db:
+        record_id, status = await _upsert_one(db, table, record)
+        await db.commit()
+    return {
+        "ok": True,
+        "id": record_id,
+        "status": status,
+        "platform_id": record.platform_id,
+        "custom_fields": record.custom_fields,
+    }
 
 
 @router.post("/tables/{table}/records/batch-upsert")
@@ -204,10 +287,10 @@ async def batch_upsert_records(table: str, data: BatchRecordsIn):
             continue
         if platform_id not in records_by_platform_id:
             ordered_platform_ids.append(platform_id)
-        records_by_platform_id[platform_id] = RecordIn(
+        records_by_platform_id[platform_id] = _clean_record(RecordIn(
             platform_id=platform_id,
             custom_fields=record.custom_fields or {},
-        )
+        ))
 
     if not ordered_platform_ids:
         return {
@@ -298,10 +381,11 @@ async def get_record(table: str, rid: int):
 @router.put("/tables/{table}/records/{rid}")
 async def update_record(table: str, rid: int, data: RecordIn):
     _check_name(table)
+    record = _clean_record(data)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(
             f"UPDATE cdb_{table} SET platform_id=?, custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
-            (data.platform_id, json.dumps(data.custom_fields, ensure_ascii=False), rid),
+            (record.platform_id, json.dumps(record.custom_fields, ensure_ascii=False), rid),
         )
         await db.commit()
     return {"ok": True}

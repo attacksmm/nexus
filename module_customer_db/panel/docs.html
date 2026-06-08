@@ -35,6 +35,7 @@
   <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
   <tr><td>GET</td><td><code>/tables/{table}/records</code></td><td>Список записей. Параметры: <code>q</code>, <code>limit</code>, <code>offset</code></td></tr>
   <tr><td>POST</td><td><code>/tables/{table}/records</code></td><td>Создать запись <code>{platform_id, custom_fields}</code></td></tr>
+  <tr><td>POST</td><td><code>/tables/{table}/records/upsert</code></td><td>Создать или обновить одну запись по <code>platform_id</code>. Удаляет пустые значения и неподставленные плейсхолдеры <code>#{...}</code>.</td></tr>
   <tr><td>POST</td><td><code>/tables/{table}/records/batch-upsert</code></td><td>Пачками до 1000 записей: создать новые и обновить существующие по <code>platform_id</code></td></tr>
   <tr><td>GET</td><td><code>/tables/{table}/records/{id}</code></td><td>Одна запись по id</td></tr>
   <tr><td>PUT</td><td><code>/tables/{table}/records/{id}</code></td><td>Обновить запись</td></tr>
@@ -53,6 +54,21 @@ Content-Type: application/json
     "phone": "+7 999 000 11 22",
     "email": "ivan@example.com",
     "source": "ВКонтакте"
+  }
+}</code></pre>
+
+<h3>Одиночный upsert для ботов</h3>
+<pre><code>POST /nexus/customer-db/api/tables/telegram_clients/records/upsert
+Content-Type: application/json
+
+{
+  "platform_id": "tg_123456",
+  "custom_fields": {
+    "platform": "telegram",
+    "salebot_id": "123",
+    "utms": {
+      "utm_campaign": "spring"
+    }
   }
 }</code></pre>
 
