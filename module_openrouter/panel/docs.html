@@ -25,6 +25,22 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
 }</pre>
   <p><code>context=0</code> не читает и не пишет историю, <code>context=1</code> читает краткий контекст, но не пишет, <code>context=2</code> читает краткий контекст и сохраняет вопрос/ответ, <code>context=3</code> читает полный контекст и сохраняет, <code>context=4</code> делает то же, что <code>3</code>, и после ответа автоматически обновляет краткую сводку-рассказ о клиенте: кто клиент, что известно о собаке, какая проблема и что уже обсуждали.</p>
   <p>Если у клиента уже есть краткая сводка, при кратком чтении она используется в приоритете вместо истории сообщений.</p>
+  <h2>Avito → Salebot</h2>
+  <p>Endpoint для Avito после генерации сохраняет контекст, разбивает ответ на части по 800 символов, записывает переменные в Salebot и вызывает callback.</p>
+  <pre>POST /nexus/openrouter/api/avito
+Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
+
+{
+  "platform_id": "u2i-avito-user-id",
+  "salebot_id": "967000000",
+  "conversation_id": null,
+  "prompt": "prompts/avito_gpt1.txt",
+  "message": "Вопрос клиента",
+  "context": 2
+}</pre>
+  <p><code>platform_id</code> — ID пользователя в Avito. Также принимаются alias-поля <code>avito_id</code>, <code>avito_user_id</code>, <code>user_id</code>. <code>salebot_id</code> — числовой ID клиента Salebot, также можно отправлять <code>client_id</code>. Необязательные поля: <code>split_size</code> (по умолчанию 800) и <code>callback_message</code> (по умолчанию <code>callback openai_answer</code>). Для доставки нужен <code>SALEBOT_API_KEY</code>; если его нет, используется существующий <code>SALEBOT_API_KEY_3</code>.</p>
+  <p><code>conversation_id</code> можно всегда отправлять из <code>#{client.thread_id}</code>. Endpoint принимает только ID вида <code>or_conv_...</code>; пустые значения, <code>none</code>, <code>null</code>, плейсхолдеры и старые OpenAI <code>thread_...</code> будут проигнорированы, после чего модуль сам возьмет активный чат по Avito <code>platform_id</code> или создаст новый.</p>
+  <p>В Salebot пишутся <code>client.message</code>, <code>client.answer</code>, JSON-копии, <code>client.thread_id</code>, <code>client.openai_status</code>, <code>client.avito_id</code>, <code>client.salebot_id</code> и <code>client.answer1</code>...<code>client.answerN</code>. Ссылки в частях ответа выделяются в отдельный <code>answerN</code>. Также создается/обновляется запись в customer-db таблице <code>avito_clients</code>.</p>
   <h2>Senler webhook</h2>
   <p>Для блока Senler «Обработать ответ в переменные» используйте отдельный endpoint. Он принимает те же поля, что <code>/chat</code>, но возвращает <code>vars</code> и <code>glob_vars</code>.</p>
   <pre>POST /nexus/openrouter/api/senler-chat
@@ -66,8 +82,10 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
   "platform_id": "vk_123",
   "conversation_id": "or_conv_...",
   "question": "1) вопрос пользователя",
-  "answer": "1) ответ пользователя"
+  "answer": "1) ответ пользователя",
+  "update_summary": false
 }</pre>
+  <p><code>update_summary=true</code> сразу пересобирает краткую сводку пользователя после добавления пары вопрос/ответ. По умолчанию <code>false</code>: пара только добавляется в историю conversation.</p>
   <h2>Настройки</h2>
   <p>Во вкладке «Настройки» отображается токен модуля для бота. OpenRouter API token можно указать там же: непустое значение сохраняется в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
 </main></body></html>

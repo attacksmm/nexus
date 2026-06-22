@@ -93,8 +93,14 @@
     .pairs{min-height:0;overflow:auto}
     .pair-table{table-layout:auto}
     .pair-table th,.pair-table td{height:auto;vertical-align:top;white-space:normal;line-height:1.45}
-    .pair-table th:nth-child(1){width:70px}.pair-table th:nth-child(2){width:36%}.pair-table th:nth-child(3){width:42%}.pair-table th:nth-child(4){width:88px}
+    .pair-table th:nth-child(1){width:70px}.pair-table th:nth-child(2){width:33%}.pair-table th:nth-child(3){width:39%}.pair-table th:nth-child(4){width:180px}
+    .pair-source{overflow-wrap:anywhere}
     .append-box{border-top:1px solid var(--border);padding:10px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end;background:var(--panel)}
+    .statusbar__pager{display:flex;align-items:center;gap:12px;flex:1;min-width:0;color:var(--muted)}
+    .pager__controls{display:flex;align-items:center;gap:5px}
+    .pager__page{min-width:92px;text-align:center;color:var(--text);font-variant-numeric:tabular-nums}
+    .statusbar__pager .pager__controls{margin-left:auto}
+    .statusbar__pager .btn{min-width:28px;min-height:22px;padding:2px 7px}
 
     @media(max-width:760px){
       .topbar,.toolbar{align-items:stretch;flex-direction:column}
@@ -106,6 +112,9 @@
       .dialog__body{grid-template-columns:minmax(0,1fr);grid-template-rows:150px minmax(0,1fr)}
       .dialog__side{border-right:0;border-bottom:1px solid var(--border)}
       .append-box{grid-template-columns:minmax(0,1fr)}
+      .statusbar__pager{gap:6px}
+      .statusbar__pager .pager__controls{margin-left:auto}
+      .statusbar__pager .btn{min-width:24px;padding:2px 5px}
     }
   </style>
 </head>
@@ -113,7 +122,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.11</div>
+    <div class="ver">v1.0.38</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -222,6 +231,16 @@
 
   <div class="statusbar">
     <span id="statusLeft">Готово</span>
+    <div id="usersPager" class="statusbar__pager" hidden>
+      <span id="usersRange">Показано 0 клиентов</span>
+      <div class="pager__controls">
+        <button id="usersFirst" class="btn ghost" type="button" title="Первая страница">«</button>
+        <button id="usersPrev" class="btn ghost" type="button" title="Предыдущая страница">‹</button>
+        <span id="usersPage" class="pager__page">1 / 1</span>
+        <button id="usersNext" class="btn ghost" type="button" title="Следующая страница">›</button>
+        <button id="usersLast" class="btn ghost" type="button" title="Последняя страница">»</button>
+      </div>
+    </div>
     <span id="statusMsg" class="right"></span>
   </div>
 </div>
@@ -291,7 +310,7 @@ const API = modBase + '/api';
 const rootBase = modBase.replace(/\/openrouter$/, '');
 const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
+const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -448,7 +467,10 @@ function renderPrompts(){
       <td class="col-model"><input class="input model-input" data-path="${esc(p.path)}" list="modelsList" value="${esc(p.model || '')}" placeholder="${esc(p.effective_model || '')}" /></td>
       <td class="col-size">${fmtSize(p.size)}</td>
       <td class="col-date">${fmtDate(p.updated_at)}</td>
-      <td class="col-actions"><button class="btn primary save-model" data-path="${esc(p.path)}" type="button">OK</button></td>
+      <td class="col-actions">
+        <button class="btn primary save-model" data-path="${esc(p.path)}" type="button">OK</button>
+        <button class="btn ghost default-model" data-path="${esc(p.path)}" type="button" title="Вернуть модель по умолчанию">По умолчанию</button>
+      </td>
     </tr>`).join('');
 }
 async function openPrompt(path){
@@ -475,11 +497,28 @@ async function savePromptModel(path){
   await loadPrompts();
   setMsg('Модель промпта сохранена','ok');
 }
+async function resetPromptModel(path){
+  const input = document.querySelector(`.model-input[data-path="${CSS.escape(path)}"]`);
+  if(input) input.value = '';
+  await api('/prompt-models', jsonPost('PUT', {prompt_path:path, model:''}));
+  await loadPrompts();
+  setMsg('Для промпта используется модель по умолчанию','ok');
+}
 
-async function loadUsers(){
-  const q = encodeURIComponent($('userSearch').value.trim());
-  const data = await api('/users?q=' + q);
+async function loadUsers(resetPage=false){
+  const rawQuery = $('userSearch').value.trim();
+  if(resetPage || rawQuery !== state.usersQuery) state.usersPage = 1;
+  state.usersQuery = rawQuery;
+  const q = encodeURIComponent(rawQuery);
+  const offset = (state.usersPage - 1) * state.usersPageSize;
+  const data = await api('/users?q=' + q + '&limit=' + state.usersPageSize + '&offset=' + offset);
   state.users = data.items || [];
+  state.usersTotal = data.total || state.users.length;
+  const totalPages = Math.max(1, Math.ceil(state.usersTotal / state.usersPageSize));
+  if(state.usersPage > totalPages){
+    state.usersPage = totalPages;
+    return loadUsers(false);
+  }
   $('usersEmpty').hidden = state.users.length > 0;
   $('usersBody').innerHTML = state.users.map(u=>`
     <tr class="clickable user-row" data-platform="${esc(u.platform_id)}">
@@ -490,17 +529,32 @@ async function loadUsers(){
       <td class="col-wide">${u.summary ? 'есть' : '<span class="muted">нет</span>'}</td>
       <td class="col-date">${fmtDate(u.updated_at)}</td>
     </tr>`).join('');
-  setLeft(`${state.users.length} клиентов`);
+  const from = state.users.length ? offset + 1 : 0;
+  const to = offset + state.users.length;
+  $('usersRange').textContent = state.usersTotal ? `Клиенты ${from}–${to} из ${state.usersTotal}` : 'Клиенты не найдены';
+  $('usersPage').textContent = `${state.usersPage} / ${totalPages}`;
+  $('usersFirst').disabled = $('usersPrev').disabled = state.usersPage <= 1;
+  $('usersNext').disabled = $('usersLast').disabled = state.usersPage >= totalPages;
+  setLeft(state.usersTotal ? `Страница ${state.usersPage} из ${totalPages}` : 'Контексты не найдены');
 }
 async function openClient(platformId){
   state.currentPlatform = platformId;
+  state.currentConversation = '';
+  state.conversations = [];
   $('clientTitle').textContent = platformId;
+  $('summaryBox').textContent = 'Загрузка...';
+  $('summaryBox').classList.add('muted');
+  $('conversationList').innerHTML = '';
+  renderPairs([]);
   $('clientDialog').hidden = false;
   await loadClientConversations();
 }
 async function loadClientConversations(){
   const data = await api('/users/' + encodeURIComponent(state.currentPlatform) + '/conversations');
   state.conversations = data.items || [];
+  if(!state.conversations.some(c=>c.conversation_id === state.currentConversation)){
+    state.currentConversation = state.conversations[0]?.conversation_id || '';
+  }
   $('summaryBox').textContent = data.summary || 'Сводка не создана';
   $('summaryBox').classList.toggle('muted', !data.summary);
   $('conversationList').innerHTML = state.conversations.map((c,i)=>`
@@ -509,7 +563,6 @@ async function loadClientConversations(){
       <div class="muted">${esc(c.prompt_path || 'prompt не задан')}</div>
       <div class="muted">${c.messages || 0} сообщений · ${fmtDate(c.updated_at)}</div>
     </div>`).join('');
-  if(!state.currentConversation && state.conversations[0]) state.currentConversation = state.conversations[0].conversation_id;
   if(state.currentConversation) await loadPairs(state.currentConversation);
   else renderPairs([]);
 }
@@ -528,7 +581,7 @@ function renderPairs(items){
       <td class="muted">${i+1}</td>
       <td>${esc(p.question || '')}</td>
       <td>${esc(p.answer || '')}</td>
-      <td class="${p.source==='manual'?'source-manual':'source-api'}">${esc(p.source || '')}</td>
+      <td class="pair-source ${p.source==='manual'?'source-manual':'source-api'}">${esc(p.model ? `${p.source || ''} / ${p.model}` : (p.source || ''))}</td>
     </tr>`).join('');
 }
 async function appendPair(){
@@ -587,6 +640,9 @@ function clearTest(){
 document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=>{
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b===btn));
   document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id === 'view-' + btn.dataset.tab));
+  const contextsActive = btn.dataset.tab === 'contexts';
+  $('usersPager').hidden = !contextsActive;
+  $('statusLeft').hidden = contextsActive;
 }));
 $('promptFilter').addEventListener('input', renderPrompts);
 $('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(e.message,'error')));
@@ -601,6 +657,11 @@ $('promptsBody').addEventListener('click', e=>{
     savePromptModel(btn.dataset.path).catch(err=>setMsg(err.message,'error'));
     return;
   }
+  const defaultBtn = e.target.closest('.default-model');
+  if(defaultBtn) {
+    resetPromptModel(defaultBtn.dataset.path).catch(err=>setMsg(err.message,'error'));
+    return;
+  }
   const promptBtn = e.target.closest('.prompt-open');
   if(promptBtn) openPrompt(promptBtn.dataset.path).catch(err=>setMsg(err.message,'error'));
 });
@@ -608,9 +669,13 @@ $('saveSettings').addEventListener('click', ()=>saveSettings().catch(e=>setMsg(e
 $('checkEnv').addEventListener('click', ()=>loadEnv());
 $('copyModuleToken').addEventListener('click', ()=>copyModuleToken().catch(e=>setMsg(e.message,'error')));
 $('rotateModuleToken').addEventListener('click', ()=>rotateModuleToken().catch(e=>setMsg(e.message,'error')));
-$('searchUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
+$('searchUsers').addEventListener('click', ()=>loadUsers(true).catch(e=>setMsg(e.message,'error')));
 $('refreshUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
-$('userSearch').addEventListener('keydown', e=>{if(e.key==='Enter') loadUsers().catch(err=>setMsg(err.message,'error'));});
+$('userSearch').addEventListener('keydown', e=>{if(e.key==='Enter') loadUsers(true).catch(err=>setMsg(err.message,'error'));});
+$('usersFirst').addEventListener('click', ()=>{state.usersPage=1; loadUsers().catch(e=>setMsg(e.message,'error'));});
+$('usersPrev').addEventListener('click', ()=>{if(state.usersPage>1) state.usersPage--; loadUsers().catch(e=>setMsg(e.message,'error'));});
+$('usersNext').addEventListener('click', ()=>{state.usersPage++; loadUsers().catch(e=>setMsg(e.message,'error'));});
+$('usersLast').addEventListener('click', ()=>{state.usersPage=Math.max(1,Math.ceil(state.usersTotal/state.usersPageSize)); loadUsers().catch(e=>setMsg(e.message,'error'));});
 $('usersBody').addEventListener('click', e=>{
   const row = e.target.closest('.user-row');
   if(row) openClient(row.dataset.platform).catch(err=>setMsg(err.message,'error'));
@@ -622,8 +687,14 @@ $('conversationList').addEventListener('click', e=>{
 $('appendPair').addEventListener('click', ()=>appendPair().catch(e=>setMsg(e.message,'error')));
 $('generateSummary').addEventListener('click', ()=>generateSummary().catch(e=>setMsg(e.message,'error')));
 $('reloadClient').addEventListener('click', ()=>loadClientConversations().catch(e=>setMsg(e.message,'error')));
-$('closeClient').addEventListener('click', ()=>$('clientDialog').hidden=true);
-$('closeClient2').addEventListener('click', ()=>$('clientDialog').hidden=true);
+function closeClientDialog(){
+  $('clientDialog').hidden = true;
+  state.currentPlatform = '';
+  state.currentConversation = '';
+  state.conversations = [];
+}
+$('closeClient').addEventListener('click', closeClientDialog);
+$('closeClient2').addEventListener('click', closeClientDialog);
 $('closePrompt').addEventListener('click', ()=>$('promptDialog').hidden=true);
 $('closePrompt2').addEventListener('click', ()=>$('promptDialog').hidden=true);
 $('reloadPrompt').addEventListener('click', ()=>state.editingPrompt && openPrompt(state.editingPrompt.path).catch(e=>setMsg(e.message,'error')));
