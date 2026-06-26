@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SBKVD GPT</title>
+  <style>
+    :root{--font:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--radius:0;--sidebar-width:360px}
+    :root[data-theme=dark]{--bg:#0f0f0f;--panel:#171717;--panel-alt:#1d1d1d;--panel-soft:#232323;--panel-hover:#2a2a2a;--text:#f2f2f2;--muted:#9a9a9a;--border:#353535;--accent:#d8d1c3;--accent-hover:#e7dece;--danger:#d9735a;--user:#2a2a2a;--assistant:#1a1a1a;--shadow:rgba(0,0,0,.24);--scroll-track:#171717;--scroll-thumb:#4c4c4c;--scroll-thumb-hover:#666}
+    :root[data-theme=light]{--bg:#ece8df;--panel:#f7f3eb;--panel-alt:#fff;--panel-soft:#f1ece3;--panel-hover:#e6ddcf;--text:#181818;--muted:#686868;--border:#222;--accent:#d7cebd;--accent-hover:#cfc4b0;--danger:#a34834;--user:#ebe2d3;--assistant:#fff;--shadow:rgba(0,0,0,.08);--scroll-track:#ebe5db;--scroll-thumb:#a29a8d;--scroll-thumb-hover:#8d8578}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
+    *::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:var(--scroll-track)}*::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:2px solid var(--scroll-track)}*::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover)}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:14px/1.45 var(--font);color-scheme:dark}
+    button,input,select,textarea{font:inherit;border-radius:var(--radius)}
+    [hidden]{display:none!important}.app{height:100dvh;display:grid;grid-template-columns:var(--sidebar-width) minmax(0,1fr)}.app.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}
+    .sidebar{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--border);background:var(--panel);overflow:hidden}
+    .sidebar-head{display:flex;flex-direction:column;gap:10px;padding:14px;border-bottom:1px solid var(--border)}
+    .sidebar-topline{display:flex;justify-content:space-between;align-items:center;gap:10px}.sidebar-label{font-weight:700;font-size:14px;letter-spacing:.03em}.sidebar-user{color:var(--muted);font-size:12px}
+    .sidebar-actions,.topbar-actions,.message-actions,.composer-actions,.attachment-row,.admin-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .thread-list{min-height:0;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}.thread-card{width:100%;border:1px solid var(--border);background:var(--panel-alt);color:var(--text);padding:10px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:4px}.thread-card:hover{background:var(--panel-hover)}.thread-card.active{background:var(--accent);color:#111}.thread-card-title{font-weight:600}.thread-card-meta{font-size:12px;color:var(--muted)}.thread-card.active .thread-card-meta{color:rgba(17,17,17,.7)}
+    .main{min-width:0;height:100dvh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto auto}.topbar,.controls,.composer,.footerbar{background:var(--panel);border-bottom:1px solid var(--border)}.topbar{display:flex;align-items:center;gap:12px;padding:12px 14px}.topbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1}.topbar-thread{display:flex;flex-direction:column;gap:2px;min-width:0}.thread-title{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.thread-subtitle{color:var(--muted);font-size:12px}
+    .controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:10px;align-items:end;padding:12px 14px}.field{display:flex;flex-direction:column;gap:6px;min-width:0}.label{font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+    input,select,textarea{width:100%;border:1px solid var(--border);background:var(--panel-alt);color:var(--text);padding:10px 11px;outline:none}.toggle-chip{min-height:42px;border:1px solid var(--border);background:var(--panel-alt);display:inline-flex;align-items:center;gap:10px;padding:0 12px;cursor:pointer;user-select:none}.toggle-chip input{appearance:none;width:20px;height:20px;padding:0;border:1px solid var(--border);background:var(--panel-soft);margin:0;display:grid;place-items:center;flex:0 0 20px}.toggle-chip input:checked{background:var(--accent)}.toggle-chip input:checked:after{content:"";width:5px;height:10px;border:solid #111;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
+    .chat{min-height:0;overflow-y:auto;padding:16px 14px;display:flex;flex-direction:column;gap:14px}.empty{margin:auto;width:min(560px,100%);border:1px solid var(--border);background:var(--panel);padding:20px;color:var(--muted)}.message{display:flex;flex-direction:column;gap:6px;max-width:min(860px,100%)}.message.user{align-self:flex-end}.message.assistant{align-self:flex-start}.message-head{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px}.bubble{border:1px solid var(--border);background:var(--assistant);padding:12px;white-space:pre-wrap;word-break:break-word;box-shadow:0 8px 18px var(--shadow)}.message.user .bubble{background:var(--user)}.bubble-image{display:block;max-width:min(100%,320px);margin-top:10px;border:1px solid var(--border)}
+    .composer{border-top:1px solid var(--border);padding:12px 14px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}.composer-main{display:flex;flex-direction:column;gap:8px;min-width:0}.composer textarea{min-height:92px;max-height:220px;resize:none}.composer-actions{min-width:156px;flex-direction:column}.footerbar{border-bottom:0;padding:0 14px calc(12px + env(safe-area-inset-bottom));color:var(--muted);font-size:12px}
+    .btn{min-height:38px;padding:8px 12px;border:1px solid var(--border);background:var(--panel-soft);color:var(--text);text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}.btn:hover{background:var(--accent);color:#111}.btn.primary{background:var(--accent);color:#111}.btn.primary:hover{background:var(--accent-hover)}.btn.ghost{background:transparent}.btn.danger{color:var(--danger)}.btn:disabled{opacity:.55;cursor:default}.attachment-pill{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:6px 10px;border:1px solid var(--border);background:var(--panel-alt);color:var(--text)}.attachment-pill img{width:28px;height:28px;object-fit:cover;border:1px solid var(--border)}
+    .mobile-only{display:none}.desktop-only{display:inline-flex}.backdrop{display:none}#imageInput{display:none}
+    .login-overlay,.admin-overlay{position:fixed;inset:0;background:var(--bg);z-index:50;display:grid;place-items:center;padding:18px}.login-box{width:min(380px,100%);border:1px solid var(--border);background:var(--panel);padding:22px;display:grid;gap:14px}.login-title{font-size:18px;font-weight:700}.login-note{color:var(--muted);font-size:13px}.admin-dialog{width:min(1180px,100%);height:min(780px,94dvh);border:1px solid var(--border);background:var(--panel);display:grid;grid-template-rows:auto minmax(0,1fr) auto}.admin-head,.admin-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)}.admin-foot{border-top:1px solid var(--border);border-bottom:0}.admin-body{min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr);overflow:hidden}.admin-side{min-height:0;overflow:auto;border-right:1px solid var(--border);background:#101010}.admin-main{min-height:0;overflow:auto;padding:12px;display:grid;gap:12px;align-content:start}.admin-row{display:grid;gap:4px;padding:9px 10px;border-bottom:1px solid var(--border);cursor:pointer}.admin-row:hover,.admin-row.active{background:var(--panel-soft)}.admin-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.check-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:6px}.check{display:flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--panel-alt);padding:8px;min-width:0}.check input{width:auto}.check span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.alias-row{display:grid;grid-template-columns:minmax(180px,1fr) minmax(160px,.8fr) minmax(160px,.8fr) auto;gap:8px;align-items:center;border-bottom:1px solid var(--border);padding:8px 0}.muted{color:var(--muted)}.tabs{display:flex;gap:8px}.tab.active{background:var(--accent);color:#111}
+    @media(max-width:960px){.app{grid-template-columns:1fr}.sidebar{position:fixed;top:0;left:0;bottom:0;width:min(var(--sidebar-width),88vw);z-index:30;transform:translateX(-100%);transition:transform .2s ease;box-shadow:12px 0 28px var(--shadow)}.app.sidebar-open .sidebar{transform:translateX(0)}.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.44);z-index:20}.app.sidebar-open .backdrop{display:block}.mobile-only{display:inline-flex}.desktop-only{display:none!important}.admin-body{grid-template-columns:1fr;grid-template-rows:180px minmax(0,1fr)}.admin-side{border-right:0;border-bottom:1px solid var(--border)}}
+    @media(max-width:720px){
+      html,body{font-size:13px}
+      .topbar{gap:8px;padding:6px 10px}
+      .topbar-left{gap:8px}
+      .thread-title{font-size:14px;line-height:1.2}
+      .thread-subtitle{display:none}
+      .topbar .btn{min-height:32px;padding:5px 10px}
+      .topbar-actions{gap:6px}
+      .controls{grid-template-columns:minmax(72px,.8fr) minmax(112px,1fr) auto;gap:8px;padding:6px 10px}
+      .field{gap:3px}
+      .label{font-size:9px}
+      input,select,textarea{padding:6px 8px}
+      .controls select{min-height:32px}
+      .toggle-chip{min-height:32px;gap:8px;padding:0 10px}
+      .toggle-chip input{width:18px;height:18px;flex-basis:18px}
+      .toggle-chip input:checked:after{width:4px;height:8px}
+      .chat{padding:10px}
+      .empty{padding:14px}
+      .composer{grid-template-columns:1fr;padding:7px 10px;gap:7px}
+      .composer-main{gap:6px}
+      .composer textarea{min-height:48px;max-height:112px}
+      .composer-actions{min-width:0;flex-direction:row;gap:8px}
+      .composer-actions .btn{flex:1;min-height:38px;padding:6px 10px}
+      .footerbar{padding:0 10px calc(4px + env(safe-area-inset-bottom));font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .admin-grid{grid-template-columns:1fr}
+      .alias-row{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+<div class="app" id="appRoot">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="sidebar-topline"><div class="sidebar-label">История бесед</div><button class="btn ghost mobile-only" id="closeSidebarBtn" type="button">Закрыть</button></div>
+      <div class="sidebar-user">Логин: <strong id="loginLabel">-</strong></div>
+      <div class="sidebar-actions"><button class="btn primary" id="newConversationBtn" type="button">Новая беседа</button><button class="btn" id="adminBtn" type="button" hidden>Доступы</button></div>
+    </div>
+    <div class="thread-list" id="threadList"></div>
+  </aside>
+  <div class="backdrop" id="backdrop"></div>
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left"><button class="btn ghost mobile-only" id="toggleSidebarBtnLeft" type="button">Меню</button><div class="topbar-thread"><div class="thread-title" id="threadLabel">Новая беседа</div><div class="thread-subtitle" id="threadMeta">Контекст включён по умолчанию</div></div></div>
+      <div class="topbar-actions"><button class="btn ghost desktop-only" id="toggleSidebarBtn" type="button">История</button><button class="btn ghost" id="themeToggleBtn" type="button">Светлая тема</button><button class="btn danger desktop-only" id="logoutBtn" type="button">Выйти</button></div>
+    </header>
+    <section class="controls">
+      <div class="field"><label class="label" for="modelSelect">Модель</label><select id="modelSelect"></select></div>
+      <div class="field"><label class="label" for="promptSelect">Промпт</label><select id="promptSelect"></select></div>
+      <div class="field"><label class="label">Контекст</label><label class="toggle-chip"><input id="keepContextToggle" type="checkbox" checked><span>Хранить контекст</span></label></div>
+    </section>
+    <section class="chat" id="chatBox"><div class="empty">Новая беседа готова. Напишите сообщение.</div></section>
+    <section class="composer">
+      <div class="composer-main"><div class="attachment-row" id="attachmentRow"></div><textarea id="messageInput" placeholder="Напишите сообщение"></textarea><input id="imageInput" type="file" accept="image/*"></div>
+      <div class="composer-actions"><button class="btn" id="attachImageBtn" type="button">Изображение</button><button class="btn primary" id="sendBtn" type="button">Отправить</button></div>
+    </section>
+    <footer class="footerbar" id="footerText">Готово к работе.</footer>
+  </main>
+</div>
+
+<div class="login-overlay" id="loginOverlay" hidden>
+  <form class="login-box" id="loginForm">
+    <div class="login-title">SBKVD GPT</div>
+    <div class="login-note">Введите логин из списка доступа.</div>
+    <input id="loginInput" autocomplete="username" placeholder="Логин">
+    <button class="btn primary" type="submit">Войти</button>
+    <div class="login-note" id="loginError"></div>
+  </form>
+</div>
+
+<div class="admin-overlay" id="adminOverlay" hidden>
+  <div class="admin-dialog">
+    <div class="admin-head">
+      <div><strong>Управление доступами</strong><div class="muted">Аккаунты, промпты и модели SBKVD GPT</div></div>
+      <div class="tabs"><button class="btn tab active" id="accountsTab" type="button">Аккаунты</button><button class="btn tab" id="aliasesTab" type="button">Названия промптов</button><button class="btn ghost" id="closeAdminBtn" type="button">Закрыть</button></div>
+    </div>
+    <div class="admin-body" id="accountsView">
+      <div class="admin-side" id="accountList"></div>
+      <div class="admin-main">
+        <div class="admin-actions"><button class="btn primary" id="createAccountBtn" type="button">Новый аккаунт</button><button class="btn danger" id="deleteAccountBtn" type="button">Удалить</button></div>
+        <div class="admin-grid">
+          <div class="field"><label class="label">Логин</label><input id="adminLogin"></div>
+          <div class="field"><label class="label">Имя в интерфейсе</label><input id="adminDisplay"></div>
+          <div class="field"><label class="label">Промпт по умолчанию</label><select id="adminDefaultPrompt"></select></div>
+          <div class="field"><label class="label">Модель по умолчанию</label><select id="adminDefaultModel"></select></div>
+          <label class="toggle-chip"><input id="adminActive" type="checkbox" checked><span>Аккаунт активен</span></label>
+        </div>
+        <div class="field"><label class="label">Доступные промпты</label><div class="check-grid" id="adminPromptChecks"></div></div>
+        <div class="field"><label class="label">Доступные модели</label><div class="check-grid" id="adminModelChecks"></div></div>
+      </div>
+    </div>
+    <div class="admin-main" id="aliasesView" hidden></div>
+    <div class="admin-foot"><span id="adminStatus" class="muted">Готово</span><button class="btn primary" id="saveAdminBtn" type="button">Сохранить</button></div>
+  </div>
+</div>
+
+<script>
+const API = new URL('../../api', location.href).pathname.replace(/\/$/, '');
+const state = {account:null,nexusAdmin:false,isSending:false,currentThreadId:null,currentTheme:'dark',sidebarCollapsed:false,attachment:null,prompts:[],models:[],threads:[],admin:{accounts:[],selected:null,prompts:[],models:[],view:'accounts'}};
+const $ = id => document.getElementById(id);
+const appRoot=$('appRoot'), chatBox=$('chatBox'), threadList=$('threadList'), footerText=$('footerText');
+const modelSelect=$('modelSelect'), promptSelect=$('promptSelect');
+const keepContextToggle=$('keepContextToggle');
+
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function setFooter(t){footerText.textContent=t}
+function apiError(data,status){const detail=data?.detail??data?.error;if(Array.isArray(detail))return detail.map(item=>item?.msg||JSON.stringify(item)).join('; ');if(detail&&typeof detail==='object')return detail.message||JSON.stringify(detail);return detail||`HTTP ${status}`}
+function api(path, options={}){return fetch(API+path,{credentials:'same-origin',...options}).then(async r=>{const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={detail:text}}if(!r.ok)throw new Error(apiError(data,r.status));return data})}
+function shortDate(raw){if(!raw)return'';const d=new Date(raw);return Number.isNaN(d.getTime())?String(raw):d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}
+function parseTime(raw){const d=raw?new Date(raw):new Date();return Number.isNaN(d.getTime())?String(raw):d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}
+function setTheme(theme){state.currentTheme=theme==='light'?'light':'dark';document.documentElement.dataset.theme=state.currentTheme;$('themeToggleBtn').textContent=state.currentTheme==='dark'?'Светлая тема':'Тёмная тема';try{localStorage.setItem('sbkvd_gpt_theme',state.currentTheme)}catch{}}
+function initTheme(){let t='dark';try{t=localStorage.getItem('sbkvd_gpt_theme')||'dark'}catch{}setTheme(t)}
+function activeModel(){return modelSelect.value}
+function activePrompt(){return promptSelect.value}
+function keepContext(){return keepContextToggle.checked}
+function threadFromUrl(){return new URL(location.href).searchParams.get('thread')||''}
+function setThreadUrl(id){const u=new URL(location.href);id?u.searchParams.set('thread',id):u.searchParams.delete('thread');history.replaceState({},'',u)}
+function setHeader(title,sub){$('threadLabel').textContent=title||'Новая беседа';$('threadMeta').textContent=sub||`Логин: ${state.account?.display_name||'-'}`}
+function showEmpty(text){chatBox.innerHTML=`<div class="empty">${esc(text)}</div>`}
+function hideEmpty(){chatBox.querySelector('.empty')?.remove()}
+function scrollBottom(){chatBox.scrollTop=chatBox.scrollHeight}
+function closeSidebar(){appRoot.classList.remove('sidebar-open')}
+function toggleSidebar(){if(innerWidth<=960)appRoot.classList.add('sidebar-open');else{state.sidebarCollapsed=!state.sidebarCollapsed;appRoot.classList.toggle('sidebar-collapsed',state.sidebarCollapsed)}}
+
+function appendMessage(role,text,meta={}){
+  hideEmpty();
+  const wrap=document.createElement('section');wrap.className=`message ${role}`;
+  wrap.innerHTML=`<div class="message-head"><span>${esc(role==='user'?(state.account?.display_name||'Вы'):'GPT')}</span><span>${esc(parseTime(meta.created_at))}</span></div><div class="bubble">${esc(text).replace(/\n/g,'<br>')}</div>`;
+  if(meta.attachment_url){const img=document.createElement('img');img.className='bubble-image';img.src=meta.attachment_url;img.alt='attachment';wrap.querySelector('.bubble').appendChild(img)}
+  if(role==='assistant'){
+    const actions=document.createElement('div');actions.className='message-actions';
+    const copy=document.createElement('button');copy.className='btn';copy.type='button';copy.textContent='Копировать';copy.onclick=async()=>{try{await navigator.clipboard.writeText(text);setFooter('Ответ скопирован')}catch{setFooter('Не удалось скопировать')}};
+    const regen=document.createElement('button');regen.className='btn';regen.type='button';regen.textContent='Перегенерировать';regen.onclick=()=>regenerate(wrap);
+    actions.append(copy,regen);wrap.append(actions);
+  }
+  chatBox.append(wrap);scrollBottom();return wrap;
+}
+function renderHistory(items){chatBox.innerHTML='';if(!items?.length){showEmpty('В этой беседе пока нет сообщений.');return}items.forEach(m=>appendMessage(m.role,m.content,{created_at:m.created_at,attachment_url:m.attachment_url}))}
+function fillSelect(select,items,valueKey='id',labelKey='name',selected=''){select.innerHTML='';items.forEach(item=>{const o=document.createElement('option');o.value=item[valueKey];o.textContent=item[labelKey]||item[valueKey];if(o.value===selected)o.selected=true;select.append(o)})}
+function fillPromptSelect(select, selected=''){
+  select.innerHTML='';
+  const byFolder={}; const none=[];
+  state.prompts.forEach(p=>p.folder?(byFolder[p.folder]=byFolder[p.folder]||[]).push(p):none.push(p));
+  const add=(items,parent)=>{let target=select;if(parent){target=document.createElement('optgroup');target.label=parent;select.append(target)}items.forEach(p=>{const o=document.createElement('option');o.value=p.path;o.textContent=p.label||p.path;if(p.path===selected)o.selected=true;target.append(o)})};
+  Object.keys(byFolder).sort().forEach(name=>add(byFolder[name],name)); if(none.length)add(none,Object.keys(byFolder).length?'Без папки':'');
+}
+async function loadMe(){const data=await api('/me');state.account=data.account;state.nexusAdmin=!!data.nexus_admin;$('adminBtn').hidden=true;$('loginLabel').textContent=state.account?.display_name||state.account?.login||'-';$('loginOverlay').hidden=!!state.account;if(!state.account)return false;return true}
+async function loadPrompts(){const data=await api('/prompts');state.prompts=data.items||[];fillPromptSelect(promptSelect,data.default_prompt)}
+async function loadModels(){const data=await api('/models');state.models=data.items||[];fillSelect(modelSelect,state.models,'id','name',data.default_model)}
+async function loadThreads(){const data=await api('/threads');state.threads=data.items||[];threadList.innerHTML='';if(!state.threads.length){threadList.innerHTML='<div class="thread-card"><div class="thread-card-title">Бесед пока нет</div><div class="thread-card-meta">Нажмите «Новая беседа»</div></div>';return}state.threads.forEach(t=>{const b=document.createElement('button');b.type='button';b.className='thread-card'+(t.id===state.currentThreadId?' active':'');b.innerHTML=`<div class="thread-card-title">${esc(t.title||'Новая беседа')}</div><div class="thread-card-meta">${esc(shortDate(t.updated_at))}</div>`;b.onclick=()=>openThread(t.id).then(closeSidebar);threadList.append(b)})}
+async function openThread(id){if(!id){state.currentThreadId=null;setThreadUrl('');setHeader('Новая беседа','Контекст включён по умолчанию');showEmpty('Новая беседа готова. Напишите сообщение.');await loadThreads();return}const data=await api('/threads/'+encodeURIComponent(id));state.currentThreadId=data.thread.id;setThreadUrl(state.currentThreadId);keepContextToggle.checked=true;setHeader(data.thread.title||'Беседа',`Последнее обновление: ${shortDate(data.thread.updated_at)}`);renderHistory(data.messages||[]);await loadThreads()}
+function startNew(){openThread('').catch(e=>setFooter(e.message))}
+function clearAttachment(){state.attachment=null;$('imageInput').value='';$('attachmentRow').innerHTML=''}
+function renderAttachment(){const row=$('attachmentRow');row.innerHTML='';if(!state.attachment)return;const pill=document.createElement('div');pill.className='attachment-pill';pill.innerHTML=`<img src="${state.attachment.dataUrl}" alt=""><span>${esc(state.attachment.name)}</span>`;const btn=document.createElement('button');btn.className='btn ghost';btn.type='button';btn.textContent='Убрать';btn.onclick=clearAttachment;row.append(pill,btn)}
+async function sendMessage(){if(state.isSending)return;const text=$('messageInput').value.trim();if(!text&&!state.attachment)return;if(!activePrompt()){setFooter('Сначала выберите промпт');return}if(!activeModel()){setFooter('Сначала выберите модель');return}state.isSending=true;$('sendBtn').disabled=true;const image=state.attachment?.dataUrl||'';appendMessage('user',text,{created_at:new Date().toISOString(),attachment_url:image});$('messageInput').value='';clearAttachment();try{const payload=await api('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,prompt_path:activePrompt(),model:activeModel(),keep_context:keepContext(),thread_id:keepContext()?(state.currentThreadId||''):'',attachment_url:image})});appendMessage('assistant',payload.answer,{created_at:new Date().toISOString()});state.currentThreadId=payload.thread_id||null;setThreadUrl(state.currentThreadId);await loadThreads();setHeader(threadList.querySelector('.thread-card.active .thread-card-title')?.textContent||'Новая беседа',payload.mode==='thread'?'Контекст сохранён':'Контекст отключён');setFooter(`Готово. Модель: ${payload.model}. Токены: ${(payload.usage||{}).total_tokens||0}`)}catch(e){appendMessage('assistant','Ошибка: '+e.message,{created_at:new Date().toISOString()});setFooter('Ошибка запроса: '+e.message)}finally{state.isSending=false;$('sendBtn').disabled=false}}
+async function regenerate(node){if(state.isSending||!state.currentThreadId){setFooter('Перегенерация доступна только в сохранённой беседе');return}state.isSending=true;node.remove();try{const payload=await api('/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thread_id:state.currentThreadId,prompt_path:activePrompt(),model:activeModel()})});appendMessage('assistant',payload.answer,{created_at:new Date().toISOString()});await loadThreads();setFooter(`Ответ перегенерирован. Токены: ${(payload.usage||{}).total_tokens||0}`)}catch(e){appendMessage('assistant','Ошибка: '+e.message,{created_at:new Date().toISOString()});setFooter('Ошибка перегенерации: '+e.message)}finally{state.isSending=false}}
+
+async function openAdmin(){if(!state.nexusAdmin)return;$('adminOverlay').hidden=false;await loadAdmin()}
+function setAdminStatus(t){$('adminStatus').textContent=t}
+async function loadAdmin(){const [accounts,prompts,models]=await Promise.all([api('/admin/accounts'),api('/admin/prompts'),api('/admin/models')]);state.admin.accounts=accounts.items||[];state.admin.prompts=prompts.items||[];state.admin.models=models.items||[];state.admin.selected=state.admin.selected||state.admin.accounts[0]?.id||null;renderAdminAccounts();renderAdminAliases();if(state.admin.selected)await loadAccountAccess(state.admin.selected)}
+function renderAdminAccounts(){const list=$('accountList');list.innerHTML='';state.admin.accounts.forEach(a=>{const row=document.createElement('div');row.className='admin-row'+(a.id===state.admin.selected?' active':'');row.innerHTML=`<strong>${esc(a.login)}</strong><span class="muted">${a.active?'активен':'выключен'} · промптов ${a.prompt_count} · моделей ${a.model_count}</span>`;row.onclick=()=>loadAccountAccess(a.id);list.append(row)})}
+function checkBox(name,value,label,checked){const l=document.createElement('label');l.className='check';l.innerHTML=`<input type="checkbox" name="${name}" value="${esc(value)}"${checked?' checked':''}><span title="${esc(label)}">${esc(label)}</span>`;return l}
+async function loadAccountAccess(id){state.admin.selected=id;renderAdminAccounts();const data=await api('/admin/accounts/'+id+'/access');const a=data.account;$('adminLogin').value=a.login||'';$('adminDisplay').value=a.display_name||'';$('adminActive').checked=!!a.active;fillSelect($('adminDefaultPrompt'),state.admin.prompts.map(p=>({id:p.path,name:p.label||p.path})),'id','name',a.default_prompt);fillSelect($('adminDefaultModel'),state.admin.models,'id','name',a.default_model);$('adminPromptChecks').innerHTML='';state.admin.prompts.forEach(p=>$('adminPromptChecks').append(checkBox('prompt',p.path,p.label||p.path,(data.prompt_paths||[]).includes(p.path))));$('adminModelChecks').innerHTML='';state.admin.models.forEach(m=>$('adminModelChecks').append(checkBox('model',m.id,m.name||m.id,(data.models||[]).includes(m.id))));setAdminStatus('Готово')}
+function values(name){return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map(x=>x.value)}
+async function saveAdmin(){if(state.admin.view==='aliases'){await saveAliases();return}let id=state.admin.selected;const body={login:$('adminLogin').value.trim(),display_name:$('adminDisplay').value.trim(),active:$('adminActive').checked,default_prompt:$('adminDefaultPrompt').value,default_model:$('adminDefaultModel').value};if(!body.login){setAdminStatus('Логин обязателен');return}if(!id){const created=await api('/admin/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});id=created.id;state.admin.selected=id}else{await api('/admin/accounts/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}await api('/admin/accounts/'+id+'/access',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt_paths:values('prompt'),models:values('model'),default_prompt:body.default_prompt,default_model:body.default_model,active:body.active})});setAdminStatus('Сохранено');await loadAdmin()}
+async function deleteAccount(){if(!state.admin.selected)return;if(!confirm('Удалить аккаунт и его историю?'))return;await api('/admin/accounts/'+state.admin.selected,{method:'DELETE'});state.admin.selected=null;await loadAdmin();setAdminStatus('Аккаунт удалён')}
+function newAccount(){state.admin.selected=null;renderAdminAccounts();$('adminLogin').value='';$('adminDisplay').value='';$('adminActive').checked=true;fillSelect($('adminDefaultPrompt'),state.admin.prompts.map(p=>({id:p.path,name:p.label||p.path})),'id','name','');fillSelect($('adminDefaultModel'),state.admin.models,'id','name','');$('adminPromptChecks').innerHTML='';state.admin.prompts.forEach(p=>$('adminPromptChecks').append(checkBox('prompt',p.path,p.label||p.path,true)));$('adminModelChecks').innerHTML='';state.admin.models.forEach(m=>$('adminModelChecks').append(checkBox('model',m.id,m.name||m.id,DEFAULT_MODEL_IDS.includes(m.id))));setAdminStatus('Новый аккаунт')}
+const DEFAULT_MODEL_IDS=['openai/gpt-4.1-mini','openai/gpt-4.1'];
+function renderAdminAliases(){const view=$('aliasesView');view.innerHTML='';state.admin.prompts.forEach(p=>{const row=document.createElement('div');row.className='alias-row';row.dataset.path=p.path;row.innerHTML=`<div><strong>${esc(p.path)}</strong></div><input class="alias-title" value="${esc(p.title||'')}" placeholder="Название"><input class="alias-folder" value="${esc(p.folder||'')}" placeholder="Группа"><button class="btn" type="button">Сохранить</button>`;row.querySelector('button').onclick=()=>saveAliasRow(row);view.append(row)})}
+async function saveAliasRow(row){await api('/admin/prompt-aliases',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt_path:row.dataset.path,title:row.querySelector('.alias-title').value,folder:row.querySelector('.alias-folder').value})});setAdminStatus('Название сохранено')}
+async function saveAliases(){for(const row of $('aliasesView').querySelectorAll('.alias-row'))await saveAliasRow(row);await loadAdmin()}
+function switchAdminView(view){state.admin.view=view;$('accountsView').hidden=view!=='accounts';$('aliasesView').hidden=view!=='aliases';$('accountsTab').classList.toggle('active',view==='accounts');$('aliasesTab').classList.toggle('active',view==='aliases');$('saveAdminBtn').textContent=view==='accounts'?'Сохранить':'Сохранить названия'}
+
+$('loginForm').onsubmit=async e=>{e.preventDefault();$('loginError').textContent='';try{await api('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({login:$('loginInput').value})});await init()}catch(err){$('loginError').textContent=err.message}};
+$('logoutBtn').onclick=async()=>{await api('/logout',{method:'POST'}).catch(()=>{});state.account=null;$('loginOverlay').hidden=false};
+$('newConversationBtn').onclick=startNew;$('toggleSidebarBtn').onclick=toggleSidebar;$('toggleSidebarBtnLeft').onclick=toggleSidebar;$('closeSidebarBtn').onclick=closeSidebar;$('backdrop').onclick=closeSidebar;
+$('themeToggleBtn').onclick=()=>setTheme(state.currentTheme==='dark'?'light':'dark');$('sendBtn').onclick=sendMessage;$('messageInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}};
+$('attachImageBtn').onclick=()=>$('imageInput').click();$('imageInput').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{state.attachment={name:file.name,dataUrl:String(reader.result||'')};renderAttachment();setFooter(`Изображение ${file.name} прикреплено`)};reader.readAsDataURL(file)};
+$('adminBtn').onclick=openAdmin;$('closeAdminBtn').onclick=()=>$('adminOverlay').hidden=true;$('saveAdminBtn').onclick=()=>saveAdmin().catch(e=>setAdminStatus(e.message));$('deleteAccountBtn').onclick=()=>deleteAccount().catch(e=>setAdminStatus(e.message));$('createAccountBtn').onclick=newAccount;$('accountsTab').onclick=()=>switchAdminView('accounts');$('aliasesTab').onclick=()=>switchAdminView('aliases');
+
+async function init(){initTheme();const ok=await loadMe();if(!ok){setFooter(state.nexusAdmin?'Войдите в GPT-аккаунт или откройте доступы':'Введите логин');return}await Promise.all([loadPrompts(),loadModels()]);if(!state.prompts.length)setFooter('Для аккаунта не назначены промпты');if(!state.models.length)setFooter('Для аккаунта не назначены модели');const t=threadFromUrl();if(t)await openThread(t);else{await loadThreads();startNew()}setFooter(`Готово. Логин: ${state.account.display_name}`)}
+init().catch(e=>{setFooter('Ошибка инициализации: '+e.message);$('loginOverlay').hidden=false});
+</script>
+</body>
+</html>

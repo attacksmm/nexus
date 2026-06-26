@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Куратор чатов</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;--ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;
+      --bad-bg:#251315;--bad-bd:#5f3137;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width:100%; height:100%; overflow:hidden; background: var(--bg); color: var(--text); }
+    button, input, select, textarea { font: inherit; }
+    button {
+      border: 1px solid var(--border-strong);
+      background: var(--panel-strong);
+      color: var(--text);
+      min-height: 28px;
+      padding: 4px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-size: .8rem;
+    }
+    button:hover { background: var(--panel-soft); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+    button.danger { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad); }
+    button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--border-strong);
+      background: #090909;
+      color: var(--text);
+      min-height: 30px;
+      padding: 6px 8px;
+      outline: none;
+    }
+    textarea { min-height: 78px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: var(--border-strong); }
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}
+    ::-webkit-scrollbar-track{background:#080808}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    .shell { width:100vw;height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;background:var(--bg);padding:0;margin:0; }
+    .topbar {
+      display:flex;align-items:center;gap:10px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel);
+    }
+    .title{font-weight:700;font-size:.98rem;white-space:nowrap}
+    .ver{color:var(--subtle);font-size:.78rem}
+    h1 { margin: 0; font-size: 1rem; font-weight: 700; letter-spacing: 0; }
+    .lead { display:none; }
+    .actions { display: flex; gap: 8px; flex-wrap: nowrap; margin-left:auto; }
+    .tabs {
+      display:flex;gap:6px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--border);background:#090909;overflow-x:auto;margin:0;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      min-width: max-content;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      padding: 4px 10px;
+      min-height: 28px;
+    }
+    .tab.active { background:var(--panel-strong);border-color:var(--border-strong);color:var(--text); }
+    .view { min-height:0;overflow:hidden;display:none; }
+    .view.active { display:block;overflow:auto; }
+    @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0;
+      border-bottom:1px solid var(--border);
+      background:var(--panel);
+    }
+    .metric {
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      padding: 10px;
+      min-height: 54px;
+    }
+    .metric small { display: block; color: var(--subtle); font-size: .7rem; text-transform:uppercase;letter-spacing:.08em; }
+    .metric strong { display: block; margin-top: 4px; font-size: 1.05rem; }
+    .section {
+      border-top: 1px solid var(--border);
+      padding: 10px;
+      min-height:0;
+      overflow:auto;
+    }
+    .section:first-child { border-top: 0; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    h2 { margin: 0; font-size: .92rem; font-weight: 700; }
+    .hint { color: var(--subtle); font-size: .78rem; line-height: 1.45; }
+    .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .grid3 { display: grid; grid-template-columns: 1.2fr 1fr 1fr auto; gap: 8px; align-items: end; }
+    .field label { display: block; color: var(--subtle); font-size: .7rem; margin-bottom: 5px; text-transform:uppercase;letter-spacing:.08em; }
+    .switch-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border-top: 1px solid var(--border);
+      padding: 8px 0;
+    }
+    .switch-row:first-child { border-top: 0; }
+    .toggle {
+      width: 48px;
+      height: 26px;
+      border: 1px solid var(--border);
+      background: #191919;
+      padding: 2px;
+      position: relative;
+    }
+    .toggle::after {
+      content: "";
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      left: 2px;
+      top: 2px;
+      background: var(--muted);
+      transition: transform .18s ease, background .18s ease;
+    }
+    .toggle.on { background:#07160b;border-color:#265733; }
+    .toggle.on::after { transform: translateX(22px); background: var(--ok); }
+    .table-wrap {
+      border: 1px solid var(--border);
+      overflow: auto;
+      background: #090909;
+      max-height: 620px;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 940px; }
+    th, td { height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+    th { color: var(--subtle); font-weight: 500; background: var(--panel); position: sticky; top: 0; z-index: 1; }
+    tr:hover td { background: var(--panel-strong); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border: 1px solid var(--border-mid);
+      background: #0b0b0b;
+      font-size: .75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .pill.ok { border-color:#265733;background:#07160b;color:var(--ok); }
+    .pill.warn { border-color:#6c5520;background:#191404;color:var(--warn); }
+    .pill.error,.pill.bad { border-color:var(--bad-bd);background:var(--bad-bg);color:var(--bad); }
+    .text-cut { max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .empty { color: var(--muted); padding: 24px 12px; text-align: center; }
+    .template-list { display:grid;gap:10px; }
+    .template-item {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+    .template-item:first-child { border-top: 0; padding-top: 0; }
+    .template-title { display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:6px; }
+    .template-title strong { font-size:.86rem; }
+    .template-item .field label { text-transform:none;letter-spacing:0; }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: min(460px, calc(100vw - 36px));
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      padding: 12px 14px;
+      color: var(--text);
+      display: none;
+      z-index: 20;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(4,7,12,.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      z-index: 30;
+    }
+    .modal.open { display: flex; }
+    .dialog {
+      width: min(900px, 100%);
+      max-height: min(760px, calc(100vh - 36px));
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+    }
+    .dialog-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .dialog-body { padding: 16px; }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 0;
+      background: #050505;
+      border: 1px solid var(--border);
+      padding: 12px;
+      color: #dce7f5;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    @media (max-width: 920px) {
+      .topbar { align-items:stretch;flex-wrap:wrap; }
+      .actions { justify-content: flex-start; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid2, .grid3 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 520px) {
+      .metrics { grid-template-columns: 1fr; }
+      .actions button { flex: 1 1 auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="title">Куратор чатов</div>
+      <div class="ver">v0.1.15</div>
+      <span id="readyChip" class="pill">готовность</span>
+      <span id="openrouterChip" class="pill">OpenRouter</span>
+      <span id="telegramChip" class="pill">Telegram</span>
+      <span id="vkChip" class="pill">VK</span>
+      <span id="dryRunChip" class="pill">dry-run</span>
+      <div class="actions">
+        <button class="ghost" id="refreshBtn">Обновить</button>
+        <button class="primary" id="startBtn">Старт</button>
+        <button class="danger" id="stopBtn">Стоп</button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab active" data-tab="status">Статус</button>
+      <button class="tab" data-tab="history">История</button>
+      <button class="tab" data-tab="chats">Чаты</button>
+      <button class="tab" data-tab="settings">Настройки</button>
+    </nav>
+
+    <section class="view active" id="view-status">
+      <div class="metrics">
+        <div class="metric"><small>Процессы</small><strong id="metricRuntime">—</strong></div>
+        <div class="metric"><small>Сухой режим</small><strong id="metricDryRun">—</strong></div>
+        <div class="metric"><small>Действий</small><strong id="metricActions">—</strong></div>
+        <div class="metric"><small>Ошибок за 24ч</small><strong id="metricErrors">—</strong></div>
+      </div>
+      <div class="section">
+        <div class="section-head">
+          <h2>Состояние процессов</h2>
+          <span class="hint">Автозапуска нет</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Платформа</th><th>Статус</th><th>Старт</th><th>Стоп</th><th>Ошибка</th></tr></thead>
+            <tbody id="runtimeRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-history">
+      <div class="section">
+        <div class="section-head">
+          <h2>История действий</h2>
+          <span class="hint">Фильтры применяются к локальной БД модуля</span>
+        </div>
+        <div class="grid3">
+          <div class="field">
+            <label>Поиск</label>
+            <input id="historyQ" placeholder="user_id, peer_id, текст">
+          </div>
+          <div class="field">
+            <label>Платформа</label>
+            <select id="historyPlatform">
+              <option value="">Все</option>
+              <option value="telegram">Telegram</option>
+              <option value="vk">VK</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Статус</label>
+            <select id="historyStatus">
+              <option value="">Все</option>
+              <option value="ok">ok</option>
+              <option value="dry_run">dry_run</option>
+              <option value="error">error</option>
+              <option value="blocked">blocked</option>
+            </select>
+          </div>
+          <button id="historyApply">Найти</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Время</th><th>Платформа</th><th>Зона</th><th>Действие</th><th>Категория</th><th>Статус</th><th>Пользователь</th><th>Текст</th>
+            </tr>
+          </thead>
+          <tbody id="historyRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view" id="view-chats">
+      <div class="section">
+        <div class="section-head">
+          <h2>Управляемые чаты</h2>
+          <span class="hint">Появляются после runtime-событий или тестов</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Платформа</th><th>Peer/Chat</th><th>Название</th><th>Зона</th><th>Последнее событие</th><th>Включён</th></tr></thead>
+            <tbody id="chatRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <h2>Токены</h2>
+            <div class="hint">ENV имеет приоритет. Пустые поля при сохранении не меняют текущие значения.</div>
+          </div>
+          <button id="saveSecretsBtn" class="primary">Сохранить токены</button>
+        </div>
+        <div id="secretsList"></div>
+      </div>
+      <div class="section">
+        <div class="section-head">
+          <h2>Безопасность</h2>
+          <span class="hint">По умолчанию всё выключено</span>
+        </div>
+        <div id="switches"></div>
+      </div>
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <h2>Ответы модератора</h2>
+            <div class="hint">Тексты, которые модератор отправляет людям. Переменные в подсказках можно оставлять в тексте.</div>
+          </div>
+          <button id="saveTemplatesBtn" class="primary">Сохранить ответы</button>
+        </div>
+        <div id="templatesList" class="template-list"></div>
+      </div>
+      <div class="section">
+        <div class="section-head">
+          <h2>Доступы и хранение</h2>
+          <button id="saveSettingsBtn" class="primary">Сохранить</button>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Кто может добавлять TG-бота</label><input id="tgAllowed"></div>
+          <div class="field"><label>TG чат уведомлений</label><input id="tgLogChat"></div>
+          <div class="field"><label>VK админы модуля</label><input id="vkAdmins"></div>
+          <div class="field"><label>VK служебные отправители для ссылок</label><input id="vkTrusted"></div>
+          <div class="field"><label>Хранить историю, дней</label><input id="retention" type="number" min="1"></div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label>Чаты для обработки по названию</label>
+          <textarea id="chatTitleContains" placeholder="Курс Щенок. Современный Собаковод;Современный Собаковод - закрытый чат"></textarea>
+          <div class="hint">Через точку с запятой. Если название чата содержит одну из частей, модуль обрабатывает чат и показывает его в истории.</div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label>VK prompt классификатора</label>
+          <input id="vkPromptPath" placeholder="prompts/kuratorbot_promt.txt">
+          <div class="hint" id="vkPromptState">Prompt из file-storage Nexus, модель из OpenRouter.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal" id="modal">
+    <div class="dialog">
+      <div class="dialog-head">
+        <h2>Действие</h2>
+        <button id="modalClose">Закрыть</button>
+      </div>
+      <div class="dialog-body"><pre id="modalPre"></pre></div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const apiBase = window.location.pathname.replace(/\/panel\/.*$/, "/api");
+    const state = { status: null, settings: {}, actions: [], chats: [], templates: [] };
+    const boolKeys = [
+      ["runtime_enabled", "Разрешить фоновые процессы", "Без этого ручной старт вернет 409"],
+      ["tg_enabled", "Telegram-модератор", "Разрешает ручной старт Telegram polling"],
+      ["vk_enabled", "VK-модератор", "Разрешает ручной старт VK longpoll"],
+      ["dry_run", "Сухой режим", "Не удалять и не отправлять реальные сообщения"]
+    ];
+
+    function $(id) { return document.getElementById(id); }
+    function toast(text, danger = false) {
+      const box = $("toast");
+      box.textContent = text;
+      box.style.borderColor = danger ? "rgba(255,107,122,.55)" : "rgba(92,200,167,.5)";
+      box.style.display = "block";
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => box.style.display = "none", 3600);
+    }
+    async function api(path, opts = {}) {
+      const res = await fetch(apiBase + path, {
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+        ...opts
+      });
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      return data;
+    }
+    function pill(value) {
+      const text = String(value || "—");
+      const cls = text === "ok" || text === "running" ? "ok" : (text === "error" || text === "blocked" ? "error" : "warn");
+      return `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
+    }
+    function badge(id, ok, text, warn = false) {
+      const el = $(id);
+      el.className = `pill ${ok ? "ok" : (warn ? "warn" : "bad")}`;
+      el.textContent = text;
+    }
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+    function yes(value) {
+      return ["1", "true", "yes", "on", "да", "y"].includes(String(value || "").trim().toLowerCase());
+    }
+    function setTab(name) {
+      document.querySelectorAll(".tab").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === name));
+      document.querySelectorAll(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
+      if (name === "history") loadActions();
+      if (name === "chats") loadChats();
+    }
+    function renderStatus(data) {
+      state.status = data;
+      state.settings = data.settings || {};
+      state.templates = data.templates || [];
+      $("metricRuntime").textContent = yes(state.settings.runtime_enabled) ? "разрешён" : "выключен";
+      $("metricDryRun").textContent = yes(state.settings.dry_run) ? "вкл" : "выкл";
+      $("metricActions").textContent = data.stats?.actions ?? "0";
+      $("metricErrors").textContent = data.stats?.recent_errors_24h ?? "0";
+      const secrets = data.secrets || [];
+      const byKey = Object.fromEntries(secrets.map(item => [item.key, item]));
+      const runtimeRows = data.runtime_state || [];
+      const anyRunning = runtimeRows.some(row => row.status === "running");
+      const allStopped = runtimeRows.every(row => row.status === "stopped");
+      badge("readyChip", allStopped && !anyRunning, anyRunning ? "работает" : "готов", anyRunning);
+      badge("openrouterChip", !!byKey.openrouter_api_key?.ready, "OpenRouter");
+      badge("telegramChip", !!byKey.telegram_bot_token_moderator?.ready, "Telegram");
+      badge("vkChip", !!byKey.vk_user_token?.ready, "VK");
+      badge("dryRunChip", yes(state.settings.dry_run), yes(state.settings.dry_run) ? "dry-run" : "live", !yes(state.settings.dry_run));
+      $("runtimeRows").innerHTML = (data.runtime_state || []).map(row => `
+        <tr>
+          <td>${escapeHtml(row.platform)}</td>
+          <td>${pill(row.status)}</td>
+          <td class="mono">${escapeHtml(row.last_started_at || "—")}</td>
+          <td class="mono">${escapeHtml(row.last_stopped_at || "—")}</td>
+          <td>${escapeHtml(row.last_error || "")}</td>
+        </tr>`).join("") || `<tr><td colspan="5" class="empty">Нет данных</td></tr>`;
+      renderSettings();
+      renderSecrets(secrets);
+      renderTemplates();
+    }
+    function renderSecrets(secrets) {
+      $("secretsList").innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>Ключ</th><th>Источник</th><th>Статус</th><th>Новое значение</th><th></th></tr></thead>
+        <tbody>${(secrets || []).map(item => {
+        const placeholder = item.ready ? `${item.source}: ${item.masked || "задано"}` : "не задано";
+        return `<tr>
+          <td><strong>${escapeHtml(item.label || item.key)}</strong><br><span class="hint">${escapeHtml(item.env || "")}${item.env_wins ? " · ENV главнее" : ""}</span></td>
+          <td>${escapeHtml(item.source || "missing")}</td>
+          <td>${pill(item.ready ? "ok" : "missing")}</td>
+          <td><input data-secret-key="${escapeHtml(item.key)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"></td>
+          <td><button class="ghost" data-clear-secret="${escapeHtml(item.key)}">Очистить</button></td>
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+    }
+    function renderSettings() {
+      const settings = state.settings || {};
+      $("switches").innerHTML = boolKeys.map(([key, title, desc]) => {
+        const on = yes(settings[key]);
+        return `<div class="switch-row">
+          <div><strong>${escapeHtml(title)}</strong><div class="hint">${escapeHtml(desc)}</div></div>
+          <button class="toggle ${on ? "on" : ""}" data-key="${key}" aria-label="${escapeHtml(title)}"></button>
+        </div>`;
+      }).join("");
+      $("tgAllowed").value = settings.tg_allowed_adders || "";
+      $("tgLogChat").value = settings.telegram_log_chat_id || "-1002852064172";
+      $("vkAdmins").value = settings.vk_allowed_admins || "";
+      $("vkTrusted").value = settings.vk_trusted_senders || "";
+      $("retention").value = settings.history_retention_days || "90";
+      $("chatTitleContains").value = settings.chat_title_contains || "";
+      $("vkPromptPath").value = settings.vk_ai_prompt_path || "prompts/kuratorbot_promt.txt";
+      if (state.status?.prompt) {
+        const prompt = state.status.prompt;
+        const modelText = prompt.model ? ` · модель ${prompt.model}` : "";
+        $("vkPromptState").textContent = prompt.ready
+          ? `file-storage: ${prompt.vk_ai_prompt_path} · ${prompt.size || 0} символов${modelText}`
+          : `fallback: ${prompt.error || "prompt недоступен"}${modelText}`;
+      }
+    }
+    function renderTemplates() {
+      $("templatesList").innerHTML = (state.templates || []).map(item => `
+        <div class="template-item">
+          <div class="template-title">
+            <strong>${escapeHtml(item.title || item.key)}</strong>
+            <span class="hint">${escapeHtml(item.key)}</span>
+            <button class="toggle ${item.enabled ? "on" : ""}" data-template-enabled="${escapeHtml(item.key)}" aria-label="Включить ${escapeHtml(item.title || item.key)}"></button>
+          </div>
+          <div class="field">
+            <label>${escapeHtml(item.help || "Текст ответа")}</label>
+            <textarea data-template-key="${escapeHtml(item.key)}">${escapeHtml(item.body || "")}</textarea>
+          </div>
+        </div>`).join("") || `<div class="empty">Шаблоны появятся после обновления статуса</div>`;
+    }
+    async function loadStatus() {
+      const data = await api("/status");
+      renderStatus(data);
+    }
+    async function loadActions() {
+      const params = new URLSearchParams();
+      if ($("historyQ").value.trim()) params.set("q", $("historyQ").value.trim());
+      if ($("historyPlatform").value) params.set("platform", $("historyPlatform").value);
+      if ($("historyStatus").value) params.set("status_value", $("historyStatus").value);
+      const data = await api(`/actions?${params.toString()}`);
+      state.actions = data.items || [];
+      $("historyRows").innerHTML = state.actions.map(row => `
+        <tr data-action-id="${row.id}">
+          <td class="mono">${row.id}</td>
+          <td class="mono">${escapeHtml(row.ts)}</td>
+          <td>${escapeHtml(row.platform)}</td>
+          <td>${escapeHtml(row.zone || "—")}</td>
+          <td>${escapeHtml(row.action)}</td>
+          <td>${escapeHtml(row.category || "—")}</td>
+          <td>${pill(row.status)}</td>
+          <td><span class="mono">${escapeHtml(row.user_id || "—")}</span><br>${escapeHtml(row.user_name || "")}</td>
+          <td><div class="text-cut">${escapeHtml(row.text_preview || "")}</div></td>
+        </tr>`).join("") || `<tr><td colspan="9" class="empty">История пуста</td></tr>`;
+    }
+    async function loadChats() {
+      const data = await api("/chats");
+      state.chats = data.items || [];
+      $("chatRows").innerHTML = state.chats.map(row => `
+        <tr>
+          <td class="mono">${row.id}</td>
+          <td>${escapeHtml(row.platform)}</td>
+          <td class="mono">${escapeHtml(row.peer_id || row.chat_id || "—")}</td>
+          <td>${escapeHtml(row.title || "—")}</td>
+          <td>${escapeHtml(row.zone || "—")}</td>
+          <td class="mono">${escapeHtml(row.last_seen_at || "—")}</td>
+          <td><button class="toggle ${row.enabled ? "on" : ""}" data-chat-id="${row.id}" aria-label="toggle chat"></button></td>
+        </tr>`).join("") || `<tr><td colspan="7" class="empty">Чаты появятся после событий runtime</td></tr>`;
+    }
+    async function saveSettings(extra = {}) {
+      const payload = {
+        ...state.settings,
+        tg_allowed_adders: $("tgAllowed").value,
+        telegram_log_chat_id: $("tgLogChat").value,
+        vk_allowed_admins: $("vkAdmins").value,
+        vk_trusted_senders: $("vkTrusted").value,
+        history_retention_days: $("retention").value,
+        chat_title_contains: $("chatTitleContains").value,
+        vk_ai_prompt_path: $("vkPromptPath").value,
+        ...extra
+      };
+      const data = await api("/settings", { method: "POST", body: JSON.stringify(payload) });
+      state.settings = data.settings || {};
+      renderSettings();
+      toast("Настройки сохранены");
+      await loadStatus();
+    }
+    async function saveSecrets(clearKey = "") {
+      const payload = {};
+      document.querySelectorAll("[data-secret-key]").forEach(input => {
+        const key = input.dataset.secretKey;
+        const value = input.value.trim();
+        if (value) payload[key] = value;
+      });
+      if (clearKey) payload[clearKey] = "__clear__";
+      if (!Object.keys(payload).length) {
+        toast("Нет новых значений");
+        return;
+      }
+      const data = await api("/secrets", { method: "POST", body: JSON.stringify(payload) });
+      renderSecrets(data.items || []);
+      toast("Токены обновлены");
+      await loadStatus();
+    }
+    async function saveTemplates() {
+      const payload = {};
+      document.querySelectorAll("[data-template-key]").forEach(input => {
+        const key = input.dataset.templateKey;
+        const toggle = document.querySelector(`[data-template-enabled="${CSS.escape(key)}"]`);
+        payload[key] = { body: input.value, enabled: !!toggle?.classList.contains("on") };
+      });
+      const data = await api("/templates", { method: "POST", body: JSON.stringify(payload) });
+      state.templates = data.items || [];
+      renderTemplates();
+      toast("Ответы модератора сохранены");
+      await loadActions();
+    }
+    async function startRuntime() {
+      const platform = prompt("Что запустить: all, vk или telegram?", "all");
+      if (!platform) return;
+      const data = await api("/runtime/start", { method: "POST", body: JSON.stringify({ platform }) });
+      toast(`Старт: ${(data.started || []).join(", ") || "ничего"}`);
+      await loadStatus();
+    }
+    async function stopRuntime() {
+      const platform = prompt("Что остановить: all, vk или telegram?", "all");
+      if (!platform) return;
+      const data = await api("/runtime/stop", { method: "POST", body: JSON.stringify({ platform }) });
+      toast(`Остановлено: ${(data.stopped || []).join(", ") || "ничего"}`);
+      await loadStatus();
+    }
+    async function openAction(id) {
+      const data = await api(`/actions/${id}`);
+      $("modalPre").textContent = JSON.stringify(data.item, null, 2);
+      $("modal").classList.add("open");
+    }
+    document.addEventListener("click", async (event) => {
+      const tab = event.target.closest(".tab");
+      if (tab) setTab(tab.dataset.tab);
+      const settingToggle = event.target.closest("#switches .toggle");
+      if (settingToggle) {
+        const key = settingToggle.dataset.key;
+        await saveSettings({ [key]: yes(state.settings[key]) ? "false" : "true" });
+      }
+      const templateToggle = event.target.closest("[data-template-enabled]");
+      if (templateToggle) {
+        templateToggle.classList.toggle("on");
+      }
+      const chatToggle = event.target.closest("[data-chat-id]");
+      if (chatToggle) {
+        const id = Number(chatToggle.dataset.chatId);
+        const row = state.chats.find(item => Number(item.id) === id);
+        await api(`/chats/${id}/toggle`, { method: "POST", body: JSON.stringify({ enabled: !row?.enabled }) });
+        await loadChats();
+      }
+      const clearSecret = event.target.closest("[data-clear-secret]");
+      if (clearSecret) {
+        await saveSecrets(clearSecret.dataset.clearSecret);
+      }
+      const actionRow = event.target.closest("[data-action-id]");
+      if (actionRow) openAction(actionRow.dataset.actionId);
+    });
+    $("refreshBtn").addEventListener("click", () => loadStatus().then(loadActions).then(loadChats).catch(err => toast(err.message, true)));
+    $("startBtn").addEventListener("click", () => startRuntime().catch(err => toast(err.message, true)));
+    $("stopBtn").addEventListener("click", () => stopRuntime().catch(err => toast(err.message, true)));
+    $("historyApply").addEventListener("click", () => loadActions().catch(err => toast(err.message, true)));
+    $("saveSettingsBtn").addEventListener("click", () => saveSettings().catch(err => toast(err.message, true)));
+    $("saveSecretsBtn").addEventListener("click", () => saveSecrets().catch(err => toast(err.message, true)));
+    $("saveTemplatesBtn").addEventListener("click", () => saveTemplates().catch(err => toast(err.message, true)));
+    $("modalClose").addEventListener("click", () => $("modal").classList.remove("open"));
+    loadStatus().then(loadActions).then(loadChats).catch(err => toast(err.message, true));
+  </script>
+</body>
+</html>

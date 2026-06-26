@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bizon365 docs</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#060606;--panel:#101010;--text:#f2f2f2;--text-muted:#bababa;
+      --text-subtle:#848484;--border:#2d2d2d;--border-strong:#545454;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:14px;
+    }
+    *,*::before,*::after{box-sizing:border-box;}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);}
+    body{padding:18px;}
+    main{max-width:920px;margin:0 auto;display:grid;gap:16px;}
+    section{border:1px solid var(--border);background:var(--panel);padding:14px;}
+    h1{font-size:1.15rem;margin:0;}
+    h2{font-size:.92rem;margin:0 0 10px;}
+    p,li{color:var(--text-muted);line-height:1.55;}
+    p{margin:0 0 8px;}
+    ul{margin:0;padding-left:20px;}
+    code{font-family:"IBM Plex Mono","Fira Code",monospace;color:var(--text);background:#090909;border:1px solid var(--border);padding:1px 5px;}
+    .muted{color:var(--text-subtle);}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Bizon365</h1>
+  <section>
+    <h2>Назначение</h2>
+    <p>Модуль переносит логику <code>sbkvd_bizon</code> в Nexus: запускает headless runner Bizon365, держит комнаты открытыми, отслеживает консольные события модератора и пишет лог.</p>
+    <p class="muted">Runner запускается отдельным процессом и не использует основной Python env Nexus.</p>
+  </section>
+  <section>
+    <h2>Скрипты автоответов</h2>
+    <p>Вкладка <code>Скрипты</code> генерирует HTML для комнат Bizon365. Скрипт грузится с <code>junior.sobakovod.pro/nexus</code>, а ответы получает через публичный endpoint модуля Bizon, который server-side вызывает Nexus OpenRouter.</p>
+    <p>OpenRouter token в браузер не отдаётся. В комнате указываются prompt-файлы, например <code>prompts/dog_gpt4.txt</code> и <code>prompts/dog_gpt4-2.txt</code>; модель берётся из настроек prompt-файла в модуле OpenRouter.</p>
+  </section>
+  <section>
+    <h2>Настройки</h2>
+    <ul>
+      <li><code>base_url</code>, <code>sec_key</code>, список комнат и watchdog-настройки хранятся в SQLite модуля.</li>
+      <li>Логин и пароль Bizon365 можно задать через панель или через env <code>BIZON365_LOGIN</code> и <code>BIZON365_PASS</code>.</li>
+      <li>Пустое поле секретов при сохранении не стирает уже сохранённое значение.</li>
+    </ul>
+  </section>
+  <section>
+    <h2>Зависимости</h2>
+    <p>Кнопка установки создаёт isolated venv в data-директории модуля, ставит <code>playwright</code>, Chromium и, если доступен <code>sudo -n</code>, системные библиотеки Chromium. Это не меняет зависимости Nexus.</p>
+  </section>
+  <section>
+    <h2>API</h2>
+    <ul>
+      <li><code>GET /api/status</code> - процесс, зависимости и публичная часть настроек.</li>
+      <li><code>GET /api/settings</code>, <code>POST /api/settings</code> - чтение и сохранение настроек.</li>
+      <li><code>POST /api/deps/install</code> - установка isolated runner dependencies.</li>
+      <li><code>POST /api/start</code>, <code>POST /api/stop</code>, <code>POST /api/restart</code> - управление runner-процессом.</li>
+      <li><code>GET /api/logs</code>, <code>GET /api/deps/logs</code> - хвост логов.</li>
+      <li><code>GET /api/scripts/rooms</code>, <code>PUT /api/scripts/rooms</code> - конфиги скриптов по комнатам.</li>
+      <li><code>/api/public/process2</code>, <code>/api/public/user_lookup</code>, <code>/api/public/chat</code> - публичные endpoints для JS в Bizon365.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

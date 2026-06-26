@@ -50,6 +50,7 @@
     .f-group{display:grid;gap:4px;min-width:140px;}
     .f-group label{font-size:.72rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.08em;}
     .f-input{min-height:30px;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);width:100%;}
+    .f-input option.page-option--bound{color:var(--text-subtle);background:#050505;}
 
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;
       min-height:28px;padding:4px 11px;border:1px solid var(--border-strong);
@@ -86,6 +87,9 @@
     .script-box{margin:0;padding:12px;background:#030303;border:1px solid var(--border);
       color:var(--ok);font-family:"IBM Plex Mono",monospace;font-size:.74rem;
       white-space:pre;overflow-x:auto;}
+    .settings-body{padding:12px;display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px;min-height:0;overflow:hidden;}
+    .settings-form{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
+    .settings-list{overflow:auto;border-top:1px solid var(--border);}
 
     .empty{padding:24px;text-align:center;color:var(--text-subtle);}
   </style>
@@ -98,6 +102,7 @@
     <button class="tab" data-view="pages" type="button">Страницы</button>
     <button class="tab" data-view="visits" type="button">Журнал</button>
     <button class="tab" data-view="script" type="button">Скрипт</button>
+    <button class="tab" data-view="settings" type="button">Настройки</button>
     <div class="tabs__right">
       <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">↻</button>
     </div>
@@ -111,8 +116,16 @@
         <select id="bPageUrl" class="f-input"><option value="">— выберите страницу —</option></select>
       </div>
       <div class="f-group" style="flex:1">
+        <label>Канал Senler</label>
+        <select id="bChannelId" class="f-input"><option value="">— канал —</option></select>
+      </div>
+      <div class="f-group" style="flex:1">
         <label>ID списка Senler</label>
         <input id="bSubId" class="f-input" placeholder="123456" />
+      </div>
+      <div class="f-group" style="flex:1">
+        <label>ID списка посещения</label>
+        <input id="bVisitSubId" class="f-input" placeholder="3720802" />
       </div>
       <div class="f-group" style="min-width:140px">
         <label>Параметр идентификатора</label>
@@ -126,7 +139,7 @@
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Страница</th><th>Список Senler</th><th>Параметр</th><th>Заметка</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Страница</th><th>Канал</th><th>Список Senler</th><th>Список посещения</th><th>Параметр</th><th>Заметка</th><th>Статус</th><th></th></tr></thead>
         <tbody id="bindingsTable"></tbody>
       </table>
     </div>
@@ -183,6 +196,33 @@
     </div>
   </div>
 
+  <!-- Настройки -->
+  <div class="view" id="viewSettings">
+    <div class="settings-body">
+      <div class="settings-form">
+        <div class="f-group" style="min-width:180px">
+          <label>ID канала Senler</label>
+          <input id="chId" class="f-input" placeholder="123456" />
+        </div>
+        <div class="f-group" style="min-width:220px;flex:1">
+          <label>Название</label>
+          <input id="chName" class="f-input" placeholder="VK группа / TG чат-бот" />
+        </div>
+        <div class="f-group" style="min-width:240px;flex:1">
+          <label>API ключ Senler</label>
+          <input id="chApiKey" class="f-input" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять" />
+        </div>
+        <button id="chAddBtn" class="btn btn--primary" type="button">+ Канал</button>
+      </div>
+      <div class="settings-list">
+        <table>
+          <thead><tr><th>ID канала</th><th>Название</th><th>API ключ</th><th></th></tr></thead>
+          <tbody id="channelsTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -203,22 +243,69 @@ document.querySelectorAll('.tab').forEach(btn => {
     if (btn.dataset.view === 'pages')    loadPages();
     if (btn.dataset.view === 'visits')   loadVisits();
     if (btn.dataset.view === 'script')   renderScript();
+    if (btn.dataset.view === 'settings') loadChannels();
   });
 });
 
-document.getElementById('refreshBtn').addEventListener('click', () => { loadBindings(); loadPages(); loadEnvCheck(); });
+document.getElementById('refreshBtn').addEventListener('click', () => { loadBindings(); loadPages(); loadChannels(); loadEnvCheck(); });
 
 async function loadEnvCheck() {
   const r = await fetch(API + '/env-status').catch(() => null);
   if (!r?.ok) return;
   const s = await r.json();
   if (!s.ready) {
-    const missing = Object.entries(s).filter(([k,v]) => k !== 'ready' && !v).map(([k]) => k).join(', ');
-    (window.parent?.notify || console.warn)(`Senler: не настроены переменные ${missing}`, 'warn');
+    const missing = Object.entries(s).filter(([k,v]) => !['ready', 'channels', 'channel_tokens', 'SENLER_ACCESS_TOKEN'].includes(k) && !v).map(([k]) => k).join(', ');
+    const channelText = !s.channels ? 'каналы Senler' : '';
+    const tokenText = !s.channel_tokens ? 'API ключ канала' : '';
+    (window.parent?.notify || console.warn)(`Senler: не настроены ${[missing, channelText, tokenText].filter(Boolean).join(', ')}`, 'warn');
   }
 }
 
 let pagesData = [];
+let bindingsData = [];
+let channelsData = [];
+
+function channelLabel(id) {
+  const ch = channelsData.find(c => c.id === id);
+  return ch ? `${ch.name} (${ch.id})` : (id || '—');
+}
+
+function renderChannelOptions() {
+  const sel = document.getElementById('bChannelId');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— канал —</option>' + channelsData.map(ch =>
+    `<option value="${escAttr(ch.id)}">${esc(ch.name)} · ${esc(ch.id)}</option>`
+  ).join('');
+  if (cur) sel.value = cur;
+  if (!sel.value && channelsData.length) sel.value = channelsData[0].id;
+}
+
+async function loadChannels() {
+  const r = await fetch(API + '/channels').catch(() => null);
+  if (!r?.ok) return;
+  const data = await r.json();
+  channelsData = data.items || [];
+  renderChannelOptions();
+  const tb = document.getElementById('channelsTable');
+  if (!tb) return;
+  if (!channelsData.length) {
+    tb.innerHTML = '<tr><td colspan="4" class="empty">Каналы не настроены. Добавьте ID канала Senler и API ключ.</td></tr>';
+    return;
+  }
+  const defaultId = data.default_channel_id || '';
+  tb.innerHTML = channelsData.map(ch => `<tr>
+    <td><code style="color:var(--warn)">${esc(ch.id)}</code>${ch.id === defaultId ? ' <span class="badge badge--ok">ENV</span>' : ''}</td>
+    <td>${esc(ch.name)}</td>
+    <td>${ch.has_api_key ? '<span class="badge badge--ok">задан</span>' : '<span class="badge badge--bad">нет</span>'}</td>
+    <td style="display:flex;gap:4px">
+      <button class="btn btn--sm btn--ghost" onclick="checkChannel('${escAttr(ch.id)}')">Проверить</button>
+      ${ch.id === defaultId
+        ? '<span style="color:var(--text-subtle)">из ENV</span>'
+        : `<button class="btn btn--sm btn--danger" onclick="deleteChannel('${escAttr(ch.id)}')">×</button>`}
+    </td>
+  </tr>`).join('');
+}
 
 async function loadPages() {
   const r = await fetch(API + '/pages').catch(() => null);
@@ -227,8 +314,7 @@ async function loadPages() {
 
   const sel = document.getElementById('bPageUrl');
   const cur = sel.value;
-  sel.innerHTML = '<option value="">— выберите страницу —</option>' +
-    pagesData.map(p => `<option value="${esc(p.url)}">${esc(p.url)}</option>`).join('');
+  sel.innerHTML = renderPageOptions(pagesData, getBoundPageUrls());
   if (cur) sel.value = cur;
 
   const tb = document.getElementById('pagesTable');
@@ -247,14 +333,24 @@ async function deletePage(id) {
 }
 
 async function loadBindings() {
+  if (!channelsData.length) await loadChannels();
   const r = await fetch(API + '/bindings').catch(() => null);
   if (!r?.ok) return;
   const list = await r.json();
+  bindingsData = list;
+  if (pagesData.length) {
+    const sel = document.getElementById('bPageUrl');
+    const cur = sel.value;
+    sel.innerHTML = renderPageOptions(pagesData, getBoundPageUrls());
+    if (cur) sel.value = cur;
+  }
   const tb = document.getElementById('bindingsTable');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Связок нет.</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Связок нет.</td></tr>'; return; }
   tb.innerHTML = list.map(b => `<tr>
     <td style="word-break:break-all;max-width:280px;font-size:.78rem">${esc(b.page_url)}</td>
+    <td><code style="color:var(--text-muted)">${esc(channelLabel(b.channel_id))}</code></td>
     <td><code style="color:var(--warn)">${esc(b.subscription_id)}</code></td>
+    <td>${b.visit_subscription_id ? `<code style="color:var(--ok)">${esc(b.visit_subscription_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
     <td style="color:var(--text-subtle)">${esc(b.vk_id_param)}</td>
     <td style="color:var(--text-subtle)">${esc(b.note)}</td>
     <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
@@ -267,17 +363,20 @@ async function loadBindings() {
 
 document.getElementById('bAddBtn').addEventListener('click', async () => {
   const page_url = document.getElementById('bPageUrl').value;
+  const channel_id = document.getElementById('bChannelId').value;
   const subscription_id = document.getElementById('bSubId').value.trim();
+  const visit_subscription_id = document.getElementById('bVisitSubId').value.trim();
   const vk_id_param = document.getElementById('bParam').value.trim() || 'vk_id';
   const note = document.getElementById('bNote').value.trim();
-  if (!page_url || !subscription_id) { alert('Выберите страницу и укажите ID списка'); return; }
+  if (!page_url || !channel_id || !subscription_id) { alert('Выберите страницу, канал и укажите ID списка'); return; }
   const r = await fetch(API + '/bindings', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({page_url, subscription_id, vk_id_param, note})
+    body: JSON.stringify({page_url, channel_id, subscription_id, visit_subscription_id, vk_id_param, note})
   });
   const d = await r.json();
   if (!r.ok) { alert(d.error || 'Ошибка'); return; }
   document.getElementById('bSubId').value = '';
+  document.getElementById('bVisitSubId').value = '';
   document.getElementById('bNote').value = '';
   loadBindings();
 });
@@ -291,6 +390,51 @@ async function deleteBinding(id) {
   if (!confirm('Удалить связку?')) return;
   await fetch(API + `/bindings/${id}`, {method:'DELETE'});
   loadBindings();
+}
+
+document.getElementById('chAddBtn').addEventListener('click', async () => {
+  const id = document.getElementById('chId').value.trim();
+  const name = document.getElementById('chName').value.trim();
+  const api_key = document.getElementById('chApiKey').value.trim();
+  if (!id) { alert('Укажите ID канала'); return; }
+  const r = await fetch(API + '/channels', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id, name, api_key})
+  });
+  let d = {};
+  try { d = await r.json(); } catch {}
+  if (!r.ok) { alert(d.error || d.detail || 'Ошибка'); return; }
+  document.getElementById('chId').value = '';
+  document.getElementById('chName').value = '';
+  document.getElementById('chApiKey').value = '';
+  await loadChannels();
+});
+
+async function deleteChannel(id) {
+  if (!confirm(`Удалить канал «${id}» из списка?`)) return;
+  const r = await fetch(API + `/channels/${encodeURIComponent(id)}`, {method:'DELETE'});
+  let d = {};
+  try { d = await r.json(); } catch {}
+  if (!r.ok) { alert(d.error || d.detail || 'Ошибка'); return; }
+  await loadChannels();
+}
+
+async function checkChannel(id) {
+  const user_id = prompt('ID пользователя для проверки', '5601500901');
+  if (!user_id) return;
+  const r = await fetch(API + `/channels/${encodeURIComponent(id)}/check`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({user_id})
+  });
+  let d = {};
+  try { d = await r.json(); } catch {}
+  if (!r.ok) { alert(d.error || d.detail || 'Ошибка проверки'); return; }
+  if (d.found) {
+    const u = d.user || {};
+    alert(`Канал отвечает. Пользователь найден: ${[u.first_name, u.last_name].filter(Boolean).join(' ') || user_id}. Подписок: ${u.subscriptions_count ?? 0}`);
+  } else {
+    alert('Канал отвечает, но пользователь не найден.');
+  }
 }
 
 let _activeVisitRow = null;
@@ -425,8 +569,55 @@ document.getElementById('copyScriptBtn').addEventListener('click', () => {
 });
 
 function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s) { return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+function pageHost(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.startsWith('www.') ? host.slice(4) : host;
+  } catch (e) {
+    return 'без домена';
+  }
+}
+
+function pageSortKey(p) {
+  try {
+    const u = new URL(p.url);
+    const host = pageHost(p.url);
+    const path = (u.pathname.replace(/\/+$/, '') || '/').toLowerCase();
+    return `${host}\n${path}\n${String(p.url).toLowerCase()}`;
+  } catch (e) {
+    return `~~~\n${String(p.url).toLowerCase()}`;
+  }
+}
+
+function getBoundPageUrls() {
+  return new Set(bindingsData.map(b => b.page_url).filter(Boolean));
+}
+
+function renderPageOptions(pages, boundPageUrls = new Set()) {
+  const sorted = [...pages].sort((a, b) => pageSortKey(a).localeCompare(pageSortKey(b)));
+  let html = '<option value="">— выберите страницу —</option>';
+  let currentHost = null;
+  for (const p of sorted) {
+    const host = pageHost(p.url);
+    if (host !== currentHost) {
+      if (currentHost !== null) html += '</optgroup>';
+      html += `<optgroup label="${escAttr(host)}">`;
+      currentHost = host;
+    }
+    const bound = boundPageUrls.has(p.url);
+    const optionAttrs = bound
+      ? ' class="page-option--bound" style="color:#848484;background:#050505" title="Уже есть связка, можно выбрать повторно"'
+      : '';
+    html += `<option value="${escAttr(p.url)}"${optionAttrs}>${esc(p.url)}</option>`;
+  }
+  if (currentHost !== null) html += '</optgroup>';
+  return html;
+}
 
 loadEnvCheck();
+loadChannels();
 loadPages();
 loadBindings();
 </script>

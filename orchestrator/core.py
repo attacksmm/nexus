@@ -6,7 +6,7 @@ import shutil
 import sys
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 
 from fastapi import FastAPI
@@ -18,6 +18,8 @@ MODULES_DIR = Path(__file__).parent.parent / "modules"
 UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
 REQUIRED_MANIFEST_KEYS = {"id", "name", "version"}
+MAX_ZIP_FILES = 500
+MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 
 
 def get_module_logger(module_id: str, log_dir: Path) -> logging.Logger:
@@ -67,14 +69,14 @@ class ModuleManager:
         return meta
 
     async def unload(self, module_id: str, app: FastAPI):
-        self._unmount_module(module_id, app)
+        await self._unmount_module(module_id, app)
         module_dir = MODULES_DIR / module_id
         if module_dir.exists():
             shutil.rmtree(module_dir)
         await delete_module(module_id)
 
     async def pause(self, module_id: str, app: FastAPI):
-        self._unmount_module(module_id, app)
+        await self._unmount_module(module_id, app)
         await update_module_status(module_id, "paused")
 
     async def resume(self, module_id: str, app: FastAPI):
@@ -105,6 +107,7 @@ class ModuleManager:
         with zipfile.ZipFile(zip_path) as zf:
             if "manifest.json" not in zf.namelist():
                 raise ValueError("manifest.json missing in ZIP")
+            self._validate_zip_members(zf)
             manifest = json.loads(zf.read("manifest.json"))
 
         missing = REQUIRED_MANIFEST_KEYS - manifest.keys()
@@ -138,8 +141,28 @@ class ModuleManager:
 
         return manifest, module_dir
 
+    @staticmethod
+    def _validate_zip_members(zf: zipfile.ZipFile) -> None:
+        infos = zf.infolist()
+        if len(infos) > MAX_ZIP_FILES:
+            raise ValueError(f"Too many files in ZIP: {len(infos)}")
+        total_size = 0
+        for info in infos:
+            name = info.filename
+            if not name:
+                raise ValueError("ZIP contains empty filename")
+            path = PurePosixPath(name)
+            if path.is_absolute() or "\\" in name or any(part in {"", ".", ".."} for part in path.parts):
+                raise ValueError(f"Unsafe ZIP path: {name!r}")
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError(f"ZIP symlinks are not allowed: {name!r}")
+            total_size += int(info.file_size or 0)
+            if total_size > MAX_ZIP_UNCOMPRESSED_BYTES:
+                raise ValueError("ZIP uncompressed size is too large")
+
     async def _mount_module(self, module_id: str, module_dir: Path, app: FastAPI):
-        self._unmount_module(module_id, app)
+        await self._unmount_module(module_id, app)
 
         router_file = module_dir / "router.py"
         if router_file.exists():
@@ -172,8 +195,15 @@ class ModuleManager:
                 except Exception:
                     pass
 
-    def _unmount_module(self, module_id: str, app: FastAPI):
-        self._loaded.pop(module_id, None)
+    async def _unmount_module(self, module_id: str, app: FastAPI):
+        mod = self._loaded.pop(module_id, None)
+        if mod is not None and hasattr(mod, "shutdown"):
+            try:
+                result = mod.shutdown()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:
+                logging.getLogger("nexus.core").exception("Module %s shutdown() failed", module_id)
         sys.modules.pop(f"_nexus_mod_{module_id}", None)
 
         prefixes = (f"/{module_id}/api", f"/{module_id}/panel", f"/{module_id}/static")

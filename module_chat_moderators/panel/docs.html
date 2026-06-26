@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Куратор чатов - документация</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0e1116; --text:#eef3fb; --muted:#98a4b5; --line:rgba(255,255,255,.1); --accent:#5cc8a7; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.55; }
+    main { width:min(980px,100%); margin:0 auto; padding:24px 18px 56px; }
+    h1 { margin:0 0 8px; font-size:26px; letter-spacing:0; }
+    h2 { margin:28px 0 10px; font-size:18px; }
+    p, li { color:var(--muted); }
+    strong { color:var(--text); }
+    code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    code { color:#c7f4e4; }
+    pre { overflow:auto; padding:14px; border:1px solid var(--line); border-radius:8px; background:#0a0f15; color:#dce7f5; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }
+    th { color:var(--text); }
+    .note { border-left:3px solid var(--accent); padding:10px 12px; background:rgba(92,200,167,.08); color:var(--text); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Куратор чатов</h1>
+  <p>Модуль переносит куратора учебных чатов Sobakovod в Nexus и хранит историю действий в SQLite.</p>
+
+  <div class="note">
+    Runtime не стартует автоматически. Даже если модуль активен в Nexus, <code>setup()</code> только инициализирует БД и настройки.
+  </div>
+
+  <h2>Текущий инкремент</h2>
+  <ul>
+    <li>Добавлен безопасный skeleton модуля.</li>
+    <li>Добавлена БД истории действий и панель просмотра.</li>
+    <li>Перенесены TG-модерация и VK core moderation: детерминированные правила для базовых нарушений, AI-анализ через OpenRouter, admin bypass, приветствия, удаления, настраиваемые ответы и логирование.</li>
+    <li>VK-модерация не считает слово «блин», кинологические формулировки про кобелей/сук, описания поведения собаки и обычные учебные вопросы негативом без отдельного признака скама, уводящей ссылки или адресного оскорбления.</li>
+    <li>VK техагент временно убран из рабочего интерфейса и остается выключенным; текущий фокус модуля — учебные чаты.</li>
+  </ul>
+
+  <h2>Безопасность</h2>
+  <table>
+    <thead><tr><th>Ключ</th><th>Значение по умолчанию</th><th>Поведение</th></tr></thead>
+    <tbody>
+      <tr><td><code>runtime_enabled</code></td><td><code>false</code></td><td>Без него ручной старт вернет 409.</td></tr>
+      <tr><td><code>tg_enabled</code></td><td><code>false</code></td><td>Разрешает Telegram polling.</td></tr>
+      <tr><td><code>vk_enabled</code></td><td><code>false</code></td><td>Разрешает VK longpoll.</td></tr>
+      <tr><td><code>dry_run</code></td><td><code>true</code></td><td>Не удаляет и не отправляет реальные сообщения, записывает would_* действия.</td></tr>
+      <tr><td><code>tg_send_responses</code></td><td><code>false</code></td><td>Управляет ответными сообщениями Telegram; уведомления в лог и удаление работают отдельно.</td></tr>
+      <tr><td><code>vk_send_responses</code></td><td><code>false</code></td><td>Управляет ответными сообщениями VK; уведомления в лог и удаление работают отдельно.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>ENV</h2>
+  <p>Секреты можно задать двумя способами: через ENV или через вкладку «Настройки» в модуле. Если значение есть в ENV, оно всегда используется вместо значения из БД модуля.</p>
+  <pre>NEXUS_CHAT_MODERATORS_RUNTIME_ENABLED=false
+NEXUS_CHAT_MODERATORS_TG_ENABLED=false
+NEXUS_CHAT_MODERATORS_VK_ENABLED=false
+NEXUS_CHAT_MODERATORS_DRY_RUN=true
+NEXUS_CHAT_MODERATORS_TG_SEND_RESPONSES=false
+NEXUS_CHAT_MODERATORS_VK_SEND_RESPONSES=false
+TELEGRAM_BOT_TOKEN_MODERATOR=
+TELEGRAM_LOG_CHAT_ID=-1002852064172
+VK_USER_TOKEN=
+VK_LOG_CHAT_ID=
+OPENROUTER_API_KEY=
+</pre>
+
+  <h2>Управление токенами</h2>
+  <ul>
+    <li><strong>Источник env</strong>: значение задано в окружении Nexus и перекрывает модульную БД.</li>
+    <li><strong>Источник module</strong>: значение сохранено в БД <code>chat-moderators.db</code>.</li>
+    <li><strong>Источник default</strong>: используется безопасное значение по умолчанию, например модель OpenRouter.</li>
+    <li><strong>Источник missing</strong>: токена нет, соответствующий runtime не стартует.</li>
+  </ul>
+  <p>Пустое поле при сохранении не стирает текущий токен. Для удаления модульного значения используется кнопка «Очистить».</p>
+
+  <h2>AI и prompt-файлы</h2>
+  <p>AI-классификация идет через OpenRouter. Прямой ключ DeepSeek этому модулю не нужен.</p>
+  <p>VK-классификатор по умолчанию читает системный prompt из Nexus file-storage: <code>prompts/kuratorbot_promt.txt</code>, а модель берёт из настроек этого prompt-файла в модуле OpenRouter. До обращения к AI модуль применяет обязательные правила для мата, возврата денег и техподдержки, чтобы очевидные случаи не зависели от ответа модели. Если файл недоступен, модуль использует встроенный fallback prompt и не запускает runtime автоматически.</p>
+
+  <h2>API</h2>
+  <table>
+    <thead><tr><th>Метод</th><th>Endpoint</th><th>Назначение</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/health</code></td><td>Публичная проверка, без автозапуска.</td></tr>
+      <tr><td>GET</td><td><code>/status</code></td><td>Готовность ENV, runtime state, счетчики истории.</td></tr>
+      <tr><td>POST</td><td><code>/settings</code></td><td>Сохранение safety-флагов и allowlist.</td></tr>
+      <tr><td>GET</td><td><code>/secrets/status</code></td><td>Готовность токенов без раскрытия значений.</td></tr>
+      <tr><td>POST</td><td><code>/secrets</code></td><td>Сохранение или очистка модульных токенов.</td></tr>
+      <tr><td>GET</td><td><code>/templates</code></td><td>Список редактируемых ответов модератора.</td></tr>
+      <tr><td>POST</td><td><code>/templates</code></td><td>Сохранение текстов ответов модератора.</td></tr>
+      <tr><td>POST</td><td><code>/runtime/start</code></td><td>Ручной старт <code>telegram</code>, <code>vk</code> или <code>all</code>.</td></tr>
+      <tr><td>POST</td><td><code>/runtime/stop</code></td><td>Остановка runtime.</td></tr>
+      <tr><td>GET</td><td><code>/actions</code></td><td>История действий с фильтрами.</td></tr>
+      <tr><td>GET</td><td><code>/chats</code></td><td>Известные управляемые чаты.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Правило работы</h2>
+  <p>Не включать runtime в Nexus, пока старые модераторы работают в Sobakovod/Germany. Для проверки использовать отдельные тестовые чаты и запускать только один источник polling для конкретного TG токена.</p>
+</main>
+</body>
+</html>

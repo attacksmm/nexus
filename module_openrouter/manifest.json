@@ -1,13 +1,15 @@
 {
   "id": "openrouter",
   "name": "OpenRouter API",
-  "version": "1.0.39",
+  "version": "1.0.47",
   "description": "Генерация ответов через OpenRouter с промптами из file-storage, контекстами пользователей и настройкой моделей.",
   "env_vars": {
     "OPENROUTER_API_KEY": "API ключ OpenRouter",
     "SALEBOT_API_KEY": "API ключ Salebot для endpoint /avito",
     "SALEBOT_API_KEY_3": "Fallback API ключ Salebot для endpoint /avito, если SALEBOT_API_KEY не задан",
     "OPENROUTER_CUSTOMER_DB_PATH": "Необязательный путь к SQLite БД customer-db, если автоопределение не подходит",
+    "SENLER_ACCESS_TOKEN": "API токен Senler для vars/set и добавления подписчика в AI-бот после /senler-chat",
+    "SENLER_GROUP_ID": "ID группы Senler для vars/set и добавления подписчика в AI-бот после /senler-chat",
     "NEXUS_OPENROUTER_API_TOKEN": "Устаревший внешний Bearer token, используется только для миграции при первом запуске"
   },
   "env_required": [

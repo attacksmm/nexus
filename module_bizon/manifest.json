@@ -1,0 +1,11 @@
+{
+  "id": "bizon",
+  "name": "Bizon365",
+  "version": "1.1.21",
+  "description": "Управление headless-модератором Bizon365, скриптами автоответов комнат, watchdog и логами.",
+  "env_required": [],
+  "env_vars": {
+    "BIZON365_LOGIN": "Fallback логин Bizon365. Можно задать в настройках модуля.",
+    "BIZON365_PASS": "Fallback пароль Bizon365. Можно задать в настройках модуля."
+  }
+}

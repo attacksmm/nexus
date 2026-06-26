@@ -16,6 +16,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from orchestrator.auth import can_access_module, verify_token_from_request
+
 router = APIRouter()
 
 _ctx = None
@@ -32,6 +34,7 @@ _EP_VAR_SET = f"{SENLER_API}/vars/set"
 TABLE_NAME = "getcourse_orders"
 TABLE_DISPLAY_NAME = "Заказы GetCourse"
 PROCESSABLE_PAYMENT_STATES = {"paid", "partial", "unpaid"}
+MODULE_ID = "getcourse-orders"
 
 DEFAULT_SETTINGS = {
     "webhook_secret": "",
@@ -41,6 +44,13 @@ DEFAULT_SETTINGS = {
     "vk_fields": "utmT,utm_term,user_term",
     "request_timeout": "12",
 }
+
+
+async def _require_panel_user(request: Request) -> dict:
+    user = await verify_token_from_request(request)
+    if not user or not can_access_module(user, MODULE_ID):
+        raise HTTPException(401, "unauthorized")
+    return user
 
 
 def setup(ctx):
@@ -827,7 +837,8 @@ async def health():
 
 
 @router.get("/env-status")
-async def env_status():
+async def env_status(request: Request):
+    await _require_panel_user(request)
     env = _env()
     settings = await _settings_map()
     db_path = _customer_db_path()
@@ -843,7 +854,8 @@ async def env_status():
 
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(request: Request):
+    await _require_panel_user(request)
     settings = await _settings_map()
     return {
         **settings,
@@ -854,12 +866,14 @@ async def get_settings():
 
 @router.post("/settings")
 async def post_settings(request: Request):
+    await _require_panel_user(request)
     data = await request.json()
     return await _save_settings(data if isinstance(data, dict) else {})
 
 
 @router.get("/rules")
-async def list_rules():
+async def list_rules(request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM rules ORDER BY id DESC")
@@ -874,6 +888,7 @@ async def list_rules():
 
 @router.post("/rules")
 async def save_rule(request: Request):
+    await _require_panel_user(request)
     data = await request.json()
     if not isinstance(data, dict):
         return JSONResponse({"error": "JSON object required"}, status_code=400)
@@ -913,7 +928,8 @@ async def save_rule(request: Request):
 
 
 @router.put("/rules/{rule_id}/toggle")
-async def toggle_rule(rule_id: int):
+async def toggle_rule(rule_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(
             "UPDATE rules SET active=1-active, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
@@ -924,7 +940,8 @@ async def toggle_rule(rule_id: int):
 
 
 @router.delete("/rules/{rule_id}")
-async def delete_rule(rule_id: int):
+async def delete_rule(rule_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute("DELETE FROM rules WHERE id=?", (rule_id,))
         await db.commit()
@@ -932,7 +949,8 @@ async def delete_rule(rule_id: int):
 
 
 @router.get("/events")
-async def list_events(limit: int = 200, result: str = "all"):
+async def list_events(request: Request, limit: int = 200, result: str = "all"):
+    await _require_panel_user(request)
     limit = max(1, min(500, int(limit)))
     where = ""
     if result == "ok":
@@ -948,7 +966,8 @@ async def list_events(limit: int = 200, result: str = "all"):
 
 
 @router.get("/events/{event_id}")
-async def get_event(event_id: int):
+async def get_event(event_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM events WHERE id=?", (event_id,))
@@ -965,7 +984,8 @@ async def get_event(event_id: int):
 
 
 @router.get("/stats")
-async def stats():
+async def stats(request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         total = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
         success = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=1")).fetchone())[0]

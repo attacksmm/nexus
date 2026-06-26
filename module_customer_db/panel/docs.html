@@ -2,7 +2,7 @@
 <html lang="ru">
 <head><meta charset="utf-8"><title>Документация customer-db</title></head>
 <body>
-<h2>База клиентов v2.0.0</h2>
+<h2>База клиентов v2.1.3</h2>
 <p>Модуль для хранения клиентов в SQLite. Поддерживает несколько изолированных таблиц. Каждая запись содержит три поля: <code>id</code>, <code>platform_id</code>, <code>custom_fields</code>.</p>
 
 <h2>Структура записи</h2>
@@ -16,7 +16,7 @@
 </table>
 
 <h2>Таблицы</h2>
-<p>Один модуль может содержать несколько таблиц (например, отдельно для каждой платформы). Таблица <code>default</code> создаётся автоматически и не удаляется.</p>
+<p>Один модуль может содержать несколько таблиц (например, отдельно для каждой платформы). Таблица <code>default</code> создаётся автоматически и не удаляется. В панели она отображается как <strong>Основная</strong> и работает как сводный лист: показывает и ищет строки из всех таблиц сразу, сохраняя признак исходного листа.</p>
 
 <h2>REST API</h2>
 <p>Базовый путь: <code>/nexus/customer-db/api</code></p>
@@ -37,11 +37,25 @@
   <tr><td>POST</td><td><code>/tables/{table}/records</code></td><td>Создать запись <code>{platform_id, custom_fields}</code></td></tr>
   <tr><td>POST</td><td><code>/tables/{table}/records/upsert</code></td><td>Создать или обновить одну запись по <code>platform_id</code>. Удаляет пустые значения и неподставленные плейсхолдеры <code>#{...}</code>.</td></tr>
   <tr><td>POST</td><td><code>/tables/{table}/records/batch-upsert</code></td><td>Пачками до 1000 записей: создать новые и обновить существующие по <code>platform_id</code></td></tr>
+  <tr><td>POST</td><td><code>/{table}</code></td><td>Webhook-friendly upsert: endpoint называется как таблица, например <code>/vk_clients</code>. Принимает nested JSON, form-data и плоские ключи <code>custom_fields.name</code>.</td></tr>
   <tr><td>GET</td><td><code>/tables/{table}/records/{id}</code></td><td>Одна запись по id</td></tr>
   <tr><td>PUT</td><td><code>/tables/{table}/records/{id}</code></td><td>Обновить запись</td></tr>
   <tr><td>DELETE</td><td><code>/tables/{table}/records/{id}</code></td><td>Удалить запись</td></tr>
   <tr><td>GET</td><td><code>/tables/{table}/stats</code></td><td>Итого и сегодня</td></tr>
 </table>
+
+<h3>Хранение и обслуживание</h3>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/maintenance/storage</code></td><td>Размер диска, live DB, archive DB, backup-кандидаты и топ таблиц по размеру</td></tr>
+  <tr><td>GET</td><td><code>/maintenance/archive/plan?months=6</code></td><td>План переноса старых строк в локальный архив без изменения данных</td></tr>
+  <tr><td>POST</td><td><code>/maintenance/archive/run?months=6&amp;dry_run=true</code></td><td>Dry-run архивации. При <code>dry_run=false</code> переносит старые строки в archive DB и удаляет их из live DB только после записи в архив</td></tr>
+  <tr><td>GET</td><td><code>/maintenance/compact/plan?tables=vk_clients,telegram_clients</code></td><td>Оценка экономии от сжатия тяжёлых <code>custom_fields</code></td></tr>
+  <tr><td>POST</td><td><code>/maintenance/compact/run?dry_run=true</code></td><td>Dry-run compaction. При <code>dry_run=false</code> полный JSON сохраняется gzip в payload-хранилище, а в live DB остаётся компактный профиль</td></tr>
+  <tr><td>GET</td><td><code>/maintenance/backups/plan?keep_latest=2</code></td><td>Показывает, какие customer-db backup-копии будут сохранены и удалены</td></tr>
+  <tr><td>POST</td><td><code>/maintenance/backups/cleanup?keep_latest=2&amp;execute=false</code></td><td>Dry-run очистки. Удаление выполняется только при <code>execute=true</code></td></tr>
+</table>
+<p>Архив и payload-хранилище лежат локально в <code>modules/customer-db/data/archive/customer-db-archive.db</code>. Списки, статистика и карточки читают live + archive прозрачно; архивные записи получают служебный признак <code>archived: true</code>, но основные поля ответа остаются прежними. При compaction полный <code>custom_fields</code> не удаляется: он автоматически восстанавливается при чтении записи/API.</p>
 
 <h3>Пример запроса</h3>
 <pre><code>POST /nexus/customer-db/api/tables/default/records
@@ -62,13 +76,28 @@ Content-Type: application/json
 Content-Type: application/json
 
 {
-  "platform_id": "tg_123456",
+  "platform_id": "123456",
   "custom_fields": {
     "platform": "telegram",
     "salebot_id": "123",
     "utms": {
       "utm_campaign": "spring"
     }
+  }
+}</code></pre>
+
+<h3>Webhook endpoint по имени таблицы</h3>
+<pre><code>POST /nexus/customer-db/api/vk_clients
+Content-Type: application/json
+
+{
+  "platform_id": "123456",
+  "custom_fields": {
+    "name": "Иван",
+    "second_name": "Иванов",
+    "phone": "+7 999 000 11 22",
+    "email": "ivan@example.com",
+    "utm_source": "senler"
   }
 }</code></pre>
 
@@ -97,6 +126,7 @@ Content-Type: application/json
     └── docs.html       — эта документация</code></pre>
 
 <h2>Безопасность</h2>
-<p>Модуль доступен только авторизованным пользователям Nexus. API не требует отдельной авторизации внутри iframe (сессия унаследована от оркестратора). Для внешних запросов к API используйте cookie <code>nexus_token</code>.</p>
+<p>Панель и чтение API доступны только авторизованным пользователям Nexus с доступом к модулю. Внешние запросы записи <code>/records</code>, <code>/records/upsert</code> и <code>/records/batch-upsert</code> принимают заголовок <code>Authorization: Bearer &lt;NEXUS_CUSTOMER_DB_API_TOKEN&gt;</code>. Для webhook-блоков без заголовков endpoint <code>/records/upsert</code> и короткий endpoint <code>/{table}</code> также принимают верхнеуровневое поле JSON/form <code>token</code>, <code>api_token</code> или <code>secret</code>; эти поля не сохраняются в карточку. Если отдельный токен не задан, используется <code>NEXUS_OPENROUTER_API_TOKEN</code>.</p>
+<p>Текущий токен и готовый JSON заголовков доступны в верхней панели Nexus: откройте модуль <strong>База клиентов</strong> и нажмите <strong>Настройки</strong> рядом с кнопкой паузы.</p>
 </body>
 </html>

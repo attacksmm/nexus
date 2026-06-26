@@ -12,7 +12,7 @@
       --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
       --accent-bg:#f4f4f4;--accent-text:#080808;
       --ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;
-      --bad-bg:#251315;--bad-bd:#5f3137;
+      --bad-bg:#251315;--bad-bd:#5f3137;--info:#9fd4ff;--info-bg:#0d2230;--info-bd:#245977;
       font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
     }
     *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
@@ -76,6 +76,19 @@
     .textarea{min-height:280px;resize:vertical;font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;line-height:1.5;white-space:pre;overflow:auto;}
     .hint{margin:0;color:var(--text-subtle);font-size:.78rem;line-height:1.45;}
     .error{color:var(--bad);background:var(--bad-bg);border:1px solid var(--bad-bd);padding:7px 9px;font-size:.78rem;}
+    .check{display:flex;align-items:flex-start;gap:8px;padding:8px 0;color:var(--text-muted);font-size:.82rem;line-height:1.35;}
+    .check input{width:16px;height:16px;margin:1px 0 0;accent-color:var(--accent-bg);flex-shrink:0;}
+    .check span{min-width:0;}
+    .upload-toast{position:fixed;right:14px;bottom:38px;width:min(420px,calc(100vw - 28px));z-index:30;border:1px solid var(--info-bd);background:var(--info-bg);color:var(--text);box-shadow:0 18px 52px rgba(0,0,0,.45);}
+    .upload-toast__body{display:grid;gap:6px;padding:10px 12px;}
+    .upload-toast__top{display:flex;align-items:center;gap:10px;min-width:0;}
+    .upload-toast__name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .upload-toast__meta{margin-left:auto;color:var(--info);font-size:.78rem;white-space:nowrap;}
+    .upload-toast__msg{color:var(--text-muted);font-size:.78rem;overflow-wrap:anywhere;}
+    .upload-toast__bar{height:4px;background:#07131b;overflow:hidden;}
+    .upload-toast__fill{height:100%;width:0;background:var(--info);transition:width .15s linear;}
+    .upload-toast--error{border-color:var(--bad-bd);background:var(--bad-bg);}
+    .upload-toast--error .upload-toast__meta{color:var(--bad);}
 
     .preview-box{min-height:220px;display:grid;place-items:center;background:#030303;border:1px solid var(--border);overflow:auto;}
     .preview-box img,.preview-box video{max-width:100%;max-height:58vh;display:block;}
@@ -100,7 +113,7 @@
       <button id="refreshBtn" class="btn btn--icon btn--ghost" type="button" title="Обновить">↻</button>
       <button id="newFolderBtn" class="btn" type="button">+ Папка</button>
       <button id="newTextBtn" class="btn" type="button">+ Текст</button>
-      <label class="btn btn--primary" for="uploadInput">↑ Загрузить</label>
+      <button id="chooseUploadBtn" class="btn btn--primary" type="button">↑ Загрузить</button>
       <input id="uploadInput" type="file" multiple hidden />
     </div>
   </div>
@@ -125,6 +138,17 @@
     <span id="statusCount">0 объектов</span>
     <span id="statusLimit"></span>
     <span id="statusMsg" style="margin-left:auto"></span>
+  </div>
+</div>
+
+<div id="uploadToast" class="upload-toast" hidden>
+  <div class="upload-toast__body">
+    <div class="upload-toast__top">
+      <span id="uploadToastName" class="upload-toast__name"></span>
+      <span id="uploadToastMeta" class="upload-toast__meta"></span>
+    </div>
+    <div class="upload-toast__bar"><div id="uploadToastFill" class="upload-toast__fill"></div></div>
+    <div id="uploadToastMsg" class="upload-toast__msg"></div>
   </div>
 </div>
 
@@ -177,6 +201,10 @@
     <div class="dialog__body">
       <div id="previewBox" class="preview-box"></div>
       <div class="field"><label>Прямая ссылка</label><input id="previewUrl" class="input" readonly /></div>
+      <label class="check">
+        <input id="previewAuthToggle" type="checkbox" />
+        <span>Только авторизованным пользователям Nexus</span>
+      </label>
       <div id="previewError" class="error" hidden></div>
     </div>
     <div class="dialog__foot">
@@ -200,10 +228,13 @@ const state = {
   selectedId: null,
   sortKey: 'name',
   sortDir: 1,
-  config: { max_file_size: 104857600, allowed_extensions: [] },
+  config: { max_file_size: null, max_text_edit_size: 1048576, upload_chunk_size: 16777216, allow_any_file: true },
   editingId: null,
   applyingRoute: false
 };
+const UPLOAD_STORE_KEY = 'nexus:file-storage:uploads';
+const HANDLE_DB = 'nexus-file-storage-handles';
+const HANDLE_STORE = 'handles';
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtSize(n){if(!n)return '—';const u=['Б','КБ','МБ','ГБ'];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++;}return `${v>=10||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`;}
@@ -241,11 +272,12 @@ async function api(url, opts={}){
 async function init(){
   try{
     state.config = await api('/config');
-    $('statusLimit').textContent = `Лимит файла: ${fmtSize(state.config.max_file_size)}`;
+    $('statusLimit').textContent = state.config.max_file_size ? `Лимит файла: ${fmtSize(state.config.max_file_size)}` : 'Лимит приложения: без ограничения';
   }catch(e){ setMsg(e.message, 'error'); }
   const routePath = currentRoutePath();
   if(routePath) await openRoutePath(routePath);
   else await loadFolder(1);
+  resumeStoredUploads().catch(e => showUploadToast({name:'Загрузка', uploaded:0, size:0}, e.message, 'error'));
 }
 
 function encodePathPart(part){return encodeURIComponent(part);}
@@ -388,16 +420,164 @@ async function saveText(){
   closeDialog('textDialog');
   await loadFolder(state.folderId);
 }
-async function uploadFiles(files){
-  for(const file of files){
-    const fd = new FormData();
-    fd.append('folder_id', String(state.folderId));
-    fd.append('file', file);
-    setMsg(`Загрузка: ${file.name}`);
-    await api('/uploads', {method:'POST', body:fd});
+function readStoredUploads(){
+  try{return JSON.parse(localStorage.getItem(UPLOAD_STORE_KEY) || '[]');}catch{return [];}
+}
+function writeStoredUploads(items){
+  localStorage.setItem(UPLOAD_STORE_KEY, JSON.stringify(items.slice(-12)));
+}
+function saveStoredUpload(upload){
+  const items = readStoredUploads().filter(u => u.sessionId !== upload.sessionId);
+  items.push({...upload, updatedAt: Date.now()});
+  writeStoredUploads(items);
+}
+function removeStoredUpload(sessionId){
+  writeStoredUploads(readStoredUploads().filter(u => u.sessionId !== sessionId));
+}
+function openHandleDb(){
+  return new Promise((resolve, reject) => {
+    if(!('indexedDB' in window)){reject(new Error('IndexedDB недоступен'));return;}
+    const req = indexedDB.open(HANDLE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(HANDLE_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB error'));
+  });
+}
+async function putFileHandle(sessionId, handle){
+  if(!handle) return;
+  const db = await openHandleDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, 'readwrite');
+    tx.objectStore(HANDLE_STORE).put(handle, sessionId);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+async function getFileHandle(sessionId){
+  const db = await openHandleDb();
+  const handle = await new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, 'readonly');
+    const req = tx.objectStore(HANDLE_STORE).get(sessionId);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return handle;
+}
+function showUploadToast(upload, msg='', level='info'){
+  const total = upload.size || 0;
+  const uploaded = upload.uploaded || 0;
+  const pct = total ? Math.max(0, Math.min(100, uploaded / total * 100)) : 0;
+  $('uploadToast').hidden = false;
+  $('uploadToast').classList.toggle('upload-toast--error', level === 'error');
+  $('uploadToastName').textContent = upload.name || 'Файл';
+  $('uploadToastMeta').textContent = total ? `${pct.toFixed(1)}% · ${fmtSize(uploaded)} / ${fmtSize(total)}` : fmtSize(uploaded);
+  $('uploadToastFill').style.width = `${pct}%`;
+  $('uploadToastMsg').textContent = msg || 'Загрузка файла';
+}
+function hideUploadToastSoon(){
+  setTimeout(() => {$('uploadToast').hidden = true;}, 1800);
+}
+function uploadChunk(sessionId, blob, offset, upload){
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `${API}/upload-sessions/${encodeURIComponent(sessionId)}/chunk?offset=${offset}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = e => {
+      if(e.lengthComputable){
+        showUploadToast({...upload, uploaded:offset + e.loaded}, 'Загрузка продолжается');
+      }
+    };
+    xhr.onload = () => {
+      let data = {};
+      try{data = JSON.parse(xhr.responseText || '{}');}catch{}
+      if(xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error || data.detail || `HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('Сетевая ошибка загрузки'));
+    xhr.send(blob);
+  });
+}
+async function uploadFileChunked(file, handle=null, existing=null){
+  let upload = existing;
+  if(!upload){
+    const created = await api('/upload-sessions', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({folder_id:state.folderId,name:file.name,size:file.size})
+    });
+    upload = {sessionId:created.id, folderId:state.folderId, name:file.name, size:file.size, uploaded:created.uploaded || 0};
+    await putFileHandle(upload.sessionId, handle).catch(() => {});
+  }else{
+    const remote = await api(`/upload-sessions/${encodeURIComponent(upload.sessionId)}`);
+    upload = {...upload, folderId:remote.folder_id, name:remote.name, size:remote.size ?? file.size, uploaded:remote.uploaded || 0};
   }
-  setMsg('Загрузка завершена', 'ok');
+  saveStoredUpload(upload);
+  const chunkSize = Number(state.config.upload_chunk_size || 16777216);
+  while(upload.uploaded < file.size){
+    const end = Math.min(upload.uploaded + chunkSize, file.size);
+    const data = await uploadChunk(upload.sessionId, file.slice(upload.uploaded, end), upload.uploaded, upload);
+    upload.uploaded = Number(data.uploaded || end);
+    saveStoredUpload(upload);
+    showUploadToast(upload, 'Загрузка продолжается');
+    if(data.ok === false && data.expected_offset !== undefined){
+      upload.uploaded = Number(data.expected_offset || 0);
+      saveStoredUpload(upload);
+    }
+  }
+  const done = await api(`/upload-sessions/${encodeURIComponent(upload.sessionId)}/complete`, {method:'POST'});
+  removeStoredUpload(upload.sessionId);
+  showUploadToast({...upload, uploaded:file.size}, `Файл загружен: ${done.name}`, 'ok');
+  hideUploadToastSoon();
   await loadFolder(state.folderId);
+}
+async function uploadFiles(files, handles=[]){
+  const list = Array.from(files || []);
+  for(let i=0;i<list.length;i++){
+    try{
+      await uploadFileChunked(list[i], handles[i] || null);
+    }catch(e){
+      showUploadToast({name:list[i]?.name || 'Файл', size:list[i]?.size || 0, uploaded:0}, e.message, 'error');
+      throw e;
+    }
+  }
+}
+async function chooseUploadFiles(){
+  if(window.showOpenFilePicker){
+    const handles = await window.showOpenFilePicker({multiple:true});
+    const files = [];
+    for(const handle of handles) files.push(await handle.getFile());
+    await uploadFiles(files, handles);
+  }else{
+    $('uploadInput').click();
+  }
+}
+async function resumeStoredUploads(){
+  const uploads = readStoredUploads();
+  for(const stored of uploads){
+    try{
+      const handle = await getFileHandle(stored.sessionId).catch(() => null);
+      if(!handle){
+        showUploadToast(stored, 'Загрузка приостановлена. Выберите этот же файл снова, чтобы продолжить.', 'error');
+        continue;
+      }
+      const permission = await handle.queryPermission?.({mode:'read'});
+      if(permission && permission !== 'granted'){
+        showUploadToast(stored, 'Нужно снова разрешить браузеру доступ к файлу для продолжения.', 'error');
+        continue;
+      }
+      const file = await handle.getFile();
+      if(file.name !== stored.name || file.size !== stored.size){
+        showUploadToast(stored, 'Файл изменился на диске. Загрузка остановлена.', 'error');
+        continue;
+      }
+      showUploadToast(stored, 'Продолжаю загрузку после обновления страницы');
+      await uploadFileChunked(file, handle, stored);
+    }catch(e){
+      showUploadToast(stored, e.message, 'error');
+    }
+  }
 }
 async function getLink(item){
   const data = await api(`/items/${item.id}/link`);
@@ -417,6 +597,9 @@ async function previewItem(item, updateRoute = true){
     $('previewTitle').textContent = item.name;
     $('previewUrl').value = url;
     $('openPreviewBtn').href = url;
+    $('previewAuthToggle').checked = Boolean(item.auth_required);
+    $('previewAuthToggle').dataset.itemId = String(item.id);
+    $('previewAuthToggle').disabled = false;
     $('previewError').hidden = true;
     const box = $('previewBox');
     if(item.category === 'image') box.innerHTML = `<img alt="" src="${esc(url)}">`;
@@ -443,6 +626,16 @@ async function editText(item){
     openDialog('textDialog');
   }catch(e){ setMsg(e.message, 'error'); }
 }
+async function updateFileAccess(itemId, authRequired){
+  const data = await api(`/items/${itemId}/access`, {
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({auth_required:authRequired})
+  });
+  const item = state.items.find(i => i.id === itemId);
+  if(item) item.auth_required = data.auth_required;
+  return data;
+}
 async function renameItem(item){
   const name = prompt('Новое имя', item.name);
   if(name === null) return;
@@ -468,10 +661,26 @@ $('newFolderBtn').addEventListener('click', () => {$('folderName').value='';$('f
 $('newTextBtn').addEventListener('click', () => {state.editingId=null;$('textTitle').textContent='Новый текстовый файл';$('textName').disabled=false;$('textName').value='';$('textContent').value='';$('textError').hidden=true;openDialog('textDialog');setTimeout(()=>$('textName').focus(),20);});
 $('refreshBtn').addEventListener('click', () => loadFolder(state.folderId));
 $('upBtn').addEventListener('click', () => {const parent = state.path.length > 1 ? state.path[state.path.length - 2].id : null;if(parent) loadFolder(parent);});
+$('chooseUploadBtn').addEventListener('click', () => chooseUploadFiles().catch(err=>setMsg(err.message,'error')));
 $('uploadInput').addEventListener('change', e => { if(e.target.files.length) uploadFiles(e.target.files).catch(err=>setMsg(err.message,'error')); e.target.value=''; });
 $('folderForm').addEventListener('submit', async e => {e.preventDefault();try{await createFolder($('folderName').value);closeDialog('folderDialog');}catch(err){$('folderError').textContent=err.message;$('folderError').hidden=false;}});
 $('textForm').addEventListener('submit', async e => {e.preventDefault();try{await saveText();}catch(err){$('textError').textContent=err.message;$('textError').hidden=false;}});
 $('copyPreviewBtn').addEventListener('click', async () => {await navigator.clipboard.writeText($('previewUrl').value);setMsg('Ссылка скопирована','ok');});
+$('previewAuthToggle').addEventListener('change', async e => {
+  const itemId = Number(e.target.dataset.itemId || 0);
+  const authRequired = e.target.checked;
+  if(!itemId) return;
+  e.target.disabled = true;
+  try{
+    await updateFileAccess(itemId, authRequired);
+    setMsg(authRequired ? 'Скачивание требует входа в Nexus' : 'Ссылка снова публичная', 'ok');
+  }catch(err){
+    e.target.checked = !authRequired;
+    setMsg(err.message, 'error');
+  }finally{
+    e.target.disabled = false;
+  }
+});
 document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
   const key = th.dataset.sort;
   if(state.sortKey === key) state.sortDir *= -1; else {state.sortKey = key; state.sortDir = 1;}

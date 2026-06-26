@@ -14,7 +14,7 @@ from typing import Any
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import ClientDisconnect
 
 from orchestrator.auth import ENV_PATH, _read_env_values, _write_env_values
@@ -37,7 +37,39 @@ SALEBOT_RETRY_DELAY_SECONDS = 2.0
 OPENROUTER_RETRY_ATTEMPTS = 3
 OPENROUTER_RETRY_DELAY_SECONDS = 1.0
 DB_BUSY_TIMEOUT_SECONDS = 60
+OUTBOUND_JOB_CONCURRENCY = 4
+OUTBOUND_JOB_MAX_ATTEMPTS = 12
+OUTBOUND_JOB_RETRY_DELAYS = (5, 15, 60, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800)
 SALEBOT_API_BASE = "https://chatter.salebot.pro/api"
+SENLER_API_BASE = "https://senler.ru/api"
+SENLER_API_VERSION = "2"
+SENLER_AI_BOT_ID = "3461217"
+SENLER_BOT_ADD_TIMEOUT = 15
+DEFAULT_PROVIDER_TAGS = ["deepseek"]
+DEFAULT_PROVIDER_MAX_PROMPT_PER_M = 0.5
+DEFAULT_PROVIDER_MAX_COMPLETION_PER_M = 1.0
+OPENROUTER_PROVIDER_OPTIONS = [
+    {"tag": "streamlake/fp8", "name": "StreamLake", "prompt_per_m": 0.0, "completion_per_m": 0.0, "cache_per_m": 0.0, "note": "Free endpoint; enable only if data/privacy policy is acceptable."},
+    {"tag": "deepseek", "name": "DeepSeek", "prompt_per_m": 0.435, "completion_per_m": 0.87, "cache_per_m": 0.003625, "note": "Official low-cost DeepSeek endpoint."},
+    {"tag": "baidu/fp8", "name": "Baidu", "prompt_per_m": 0.7605, "completion_per_m": 1.521, "cache_per_m": 0.063, "note": "Cheaper than most third-party endpoints, lower recent uptime."},
+    {"tag": "gmicloud/fp8", "name": "GMICloud", "prompt_per_m": 1.131, "completion_per_m": 2.262, "cache_per_m": 0.094, "note": "More expensive fallback."},
+    {"tag": "deepinfra/fp4", "name": "DeepInfra", "prompt_per_m": 1.3, "completion_per_m": 2.6, "cache_per_m": 0.1, "note": "More expensive fallback."},
+    {"tag": "digitalocean", "name": "DigitalOcean", "prompt_per_m": 1.392, "completion_per_m": 2.784, "cache_per_m": 0.0, "note": "More expensive fallback."},
+    {"tag": "siliconflow/fp8", "name": "SiliconFlow", "prompt_per_m": 1.6, "completion_per_m": 3.135, "cache_per_m": 0.135, "note": "Expensive fallback."},
+    {"tag": "novita/fp8", "name": "Novita", "prompt_per_m": 1.6, "completion_per_m": 3.2, "cache_per_m": 0.135, "note": "Expensive fallback."},
+    {"tag": "alibaba", "name": "Alibaba", "prompt_per_m": 1.608, "completion_per_m": 3.216, "cache_per_m": 0.134, "note": "Expensive fallback."},
+    {"tag": "atlas-cloud/fp8", "name": "AtlasCloud", "prompt_per_m": 1.68, "completion_per_m": 3.38, "cache_per_m": 0.13, "note": "Expensive fallback seen in logs."},
+    {"tag": "venice", "name": "Venice", "prompt_per_m": 1.73, "completion_per_m": 3.796, "cache_per_m": 0.33, "note": "Expensive fallback."},
+    {"tag": "parasail/fp8", "name": "Parasail", "prompt_per_m": 1.74, "completion_per_m": 3.48, "cache_per_m": 0.1, "note": "Expensive fallback."},
+    {"tag": "wandb/fp8", "name": "Weights & Biases", "prompt_per_m": 1.74, "completion_per_m": 3.48, "cache_per_m": 0.14, "note": "Expensive fallback."},
+    {"tag": "together", "name": "Together", "prompt_per_m": 1.74, "completion_per_m": 3.48, "cache_per_m": 0.2, "note": "Expensive fallback."},
+    {"tag": "fireworks", "name": "Fireworks", "prompt_per_m": 1.74, "completion_per_m": 3.48, "cache_per_m": 0.145, "note": "Expensive fallback."},
+    {"tag": "nextbit/fp8", "name": "NextBit", "prompt_per_m": 1.75, "completion_per_m": 3.2, "cache_per_m": 0.13, "note": "Expensive fallback."},
+]
+SALEBOT_FALLBACK_ANSWER = (
+    "Сейчас не получилось подготовить автоматический ответ. "
+    "Передаю диалог специалисту, чтобы вам ответили вручную."
+)
 CONTEXT_REFERENCE_GUARD = """
 # ПРАВИЛА ИСПОЛЬЗОВАНИЯ КОНТЕКСТА
 - Главная и единственная текущая задача находится в последнем сообщении пользователя.
@@ -172,6 +204,7 @@ _db_path: Path | None = None
 _module_dir: Path | None = None
 _logger = None
 _module_write_lock = asyncio.Lock()
+_outbound_job_worker_task: asyncio.Task | None = None
 
 
 def setup(ctx):
@@ -230,6 +263,53 @@ def _coerce_text_input(value: Any) -> str:
     raise ValueError("must be a string or number")
 
 
+SENLER_TEMPLATE_TOKEN_RE = re.compile(r"(\{%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\}|\[%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\]|#\{\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*\})")
+SENLER_TEMPLATE_RESERVED_KEYS = {
+    "platform_id",
+    "conversation_id",
+    "prompt",
+    "message",
+    "context",
+    "model",
+    "summary_only",
+    "answer_var",
+    "conversation_id_var",
+    "platform_id_var",
+    "model_var",
+    "summary_var",
+    "summary_error_var",
+    "template_vars",
+}
+
+
+def _senler_template_vars(raw: dict[str, Any]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    nested = raw.get("template_vars")
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            clean_key = _clean(key, 120)
+            if clean_key and value is not None:
+                values[clean_key] = _clean(value, 5000)
+    for key, value in raw.items():
+        clean_key = _clean(key, 120)
+        if not clean_key or clean_key in SENLER_TEMPLATE_RESERVED_KEYS or value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            values[clean_key] = _clean(value, 5000)
+    return values
+
+
+def _render_senler_template_text(text: str, values: dict[str, str]) -> str:
+    if not text or not values:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        key = next((group for group in match.groups()[1:] if group), "")
+        return values.get(key, match.group(0))
+
+    return SENLER_TEMPLATE_TOKEN_RE.sub(repl, text)
+
+
 def _optional_conversation_id(value: Any) -> str | None:
     text = _coerce_text_input(value).strip()
     if not text or text.lower() in {"none", "null", "undefined"}:
@@ -259,6 +339,8 @@ def _env() -> dict[str, str]:
         "openrouter_key": os.environ.get("OPENROUTER_API_KEY", "").strip(),
         "api_token": os.environ.get("NEXUS_OPENROUTER_API_TOKEN", "").strip(),
         "salebot_key": (os.environ.get("SALEBOT_API_KEY", "") or os.environ.get("SALEBOT_API_KEY_3", "")).strip(),
+        "senler_token": os.environ.get("SENLER_ACCESS_TOKEN", "").strip(),
+        "senler_group_id": os.environ.get("SENLER_GROUP_ID", "").strip(),
         "customer_db_path": os.environ.get("OPENROUTER_CUSTOMER_DB_PATH", "").strip(),
     }
 
@@ -318,6 +400,21 @@ async def _init_db():
                 models_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS outbound_jobs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                source          TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                request_hash    TEXT NOT NULL DEFAULT '',
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                result_json     TEXT NOT NULL DEFAULT '{}',
+                error_text      TEXT NOT NULL DEFAULT '',
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbound_jobs_status_next ON outbound_jobs(status, next_attempt_at, id);
+            CREATE INDEX IF NOT EXISTS idx_outbound_jobs_hash ON outbound_jobs(source, request_hash, created_at);
         """)
         defaults = {
             "default_model": DEFAULT_MODEL,
@@ -352,8 +449,232 @@ async def _init_db():
                 "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (MODULE_TOKEN_SETTING, module_token),
             )
+        now = _now()
+        await db.execute(
+            "UPDATE outbound_jobs SET status='pending', updated_at=?, next_attempt_at=? WHERE status='running'",
+            (now, now),
+        )
         await db.commit()
     _log("info", "openrouter DB initialized")
+    _kick_outbound_job_worker(delay=1.0)
+
+
+def _json_dumps_compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _payload_hash(source: str, payload: dict[str, Any]) -> str:
+    raw = source + ":" + _json_dumps_compact(payload)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _model_payload(data: BaseModel) -> dict[str, Any]:
+    return data.model_dump(mode="json")
+
+
+def _exception_text(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        return f"HTTP {exc.status_code}: {exc.detail}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _parse_utc(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _seconds_until(value: str) -> float:
+    target = _parse_utc(value)
+    if not target:
+        return 5.0
+    return max(1.0, (target - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay(attempts: int) -> int:
+    index = max(0, min(len(OUTBOUND_JOB_RETRY_DELAYS) - 1, attempts - 1))
+    return int(OUTBOUND_JOB_RETRY_DELAYS[index])
+
+
+def _kick_outbound_job_worker(delay: float = 0.0) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def delayed_kick() -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        _start_outbound_job_worker()
+
+    if delay > 0:
+        loop.create_task(delayed_kick())
+    else:
+        _start_outbound_job_worker()
+
+
+def _start_outbound_job_worker() -> None:
+    global _outbound_job_worker_task
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _outbound_job_worker_task is None or _outbound_job_worker_task.done():
+        _outbound_job_worker_task = loop.create_task(_outbound_job_worker_loop())
+
+
+async def _enqueue_outbound_job(source: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request_hash = _payload_hash(source, payload)
+    now = _now()
+    async with _module_write_lock:
+        async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+            await db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+            cur = await db.execute(
+                """
+                SELECT id,status,attempts,created_at,updated_at
+                FROM outbound_jobs
+                WHERE source=? AND request_hash=?
+                  AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-15 minutes')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (source, request_hash),
+            )
+            row = await cur.fetchone()
+            if row:
+                _kick_outbound_job_worker()
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "queued": False,
+                    "job_id": int(row[0]),
+                    "status": row[1],
+                    "attempts": int(row[2] or 0),
+                    "deduped": True,
+                }
+            cur = await db.execute(
+                """
+                INSERT INTO outbound_jobs(source,status,request_hash,payload_json,result_json,error_text,attempts,created_at,updated_at,next_attempt_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (source, "pending", request_hash, _json_dumps_compact(payload), "{}", "", 0, now, now, now),
+            )
+            await db.commit()
+            job_id = int(cur.lastrowid)
+    _kick_outbound_job_worker()
+    return {"ok": True, "accepted": True, "queued": True, "job_id": job_id, "status": "pending", "deduped": False}
+
+
+async def _claim_outbound_jobs(limit: int) -> tuple[list[dict[str, Any]], str]:
+    now = _now()
+    async with _module_write_lock:
+        async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+            cur = await db.execute(
+                """
+                SELECT *
+                FROM outbound_jobs
+                WHERE status='pending' AND (next_attempt_at='' OR next_attempt_at<=?)
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (now, limit),
+            )
+            rows = [dict(row) for row in await cur.fetchall()]
+            for row in rows:
+                await db.execute(
+                    "UPDATE outbound_jobs SET status='running', attempts=attempts+1, updated_at=? WHERE id=?",
+                    (now, row["id"]),
+                )
+                row["attempts"] = int(row.get("attempts") or 0) + 1
+            next_due = ""
+            if not rows:
+                cur = await db.execute(
+                    "SELECT MIN(next_attempt_at) FROM outbound_jobs WHERE status='pending' AND next_attempt_at>?",
+                    (now,),
+                )
+                next_row = await cur.fetchone()
+                next_due = str(next_row[0] or "") if next_row else ""
+            await db.commit()
+    return rows, next_due
+
+
+async def _complete_outbound_job(job_id: int, result: dict[str, Any]) -> None:
+    now = _now()
+    async with _module_write_lock:
+        async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+            await db.execute(
+                """
+                UPDATE outbound_jobs
+                SET status='completed', result_json=?, error_text='', updated_at=?, next_attempt_at=''
+                WHERE id=?
+                """,
+                (_json_dumps_compact(result)[:200000], now, job_id),
+            )
+            await db.commit()
+
+
+async def _retry_or_fail_outbound_job(job: dict[str, Any], exc: Exception) -> None:
+    job_id = int(job["id"])
+    attempts = int(job.get("attempts") or 0)
+    error = _exception_text(exc)[:2000]
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if attempts >= OUTBOUND_JOB_MAX_ATTEMPTS:
+        status = "failed"
+        next_attempt = ""
+        _log("error", "outbound job failed permanently id=%s source=%s attempts=%s error=%s", job_id, job.get("source"), attempts, error)
+    else:
+        status = "pending"
+        delay = _retry_delay(attempts)
+        next_attempt = datetime.fromtimestamp(now_dt.timestamp() + delay, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _log(
+            "warning",
+            "outbound job retry scheduled id=%s source=%s attempts=%s delay=%ss error=%s",
+            job_id,
+            job.get("source"),
+            attempts,
+            delay,
+            error,
+        )
+    async with _module_write_lock:
+        async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+            await db.execute(
+                "UPDATE outbound_jobs SET status=?, error_text=?, updated_at=?, next_attempt_at=? WHERE id=?",
+                (status, error, now, next_attempt, job_id),
+            )
+            await db.commit()
+
+
+async def _outbound_job_worker_loop() -> None:
+    while True:
+        jobs, next_due = await _claim_outbound_jobs(OUTBOUND_JOB_CONCURRENCY)
+        if not jobs:
+            if next_due:
+                _kick_outbound_job_worker(delay=min(300.0, _seconds_until(next_due)))
+            return
+        await asyncio.gather(*(_process_outbound_job(job) for job in jobs))
+
+
+async def _process_outbound_job(job: dict[str, Any]) -> None:
+    job_id = int(job["id"])
+    source = str(job.get("source") or "")
+    try:
+        payload = json.loads(str(job.get("payload_json") or "{}"))
+        if source == "avito":
+            result = await _deliver_avito_job(AvitoChatIn(**payload), job_id=job_id)
+        elif source == "salebot":
+            result = await _deliver_salebot_job(SalebotChatIn(**payload), job_id=job_id)
+        else:
+            raise RuntimeError(f"unknown outbound job source: {source}")
+        await _complete_outbound_job(job_id, result)
+        _log("info", "outbound job completed id=%s source=%s", job_id, source)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _retry_or_fail_outbound_job(job, exc)
 
 
 class TextInputMixin(BaseModel):
@@ -389,6 +710,27 @@ class ChatIn(TextInputMixin):
     model: str | None = None
     summary_only: bool = False
 
+    @field_validator("context", mode="before")
+    @classmethod
+    def _normalize_context_input(cls, value: Any) -> int | bool:
+        if value is None:
+            return 2
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value
+        text = str(value or "").strip().lower()
+        if not text:
+            return 2
+        if text in {"true", "yes", "да"}:
+            return True
+        if text in {"false", "no", "нет"}:
+            return False
+        try:
+            return int(text)
+        except Exception:
+            return 2
+
 
 class TestChatIn(TextInputMixin):
     platform_id: str = ""
@@ -397,6 +739,11 @@ class TestChatIn(TextInputMixin):
     message: str
     context: int | bool = 1
     model: str | None = None
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def _normalize_context_input(cls, value: Any) -> int | bool:
+        return ChatIn._normalize_context_input(value)
 
 
 class DirectChatIn(TextInputMixin):
@@ -415,6 +762,7 @@ class SenlerChatIn(ChatIn):
     model_var: str = ""
     summary_var: str = ""
     summary_error_var: str = ""
+    template_vars: dict[str, str] = Field(default_factory=dict)
 
 
 class AvitoChatIn(ChatIn):
@@ -454,6 +802,11 @@ class SettingsIn(BaseModel):
     history_limit: int | None = None
     summary_prompt: str | None = None
     openrouter_api_key: str | None = None
+    provider_enabled_tags: list[str] | None = None
+    provider_allow_fallbacks: bool | None = None
+    provider_data_collection: str | None = None
+    provider_max_prompt_per_m: float | None = None
+    provider_max_completion_per_m: float | None = None
 
 
 class PromptModelIn(BaseModel):
@@ -515,9 +868,73 @@ async def _settings() -> dict[str, str]:
         "request_timeout": str(DEFAULT_TIMEOUT),
         "history_limit": str(MAX_HISTORY_MESSAGES),
         "summary_prompt": CLIENT_STORY_SUMMARY_PROMPT,
+        "provider_enabled_tags": json.dumps(DEFAULT_PROVIDER_TAGS, ensure_ascii=False),
+        "provider_allow_fallbacks": "0",
+        "provider_data_collection": "allow",
+        "provider_max_prompt_per_m": str(DEFAULT_PROVIDER_MAX_PROMPT_PER_M),
+        "provider_max_completion_per_m": str(DEFAULT_PROVIDER_MAX_COMPLETION_PER_M),
     }
     data.update({row[0]: row[1] for row in rows})
     return data
+
+
+def _provider_option_tags() -> set[str]:
+    return {str(item.get("tag") or "").strip() for item in OPENROUTER_PROVIDER_OPTIONS if item.get("tag")}
+
+
+def _load_provider_tags(raw: str | None) -> list[str]:
+    valid = _provider_option_tags()
+    tags: list[str] = []
+    try:
+        parsed = json.loads(raw or "[]")
+    except Exception:
+        parsed = []
+    if isinstance(parsed, list):
+        for item in parsed:
+            tag = str(item or "").strip()
+            if tag in valid and tag not in tags:
+                tags.append(tag)
+    if not tags:
+        tags = list(DEFAULT_PROVIDER_TAGS)
+    return tags
+
+
+def _setting_bool(settings: dict[str, str], key: str, default: bool = False) -> bool:
+    raw = str(settings.get(key, "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _setting_float(settings: dict[str, str], key: str, default: float, minimum: float = 0.0, maximum: float = 100.0) -> float:
+    try:
+        value = float(settings.get(key) or default)
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _provider_policy(settings: dict[str, str], model: str = "") -> dict[str, Any]:
+    prompt_per_m = _setting_float(settings, "provider_max_prompt_per_m", DEFAULT_PROVIDER_MAX_PROMPT_PER_M)
+    completion_per_m = _setting_float(settings, "provider_max_completion_per_m", DEFAULT_PROVIDER_MAX_COMPLETION_PER_M)
+    data_collection = str(settings.get("provider_data_collection") or "allow").strip().lower()
+    if data_collection not in {"deny", "allow"}:
+        data_collection = "allow"
+    provider: dict[str, Any] = {
+        "allow_fallbacks": _setting_bool(settings, "provider_allow_fallbacks", False),
+        "data_collection": data_collection,
+        "max_price": {
+            "prompt": prompt_per_m,
+            "completion": completion_per_m,
+        },
+    }
+    if str(model or "").strip().lower().startswith("deepseek/"):
+        tags = _load_provider_tags(settings.get("provider_enabled_tags"))
+        provider["only"] = tags
+        provider["order"] = tags
+    return provider
 
 
 async def _module_api_token() -> str:
@@ -572,6 +989,25 @@ async def _save_settings(data: SettingsIn) -> dict[str, str]:
         updates["history_limit"] = str(max(0, min(200, int(data.history_limit))))
     if data.summary_prompt is not None:
         updates["summary_prompt"] = _clean(data.summary_prompt, 4000)
+    if data.provider_enabled_tags is not None:
+        valid_tags = _provider_option_tags()
+        tags: list[str] = []
+        for item in data.provider_enabled_tags:
+            tag = str(item or "").strip()
+            if tag in valid_tags and tag not in tags:
+                tags.append(tag)
+        if not tags:
+            tags = list(DEFAULT_PROVIDER_TAGS)
+        updates["provider_enabled_tags"] = json.dumps(tags, ensure_ascii=False)
+    if data.provider_allow_fallbacks is not None:
+        updates["provider_allow_fallbacks"] = "1" if data.provider_allow_fallbacks else "0"
+    if data.provider_data_collection is not None:
+        value = _clean(data.provider_data_collection, 20).lower()
+        updates["provider_data_collection"] = value if value in {"deny", "allow"} else "deny"
+    if data.provider_max_prompt_per_m is not None:
+        updates["provider_max_prompt_per_m"] = str(max(0.0, min(100.0, float(data.provider_max_prompt_per_m))))
+    if data.provider_max_completion_per_m is not None:
+        updates["provider_max_completion_per_m"] = str(max(0.0, min(100.0, float(data.provider_max_completion_per_m))))
     openrouter_api_key = _clean(data.openrouter_api_key, 2000) if data.openrouter_api_key is not None else None
     async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
         for key, value in updates.items():
@@ -964,7 +1400,7 @@ async def generate_direct_chat(
     payload: list[dict[str, Any]] = [{"role": "system", "content": "\n\n---\n\n".join(system_parts)}]
     payload.extend(_normalize_direct_history(history, _history_limit(settings)))
     payload.append({"role": "user", "content": _user_content(clean_message, attachment_url)})
-    answer, usage = await _call_openrouter(effective_model, payload, _timeout(settings))
+    answer, usage = await _call_openrouter(effective_model, payload, _timeout(settings), settings)
     return {
         "ok": True,
         "prompt": prompt_path,
@@ -1267,30 +1703,40 @@ async def _upsert_avito_client(platform_id: str, salebot_id: str) -> dict[str, A
         return {"ok": True, "id": int(cur.lastrowid), "status": "created", "deduped": 0, "path": str(db_path)}
 
 
-async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: float) -> tuple[str, dict[str, int]]:
+async def _call_openrouter(
+    model: str,
+    messages: list[dict[str, Any]],
+    timeout: float,
+    settings: dict[str, str] | None = None,
+) -> tuple[str, dict[str, int]]:
     api_key = _env()["openrouter_key"]
     if not api_key:
         _log("warning", "OpenRouter call blocked: OPENROUTER_API_KEY is not configured model=%s", model)
         raise HTTPException(503, "OPENROUTER_API_KEY is not configured")
+    if settings is None:
+        settings = await _settings()
+    provider = _provider_policy(settings, model)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://junior.sobakovod.pro/nexus/",
         "X-Title": "Nexus OpenRouter",
     }
+    request_json = {"model": model, "messages": messages, "provider": provider}
     last_error = ""
     async with httpx.AsyncClient(timeout=timeout) as client:
         for attempt in range(1, OPENROUTER_RETRY_ATTEMPTS + 1):
             try:
-                resp = await client.post(OPENROUTER_CHAT_URL, headers=headers, json={"model": model, "messages": messages})
+                resp = await client.post(OPENROUTER_CHAT_URL, headers=headers, json=request_json)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_error = type(exc).__name__
                 _log(
                     "warning",
-                    "OpenRouter transport error attempt=%s/%s model=%s error=%s",
+                    "OpenRouter transport error attempt=%s/%s model=%s providers=%s error=%s",
                     attempt,
                     OPENROUTER_RETRY_ATTEMPTS,
                     model,
+                    ",".join(provider.get("only") or []),
                     last_error,
                 )
                 if attempt < OPENROUTER_RETRY_ATTEMPTS:
@@ -1303,11 +1749,12 @@ async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: 
                 retryable = resp.status_code in {408, 409, 425, 429} or resp.status_code >= 500
                 _log(
                     "warning",
-                    "OpenRouter HTTP error attempt=%s/%s status=%s model=%s body=%s",
+                    "OpenRouter HTTP error attempt=%s/%s status=%s model=%s providers=%s body=%s",
                     attempt,
                     OPENROUTER_RETRY_ATTEMPTS,
                     resp.status_code,
                     model,
+                    ",".join(provider.get("only") or []),
                     resp.text[:500],
                 )
                 if retryable and attempt < OPENROUTER_RETRY_ATTEMPTS:
@@ -1328,10 +1775,11 @@ async def _call_openrouter(model: str, messages: list[dict[str, Any]], timeout: 
                 last_error = "missing choices" if not choices else "empty content"
                 _log(
                     "warning",
-                    "OpenRouter invalid response attempt=%s/%s model=%s error=%s body=%s",
+                    "OpenRouter invalid response attempt=%s/%s model=%s providers=%s error=%s body=%s",
                     attempt,
                     OPENROUTER_RETRY_ATTEMPTS,
                     model,
+                    ",".join(provider.get("only") or []),
                     last_error,
                     str(data)[:500],
                 )
@@ -1441,6 +1889,7 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
         summary_model,
         [{"role": "system", "content": summary_prompt}, {"role": "user", "content": summary_source[-60000:]}],
         _timeout(settings),
+        settings,
     )
     summary = summary[:SUMMARY_MAX_CHARS]
     async with _module_write_lock:
@@ -1493,6 +1942,18 @@ async def env_status(request: Request):
 async def get_settings(request: Request):
     await _require_panel_user(request)
     return await _settings()
+
+
+@router.get("/provider-options")
+async def get_provider_options(request: Request):
+    await _require_panel_user(request)
+    settings = await _settings()
+    return {
+        "items": OPENROUTER_PROVIDER_OPTIONS,
+        "enabled_tags": _load_provider_tags(settings.get("provider_enabled_tags")),
+        "policy": _provider_policy(settings, "deepseek/deepseek-v4-pro"),
+        "price_units": "USD per 1M tokens",
+    }
 
 
 @router.post("/settings")
@@ -1620,6 +2081,10 @@ async def _run_chat(
     mode = _context_mode(data.context)
     read_mode = 2 if (prefer_summary_context or data.summary_only) and mode == 4 else mode
     prompt_path, prompt_text = await _resolve_prompt(data.prompt)
+    senler_template_vars = data.template_vars if source == "senler" and isinstance(data, SenlerChatIn) else {}
+    if senler_template_vars:
+        prompt_text = _render_senler_template_text(prompt_text, senler_template_vars)
+        message = _render_senler_template_text(message, senler_template_vars)
     stage_guard = ""
     if source == "salebot":
         stage_guard = _salebot_funnel_stage_guard(prompt_path)
@@ -1663,7 +2128,10 @@ async def _run_chat(
         model,
         _context_payload(prompt_text, summary, history, message, read_mode, stage_guard),
         _timeout(settings),
+        settings,
     )
+    if senler_template_vars:
+        answer = _render_senler_template_text(answer, senler_template_vars)
     summary_result = None
     summary_error = ""
     if allow_write and mode in (2, 3, 4):
@@ -1799,6 +2267,118 @@ def _senler_var(items: list[dict[str, str]], name: str, value: Any) -> None:
     items.append({"n": clean_name, "v": str(value)})
 
 
+def _senler_safe_response(raw: dict[str, Any] | None, reason: str) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    vars_out: list[dict[str, str]] = []
+    _senler_var(vars_out, _clean(raw.get("answer_var"), 120) or "ai_answer", "")
+    _senler_var(vars_out, _clean(raw.get("conversation_id_var"), 120) or "conversation_id", raw.get("conversation_id", ""))
+    _senler_var(vars_out, _clean(raw.get("platform_id_var"), 120) or "platform_id", raw.get("platform_id", ""))
+    return {"vars": vars_out, "glob_vars": [], "ok": False, "ignored": True, "reason": reason}
+
+
+def _senler_preflight_reason(raw: dict[str, Any]) -> str:
+    if not _clean(raw.get("prompt"), 500):
+        return "missing_prompt"
+    if not _clean(raw.get("message"), 1000):
+        return "missing_message"
+    if not _clean(raw.get("platform_id"), 300) and not _clean(raw.get("conversation_id"), 300):
+        return "missing_platform_or_conversation"
+    return ""
+
+
+def _senler_public_result(ok: bool, error: str = "", details: dict[str, Any] | None = None) -> dict[str, Any]:
+    details = details or {}
+    return {
+        "ok": bool(ok),
+        "error": _clean(error, 300),
+        "http_status": details.get("http_status", 0),
+    }
+
+
+async def _senler_api_post(endpoint: str, data: dict[str, Any], timeout: int = SENLER_BOT_ADD_TIMEOUT) -> tuple[bool, str, dict[str, Any]]:
+    safe_params = {key: ("***" if key == "access_token" else value) for key, value in data.items()}
+    status_code = 0
+    raw = ""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(endpoint, data=data)
+        status_code = resp.status_code
+        raw = resp.text[:2000]
+        try:
+            body = resp.json()
+        except Exception:
+            return False, f"ответ Senler не JSON (HTTP {status_code})", {
+                "http_status": status_code,
+                "response": raw,
+                "params": safe_params,
+            }
+        if body.get("success") is True:
+            return True, "", {"http_status": status_code, "response": body, "params": safe_params}
+        err = body.get("error", {})
+        msg = (
+            body.get("error_message")
+            or (err.get("error_msg") if isinstance(err, dict) else "")
+            or (str(err) if err else "")
+            or str(body)
+        )
+        return False, _clean(msg, 1000), {"http_status": status_code, "response": body, "params": safe_params}
+    except Exception as exc:
+        return False, str(exc), {
+            "http_status": status_code,
+            "response": raw,
+            "exception": str(exc),
+            "params": safe_params,
+        }
+
+
+async def _senler_set_var_and_add_ai_bot(vk_user_id: str, name: str, value: str) -> dict[str, Any]:
+    env = _env()
+    vk_id = _clean(vk_user_id, 80)
+    var_name = _clean(name, 120)
+    answer = _clean(value, 50000)
+    if not answer:
+        return {"ok": False, "skipped": True, "reason": "empty_answer"}
+    if var_name != "ai_answer":
+        return {"ok": False, "skipped": True, "reason": "answer_var_is_not_ai_answer"}
+    if not _is_numeric_client_id(vk_id):
+        return {"ok": False, "skipped": True, "reason": "platform_id_is_not_numeric_vk_id"}
+    if not env["senler_token"] or not env["senler_group_id"]:
+        return {"ok": False, "skipped": True, "reason": "senler_env_missing"}
+
+    base = {
+        "access_token": env["senler_token"],
+        "group_id": env["senler_group_id"],
+        "vk_user_id": vk_id,
+        "v": SENLER_API_VERSION,
+    }
+    var_ok, var_error, var_details = await _senler_api_post(
+        f"{SENLER_API_BASE}/vars/set",
+        {**base, "name": var_name, "value": answer},
+    )
+    result: dict[str, Any] = {
+        "ok": False,
+        "vk_user_id": vk_id,
+        "bot_id": SENLER_AI_BOT_ID,
+        "var_set": _senler_public_result(var_ok, var_error, var_details),
+        "bot_add": {"ok": False, "skipped": True, "reason": "var_set_failed"},
+    }
+    if not var_ok:
+        _log("warning", "senler-chat vars/set failed vk_user_id=%s name=%s error=%s", vk_id, var_name, var_error)
+        return result
+
+    bot_ok, bot_error, bot_details = await _senler_api_post(
+        f"{SENLER_API_BASE}/bots/addSubscriber",
+        {**base, "bot_id": SENLER_AI_BOT_ID, "enforce": "true"},
+    )
+    result["bot_add"] = _senler_public_result(bot_ok, bot_error, bot_details)
+    result["ok"] = bool(bot_ok)
+    if bot_ok:
+        _log("info", "senler-chat bot add ok vk_user_id=%s bot_id=%s enforce=true", vk_id, SENLER_AI_BOT_ID)
+    else:
+        _log("warning", "senler-chat bot add failed vk_user_id=%s bot_id=%s error=%s", vk_id, SENLER_AI_BOT_ID, bot_error)
+    return result
+
+
 def _is_numeric_client_id(client_id: str) -> bool:
     return str(client_id or "").strip().isdigit()
 
@@ -1853,6 +2433,8 @@ async def _send_salebot_avito_callback(
     conversation_id: str,
     callback_message: str,
     split_size: int,
+    openai_status: str = "success",
+    error_text: str = "",
 ) -> dict[str, Any]:
     api_key = _env()["salebot_key"]
     if not api_key:
@@ -1870,7 +2452,8 @@ async def _send_salebot_avito_callback(
         "client.answer_json": json.dumps(str(answer), ensure_ascii=False),
         "client.answer_full_json": json.dumps(str(answer), ensure_ascii=False),
         "client.thread_id": str(conversation_id),
-        "client.openai_status": "success",
+        "client.openai_status": str(openai_status or "success"),
+        "client.openai_error": str(error_text or ""),
         "client.avito_id": str(avito_id),
         "client.salebot_id": str(salebot_id),
         "client.answer_count": str(len(clean_chunks)),
@@ -1906,6 +2489,8 @@ async def _send_salebot_callback(
     answer: str,
     conversation_id: str,
     callback_message: str,
+    openai_status: str = "success",
+    error_text: str = "",
 ) -> dict[str, Any]:
     api_key = _env()["salebot_key"]
     if not api_key:
@@ -1918,7 +2503,8 @@ async def _send_salebot_callback(
         "client.answer": str(answer),
         "client.answer_json": json.dumps(str(answer), ensure_ascii=False),
         "client.thread_id": str(conversation_id),
-        "client.openai_status": "success",
+        "client.openai_status": str(openai_status or "success"),
+        "client.openai_error": str(error_text or ""),
         "client.platform_id": str(platform_id),
         "client.salebot_id": str(salebot_id),
     }
@@ -1940,18 +2526,268 @@ async def _send_salebot_callback(
     }
 
 
+async def _run_chat_with_stale_retry(data: AvitoChatIn | SalebotChatIn, *, source: str, platform_id: str) -> dict[str, Any]:
+    try:
+        return await _run_chat(data, allow_write=True, source=source, defer_summary=True, prefer_summary_context=True)
+    except HTTPException as exc:
+        if exc.status_code == 404 and str(exc.detail) == "conversation_id not found" and data.conversation_id:
+            stale_conversation_id = data.conversation_id
+            data.conversation_id = None
+            _log(
+                "warning",
+                "%s conversation_id not found, retrying without it conversation_id=%s platform_id=%s",
+                source,
+                stale_conversation_id,
+                platform_id,
+            )
+            return await _run_chat(data, allow_write=True, source=source, defer_summary=True, prefer_summary_context=True)
+        raise
+
+
+async def _save_fallback_turn(
+    data: AvitoChatIn | SalebotChatIn,
+    *,
+    source: str,
+    platform_id: str,
+    answer: str,
+    error_text: str,
+) -> dict[str, Any]:
+    message = _clean(data.message, 50000)
+    prompt_path = _clean(data.prompt, 300)
+    model = _clean(data.model, 200) if data.model else ""
+    conversation_id = _clean(data.conversation_id, 200) or None
+    try:
+        prompt_path, _prompt_text = await _resolve_prompt(data.prompt)
+        settings = await _settings()
+        model = await _model_for_prompt(prompt_path, settings, data.model)
+        async with _module_write_lock:
+            async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+                await db.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_SECONDS * 1000}")
+                clean_platform_id = _clean(platform_id, 300)
+                if not clean_platform_id and conversation_id:
+                    try:
+                        clean_platform_id = await _platform_for_conversation(db, conversation_id)
+                    except HTTPException:
+                        conversation_id = None
+                if not clean_platform_id:
+                    clean_platform_id = _clean(getattr(data, "salebot_id", ""), 300)
+                try:
+                    cid = await _resolve_conversation(
+                        db,
+                        platform_id=clean_platform_id,
+                        conversation_id=conversation_id,
+                        prompt_path=prompt_path,
+                        model=model,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 404 and conversation_id:
+                        cid = await _resolve_conversation(
+                            db,
+                            platform_id=clean_platform_id,
+                            conversation_id=None,
+                            prompt_path=prompt_path,
+                            model=model,
+                        )
+                    else:
+                        raise
+                await _save_turn(
+                    db,
+                    conversation_id=cid,
+                    platform_id=clean_platform_id,
+                    pair_id=_new_pair_id(),
+                    question=message,
+                    answer=answer,
+                    source=source,
+                    prompt_path=prompt_path,
+                    model=model,
+                    usage={},
+                )
+                await db.commit()
+        return {
+            "ok": False,
+            "delivery_fallback": True,
+            "platform_id": clean_platform_id,
+            "conversation_id": cid,
+            "prompt": prompt_path,
+            "model": model,
+            "read_context": None,
+            "text": answer,
+            "answer": answer,
+            "usage": {},
+            "summary": None,
+            "summary_error": "",
+            "openrouter_error": error_text,
+        }
+    except Exception as exc:
+        _log("warning", "%s fallback turn save failed error=%s original_error=%s", source, _exception_text(exc), error_text)
+        return {
+            "ok": False,
+            "delivery_fallback": True,
+            "platform_id": _clean(platform_id, 300),
+            "conversation_id": conversation_id or _new_conversation_id(),
+            "prompt": prompt_path,
+            "model": model,
+            "read_context": None,
+            "text": answer,
+            "answer": answer,
+            "usage": {},
+            "summary": None,
+            "summary_error": "",
+            "openrouter_error": error_text,
+        }
+
+
+async def _deliver_avito_job(data: AvitoChatIn, *, job_id: int) -> dict[str, Any]:
+    avito_id = _clean(data.platform_id, 300)
+    salebot_id = _clean(data.salebot_id, 80)
+    split_size = _avito_split_size(data.split_size)
+    _log(
+        "info",
+        "avito job processing id=%s platform_id=%s salebot_id=%s conversation_id=%s",
+        job_id,
+        avito_id,
+        salebot_id,
+        _clean(data.conversation_id, 80),
+    )
+    openai_status = "success"
+    error_text = ""
+    try:
+        result = await _run_chat_with_stale_retry(data, source="avito", platform_id=avito_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        openai_status = "error"
+        error_text = _exception_text(exc)
+        _log("warning", "avito job using fallback id=%s platform_id=%s error=%s", job_id, avito_id, error_text)
+        result = await _save_fallback_turn(
+            data,
+            source="avito",
+            platform_id=avito_id,
+            answer=SALEBOT_FALLBACK_ANSWER,
+            error_text=error_text,
+        )
+
+    try:
+        customer_record = await _upsert_avito_client(avito_id, salebot_id)
+    except Exception as exc:
+        customer_record = {"ok": False, "error": _exception_text(exc)}
+        _log("warning", "avito customer-db upsert failed id=%s platform_id=%s error=%s", job_id, avito_id, customer_record["error"])
+
+    salebot = await _send_salebot_avito_callback(
+        salebot_id=salebot_id,
+        avito_id=avito_id,
+        message=_clean(data.message, 50000),
+        answer=result.get("text", ""),
+        conversation_id=result.get("conversation_id", ""),
+        callback_message=data.callback_message,
+        split_size=split_size,
+        openai_status=openai_status,
+        error_text=error_text,
+    )
+    chunks = salebot.pop("chunks")
+    return {
+        **result,
+        "job_id": job_id,
+        "chunks": chunks,
+        "split_size": split_size,
+        "salebot": salebot,
+        "customer_db": customer_record,
+        "openai_status": openai_status,
+    }
+
+
+async def _deliver_salebot_job(data: SalebotChatIn, *, job_id: int) -> dict[str, Any]:
+    salebot_id = _clean(data.salebot_id, 80)
+    platform_id = _clean(data.platform_id, 300) or salebot_id
+    data.platform_id = platform_id
+    _log(
+        "info",
+        "salebot job processing id=%s platform_id=%s salebot_id=%s conversation_id=%s",
+        job_id,
+        platform_id,
+        salebot_id,
+        _clean(data.conversation_id, 80),
+    )
+    openai_status = "success"
+    error_text = ""
+    try:
+        result = await _run_chat_with_stale_retry(data, source="salebot", platform_id=platform_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        openai_status = "error"
+        error_text = _exception_text(exc)
+        _log("warning", "salebot job using fallback id=%s platform_id=%s error=%s", job_id, platform_id, error_text)
+        result = await _save_fallback_turn(
+            data,
+            source="salebot",
+            platform_id=platform_id,
+            answer=SALEBOT_FALLBACK_ANSWER,
+            error_text=error_text,
+        )
+
+    salebot = await _send_salebot_callback(
+        salebot_id=salebot_id,
+        platform_id=result.get("platform_id", platform_id),
+        message=_clean(data.message, 50000),
+        answer=result.get("text", ""),
+        conversation_id=result.get("conversation_id", ""),
+        callback_message=data.callback_message,
+        openai_status=openai_status,
+        error_text=error_text,
+    )
+    return {**result, "job_id": job_id, "salebot": salebot, "openai_status": openai_status}
+
+
 @router.post("/senler-chat")
 async def senler_chat(request: Request):
     try:
         await _require_bearer(request)
+        raw: dict[str, Any] | None = None
         try:
             raw = await request.json()
+            if not isinstance(raw, dict):
+                _log("warning", "senler-chat ignored invalid json shape type=%s", type(raw).__name__)
+                return _senler_safe_response(None, "invalid_json_body")
+            _log(
+                "info",
+                "senler-chat request received keys=%s prompt_present=%s message_chars=%s platform_id_present=%s conversation_id_present=%s context_raw=%s template_vars_count=%s",
+                sorted(raw.keys()),
+                bool(_clean(raw.get("prompt"), 500)),
+                len(_clean(raw.get("message"), 50000)),
+                bool(_clean(raw.get("platform_id"), 300)),
+                bool(_clean(raw.get("conversation_id"), 300)),
+                _clean(raw.get("context"), 40),
+                len(raw.get("template_vars") or {}) if isinstance(raw.get("template_vars"), dict) else 0,
+            )
+            raw["template_vars"] = _senler_template_vars(raw)
+            preflight_reason = _senler_preflight_reason(raw)
+            if preflight_reason:
+                _log("warning", "senler-chat ignored unsafe preflight reason=%s keys=%s", preflight_reason, sorted(raw.keys()))
+                return _senler_safe_response(raw, preflight_reason)
             data = SenlerChatIn(**raw)
         except ValidationError as exc:
-            raise HTTPException(400, f"invalid senler body: {_validation_detail(exc)}")
-        except Exception:
-            raise HTTPException(400, "invalid JSON body")
-        result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True, prefer_summary_context=True)
+            reason = f"invalid_body: {_validation_detail(exc)}"
+            _log("warning", "senler-chat ignored validation error reason=%s", reason)
+            return _senler_safe_response(raw, reason)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _log("warning", "senler-chat ignored invalid JSON body: %s", exc)
+            return _senler_safe_response(raw, "invalid_json_body")
+        try:
+            result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True, prefer_summary_context=True)
+        except HTTPException as exc:
+            if exc.status_code == 400:
+                reason = _clean(exc.detail, 300) or "bad_request"
+                _log("warning", "senler-chat ignored unsafe request detail=%s", reason)
+                return _senler_safe_response(raw, reason)
+            raise
+        senler_ai_bot = await _senler_set_var_and_add_ai_bot(
+            result.get("platform_id", data.platform_id),
+            data.answer_var,
+            result.get("text", ""),
+        )
         vars_out: list[dict[str, str]] = []
         _senler_var(vars_out, data.answer_var, result.get("text", ""))
         _senler_var(vars_out, data.conversation_id_var, result.get("conversation_id", ""))
@@ -1959,7 +2795,7 @@ async def senler_chat(request: Request):
         _senler_var(vars_out, data.model_var, result.get("model", ""))
         _senler_var(vars_out, data.summary_var, result.get("summary", ""))
         _senler_var(vars_out, data.summary_error_var, result.get("summary_error", ""))
-        return {"vars": vars_out, "glob_vars": []}
+        return {"vars": vars_out, "glob_vars": [], "senler_ai_bot": senler_ai_bot}
     except HTTPException as exc:
         _log("warning", "senler-chat failed status=%s detail=%s", exc.status_code, exc.detail)
         raise
@@ -2025,40 +2861,15 @@ async def avito_chat(request: Request):
             raise HTTPException(400, "salebot_id must be numeric")
         if not _env()["salebot_key"]:
             raise HTTPException(503, "SALEBOT_API_KEY or SALEBOT_API_KEY_3 is not configured")
-
-        try:
-            result = await _run_chat(data, allow_write=True, source="avito", defer_summary=True, prefer_summary_context=True)
-        except HTTPException as exc:
-            if exc.status_code == 404 and str(exc.detail) == "conversation_id not found" and data.conversation_id:
-                stale_conversation_id = data.conversation_id
-                data.conversation_id = None
-                _log(
-                    "warning",
-                    "avito conversation_id not found, retrying without it conversation_id=%s platform_id=%s",
-                    stale_conversation_id,
-                    avito_id,
-                )
-                result = await _run_chat(data, allow_write=True, source="avito", defer_summary=True, prefer_summary_context=True)
-            else:
-                raise
-        customer_record = await _upsert_avito_client(avito_id, salebot_id)
-        split_size = _avito_split_size(data.split_size)
-        salebot = await _send_salebot_avito_callback(
-            salebot_id=salebot_id,
-            avito_id=avito_id,
-            message=_clean(data.message, 50000),
-            answer=result.get("text", ""),
-            conversation_id=result.get("conversation_id", ""),
-            callback_message=data.callback_message,
-            split_size=split_size,
-        )
-        chunks = salebot.pop("chunks")
+        data.platform_id = avito_id
+        data.salebot_id = salebot_id
+        queued = await _enqueue_outbound_job("avito", _model_payload(data))
         return {
-            **result,
-            "chunks": chunks,
-            "split_size": split_size,
-            "salebot": salebot,
-            "customer_db": customer_record,
+            **queued,
+            "delivery": "background",
+            "source": "avito",
+            "platform_id": avito_id,
+            "salebot_id": salebot_id,
         }
     except HTTPException as exc:
         _log("warning", "avito failed status=%s detail=%s", exc.status_code, exc.detail)
@@ -2110,32 +2921,15 @@ async def salebot_chat(request: Request):
         if not _env()["salebot_key"]:
             raise HTTPException(503, "SALEBOT_API_KEY or SALEBOT_API_KEY_3 is not configured")
         data.platform_id = platform_id
-
-        try:
-            result = await _run_chat(data, allow_write=True, source="salebot", defer_summary=True, prefer_summary_context=True)
-        except HTTPException as exc:
-            if exc.status_code == 404 and str(exc.detail) == "conversation_id not found" and data.conversation_id:
-                stale_conversation_id = data.conversation_id
-                data.conversation_id = None
-                _log(
-                    "warning",
-                    "salebot conversation_id not found, retrying without it conversation_id=%s platform_id=%s",
-                    stale_conversation_id,
-                    platform_id,
-                )
-                result = await _run_chat(data, allow_write=True, source="salebot", defer_summary=True, prefer_summary_context=True)
-            else:
-                raise
-
-        salebot = await _send_salebot_callback(
-            salebot_id=salebot_id,
-            platform_id=result.get("platform_id", platform_id),
-            message=_clean(data.message, 50000),
-            answer=result.get("text", ""),
-            conversation_id=result.get("conversation_id", ""),
-            callback_message=data.callback_message,
-        )
-        return {**result, "salebot": salebot}
+        data.salebot_id = salebot_id
+        queued = await _enqueue_outbound_job("salebot", _model_payload(data))
+        return {
+            **queued,
+            "delivery": "background",
+            "source": "salebot",
+            "platform_id": platform_id,
+            "salebot_id": salebot_id,
+        }
     except HTTPException as exc:
         _log("warning", "salebot failed status=%s detail=%s", exc.status_code, exc.detail)
         raise
@@ -2197,7 +2991,20 @@ async def api_schema(request: Request):
             "method": "POST",
             "path": "/nexus/openrouter/api/senler-chat",
             "auth": "Authorization: Bearer <токен модуля из настроек>",
-            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var. При context=4 ответ строится по краткой сводке о клиенте, а сводка обновляется в фоне.",
+            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var и template_vars. template_vars подставляет значения Senler-переменных в prompt/message/ответ до возврата ai_answer, потому что Senler не делает вложенную подстановку переменных. Значения можно также передавать top-level полями: airtime, web_date, full_price и т.д. При context=4 ответ строится по краткой сводке о клиенте, а сводка обновляется в фоне.",
+            "senler_side_effect": "если platform_id является числовым VK ID и непустой ai_answer успешно записан через Senler vars/set, подписчик добавляется в бота 3461217 через bots/addSubscriber с enforce=true; preflight/test-запросы безопасно пропускаются",
+            "template_vars_example": {
+                "airtime": "{%airtime%}",
+                "web_date": "{%web_date%}",
+                "full_price": "{%full_price%}",
+                "full_program": "{%full_program%}",
+                "full_replay": "{%full_replay%}",
+                "full_site": "{%full_site%}",
+                "full_auto": "{%full_auto%}",
+                "full_bonus": "{%full_bonus%}",
+                "full_tour": "{%full_tour%}",
+                "op_numbers": "[%op_numbers%]",
+            },
             "response": {
                 "vars": [
                     {"n": "ai_answer", "v": "текст ответа модели"},
@@ -2205,6 +3012,13 @@ async def api_schema(request: Request):
                     {"n": "platform_id", "v": "vk_123"},
                 ],
                 "glob_vars": [],
+                "senler_ai_bot": {
+                    "ok": True,
+                    "vk_user_id": "123456",
+                    "bot_id": "3461217",
+                    "var_set": {"ok": True, "error": "", "http_status": 200},
+                    "bot_add": {"ok": True, "error": "", "http_status": 200},
+                },
             },
         },
         "avito": {

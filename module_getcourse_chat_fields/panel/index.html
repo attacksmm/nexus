@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Поля чатов GetCourse</title>
+  <style>
+    :root{
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    .shell{width:100%;height:100vh;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;background:var(--bg)}
+    .tabs{min-width:0;display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto;overflow-y:hidden}
+    .tab{flex:0 0 auto;height:36px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:.82rem}
+    .tab:hover{color:var(--muted)}.tab.is-active{color:var(--text);border-bottom-color:var(--accent)}
+    .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
+    .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
+    .form-grid{flex-shrink:0;display:grid;grid-template-columns:repeat(4,minmax(150px,1fr)) auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
+    .f-input{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text)}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap;text-decoration:none}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
+    .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}.bad{color:var(--bad)}.warn{color:var(--warn)}.ok{color:var(--ok)}.empty{padding:24px;text-align:center;color:var(--subtle)}
+    .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
+    .panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.stat{border:1px solid var(--border);background:var(--panel);padding:9px 10px}.stat span{display:block;color:var(--subtle);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}.stat b{display:block;margin-top:3px;font-size:1rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,420px);min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:420px;overflow:auto}
+    .flow-layout{display:grid;grid-template-columns:300px minmax(0,1fr);min-height:0;flex:1;overflow:hidden}.flow-list{border-right:1px solid var(--border);background:#050505;overflow:auto;padding:8px}.flow-item{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;align-items:center;padding:8px;border:1px solid transparent;background:transparent;color:var(--text);text-align:left}.flow-item:hover{background:var(--panel)}.flow-item.is-active{background:var(--panel-strong);border-color:var(--border-mid)}.flow-item b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flow-item span{font-size:.75rem;color:var(--subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flow-main{display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;min-height:0}.flow-head{display:flex;gap:10px;align-items:center;justify-content:space-between;min-width:0;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel)}.flow-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flow-head__meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.progress-mini{min-width:190px;display:grid;gap:4px;align-self:center}.progress-mini__top{display:flex;gap:8px;align-items:center;justify-content:space-between;color:var(--muted);font-size:.74rem}.progress-mini__bar{height:5px;background:#050505;border:1px solid var(--border-mid);overflow:hidden}.progress-mini__fill{height:100%;width:0;background:var(--ok);transition:width .18s ease}.progress-mini__miss{color:var(--warn)}
+    @media(max-width:1180px){.form-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}.flow-layout{grid-template-columns:1fr}.flow-list{border-right:0;border-bottom:1px solid var(--border);max-height:220px}}
+    @media(max-width:760px){.form-grid,.stats{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="tabs">
+    <button class="tab is-active" type="button" data-view="overview">Обзор</button>
+    <button class="tab" type="button" data-view="students">Потоки</button>
+    <button class="tab" type="button" data-view="orders">Заказы</button>
+    <button class="tab" type="button" data-view="source">Источник</button>
+    <button class="tab" type="button" data-view="runs">Запуски</button>
+    <button class="tab" type="button" data-view="settings">Настройки</button>
+    <div class="tabs__right">
+      <button id="scanBtn" class="btn btn--primary btn--sm" type="button">Сканировать</button>
+      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">Обновить</button>
+      <a class="btn btn--ghost btn--sm" href="docs.html" target="_blank" rel="noopener">Docs</a>
+    </div>
+  </div>
+
+  <section id="viewOverview" class="view is-active">
+    <div class="panel-body">
+      <div id="stats" class="stats"></div>
+      <div class="split">
+        <div class="table-wrap">
+          <table>
+            <colgroup><col style="width:11%"><col style="width:11%"><col style="width:12%"><col style="width:28%"><col style="width:38%"></colgroup>
+            <thead><tr><th>Поток</th><th>Куратор</th><th>Платформа</th><th>Название</th><th>Ссылка</th></tr></thead>
+            <tbody id="flowsTable"></tbody>
+          </table>
+        </div>
+        <aside class="side">
+          <div class="muted">Окружение</div>
+          <pre id="envBox" class="pre">-</pre>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <section id="viewStudents" class="view">
+    <div class="form-grid" style="grid-template-columns:minmax(220px,1fr) 160px auto auto minmax(190px,240px) auto">
+      <div class="f-group"><label>Снимок</label><input id="studentsSnapshot" class="f-input mono" readonly value="-"></div>
+      <div class="f-group"><label>TTL, минут</label><input id="studentsCacheMinutesView" class="f-input mono" readonly value="-"></div>
+      <button class="btn" id="studentsRefreshBtn" type="button">Обновить из Sheets</button>
+      <button class="btn" id="gcLookupQueueBtn" type="button">GC lookup</button>
+      <div class="progress-mini" title="Доля учеников, у которых найдена ссылка на пользователя или заказ">
+        <div class="progress-mini__top"><span id="studentsProgressLabel">0%</span><span id="studentsProgressCounts" class="mono">0/0</span></div>
+        <div class="progress-mini__bar"><div id="studentsProgressFill" class="progress-mini__fill"></div></div>
+      </div>
+      <span id="studentsState" class="muted"></span>
+    </div>
+    <div class="flow-layout">
+      <div id="studentFlows" class="flow-list"></div>
+      <div class="flow-main">
+        <div class="flow-head">
+          <b id="studentFlowTitle">Поток не выбран</b>
+          <div class="flow-head__meta">
+            <span id="studentFlowMeta" class="muted"></span>
+            <a id="studentSheetLink" class="btn btn--ghost btn--sm" href="#" target="_blank" rel="noopener" hidden>Лист</a>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <colgroup><col style="width:15%"><col style="width:20%"><col style="width:13%"><col style="width:10%"><col style="width:12%"><col style="width:10%"><col style="width:10%"><col style="width:10%"></colgroup>
+            <thead><tr><th>ФИО</th><th>Почта</th><th>TG аккаунт</th><th>Тариф</th><th>Куратор</th><th>Пользователь</th><th>Заказ</th><th>Оплата</th></tr></thead>
+            <tbody id="studentRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="viewOrders" class="view">
+    <div class="form-grid" style="grid-template-columns:220px 120px auto">
+      <div class="f-group"><label>Статус</label><select id="statusFilter" class="f-input"><option value="all">Все</option><option value="processed">processed</option><option value="customer_only">customer_only</option><option value="dry_run">dry_run</option><option value="pending_curator">pending_curator</option><option value="pending_chat_links">pending_chat_links</option><option value="failed">failed</option><option value="skipped">skipped</option></select></div>
+      <div class="f-group"><label>Лимит</label><input id="ordersLimit" class="f-input" value="100"></div>
+      <button class="btn" id="ordersRefreshBtn" type="button">Обновить</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <colgroup><col style="width:7%"><col style="width:13%"><col style="width:12%"><col style="width:12%"><col style="width:8%"><col style="width:10%"><col style="width:8%"><col style="width:10%"><col style="width:10%"><col style="width:10%"></colgroup>
+        <thead><tr><th>ID</th><th>Заказ</th><th>GC user</th><th>Статус</th><th>Курс</th><th>Тариф</th><th>Поток</th><th>VK</th><th>TG</th><th>Ошибка</th></tr></thead>
+        <tbody id="ordersBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="viewSource" class="view">
+    <div class="form-grid" style="grid-template-columns:minmax(220px,320px) 160px 120px auto">
+      <div class="f-group"><label>Поиск</label><input id="sourceQuery" class="f-input" placeholder="858644986 или GC user"></div>
+      <div class="f-group"><label>С даты</label><input id="sourceDate" class="f-input" type="date"></div>
+      <div class="f-group"><label>Лимит</label><input id="sourceLimit" class="f-input" value="100"></div>
+      <button class="btn" id="sourceRefreshBtn" type="button">Показать</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <colgroup><col style="width:6%"><col style="width:11%"><col style="width:10%"><col style="width:11%"><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:10%"><col style="width:20%"></colgroup>
+        <thead><tr><th>ID</th><th>Заказ</th><th>GC user</th><th>Дата</th><th>GC статус</th><th>Оплата</th><th>Курс</th><th>Тариф</th><th>В журнале</th><th>Название</th></tr></thead>
+        <tbody id="sourceBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="viewRuns" class="view">
+    <div class="table-wrap"><table><thead><tr><th>ID</th><th>Старт</th><th>Финиш</th><th>Строк</th><th>Обработано</th><th>Пропущено</th><th>Ошибок</th><th>Dry-run</th><th>Ошибка</th></tr></thead><tbody id="runsBody"></tbody></table></div>
+  </section>
+
+  <section id="viewSettings" class="view">
+    <div class="panel-body">
+      <div class="form-grid" style="padding:0;border:0;background:transparent;grid-template-columns:repeat(4,minmax(150px,1fr)) auto">
+        <div class="f-group"><label>Polling</label><select id="enabled" class="f-input"><option value="1">Включен</option><option value="0">Выключен</option></select></div>
+        <div class="f-group"><label>Dry-run GetCourse</label><select id="dry_run" class="f-input"><option value="0">Нет</option><option value="1">Да</option></select></div>
+        <div class="f-group"><label>Стартовая дата</label><input id="start_date" class="f-input" type="date"></div>
+        <div class="f-group"><label>Polling, сек</label><input id="poll_seconds" class="f-input" type="number" min="10" max="3600"></div>
+        <button class="btn btn--primary" id="saveBtn" type="button">Сохранить</button>
+      </div>
+      <div class="form-grid" style="padding:0;border:0;background:transparent;grid-template-columns:repeat(4,minmax(150px,1fr))">
+        <div class="f-group"><label>Timeout GetCourse, сек</label><input id="request_timeout" class="f-input" type="number" min="5" max="60"></div>
+        <div class="f-group"><label>Поле потока</label><input id="field_stream" class="f-input"></div>
+        <div class="f-group"><label>Поле VK</label><input id="field_vk" class="f-input"></div>
+        <div class="f-group"><label>Поле TG</label><input id="field_tg" class="f-input"></div>
+        <div class="f-group"><label>Поле куратора</label><input id="field_curator" class="f-input"></div>
+        <div class="f-group"><label>Spreadsheet ID</label><input id="curator_spreadsheet_id" class="f-input mono"></div>
+        <div class="f-group"><label>Credentials path</label><input id="curator_credentials_path" class="f-input mono" placeholder="ENV если пусто"></div>
+        <div class="f-group"><label>Ячейка куратора</label><input id="curator_cell" class="f-input mono" value="K2"></div>
+        <div class="f-group"><label>Диапазон поиска куратора</label><input id="curator_search_range" class="f-input mono" value="J2:AC2"></div>
+        <div class="f-group"><label>Сопоставление кураторов</label><input id="curator_map" class="f-input" placeholder="Ирина=Куратор 1;Слава=Куратор 2;Настасья=Куратор 3"></div>
+        <div class="f-group"><label>Таблица ссылок</label><input id="chat_links_spreadsheet_id" class="f-input mono"></div>
+        <div class="f-group"><label>Credentials ссылок</label><input id="chat_links_credentials_path" class="f-input mono" placeholder="ENV если пусто"></div>
+        <div class="f-group"><label>Кэш учеников, минут</label><input id="students_cache_minutes" class="f-input" type="number" min="1" max="1440"></div>
+        <div class="f-group"><label>Диапазон учеников</label><input id="students_data_range" class="f-input mono" value="A1:AC300"></div>
+        <div class="f-group"><label>Лимит заказов локально</label><input id="students_order_lookup_limit" class="f-input" type="number" min="100" max="200000"></div>
+        <div class="f-group"><label>GetCourse web URL</label><input id="getcourse_web_base_url" class="f-input mono" placeholder="https://club.sobakovod.pro"></div>
+        <div class="f-group"><label>GC API lookup</label><select id="gc_export_lookup_enabled" class="f-input"><option value="1">Включен</option><option value="0">Выключен</option></select></div>
+        <div class="f-group"><label>GC API лимит / 2ч</label><input id="gc_export_lookup_max_requests_2h" class="f-input" type="number" min="0" max="100"></div>
+        <div class="f-group"><label>Почт за refresh</label><input id="gc_export_lookup_max_missing_per_refresh" class="f-input" type="number" min="0" max="1000"></div>
+        <div class="f-group"><label>Почт в батче</label><input id="gc_export_lookup_batch_size" class="f-input" type="number" min="1" max="100"></div>
+        <div class="f-group"><label>Проверок экспорта</label><input id="gc_export_lookup_poll_attempts" class="f-input" type="number" min="1" max="5"></div>
+        <div class="f-group"><label>Пауза экспорта, сек</label><input id="gc_export_lookup_poll_delay_seconds" class="f-input" type="number" min="0" max="20"></div>
+        <div class="f-group"><label>Кэш GC lookup, дней</label><input id="gc_export_lookup_cache_days" class="f-input" type="number" min="1" max="365"></div>
+        <div class="f-group"><label>Автодобор GC</label><select id="gc_export_lookup_auto_enqueue_enabled" class="f-input"><option value="1">Включен</option><option value="0">Выключен</option></select></div>
+        <div class="f-group"><label>Автодобор пачка</label><input id="gc_export_lookup_auto_enqueue_batch_size" class="f-input" type="number" min="1" max="100"></div>
+        <div class="f-group"><label>Worker interval, сек</label><input id="gc_export_lookup_worker_interval_seconds" class="f-input" type="number" min="10" max="3600"></div>
+        <div class="f-group"><label>Job timeout, сек</label><input id="gc_export_lookup_job_timeout_seconds" class="f-input" type="number" min="3" max="60"></div>
+        <div class="f-group"><label>Попыток job</label><input id="gc_export_lookup_job_max_attempts" class="f-input" type="number" min="1" max="10"></div>
+        <div class="f-group"><label>Запись полей GC</label><select id="gc_fields_write_enabled" class="f-input"><option value="1">Включена</option><option value="0">Выключена</option></select></div>
+        <div class="f-group"><label>Запись interval, сек</label><input id="gc_fields_write_worker_interval_seconds" class="f-input" type="number" min="10" max="3600"></div>
+        <div class="f-group"><label>Попыток записи</label><input id="gc_fields_write_job_max_attempts" class="f-input" type="number" min="1" max="10"></div>
+      </div>
+      <div><span id="saveState" class="muted"></span></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+let settings = {};
+let studentsData = {items:[]};
+let selectedStudentFlow = '';
+function esc(s){return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function badge(text, cls){return `<span class="badge badge--${cls}">${esc(text)}</span>`}
+function fmtTime(value){
+  if(!value) return '';
+  const d = new Date(String(value).replace(' ', 'T') + 'Z');
+  if(Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+}
+async function api(path, opts){
+  const res = await fetch(API + path, opts);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+  return data;
+}
+document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('is-active'));
+  document.querySelectorAll('.view').forEach(el=>el.classList.remove('is-active'));
+  btn.classList.add('is-active');
+  $('view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)).classList.add('is-active');
+  if(btn.dataset.view==='orders') loadOrders();
+  if(btn.dataset.view==='students') loadFlowStudents();
+  if(btn.dataset.view==='source') loadSourceOrders();
+  if(btn.dataset.view==='runs') loadRuns();
+}));
+function yes(v){return String(v)==='1'}
+function renderStats(){
+  const gc = settings.env?.account_name && settings.env?.api_token;
+  const gs = settings.env?.google_credentials && settings.env?.google_auth;
+  $('stats').innerHTML = [
+    ['Polling', yes(settings.enabled) ? 'включен' : 'выключен', yes(settings.enabled) ? 'ok' : 'warn'],
+    ['Dry-run', yes(settings.dry_run) ? 'да' : 'нет', yes(settings.dry_run) ? 'warn' : 'ok'],
+    ['GetCourse', gc ? 'готов' : 'нет ENV', gc ? 'ok' : 'bad'],
+    ['Google Sheets', gs ? 'готов' : 'нет доступа', gs ? 'ok' : 'warn'],
+    ['Старт', settings.start_date || '-', 'off']
+  ].map(([k,v,cls])=>`<div class="stat"><span>${esc(k)}</span><b class="${cls}">${esc(v)}</b></div>`).join('');
+}
+async function loadSettings(){
+  settings = await api('/settings');
+  ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','curator_map','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'].forEach(k=>{ if($(k)) $(k).value = settings[k] || ''; });
+  if($('sourceDate') && !$('sourceDate').value) $('sourceDate').value = settings.start_date || '';
+  $('envBox').textContent = JSON.stringify({env:settings.env, paths:settings.paths, curator_spreadsheet_id:settings.curator_spreadsheet_id, chat_links_spreadsheet_id:settings.chat_links_spreadsheet_id, curator_cell:settings.curator_cell, curator_search_range:settings.curator_search_range, curator_map:settings.curator_map}, null, 2);
+  renderStats();
+}
+function flowKey(flow){return `${flow.course_key || ''}:${flow.stream || ''}`}
+function renderStudentFlows(){
+  const items = studentsData.items || [];
+  if(!items.length){
+    $('studentFlows').innerHTML = '<div class="empty">Потоки не найдены</div>';
+    renderStudentRows(null);
+    return;
+  }
+  if(!selectedStudentFlow || !items.some(flow=>flowKey(flow)===selectedStudentFlow)) selectedStudentFlow = flowKey(items[0]);
+  $('studentFlows').innerHTML = items.map(flow=>{
+    const key = flowKey(flow);
+    return `<button class="flow-item ${key===selectedStudentFlow?'is-active':''}" type="button" data-flow="${esc(key)}">
+      <b>${esc(flow.course)} ${esc(flow.stream)}</b><span class="mono">${esc(flow.students_count || 0)}</span>
+      <span title="${esc([flow.sheet_title, flow.curator_raw].filter(Boolean).join(' / '))}">${esc(flow.curator_value || '-')}</span><span>${esc(flow.sheet_title || '-')}</span>
+    </button>`;
+  }).join('');
+  document.querySelectorAll('.flow-item').forEach(btn=>btn.addEventListener('click',()=>{
+    selectedStudentFlow = btn.dataset.flow || '';
+    renderStudentFlows();
+  }));
+  renderStudentRows(items.find(flow=>flowKey(flow)===selectedStudentFlow) || items[0]);
+}
+function renderStudentsProgress(){
+  const students = (studentsData.items || []).flatMap(flow=>flow.students || []);
+  const total = students.length;
+  const linked = students.filter(student=>student.user_url || student.order_url).length;
+  const missing = Math.max(0, total - linked);
+  const pct = total ? Math.round(linked * 100 / total) : 0;
+  if($('studentsProgressLabel')) $('studentsProgressLabel').textContent = `${pct}%`;
+  if($('studentsProgressCounts')) $('studentsProgressCounts').innerHTML = `${linked}/${total}${missing ? ` <span class="progress-mini__miss">-${missing}</span>` : ''}`;
+  if($('studentsProgressFill')) $('studentsProgressFill').style.width = `${pct}%`;
+}
+function renderStudentRows(flow){
+  const sheetLink = $('studentSheetLink');
+  if(!flow){
+    $('studentFlowTitle').textContent = 'Поток не выбран';
+    $('studentFlowMeta').textContent = '';
+    sheetLink.hidden = true;
+    $('studentRows').innerHTML = '<tr><td colspan="8" class="empty">Нет данных</td></tr>';
+    return;
+  }
+  $('studentFlowTitle').textContent = `${flow.course || ''} ${flow.stream || ''}`;
+  $('studentFlowMeta').textContent = `${flow.students_count || 0} учеников / ${flow.curator_value || 'куратор не найден'}`;
+  sheetLink.hidden = !flow.sheet_url;
+  if(flow.sheet_url) sheetLink.href = flow.sheet_url;
+  const rows = (flow.students || []).map(student=>`<tr>
+    <td title="${esc(student.name)}">${esc(student.name || '-')}</td>
+    <td title="${esc(student.email)}">${esc(student.email || '-')}</td>
+    <td title="${esc(student.tg_account)}">${esc(student.tg_account || '-')}</td>
+    <td>${esc(student.tariff || '-')}</td>
+    <td title="${esc(student.responsible_curator_raw || flow.curator_raw || '')}">${esc(student.responsible_curator || flow.curator_value || '-')}</td>
+    <td>${student.user_url ? `<a href="${esc(student.user_url)}" target="_blank" rel="noopener">${esc(student.gc_user_id || 'GC')}</a>` : '<span class="muted">нет</span>'}</td>
+    <td>${student.order_url ? `<a href="${esc(student.order_url)}" target="_blank" rel="noopener">${esc(student.order_id || 'заказ')}</a>` : '<span class="muted">нет</span>'}</td>
+    <td title="${esc([student.order_status, student.payment_state].filter(Boolean).join(' / '))}">${esc(student.payment_state || student.order_status || '-')}</td>
+  </tr>`).join('');
+  $('studentRows').innerHTML = rows || '<tr><td colspan="8" class="empty">В листе нет строк с почтами</td></tr>';
+}
+async function loadFlowStudents(refresh=false){
+  $('studentsState').textContent = refresh ? 'Обновляю...' : 'Загрузка...';
+  $('studentsRefreshBtn').disabled = true;
+  try{
+    studentsData = await api(refresh ? '/flow-students/refresh' : '/flow-students', refresh ? {method:'POST'} : undefined);
+    $('studentsSnapshot').value = studentsData.cache_updated_at || studentsData.updated_at || '-';
+    $('studentsCacheMinutesView').value = studentsData.cache_minutes || settings.students_cache_minutes || '-';
+    const total = (studentsData.items || []).reduce((sum, flow)=>sum + Number(flow.students_count || 0), 0);
+    const gc = studentsData.getcourse_export_lookup;
+    const q = gc?.queue?.counts || {};
+    const write = await api('/field-write/status').catch(()=>null);
+    const wq = write?.counts || {};
+    const paused = gc?.queue?.paused_reason === 'budget_low' ? ` / пауза до ${fmtTime(gc.queue.next_budget_at)}` : '';
+    const writeText = write ? ` / запись ${wq.pending || 0}/${wq.running || 0}/${wq.completed || 0}` : '';
+    const gcText = gc ? ` / GC API осталось ${gc.requests_left_2h ?? '-'} / очередь ${q.pending || 0}/${q.running || 0}${writeText}${paused}` : '';
+    const cacheLabel = studentsData.stale_cache ? 'старый кэш' : (studentsData.cached ? 'кэш' : 'обновлено');
+    $('studentsState').textContent = studentsData.needs_refresh ? `нет свежего кэша${gcText}` : `${cacheLabel} / ${studentsData.items?.length || 0} потоков / ${total} учеников${gcText}`;
+    renderStudentsProgress();
+    renderStudentFlows();
+  }catch(e){
+    $('studentsState').textContent = e.message;
+    $('studentFlows').innerHTML = `<div class="empty bad">${esc(e.message)}</div>`;
+    renderStudentsProgress();
+    renderStudentRows(null);
+  }finally{
+    $('studentsRefreshBtn').disabled = false;
+  }
+}
+async function enqueueGcLookup(){
+  $('gcLookupQueueBtn').disabled = true;
+  $('studentsState').textContent = 'Ставлю email в очередь...';
+  try{
+    const data = await api('/gc-lookup/enqueue', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({missing_from_cache:true, limit:50})});
+    const counts = data.status?.counts || {};
+    $('studentsState').textContent = `в очереди: ${counts.pending || 0}, выполняется: ${counts.running || 0}, готово: ${counts.completed || 0}, осталось API: ${data.status?.requests_left_2h ?? '-'}`;
+  }catch(e){
+    $('studentsState').textContent = e.message;
+  }finally{
+    $('gcLookupQueueBtn').disabled = false;
+  }
+}
+function linkCell(url, label){
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label || url)}</a>` : '<span class="muted">-</span>';
+}
+async function loadChatFlows(){
+  $('flowsTable').innerHTML = '<tr><td colspan="5" class="empty">Загрузка потоков...</td></tr>';
+  let data;
+  try { data = await api('/chat-flows'); }
+  catch(e){
+    $('flowsTable').innerHTML = `<tr><td colspan="5" class="empty bad">${esc(e.message)}</td></tr>`;
+    return;
+  }
+  const rows = (data.items || []).map(flow=>`
+    <tr>
+      <td class="mono" rowspan="2">${esc(flow.course)} ${esc(flow.stream)}</td>
+      <td rowspan="2" title="${esc([flow.curator_sheet, flow.curator_raw].filter(Boolean).join(' / '))}">${esc(flow.curator_value || '-')}</td>
+      <td>Вконтакте</td><td>${esc(flow.vk_title || '-')}</td><td>${linkCell(flow.vk_link, flow.vk_link)}</td>
+    </tr>
+    <tr>
+      <td>Телеграм</td><td>${esc(flow.tg_title || '-')}</td><td>${linkCell(flow.tg_link, flow.tg_link || 'TG')}</td>
+    </tr>
+  `).join('');
+  const errorText = (data.errors || []).map(e=>[e.course_key, e.platform, e.error].filter(Boolean).join(': ')).join('; ');
+  $('flowsTable').innerHTML = rows || `<tr><td colspan="5" class="empty">${esc(errorText || 'Потоки не найдены')}</td></tr>`;
+}
+async function saveSettings(){
+  const keys = ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','curator_map','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'];
+  const payload = {};
+  keys.forEach(k=>payload[k]=$(k).value);
+  $('saveState').textContent = 'Сохраняю...';
+  try { await api('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}); $('saveState').textContent='Сохранено'; await refreshAll(); }
+  catch(e){ $('saveState').textContent = e.message; }
+}
+async function scanNow(){
+  $('scanBtn').disabled = true;
+  try { const data = await api('/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({limit:200})}); alert(JSON.stringify(data, null, 2)); await refreshAll(); }
+  catch(e){ alert(e.message); }
+  finally { $('scanBtn').disabled = false; }
+}
+async function loadOrders(){
+  const status = $('statusFilter').value;
+  const limit = Math.max(1, Math.min(500, Number($('ordersLimit').value || 100)));
+  const data = await api('/orders?status=' + encodeURIComponent(status) + '&limit=' + encodeURIComponent(limit));
+  $('ordersBody').innerHTML = data.items.map(o=>`<tr>
+    <td class="mono">${esc(o.id)}</td><td class="mono">${esc(o.platform_id || o.order_id)}</td><td class="mono">${esc(o.gc_user_id)}</td><td>${esc(o.status)}</td>
+    <td>${esc(o.course_key)}</td><td>${esc(o.tariff)}</td><td class="mono">${esc(o.stream)}</td>
+    <td>${o.vk_link ? '<a href="'+esc(o.vk_link)+'" target="_blank" rel="noopener">VK</a>' : ''}</td><td>${o.tg_link ? '<a href="'+esc(o.tg_link)+'" target="_blank" rel="noopener">TG</a>' : ''}</td><td class="bad">${esc(o.error)}</td>
+  </tr>`).join('') || '<tr><td colspan="10" class="empty">Нет записей</td></tr>';
+}
+async function loadSourceOrders(){
+  const query = $('sourceQuery').value.trim();
+  const dateFrom = $('sourceDate').value;
+  const limit = Math.max(1, Math.min(500, Number($('sourceLimit').value || 100)));
+  const path = '/source-orders?query=' + encodeURIComponent(query) + '&date_from=' + encodeURIComponent(dateFrom) + '&limit=' + encodeURIComponent(limit);
+  const data = await api(path);
+  $('sourceBody').innerHTML = (data.items || []).map(o=>{
+    const journal = o.processed_status ? `${o.processed_status}${o.processed_stream ? ' / поток ' + o.processed_stream : ''}` : 'нет';
+    return `<tr>
+      <td class="mono">${esc(o.id)}</td><td class="mono">${esc(o.platform_id || o.order_id)}</td><td class="mono">${esc(o.gc_user_id)}</td>
+      <td class="mono">${esc(o.created_at || o.updated_at)}</td><td>${esc(o.status)}</td><td>${esc(o.payment_state)}</td>
+      <td>${esc(o.course || o.course_key || '-')}</td><td>${esc(o.tariff || '-')}</td>
+      <td class="${o.processed_status ? '' : 'muted'}">${esc(journal)}</td><td title="${esc(o.title)}">${esc(o.title)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="10" class="empty">Нет записей</td></tr>';
+}
+async function loadRuns(){
+  const data = await api('/runs');
+  $('runsBody').innerHTML = data.items.map(r=>`<tr><td class="mono">${esc(r.id)}</td><td>${esc(r.started_at)}</td><td>${esc(r.finished_at)}</td><td>${esc(r.source_rows)}</td><td>${esc(r.processed)}</td><td>${esc(r.skipped)}</td><td>${esc(r.failed)}</td><td>${r.dry_run?'да':'нет'}</td><td class="bad">${esc(r.error)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Нет запусков</td></tr>';
+}
+async function refreshAll(){ await loadSettings(); await Promise.all([loadChatFlows(), loadOrders(), loadSourceOrders(), loadRuns(), loadFlowStudents(false)]); }
+$('saveBtn').onclick = saveSettings; $('scanBtn').onclick = scanNow; $('refreshBtn').onclick = refreshAll; $('ordersRefreshBtn').onclick = loadOrders; $('sourceRefreshBtn').onclick = loadSourceOrders; $('studentsRefreshBtn').onclick = ()=>loadFlowStudents(true); $('gcLookupQueueBtn').onclick = enqueueGcLookup; $('statusFilter').onchange = loadOrders;
+$('sourceQuery').addEventListener('keydown', e=>{ if(e.key==='Enter') loadSourceOrders(); });
+refreshAll().catch(e=>alert(e.message));
+</script>
+</body>
+</html>

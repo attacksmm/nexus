@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>amoCRM → DB</title>
+  <style>
+    :root{color-scheme:dark;--bg:#090909;--panel:#101010;--panel2:#151515;--line:#2a2a2a;--line2:#393939;--text:#f2f2f2;--muted:#9b9b9b;--soft:#cfcfcf;--ok:#52d273;--bad:#ff6b6b;--warn:#f4c542;--accent:#55b6ff}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}
+    .app{height:100%;display:grid;grid-template-rows:auto 1fr;min-width:0}
+    .top{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);background:#0b0b0b;min-width:0}
+    .brand{font-weight:700;white-space:nowrap}.state{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+    .pill{border:1px solid var(--line2);background:#111;color:var(--soft);padding:3px 7px;font-size:12px}.pill.ok{color:var(--ok);border-color:#246b35}.pill.bad{color:var(--bad);border-color:#713030}
+    .tabs{display:flex;gap:4px}.tab{border:1px solid var(--line);background:#0d0d0d;color:var(--soft);padding:6px 10px}.tab.active{background:#fff;color:#000;border-color:#fff}
+    .main{min-height:0;overflow:hidden}.view{height:100%;min-height:0;display:none}.view.active{display:block}
+    .crm{height:100%;display:grid;grid-template-rows:auto 1fr;min-width:0}
+    .filters{display:grid;grid-template-columns:180px 180px minmax(180px,1fr) auto auto;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);background:#0d0d0d;align-items:end}
+    label{display:block;color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.08em;margin:0 0 4px}
+    .input,.select,.textarea{width:100%;min-height:32px;border:1px solid var(--line2);background:#070707;color:var(--text);padding:6px 8px;outline:none}.textarea{min-height:160px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .input:focus,.select:focus,.textarea:focus{border-color:var(--accent)}
+    .btn{min-height:32px;border:1px solid var(--line2);background:#141414;color:var(--text);padding:6px 10px}.btn:hover{border-color:#666}.btn.primary{background:#fff;color:#000;border-color:#fff}.btn.danger{background:#2a1010;border-color:#612020;color:#ffbdbd}
+    .workspace{display:grid;grid-template-columns:minmax(0,1fr) 360px;height:100%;min-height:0}
+    .board{min-width:0;min-height:0;overflow:auto;padding:12px;display:flex;gap:10px;align-items:stretch}
+    .col{width:288px;min-width:288px;display:grid;grid-template-rows:auto 1fr;border:1px solid var(--line);background:#0c0c0c;min-height:0}
+    .col-head{padding:8px 9px;border-bottom:1px solid var(--line);background:#131313}
+    .col-title{display:flex;align-items:center;gap:8px;font-weight:700}.dot{width:8px;height:8px;border-radius:999px;background:var(--accent);box-shadow:0 0 0 2px rgba(85,182,255,.12)}
+    .col-meta{margin-top:2px;color:var(--muted);font-size:12px}.cards{min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+    .deal{border:1px solid var(--line);background:#111;padding:9px;text-align:left;color:var(--text);width:100%;min-height:116px}.deal:hover,.deal.active{border-color:#777;background:#171717}
+    .deal-title{font-weight:700;line-height:1.25;word-break:break-word}.deal-line{display:flex;gap:8px;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:6px}.deal-contact{color:var(--soft);font-size:12px;margin-top:7px;word-break:break-word}
+    .tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:7px}.tag{font-size:11px;color:#ddd;background:#232323;border:1px solid #333;padding:1px 5px}
+    .side{border-left:1px solid var(--line);background:#0d0d0d;min-width:0;min-height:0;overflow:auto}
+    .side-head{padding:12px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#0d0d0d;z-index:2}.side-title{font-size:15px;font-weight:800;word-break:break-word}.side-sub{color:var(--muted);margin-top:4px}
+    .side-body{padding:12px}.kv{display:grid;grid-template-columns:110px minmax(0,1fr);gap:6px 10px;margin:10px 0}.k{color:var(--muted)}.v{word-break:break-word}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .json{white-space:pre-wrap;word-break:break-word;border:1px solid var(--line);background:#070707;padding:10px;max-height:360px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+    .panel{height:100%;overflow:auto;padding:14px;display:grid;gap:12px;align-content:start}.section{border:1px solid var(--line);background:#0d0d0d;padding:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{color:var(--muted);min-height:18px}
+    table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;background:#111;position:sticky;top:0}
+    .events{max-height:calc(100vh - 170px);overflow:auto;border:1px solid var(--line)}
+    @media(max-width:980px){.filters{grid-template-columns:1fr 1fr}.workspace{grid-template-columns:1fr}.side{display:none}.state{display:none}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="brand">amoCRM → DB</div>
+    <div class="tabs">
+      <button class="tab active" data-view="crm" type="button">CRM</button>
+      <button class="tab" data-view="webhook" type="button">Webhook</button>
+      <button class="tab" data-view="events" type="button">События</button>
+      <button class="tab" data-view="settings" type="button">Настройки</button>
+    </div>
+    <button id="refreshBtn" class="btn" type="button">↻</button>
+    <div id="state" class="state"></div>
+  </div>
+
+  <main class="main">
+    <section id="viewCrm" class="view active">
+      <div class="crm">
+        <div class="filters">
+          <div><label>Воронка</label><select id="pipelineFilter" class="select"></select></div>
+          <div><label>Статус</label><select id="statusFilter" class="select"><option value="">Все статусы</option></select></div>
+          <div><label>Поиск</label><input id="searchInput" class="input" placeholder="deal_id, имя, телефон, email, utm_term"></div>
+          <button id="applyFiltersBtn" class="btn primary" type="button">Показать</button>
+          <button id="clearFiltersBtn" class="btn" type="button">Сброс</button>
+        </div>
+        <div class="workspace">
+          <div id="board" class="board"></div>
+          <aside id="details" class="side"></aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewWebhook" class="view">
+      <div class="panel">
+        <div class="section">
+          <div class="grid">
+            <div><label>URL amoCRM webhook</label><input id="webhookUrl" class="input mono" readonly></div>
+            <div><label>Сделка для ручной синхронизации</label><input id="manualDealId" class="input mono" placeholder="deal_id"></div>
+          </div>
+          <div class="actions" style="margin-top:10px">
+            <button id="copyWebhookBtn" class="btn primary" type="button">Скопировать URL</button>
+            <button id="manualSyncBtn" class="btn" type="button">Синхронизировать deal_id</button>
+            <span id="webhookStatus" class="status"></span>
+          </div>
+        </div>
+        <div class="section">
+          <label>Тестовый JSON payload</label>
+          <textarea id="testPayload" class="textarea mono"></textarea>
+          <div class="actions" style="margin-top:10px">
+            <button id="sendTestBtn" class="btn" type="button">Отправить тест</button>
+            <span id="testStatus" class="status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewEvents" class="view">
+      <div class="panel">
+        <div class="actions">
+          <select id="eventFilter" class="select" style="width:180px">
+            <option value="all">Все</option>
+            <option value="ok">Успех</option>
+            <option value="error">Ошибки</option>
+            <option value="ignored">Ignored</option>
+          </select>
+          <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
+        </div>
+        <div class="events"><table><thead><tr><th>Время</th><th>Action</th><th>Deal</th><th>Статус</th><th>Ошибка</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+      </div>
+    </section>
+
+    <section id="viewSettings" class="view">
+      <div class="panel">
+        <div class="section">
+          <div class="grid">
+            <div><label>Webhook secret</label><input id="secretInput" class="input mono"></div>
+            <div><label>Request timeout, сек</label><input id="timeoutInput" class="input mono"></div>
+            <div><label>Debounce, сек</label><input id="debounceInput" class="input mono"></div>
+            <div><label>customer-db path</label><input id="dbPath" class="input mono" readonly></div>
+          </div>
+          <div class="actions" style="margin-top:10px">
+            <button id="saveSettingsBtn" class="btn primary" type="button">Сохранить</button>
+            <span id="settingsStatus" class="status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const modBase = location.pathname.split('/panel/')[0];
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let settings = {};
+let pipelines = [];
+let deals = [];
+let selectedDeal = null;
+
+async function fetchJson(url, opts){
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+function money(value){
+  const n = Number(value || 0);
+  return n ? n.toLocaleString('ru-RU') + ' ₽' : '0 ₽';
+}
+
+function dateText(ts){
+  if (!ts) return '';
+  const n = Number(ts);
+  if (!n) return String(ts);
+  return new Date(n * 1000).toLocaleString('ru-RU');
+}
+
+function setStatus(text, kind=''){
+  $('state').innerHTML = text.map(item => `<span class="pill ${item.ok ? 'ok' : item.bad ? 'bad' : ''}">${esc(item.label)}: ${esc(item.value)}</span>`).join('');
+}
+
+async function loadSettings(){
+  settings = await fetchJson(API + '/settings');
+  $('secretInput').value = settings.webhook_secret || '';
+  $('timeoutInput').value = settings.request_timeout || '12';
+  $('debounceInput').value = settings.debounce_seconds || '3';
+  $('dbPath').value = settings.customer_db_path || '';
+  renderWebhookUrl();
+}
+
+async function loadEnv(){
+  const env = await fetchJson(API + '/env-status').catch(e => ({error:e.message}));
+  setStatus([
+    {label:'AMO', value:env.ready ? 'OK' : 'нет', ok:env.ready, bad:!env.ready},
+    {label:'customer-db', value:env.customer_db_ready ? 'OK' : 'нет', ok:env.customer_db_ready, bad:!env.customer_db_ready},
+    {label:'secret', value:env.webhook_secret ? 'OK' : 'пусто'}
+  ]);
+}
+
+async function loadPipelines(refresh=false){
+  const data = await fetchJson(API + '/amo/pipelines' + (refresh ? '?refresh=1' : '')).catch(e => ({pipelines:[], error:e.message}));
+  pipelines = data.pipelines || [];
+  renderPipelineFilters();
+}
+
+function renderPipelineFilters(){
+  const current = $('pipelineFilter').value;
+  $('pipelineFilter').innerHTML = '<option value="">Все воронки</option>' + pipelines.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  $('pipelineFilter').value = current;
+  renderStatusFilter();
+}
+
+function currentPipeline(){
+  const id = $('pipelineFilter').value;
+  return pipelines.find(p => p.id === id) || pipelines[0] || {statuses:[]};
+}
+
+function renderStatusFilter(){
+  const current = $('statusFilter').value;
+  const pipelineId = $('pipelineFilter').value;
+  const source = pipelineId ? (pipelines.find(p => p.id === pipelineId)?.statuses || []) : pipelines.flatMap(p => p.statuses || []);
+  const seen = new Set();
+  const options = [];
+  for (const s of source) {
+    if (seen.has(s.id)) continue;
+    seen.add(s.id);
+    options.push(`<option value="${esc(s.id)}">${esc(s.name)}</option>`);
+  }
+  $('statusFilter').innerHTML = '<option value="">Все статусы</option>' + options.join('');
+  $('statusFilter').value = current;
+}
+
+async function loadDeals(){
+  const params = new URLSearchParams();
+  if ($('pipelineFilter').value) params.set('pipeline_id', $('pipelineFilter').value);
+  if ($('statusFilter').value) params.set('status_id', $('statusFilter').value);
+  if ($('searchInput').value.trim()) params.set('q', $('searchInput').value.trim());
+  params.set('limit', '500');
+  const data = await fetchJson(API + '/deals?' + params.toString());
+  deals = data.items || [];
+  renderBoard();
+}
+
+function renderBoard(){
+  const pipeline = currentPipeline();
+  let statuses = pipeline.statuses || [];
+  if (!$('pipelineFilter').value) {
+    const byKey = new Map();
+    for (const d of deals) {
+      const f = d.custom_fields || {};
+      const key = `${f.pipeline_id || ''}:${f.status_id || ''}`;
+      if (!byKey.has(key)) byKey.set(key, {id:f.status_id || '', name:f.status_name || f.status_id || 'Без статуса', color:f.status_color || '', pipeline_id:f.pipeline_id || ''});
+    }
+    statuses = [...byKey.values()];
+  }
+  if (!statuses.length) statuses = [{id:'', name:'Сделки', color:''}];
+  const html = statuses.map(status => {
+    const list = deals.filter(d => {
+      const f = d.custom_fields || {};
+      if (!status.id) return true;
+      return String(f.status_id || '') === String(status.id || '') && (!$('pipelineFilter').value || String(f.pipeline_id || '') === String(pipeline.id || ''));
+    });
+    return `<div class="col">
+      <div class="col-head">
+        <div class="col-title"><span class="dot" style="${status.color ? `background:${esc(status.color)}` : ''}"></span><span>${esc(status.name || status.id || 'Без статуса')}</span></div>
+        <div class="col-meta">${list.length} сделок · ${money(list.reduce((s,d)=>s+Number((d.custom_fields||{}).price||0),0))}</div>
+      </div>
+      <div class="cards">${list.map(renderDealCard).join('') || '<div class="status">Нет сделок</div>'}</div>
+    </div>`;
+  }).join('');
+  $('board').innerHTML = html;
+  $('board').querySelectorAll('.deal').forEach(btn => btn.addEventListener('click', () => selectDeal(btn.dataset.id)));
+  renderDetails();
+}
+
+function renderDealCard(deal){
+  const f = deal.custom_fields || {};
+  const contact = f.contact_fields || {};
+  const active = selectedDeal && selectedDeal.platform_id === deal.platform_id ? ' active' : '';
+  const tags = (f.tag_names || []).slice(0,3).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+  return `<button class="deal${active}" type="button" data-id="${esc(deal.platform_id)}">
+    <div class="deal-title">${esc(f.deal_name || ('Сделка #' + deal.platform_id))}</div>
+    <div class="deal-line"><span>#${esc(deal.platform_id)}</span><strong>${esc(money(f.price))}</strong></div>
+    <div class="deal-contact">${esc(contact.name || 'Контакт не указан')}</div>
+    <div class="deal-line"><span>${esc(dateText(f.updated_at_ts))}</span><span>${esc((f.utms||{}).utm_term || '')}</span></div>
+    ${tags ? `<div class="tags">${tags}</div>` : ''}
+  </button>`;
+}
+
+function selectDeal(id){
+  selectedDeal = deals.find(d => d.platform_id === id) || null;
+  renderBoard();
+}
+
+function renderDetails(){
+  if (!selectedDeal) {
+    $('details').innerHTML = '<div class="side-head"><div class="side-title">Сделка не выбрана</div><div class="side-sub">Выберите карточку в kanban</div></div>';
+    return;
+  }
+  const f = selectedDeal.custom_fields || {};
+  const contact = f.contact_fields || {};
+  $('details').innerHTML = `<div class="side-head">
+    <div class="side-title">${esc(f.deal_name || ('Сделка #' + selectedDeal.platform_id))}</div>
+    <div class="side-sub">${esc(f.pipeline_name || '')} / ${esc(f.status_name || '')}</div>
+  </div>
+  <div class="side-body">
+    <div class="actions">${f.deal_url ? `<a class="btn primary" href="${esc(f.deal_url)}" target="_blank" rel="noopener">Открыть amoCRM</a>` : ''}<button class="btn" type="button" id="syncSelectedBtn">Синхронизировать</button></div>
+    <div class="kv">
+      <div class="k">Deal ID</div><div class="v mono">${esc(selectedDeal.platform_id)}</div>
+      <div class="k">Сумма</div><div class="v">${esc(money(f.price))}</div>
+      <div class="k">Контакт</div><div class="v">${esc(contact.name || '')}</div>
+      <div class="k">Телефон</div><div class="v mono">${esc((f.phones || []).join(', '))}</div>
+      <div class="k">Email</div><div class="v mono">${esc((f.emails || []).join(', '))}</div>
+      <div class="k">utm_term</div><div class="v mono">${esc((f.utms || {}).utm_term || '')}</div>
+      <div class="k">yclid</div><div class="v mono">${esc((f.utms || {}).yclid || '')}</div>
+      <div class="k">ym_uid</div><div class="v mono">${esc((f.utms || {}).ym_uid || '')}</div>
+      <div class="k">Обновлена</div><div class="v">${esc(dateText(f.updated_at_ts))}</div>
+      <div class="k">Синхр.</div><div class="v mono">${esc(f.synced_at || '')}</div>
+    </div>
+    <label>Snapshot</label><pre class="json">${esc(JSON.stringify(f, null, 2))}</pre>
+  </div>`;
+  $('syncSelectedBtn')?.addEventListener('click', () => syncDeal(selectedDeal.platform_id));
+}
+
+function renderWebhookUrl(){
+  const secret = $('secretInput').value.trim() || settings.webhook_secret || '';
+  $('webhookUrl').value = location.origin + modBase + '/api/webhook' + (secret ? '?secret=' + encodeURIComponent(secret) : '');
+  $('testPayload').value ||= JSON.stringify({leads:{status:[{id:'123456', pipeline_id:'111', status_id:'142', old_status_id:'143', responsible_user_id:'987654'}]}}, null, 2);
+}
+
+async function syncDeal(id){
+  if (!id) return;
+  $('webhookStatus').textContent = 'Синхронизация...';
+  const data = await fetchJson(API + '/deals/' + encodeURIComponent(id) + '/sync', {method:'POST'}).catch(e => ({ok:false,error:e.message}));
+  $('webhookStatus').textContent = data.ok ? 'Готово' : (data.error || 'Ошибка');
+  await loadDeals();
+}
+
+async function loadEvents(){
+  const rows = await fetchJson(API + '/events?result=' + encodeURIComponent($('eventFilter').value || 'all'));
+  $('eventsBody').innerHTML = rows.map(e => `<tr>
+    <td class="mono">${esc(e.received_at)}</td>
+    <td>${esc(e.action)}</td>
+    <td class="mono">${esc(e.deal_id)}</td>
+    <td>${e.success ? '<span class="pill ok">ok</span>' : e.ignored ? '<span class="pill">ignored</span>' : e.error ? '<span class="pill bad">error</span>' : '<span class="pill">pending</span>'}</td>
+    <td>${esc(e.error || '')}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="status">Событий нет</td></tr>';
+}
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === btn));
+  document.querySelectorAll('.view').forEach(x => x.classList.toggle('active', x.id === 'view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)));
+  if (btn.dataset.view === 'events') loadEvents();
+}));
+
+$('pipelineFilter').addEventListener('change', () => { renderStatusFilter(); loadDeals(); });
+$('applyFiltersBtn').addEventListener('click', loadDeals);
+$('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') loadDeals(); });
+$('clearFiltersBtn').addEventListener('click', () => { $('pipelineFilter').value=''; $('statusFilter').value=''; $('searchInput').value=''; renderStatusFilter(); loadDeals(); });
+$('refreshBtn').addEventListener('click', async () => { await loadEnv(); await loadPipelines(true); await loadDeals(); });
+$('copyWebhookBtn').addEventListener('click', async () => { await navigator.clipboard.writeText($('webhookUrl').value); $('webhookStatus').textContent='URL скопирован'; });
+$('manualSyncBtn').addEventListener('click', () => syncDeal($('manualDealId').value.trim()));
+$('sendTestBtn').addEventListener('click', async () => {
+  $('testStatus').textContent = 'Отправка...';
+  const data = await fetchJson($('webhookUrl').value, {method:'POST', headers:{'Content-Type':'application/json'}, body:$('testPayload').value}).catch(e => ({ok:false,error:e.message}));
+  $('testStatus').textContent = data.ok ? `Принято: ${data.processed || 0}` : (data.error || 'Ошибка');
+  await loadEvents();
+});
+$('eventFilter').addEventListener('change', loadEvents);
+$('loadEventsBtn').addEventListener('click', loadEvents);
+$('saveSettingsBtn').addEventListener('click', async () => {
+  $('settingsStatus').textContent='Сохранение...';
+  settings = await fetchJson(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({webhook_secret:$('secretInput').value.trim(), request_timeout:$('timeoutInput').value.trim(), debounce_seconds:$('debounceInput').value.trim()})});
+  $('settingsStatus').textContent='Сохранено';
+  renderWebhookUrl();
+});
+$('secretInput').addEventListener('input', renderWebhookUrl);
+
+(async function init(){
+  await loadSettings();
+  await loadEnv();
+  await loadPipelines();
+  await loadDeals();
+})();
+</script>
+</body>
+</html>

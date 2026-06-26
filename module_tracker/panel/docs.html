@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Трекер · Документация</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080808;--text:#f2f2f2;--muted:#aaa;--line:#2e2e2e;--panel:#111}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;padding:22px;max-width:980px}
+    h1{font-size:22px;margin:0 0 14px}h2{font-size:16px;margin:24px 0 8px}p,li{color:var(--muted)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{background:#030303;border:1px solid var(--line);padding:12px;overflow:auto;color:#9fe0aa}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid var(--line);padding:7px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;background:var(--panel)}
+  </style>
+</head>
+<body>
+  <h1>Трекер</h1>
+  <p>Модуль собирает визиты, UTM, click id, IP/Geo, устройство и подтвержденные формы. Скрипт не меняет страницу: не правит URL, DOM, стили, формы и не блокирует отправку.</p>
+
+  <h2>Установка скрипта</h2>
+  <pre><code>&lt;script src="https://junior.sobakovod.pro/nexus/tracker/api/script.js" async data-site="sobakovod" data-consent="required" data-banner="1" data-policy-url="https://sobakovod.pro/popd" data-auto-consent="continue"&gt;&lt;/script&gt;</code></pre>
+  <p><code>data-site</code> нужен только для группировки сайтов в панели. Если не задан, используется host страницы.</p>
+
+  <h2>Согласие и баннер</h2>
+  <p><code>data-consent="required"</code> включает режим, при котором скрипт до согласия не ставит visitor cookie/localStorage и не отправляет визиты/формы. <code>data-banner="1"</code> показывает стандартный нижний cookie-баннер в стиле сайта: читаемый текст, ссылка на политику и кнопка принятия. <code>data-auto-consent="continue"</code> считает согласием продолжение пользования после небольшой задержки: скролл, клик по сайту, касание или клавишу. Для более строгого режима уберите <code>data-auto-consent</code> и принимайте согласие только кнопкой баннера или вызовом API.</p>
+  <pre><code>window.NexusTracker.grantConsent("site_banner");
+window.NexusTracker.revokeConsent();
+window.NexusTracker.hasConsent();</code></pre>
+
+  <h2>Что собирается</h2>
+  <table>
+    <tr><th>Группа</th><th>Поля</th></tr>
+    <tr><td>Визит</td><td>URL, referrer, title, host, UTM, yclid/gclid/fbclid/ttclid/msclkid/roistat/_ym_uid, browser context.</td></tr>
+    <tr><td>Идентификация</td><td>visitor_id, visit_id, email, phone, name, utm_term, fingerprint, marketing ids.</td></tr>
+    <tr><td>Сервер</td><td>IP, User-Agent, browser/device, GeoIP country/city при наличии GeoLite2-City.mmdb.</td></tr>
+    <tr><td>Формы</td><td>Только подтвержденные формы. Пароли, токены, hidden, file, captcha/OTP/CSRF и карточные поля исключаются.</td></tr>
+  </table>
+
+  <h2>Подтверждение формы</h2>
+  <p>Автоматически срабатывают success URL и видимые success-блоки Tilda/GetCourse-подобных форм. Для SPA можно вызвать:</p>
+  <pre><code>window.NexusTracker.confirmForm(document.querySelector("form"), { confirmation_reason: "crm_success" });</code></pre>
+
+  <h2>Публичные endpoints</h2>
+  <table>
+    <tr><th>Метод</th><th>Endpoint</th><th>Назначение</th></tr>
+    <tr><td>GET</td><td><code>/tracker/api/script.js</code></td><td>Клиентский скрипт.</td></tr>
+    <tr><td>POST/GET</td><td><code>/tracker/api/collect</code></td><td>Прием событий. Всегда безопасен для браузера.</td></tr>
+    <tr><td>GET</td><td><code>/tracker/api/pixel.gif</code></td><td>1x1 fallback pixel.</td></tr>
+  </table>
+
+  <h2>Хранение</h2>
+  <p>Raw-события чистятся вручную во вкладке «Настройки» по retention, по умолчанию 6 месяцев. Склеенные профили людей остаются в БД модуля и синхронизируются в customer-db таблицу <code>visitor_profiles</code>.</p>
+</body>
+</html>

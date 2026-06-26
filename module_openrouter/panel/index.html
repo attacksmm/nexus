@@ -58,6 +58,18 @@
     .test-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;padding:10px}
     .hint{margin:0;color:var(--subtle);font-size:.78rem;line-height:1.45}
     .error{color:var(--bad);background:var(--bad-bg);border:1px solid var(--bad-bd);padding:7px 9px;font-size:.78rem}
+    .provider-grid{display:grid;gap:8px}
+    .provider-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .check-row{display:flex;align-items:center;gap:8px;min-width:0}
+    .check-row input{width:16px;height:16px;accent-color:#f4f4f4}
+    .provider-table th:nth-child(1),.provider-table td:nth-child(1){width:46px;text-align:center}
+    .provider-table th:nth-child(3),.provider-table td:nth-child(3),
+    .provider-table th:nth-child(4),.provider-table td:nth-child(4),
+    .provider-table th:nth-child(5),.provider-table td:nth-child(5){width:112px;text-align:right;font-variant-numeric:tabular-nums}
+    .provider-table th:nth-child(6),.provider-table td:nth-child(6){width:26%}
+    .provider-name{display:grid;gap:2px;min-width:0}
+    .provider-name strong{font-weight:600;overflow:hidden;text-overflow:ellipsis}
+    .provider-name span{color:var(--subtle);font-family:"IBM Plex Mono","Consolas",monospace;font-size:.72rem;overflow:hidden;text-overflow:ellipsis}
 
     table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem}
     th,td{height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -122,7 +134,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.38</div>
+    <div class="ver">v1.0.43</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -224,6 +236,27 @@
           <input id="openrouterKey" class="input" type="password" autocomplete="off" placeholder="Оставьте пустым, если ключ уже задан в ENV" />
           <p class="hint">При сохранении непустое значение записывается в <code>OPENROUTER_API_KEY</code> и сразу загружается в окружение процесса Nexus.</p>
         </div>
+        <div class="field" style="grid-column:1/-1">
+          <label>Провайдеры OpenRouter</label>
+          <div class="provider-grid">
+            <div class="provider-actions">
+              <div class="check-row"><input id="providerAllowFallbacks" type="checkbox" /><span>Разрешить fallback только внутри выбранных провайдеров</span></div>
+              <select id="providerDataCollection" class="select" style="width:220px">
+                <option value="allow">Разрешить data collection</option>
+                <option value="deny">Запретить data collection</option>
+              </select>
+            </div>
+            <div class="form-grid" style="padding:0">
+              <div class="field"><label>Max input $ / 1M</label><input id="providerMaxPrompt" class="input" type="number" min="0" max="100" step="0.001" /></div>
+              <div class="field"><label>Max output $ / 1M</label><input id="providerMaxCompletion" class="input" type="number" min="0" max="100" step="0.001" /></div>
+            </div>
+            <table class="provider-table">
+              <thead><tr><th></th><th>Провайдер</th><th>Input / 1M</th><th>Output / 1M</th><th>Cache / 1M</th><th>Комментарий</th></tr></thead>
+              <tbody id="providerBody"></tbody>
+            </table>
+            <p class="hint">Для моделей <code>deepseek/*</code> в OpenRouter уходит <code>provider.only</code> по выбранным чекбоксам и <code>max_price</code>. Для остальных моделей чекбоксы DeepSeek-провайдеров не применяются, но ценовой потолок сохраняется. Если снять все галочки, модуль сохранит безопасный минимум: только официальный DeepSeek. Запрет data collection может отключить официальный DeepSeek, если в аккаунте OpenRouter разрешены paid endpoints that may train.</p>
+          </div>
+        </div>
         <div class="field" style="grid-column:1/-1"><label>Промпт сводки</label><textarea id="summaryPrompt" class="textarea"></textarea></div>
       </div>
     </div>
@@ -310,11 +343,16 @@ const API = modBase + '/api';
 const rootBase = modBase.replace(/\/openrouter$/, '');
 const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', settings:{}, currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
+const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', settings:{}, providerOptions:[], currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function fmtSize(n){if(!n)return '—';const u=['Б','КБ','МБ'];let i=0,v=Number(n||0);while(v>=1024&&i<u.length-1){v/=1024;i++;}return `${v>=10||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`;}
+function fmtPrice(n){const v=Number(n||0);return v===0?'$0':`$${v.toFixed(v<1?4:3).replace(/0+$/,'').replace(/\.$/,'')}`;}
+function parseTags(raw){try{const v=JSON.parse(raw||'[]');return Array.isArray(v)?v:[];}catch{return [];}}
+function selectedProviderTags(){
+  return [...document.querySelectorAll('.provider-check:checked')].map(el=>el.value).filter(Boolean);
+}
 function setMsg(msg, kind='info'){ $('statusMsg').textContent=msg||''; $('statusMsg').style.color=kind==='error'?'var(--bad)':kind==='ok'?'var(--ok)':'var(--subtle)'; }
 function setLeft(msg){ $('statusLeft').textContent=msg||'Готово'; }
 function badge(id, ok, text){ const el=$(id); el.className='pill '+(ok?'ok':'bad'); el.textContent=text; }
@@ -401,7 +439,32 @@ async function loadSettings(){
   $('summaryPrompt').value = state.settings.summary_prompt || '';
   $('moduleApiToken').value = state.settings.module_api_token || '';
   $('openrouterKey').value = '';
+  $('providerAllowFallbacks').checked = ['1','true','yes','on'].includes(String(state.settings.provider_allow_fallbacks||'').toLowerCase());
+  $('providerDataCollection').value = state.settings.provider_data_collection || 'allow';
+  $('providerMaxPrompt').value = state.settings.provider_max_prompt_per_m || '0.5';
+  $('providerMaxCompletion').value = state.settings.provider_max_completion_per_m || '1';
+  renderProviders();
   if(state.me && !$('testPlatform').value.trim()) $('testPlatform').value = state.me.username || '';
+}
+async function loadProviderOptions(){
+  const data = await api('/provider-options');
+  state.providerOptions = data.items || [];
+  renderProviders(data.enabled_tags || null);
+}
+function renderProviders(forcedEnabled=null){
+  const enabled = new Set(forcedEnabled || parseTags(state.settings.provider_enabled_tags || '["deepseek"]'));
+  const rows = (state.providerOptions || []).map(p=>{
+    const checked = enabled.has(p.tag) ? 'checked' : '';
+    return `<tr>
+      <td><input class="provider-check" type="checkbox" value="${esc(p.tag)}" ${checked} /></td>
+      <td><div class="provider-name"><strong>${esc(p.name)}</strong><span>${esc(p.tag)}</span></div></td>
+      <td>${fmtPrice(p.prompt_per_m)}</td>
+      <td>${fmtPrice(p.completion_per_m)}</td>
+      <td>${fmtPrice(p.cache_per_m)}</td>
+      <td class="muted">${esc(p.note || '')}</td>
+    </tr>`;
+  }).join('');
+  $('providerBody').innerHTML = rows || '<tr><td colspan="6" class="muted">Провайдеры не загружены</td></tr>';
 }
 async function saveSettings(){
   const body = {
@@ -409,11 +472,17 @@ async function saveSettings(){
     summary_model:$('summaryModel').value,
     request_timeout:Number($('requestTimeout').value||90),
     history_limit:Number($('historyLimit').value||80),
-    summary_prompt:$('summaryPrompt').value
+    summary_prompt:$('summaryPrompt').value,
+    provider_enabled_tags:selectedProviderTags(),
+    provider_allow_fallbacks:$('providerAllowFallbacks').checked,
+    provider_data_collection:$('providerDataCollection').value || 'deny',
+    provider_max_prompt_per_m:Number($('providerMaxPrompt').value||0.5),
+    provider_max_completion_per_m:Number($('providerMaxCompletion').value||1)
   };
   if($('openrouterKey').value.trim()) body.openrouter_api_key = $('openrouterKey').value.trim();
   await api('/settings', jsonPost('PUT', body));
   await loadSettings();
+  await loadProviderOptions();
   await loadPrompts();
   await loadEnv();
   setMsg('Настройки сохранены','ok');
@@ -708,6 +777,7 @@ $('savePromptText').addEventListener('click', ()=>savePromptText().catch(e=>setM
     installAntiAutofill($('testConversation'));
     await loadMe();
     await loadSettings();
+    await loadProviderOptions();
     await loadModels();
     await loadPrompts();
     await loadUsers();

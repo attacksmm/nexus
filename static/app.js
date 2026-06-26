@@ -22,8 +22,23 @@ window.notify = notify;
 let activeModuleId = null;
 let modulesCache = {};
 let sortOrder = [];  // localStorage порядок
+let globalBusyCount = 0;
 
 const $ = id => document.getElementById(id);
+
+function setGlobalBusy(on, text = "Загрузка") {
+  globalBusyCount = Math.max(0, globalBusyCount + (on ? 1 : -1));
+  const el = $("globalBusy");
+  if (!el) return;
+  $("globalBusyText").textContent = text;
+  el.hidden = globalBusyCount === 0;
+}
+
+async function withGlobalBusy(promise, text = "Загрузка") {
+  setGlobalBusy(true, text);
+  try { return await promise; }
+  finally { setGlobalBusy(false, text); }
+}
 
 // ── LocalStorage order ────────────────────────────────────────────────────────
 
@@ -121,7 +136,7 @@ function renderModules(list) {
 }
 
 async function refreshModules() {
-  const res = await fetch(RP + "/api/modules");
+  const res = await withGlobalBusy(fetch(RP + "/api/modules"), "Обновление модулей");
   if (!res.ok) return;
   renderModules(await res.json());
   if (activeModuleId && modulesCache[activeModuleId]) updateToolbar(modulesCache[activeModuleId]);
@@ -206,7 +221,7 @@ async function checkModuleEnv(m) {
       : Object.keys(envVars).filter(Boolean);
     if (!keys.length) return;
 
-    const res = await fetch(`${RP}/api/env/check?keys=${keys.join(",")}`);
+    const res = await withGlobalBusy(fetch(`${RP}/api/env/check?keys=${keys.join(",")}`), "Проверка ENV");
     if (!res.ok) return;
     const status = await res.json();
 
@@ -223,6 +238,7 @@ function updateToolbar(m) {
   $("mtVersion").textContent = "v" + m.version;
   $("mtStatus").textContent = statusLabel(m.status);
   $("mtStatus").className = "module-toolbar__status module-toolbar__status--" + m.status;
+  $("mtModuleSettings").hidden = m.id !== "customer-db" || m.status !== "active";
   $("mtPause").hidden  = m.status !== "active";
   $("mtResume").hidden = m.status !== "paused";
 }
@@ -234,7 +250,11 @@ function statusLabel(s) { return STATUS_LABELS[s] || s; }
 
 async function moduleAction(action) {
   if (!activeModuleId) return;
-  const res = await fetch(`${RP}/api/modules/${activeModuleId}/${action}`, { method: "POST" });
+  const labels = {pause: "Пауза модуля", resume: "Запуск модуля", unload: "Выгрузка модуля"};
+  const res = await withGlobalBusy(
+    fetch(`${RP}/api/modules/${activeModuleId}/${action}`, { method: "POST" }),
+    labels[action] || "Операция"
+  );
   if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || "Ошибка"); return; }
   if (action === "unload") {
     history.pushState({}, "", RP + "/");
@@ -254,6 +274,52 @@ $("mtUnload").addEventListener("click", () => {
   if (confirm(`Выгрузить модуль «${modulesCache[activeModuleId]?.name}»? Файлы будут удалены.`))
     moduleAction("unload");
 });
+$("mtModuleSettings").addEventListener("click", openModuleSettings);
+
+async function openModuleSettings() {
+  if (activeModuleId !== "customer-db") return;
+  $("moduleSettingsTitle").textContent = "База клиентов";
+  const body = $("moduleSettingsBody");
+  body.innerHTML = '<p class="status-line">Загрузка...</p>';
+  $("moduleSettingsOverlay").hidden = false;
+
+  const res = await withGlobalBusy(fetch(`${RP}/customer-db/api/settings/token`), "Загрузка настроек");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    body.innerHTML = `<p class="status-line status-line--err">${esc(err.detail || err.error || "Не удалось загрузить настройки")}</p>`;
+    return;
+  }
+  const data = await res.json();
+  const headersJson = JSON.stringify(data.headers_json || {}, null, 2);
+  body.innerHTML = `
+    <label class="form-label">NEXUS_CUSTOMER_DB_API_TOKEN
+      <input id="customerDbTokenInput" class="form-input token-input" value="${esc(data.token || "")}" readonly />
+    </label>
+    <label class="form-label">Заголовки для Salebot JSON
+      <textarea id="customerDbHeadersInput" class="form-input token-textarea" readonly>${esc(headersJson)}</textarea>
+    </label>
+    <p class="status-line">Источник: ${esc(data.source || "NEXUS_CUSTOMER_DB_API_TOKEN")}${data.generated ? " · создан сейчас" : ""}</p>
+    <div class="dialog__actions">
+      <button id="copyCustomerDbTokenBtn" class="btn btn--sm" type="button">Копировать токен</button>
+      <button id="copyCustomerDbHeadersBtn" class="btn btn--sm btn--primary" type="button">Копировать JSON заголовков</button>
+    </div>`;
+  $("copyCustomerDbTokenBtn").addEventListener("click", () => copyText(data.token || "", "Токен скопирован"));
+  $("copyCustomerDbHeadersBtn").addEventListener("click", () => copyText(headersJson, "JSON заголовков скопирован"));
+}
+
+async function copyText(text, message) {
+  try {
+    await navigator.clipboard.writeText(text);
+    notify(message, "ok");
+  } catch {
+    notify("Не удалось скопировать", "error");
+  }
+}
+
+$("moduleSettingsCloseBtn").addEventListener("click", () => { $("moduleSettingsOverlay").hidden = true; });
+$("moduleSettingsOverlay").addEventListener("click", e => {
+  if (e.target === $("moduleSettingsOverlay")) $("moduleSettingsOverlay").hidden = true;
+});
 
 // ── Docs dialog ───────────────────────────────────────────────────────────────
 
@@ -262,7 +328,7 @@ $("mtDocs").addEventListener("click", async () => {
   const m = modulesCache[activeModuleId];
   $("docsTitle").textContent = m?.name ?? activeModuleId;
 
-  const res = await fetch(`${RP}/${activeModuleId}/panel/docs.html`).catch(() => null);
+  const res = await withGlobalBusy(fetch(`${RP}/${activeModuleId}/panel/docs.html`).catch(() => null), "Загрузка документации");
   const body = $("docsBody");
   if (res?.ok) {
     const html = await res.text();
@@ -319,7 +385,7 @@ $("uploadSubmitBtn").addEventListener("click", async () => {
   const fd = new FormData();
   fd.append("file", selectedFile);
   try {
-    const res = await fetch(RP + "/api/modules/upload", { method: "POST", body: fd });
+    const res = await withGlobalBusy(fetch(RP + "/api/modules/upload", { method: "POST", body: fd }), "Установка модуля");
     const data = await res.json();
     if (!res.ok) {
       $("uploadStatus").textContent = data.error || "Ошибка";
@@ -347,7 +413,7 @@ function esc(s) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 (async () => {
-  const res = await fetch(RP + "/api/modules");
+  const res = await withGlobalBusy(fetch(RP + "/api/modules"), "Загрузка Nexus");
   if (!res.ok) return;
   const list = await res.json();
   renderModules(list);

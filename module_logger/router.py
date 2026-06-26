@@ -1,15 +1,19 @@
 import asyncio
 import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+
+from orchestrator.auth import can_access_module, verify_token_from_request, verify_token_value
 
 router = APIRouter()
 _modules_dir: Path = None
 _log_dir: Path = None   # data/logs/ самого логгера (не используется для чтения)
 SAFE_MODULE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+MODULE_ID = "logger"
 
 
 def setup(ctx):
@@ -22,7 +26,8 @@ def setup(ctx):
 # ── Module list ──────────────────────────────────────────────────────────────
 
 @router.get("/modules")
-async def list_modules():
+async def list_modules(request: Request):
+    await _require_panel_user(request)
     result = [{"id": "nexus", "name": "Nexus (system)", "size": 0, "has_logs": True}]
     if not _modules_dir:
         return result
@@ -72,10 +77,26 @@ def _valid_module_id(module_id: str) -> bool:
     return bool(module_id and SAFE_MODULE_ID.match(module_id))
 
 
+async def _require_panel_user(request: Request) -> dict:
+    user = await verify_token_from_request(request)
+    if not user or not can_access_module(user, MODULE_ID):
+        raise HTTPException(401, "unauthorized")
+    return user
+
+
+async def _require_ws_user(websocket: WebSocket) -> dict | None:
+    user = await verify_token_value(websocket.cookies.get("nexus_token"))
+    if not user or not can_access_module(user, MODULE_ID):
+        await websocket.close(code=1008)
+        return None
+    return user
+
+
 # ── Read logs ────────────────────────────────────────────────────────────────
 
 @router.get("/logs/nexus")
-async def get_nexus_logs(lines: int = 300):
+async def get_nexus_logs(request: Request, lines: int = 300):
+    await _require_panel_user(request)
     try:
         proc = await asyncio.create_subprocess_exec(
             "journalctl", "-u", "nexus", "-n", str(lines),
@@ -89,7 +110,8 @@ async def get_nexus_logs(lines: int = 300):
 
 
 @router.get("/logs/{module_id}")
-async def get_module_logs(module_id: str, lines: int = 300):
+async def get_module_logs(module_id: str, request: Request, lines: int = 300):
+    await _require_panel_user(request)
     log_file = await _module_log_file(module_id)
     if not log_file:
         return PlainTextResponse("[модуль не найден]", status_code=404)
@@ -103,24 +125,56 @@ async def get_module_logs(module_id: str, lines: int = 300):
 # ── Clear logs ───────────────────────────────────────────────────────────────
 
 @router.delete("/logs/nexus")
-async def clear_nexus_logs():
+async def clear_nexus_logs(request: Request):
+    await _require_panel_user(request)
     return JSONResponse({"error": "Системные логи очищаются через journalctl на сервере"}, status_code=400)
 
 
 @router.delete("/logs/{module_id}")
-async def clear_module_logs(module_id: str):
+async def clear_module_logs(module_id: str, request: Request):
+    await _require_panel_user(request)
     log_file = await _module_log_file(module_id)
     if not log_file:
         return JSONResponse({"error": "модуль не найден"}, status_code=404)
-    if log_file.exists():
-        log_file.write_text("", encoding="utf-8")
-    return {"ok": True}
+    return {
+        "ok": True,
+        "mode": "view-only",
+        "message": "Файл лога не изменен. Очистка окна выполняется в интерфейсе.",
+    }
+
+
+@router.post("/logs/{module_id}/rotate")
+async def rotate_module_logs(module_id: str, request: Request):
+    await _require_panel_user(request)
+    log_file = await _module_log_file(module_id)
+    if not log_file:
+        return JSONResponse({"error": "модуль не найден"}, status_code=404)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_dir = log_file.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive_file = archive_dir / f"{module_id}-{stamp}.log"
+    size = log_file.stat().st_size if log_file.exists() else 0
+    if log_file.exists() and size > 0:
+        archive_file.write_bytes(log_file.read_bytes())
+    else:
+        archive_file.write_text("", encoding="utf-8")
+    log_file.write_text("", encoding="utf-8")
+    return {
+        "ok": True,
+        "module_id": module_id,
+        "archived": archive_file.name,
+        "archive_path": str(archive_file),
+        "size": size,
+    }
 
 
 # ── Download logs ────────────────────────────────────────────────────────────
 
 @router.get("/logs/nexus/download")
-async def download_nexus_logs():
+async def download_nexus_logs(request: Request):
+    await _require_panel_user(request)
     try:
         proc = await asyncio.create_subprocess_exec(
             "journalctl", "-u", "nexus", "--no-pager",
@@ -135,7 +189,8 @@ async def download_nexus_logs():
 
 
 @router.get("/logs/{module_id}/download")
-async def download_module_logs(module_id: str):
+async def download_module_logs(module_id: str, request: Request):
+    await _require_panel_user(request)
     log_file = await _module_log_file(module_id)
     if not log_file:
         return JSONResponse({"error": "модуль не найден"}, status_code=404)
@@ -148,6 +203,8 @@ async def download_module_logs(module_id: str):
 
 @router.websocket("/ws/{module_id}")
 async def ws_tail(websocket: WebSocket, module_id: str):
+    if not await _require_ws_user(websocket):
+        return
     await websocket.accept()
     proc = None
     try:

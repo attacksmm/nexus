@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Подсчет</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080808;--panel:#101010;--panel2:#161616;--line:#2b2b2b;--line2:#454545;--text:#f1f1f1;--muted:#9c9c9c;--soft:#d5d5d5;--ok:#70d98b;--bad:#ff7777;--accent:#fff}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}
+    .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0}
+    .top{height:44px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line);background:#0b0b0b;min-width:0}
+    .brand{font-weight:800}.status{margin-left:auto;color:var(--muted);font-size:12px}.pill{border:1px solid var(--line2);padding:2px 7px;background:#111;color:var(--soft)}
+    .grid{height:100%;min-height:0;display:grid;grid-template-columns:300px minmax(420px,1fr) 420px}
+    .pane{min-height:0;overflow:auto;border-right:1px solid var(--line);background:#0d0d0d}.pane:last-child{border-right:0}
+    .section{padding:12px;border-bottom:1px solid var(--line)}.section h2{margin:0 0 10px;font-size:13px}.sub{color:var(--muted);font-size:12px}
+    label{display:block;color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.08em;margin:0 0 5px}
+    .input,.select,.textarea{width:100%;min-height:31px;border:1px solid var(--line2);background:#070707;color:var(--text);padding:6px 8px;outline:none}.textarea{min-height:74px;resize:vertical}
+    .input:focus,.select:focus,.textarea:focus{border-color:#777}.btn{min-height:31px;border:1px solid var(--line2);background:#151515;color:var(--text);padding:6px 10px}.btn.primary{background:#fff;color:#000;border-color:#fff}.btn.ghost{background:transparent}.btn.danger{background:#251010;border-color:#6b2525;color:#ffc7c7}.btn:disabled{opacity:.45;cursor:default}
+    .actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.list{display:grid;gap:5px}.check{display:flex;align-items:center;gap:8px;padding:6px;border:1px solid var(--line);background:#101010}.check input{margin:0}.check span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.check small{margin-left:auto;color:var(--muted)}
+    .preset{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;padding:7px;border:1px solid var(--line);background:#101010}.preset button{min-height:26px;padding:3px 7px}.preset-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.preset-desc{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .cond{display:grid;grid-template-columns:minmax(130px,1fr) 142px minmax(100px,.8fr) minmax(90px,.6fr) auto;gap:7px;align-items:end;margin-bottom:8px;padding:8px;border:1px solid var(--line);background:#0f0f0f}
+    .empty{color:var(--muted);padding:10px;border:1px dashed var(--line2);text-align:center}.cols{display:flex;gap:6px;flex-wrap:wrap}.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line2);background:#151515;padding:3px 7px}.chip button{border:0;background:transparent;color:#ccc;padding:0;min-height:0}
+    .result-head{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}.metric{border:1px solid var(--line);background:#101010;padding:9px}.metric b{display:block;font-size:20px}.metric span{color:var(--muted);font-size:12px}
+    .breakdown{display:grid;gap:4px;margin-top:8px}.break{display:flex;justify-content:space-between;border-bottom:1px solid #1f1f1f;padding:3px 0;color:var(--soft)}
+    .table-wrap{max-height:42vh;overflow:auto;border:1px solid var(--line);margin-top:10px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}th{position:sticky;top:0;background:#141414;color:var(--muted);z-index:1}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.notice{color:var(--muted);min-height:18px}.ok{color:var(--ok)}.bad{color:var(--bad)}
+    @media(max-width:1100px){.grid{grid-template-columns:1fr}.pane{border-right:0;border-bottom:1px solid var(--line)}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="brand">Подсчет</div>
+    <button id="refreshBtn" class="btn ghost" type="button">↻</button>
+    <span id="topStatus" class="status"></span>
+  </div>
+  <div class="grid">
+    <aside class="pane">
+      <div class="section">
+        <h2>Листы</h2>
+        <div class="actions" style="margin-bottom:8px">
+          <button id="selectAllTables" class="btn ghost" type="button">Выбрать все</button>
+          <button id="clearTables" class="btn ghost" type="button">Снять</button>
+        </div>
+        <div id="tablesList" class="list"></div>
+      </div>
+      <div class="section">
+        <h2>Шаблоны</h2>
+        <div class="actions" style="margin-bottom:8px">
+          <button id="savePresetBtn" class="btn primary" type="button">Сохранить</button>
+          <button id="newPresetBtn" class="btn ghost" type="button">Новый</button>
+        </div>
+        <input id="presetName" class="input" placeholder="Название фильтра" style="margin-bottom:6px">
+        <input id="presetDesc" class="input" placeholder="Описание">
+        <div id="presetsList" class="list" style="margin-top:10px"></div>
+      </div>
+    </aside>
+
+    <main class="pane">
+      <div class="section">
+        <h2>Условия</h2>
+        <div class="actions" style="margin-bottom:10px">
+          <select id="mode" class="select" style="width:120px"><option value="and">AND</option><option value="or">OR</option></select>
+          <button id="addConditionBtn" class="btn" type="button">+ Условие</button>
+          <button id="runBtn" class="btn primary" type="button">Посчитать</button>
+          <button id="exportBtn" class="btn" type="button">Скачать CSV</button>
+        </div>
+        <div id="conditions"></div>
+        <datalist id="fieldsList"></datalist>
+      </div>
+      <div class="section">
+        <h2>CSV колонки</h2>
+        <p class="sub">Базовые колонки всегда входят: table, id, platform_id, created_at, updated_at.</p>
+        <div class="actions" style="margin:8px 0">
+          <input id="columnInput" class="input" list="fieldsList" placeholder="Например: utms.ym_uid" style="max-width:360px">
+          <button id="addColumnBtn" class="btn" type="button">+ Колонка</button>
+          <label class="check" style="padding:5px 8px"><input id="rawJson" type="checkbox"><span>raw_json</span></label>
+        </div>
+        <div id="columns" class="cols"></div>
+      </div>
+    </main>
+
+    <aside class="pane">
+      <div class="section">
+        <h2>Результат</h2>
+        <div class="result-head">
+          <div class="metric"><b id="totalRows">0</b><span>строк</span></div>
+          <div class="metric"><b id="tableRows">0</b><span>листов</span></div>
+          <div class="metric"><b id="shownRows">0</b><span>в предпросмотре</span></div>
+        </div>
+        <div id="breakdown" class="breakdown"></div>
+        <p id="resultStatus" class="notice"></p>
+        <div class="table-wrap"><table><thead id="previewHead"></thead><tbody id="previewBody"></tbody></table></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const modBase = location.pathname.split('/panel/')[0];
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let tables = [];
+let presets = [];
+let selectedPresetId = null;
+let columns = ['contact_fields.name','contact_fields.phone','contact_fields.email','utms.utm_source','utms.ym_uid','utms.yclid'];
+
+const OPS = [
+  ['contains','содержит'], ['not_contains','не содержит'], ['eq','равно'], ['neq','не равно'],
+  ['empty','пусто'], ['not_empty','не пусто'], ['starts','начинается с'], ['ends','заканчивается на'],
+  ['gt','больше'], ['lt','меньше'], ['between','между'], ['in','in list']
+];
+
+async function fetchJson(url, opts){
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+function selectedTables(){
+  return [...document.querySelectorAll('.table-check:checked')].map(input => input.value);
+}
+
+function conditionRows(){
+  return [...document.querySelectorAll('.cond')].map(row => ({
+    field: row.querySelector('.cond-field').value.trim(),
+    op: row.querySelector('.cond-op').value,
+    value: row.querySelector('.cond-value').value,
+    value2: row.querySelector('.cond-value2').value
+  })).filter(c => c.field);
+}
+
+function payload(limit=100){
+  return {
+    tables: selectedTables(),
+    mode: $('mode').value,
+    conditions: conditionRows(),
+    columns,
+    raw_json: $('rawJson').checked,
+    limit,
+    offset: 0
+  };
+}
+
+function renderTables(){
+  $('tablesList').innerHTML = tables.map(t => `<label class="check" title="${esc(t.name)}">
+    <input class="table-check" type="checkbox" value="${esc(t.name)}" checked>
+    <span>${esc(t.display_name || t.name)}</span><small>${Number(t.count||0).toLocaleString('ru-RU')}</small>
+  </label>`).join('') || '<div class="empty">Листы не найдены</div>';
+  document.querySelectorAll('.table-check').forEach(input => input.addEventListener('change', loadFields));
+}
+
+function renderConditions(){
+  if (!$('conditions').children.length) addCondition('utms.ym_uid', 'not_empty', '');
+}
+
+function addCondition(field='', op='contains', value='', value2=''){
+  const div = document.createElement('div');
+  div.className = 'cond';
+  div.innerHTML = `
+    <div><label>Поле</label><input class="input cond-field" list="fieldsList" value="${esc(field)}" placeholder="utms.ym_uid"></div>
+    <div><label>Оператор</label><select class="select cond-op">${OPS.map(([v,l]) => `<option value="${v}" ${v===op?'selected':''}>${l}</option>`).join('')}</select></div>
+    <div><label>Значение</label><input class="input cond-value" value="${esc(value)}"></div>
+    <div><label>Значение 2</label><input class="input cond-value2" value="${esc(value2)}"></div>
+    <button class="btn danger" type="button">×</button>`;
+  div.querySelector('button').addEventListener('click', () => div.remove());
+  $('conditions').appendChild(div);
+}
+
+function renderColumns(){
+  $('columns').innerHTML = columns.map(col => `<span class="chip mono">${esc(col)}<button type="button" data-col="${esc(col)}">×</button></span>`).join('') || '<span class="sub">Дополнительные колонки не выбраны</span>';
+  $('columns').querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => {
+    columns = columns.filter(c => c !== btn.dataset.col);
+    renderColumns();
+  }));
+}
+
+function renderPresets(){
+  $('presetsList').innerHTML = presets.map(p => `<div class="preset">
+    <div><div class="preset-title">${esc(p.name)}</div><div class="preset-desc">${esc(p.description || '')}</div></div>
+    <div class="actions"><button class="btn" data-load="${p.id}" type="button">Открыть</button><button class="btn danger" data-del="${p.id}" type="button">×</button></div>
+  </div>`).join('') || '<div class="empty">Шаблонов нет</div>';
+  $('presetsList').querySelectorAll('[data-load]').forEach(btn => btn.addEventListener('click', () => loadPreset(Number(btn.dataset.load))));
+  $('presetsList').querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', () => deletePreset(Number(btn.dataset.del))));
+}
+
+async function loadTables(){
+  const data = await fetchJson(API + '/tables');
+  tables = data.items || [];
+  renderTables();
+  $('topStatus').textContent = `${tables.length} листов · ${tables.reduce((s,t)=>s+Number(t.count||0),0).toLocaleString('ru-RU')} строк`;
+}
+
+async function loadFields(){
+  const qs = selectedTables().join(',');
+  const data = await fetchJson(API + '/fields?tables=' + encodeURIComponent(qs));
+  $('fieldsList').innerHTML = (data.items || []).map(item => `<option value="${esc(item.name)}"></option>`).join('');
+}
+
+async function loadPresets(){
+  const data = await fetchJson(API + '/presets');
+  presets = data.items || [];
+  renderPresets();
+}
+
+function loadPreset(id){
+  const p = presets.find(x => Number(x.id) === Number(id));
+  if (!p) return;
+  selectedPresetId = p.id;
+  $('presetName').value = p.name || '';
+  $('presetDesc').value = p.description || '';
+  const q = p.payload || {};
+  $('mode').value = q.mode || 'and';
+  document.querySelectorAll('.table-check').forEach(input => input.checked = (q.tables || []).includes(input.value));
+  $('conditions').innerHTML = '';
+  (q.conditions || []).forEach(c => addCondition(c.field, c.op, c.value, c.value2));
+  columns = q.columns || [];
+  $('rawJson').checked = !!q.raw_json;
+  renderColumns();
+  loadFields();
+}
+
+async function savePreset(){
+  const name = $('presetName').value.trim();
+  if (!name) { $('resultStatus').textContent = 'Введите название шаблона'; return; }
+  const body = {name, description:$('presetDesc').value.trim(), payload:payload(100)};
+  const url = selectedPresetId ? `${API}/presets/${selectedPresetId}` : `${API}/presets`;
+  const method = selectedPresetId ? 'PUT' : 'POST';
+  const res = await fetchJson(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (!selectedPresetId && res.id) selectedPresetId = res.id;
+  await loadPresets();
+  $('resultStatus').textContent = 'Шаблон сохранен';
+}
+
+async function deletePreset(id){
+  await fetchJson(`${API}/presets/${id}`, {method:'DELETE'});
+  if (selectedPresetId === id) selectedPresetId = null;
+  await loadPresets();
+}
+
+function resetPreset(){
+  selectedPresetId = null;
+  $('presetName').value = '';
+  $('presetDesc').value = '';
+}
+
+function renderResult(data){
+  $('totalRows').textContent = Number(data.total || 0).toLocaleString('ru-RU');
+  $('tableRows').textContent = Object.keys(data.per_table || {}).length;
+  $('shownRows').textContent = (data.items || []).length;
+  $('breakdown').innerHTML = Object.entries(data.per_table || {}).map(([k,v]) => `<div class="break"><span>${esc(k)}</span><b>${Number(v).toLocaleString('ru-RU')}</b></div>`).join('');
+  const rows = data.items || [];
+  const headers = rows.length ? Object.keys(rows[0]) : ['table','id','platform_id'];
+  $('previewHead').innerHTML = `<tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr>`;
+  $('previewBody').innerHTML = rows.map(row => `<tr>${headers.map(h => `<td title="${esc(row[h])}">${esc(row[h])}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="3" class="sub">Нет строк</td></tr>';
+}
+
+async function runQuery(){
+  $('resultStatus').textContent = 'Считаю...';
+  const data = await fetchJson(API + '/query', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload(100))});
+  renderResult(data);
+  $('resultStatus').textContent = 'Готово';
+}
+
+async function exportCsv(){
+  $('resultStatus').textContent = 'Готовлю CSV...';
+  const res = await fetch(API + '/export.csv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload(0))});
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'counter-export.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  $('resultStatus').textContent = 'CSV скачан';
+}
+
+$('selectAllTables').addEventListener('click', () => { document.querySelectorAll('.table-check').forEach(i => i.checked = true); loadFields(); });
+$('clearTables').addEventListener('click', () => { document.querySelectorAll('.table-check').forEach(i => i.checked = false); loadFields(); });
+$('addConditionBtn').addEventListener('click', () => addCondition());
+$('addColumnBtn').addEventListener('click', () => {
+  const value = $('columnInput').value.trim();
+  if (value && !columns.includes(value)) columns.push(value);
+  $('columnInput').value = '';
+  renderColumns();
+});
+$('runBtn').addEventListener('click', () => runQuery().catch(e => $('resultStatus').textContent = e.message));
+$('exportBtn').addEventListener('click', () => exportCsv().catch(e => $('resultStatus').textContent = e.message));
+$('savePresetBtn').addEventListener('click', () => savePreset().catch(e => $('resultStatus').textContent = e.message));
+$('newPresetBtn').addEventListener('click', resetPreset);
+$('refreshBtn').addEventListener('click', async () => { await loadTables(); await loadFields(); await loadPresets(); });
+
+(async function init(){
+  await loadTables();
+  await loadFields();
+  await loadPresets();
+  renderConditions();
+  renderColumns();
+  await runQuery();
+})();
+</script>
+</body>
+</html>

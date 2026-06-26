@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bizon365</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--text-muted:#bababa;--text-subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent-bg:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);}
+    button,input,textarea{font:inherit;}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
+    ::-webkit-scrollbar{width:8px;height:8px;}
+    ::-webkit-scrollbar-track{background:#080808;}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+
+    .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;}
+    .toolbar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel);}
+    .toolbar__title{font-weight:600;font-size:.92rem;margin-right:4px;}
+    .toolbar__meta{color:var(--text-subtle);font-size:.78rem;margin-right:auto;}
+    .actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;padding:4px 10px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);cursor:pointer;white-space:nowrap;font-size:.8rem;}
+    .btn:hover{background:var(--panel-soft);}
+    .btn:disabled{opacity:.35;cursor:default;}
+    .btn--primary{background:var(--accent-bg);border-color:var(--accent-bg);color:var(--accent-text);}
+    .btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad);}
+    .btn--ghost{background:transparent;border-color:var(--border);color:var(--text-muted);}
+    .tabs{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid var(--border);background:#090909;}
+    .tab{height:30px;padding:0 12px;border:1px solid var(--border);background:transparent;color:var(--text-subtle);cursor:pointer;font-size:.82rem;}
+    .tab:hover{color:var(--text-muted);border-color:var(--border-mid);}
+    .tab--active{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-bg);}
+
+    .body{min-height:0;overflow:auto;display:grid;grid-template-columns:minmax(360px,520px) minmax(420px,1fr);gap:12px;padding:12px;}
+    .body[hidden]{display:none;}
+    .section{display:grid;gap:10px;align-content:start;}
+    .panel{border:1px solid var(--border);background:var(--panel);}
+    .panel__head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;padding:8px 10px;border-bottom:1px solid var(--border);}
+    .panel__title{font-weight:600;font-size:.84rem;}
+    .panel__body{padding:10px;display:grid;gap:10px;}
+
+    .status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+    .metric{border:1px solid var(--border);background:#090909;padding:8px;min-height:58px;}
+    .metric__label{color:var(--text-subtle);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;}
+    .metric__value{font-size:.86rem;overflow-wrap:anywhere;}
+    .badge{display:inline-flex;align-items:center;min-height:20px;padding:1px 7px;border:1px solid var(--border-mid);color:var(--text-muted);background:#090909;font-size:.74rem;}
+    .badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg);}
+    .badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg);}
+    .badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg);}
+
+    .form{display:grid;gap:9px;}
+    .field{display:grid;gap:5px;min-width:0;}
+    .field label{font-size:.72rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.08em;}
+    .input,.textarea{width:100%;border:1px solid var(--border-strong);background:#090909;color:var(--text);padding:7px 9px;min-height:32px;}
+    .textarea{min-height:120px;resize:vertical;font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;line-height:1.45;}
+    .form-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+    .hint{margin:0;color:var(--text-subtle);font-size:.77rem;line-height:1.45;}
+    .log-tabs{display:flex;gap:6px;align-items:center;}
+    .log{height:calc(100vh - 262px);min-height:360px;margin:0;padding:10px;border:1px solid var(--border);background:#030303;color:var(--text-muted);font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.76rem;line-height:1.45;white-space:pre-wrap;overflow:auto;}
+    .script-list{display:grid;gap:0;border:1px solid var(--border);background:#080808;}
+    .script-row{display:grid;grid-template-columns:minmax(260px,420px) minmax(360px,1fr);gap:12px;padding:12px;border-bottom:1px solid var(--border);}
+    .script-row:last-child{border-bottom:0;}
+    .script-meta{display:grid;gap:10px;align-content:start;min-width:0;}
+    .script-title{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;min-width:0;}
+    .script-room{font-weight:600;overflow-wrap:anywhere;}
+    .script-note{color:var(--text-subtle);font-size:.76rem;line-height:1.35;}
+    .script-fields{display:grid;grid-template-columns:1fr;gap:8px;min-width:0;}
+    .script-flags{display:flex;gap:12px;flex-wrap:wrap;}
+    .script-snippet{display:grid;grid-template-rows:auto minmax(150px,1fr);gap:8px;min-width:0;}
+    .script-snippet__head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+    .snippet{width:100%;height:100%;min-height:150px;margin:0;padding:8px;border:1px solid var(--border);background:#030303;color:var(--text-muted);font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.72rem;line-height:1.42;white-space:pre-wrap;overflow:auto;}
+    .checkline{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:.78rem;}
+    .statusbar{display:flex;align-items:center;gap:10px;height:28px;padding:0 10px;border-top:1px solid var(--border);background:var(--panel);color:var(--text-subtle);font-size:.76rem;}
+    .statusbar__msg{margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+    @media (max-width:980px){
+      html,body{overflow:auto;}
+      .shell{height:auto;min-height:100vh;overflow:visible;}
+      .body{grid-template-columns:1fr;overflow:visible;}
+      .log{height:420px;}
+      .toolbar{align-items:flex-start;flex-wrap:wrap;}
+      .toolbar__meta{margin-right:0;flex:1 1 220px;}
+      .actions{width:100%;justify-content:flex-start;}
+      .script-row{grid-template-columns:1fr;}
+    }
+    @media (max-width:560px){
+      .body{padding:8px;}
+      .status-grid,.form-row{grid-template-columns:1fr;}
+      .btn{padding-inline:8px;}
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="toolbar">
+    <div class="toolbar__title">Bizon365</div>
+    <div id="toolbarMeta" class="toolbar__meta">загрузка</div>
+    <div class="actions">
+      <button id="refreshBtn" class="btn btn--ghost" type="button">↻</button>
+      <button id="installBtn" class="btn" type="button">Установить зависимости</button>
+      <button id="startBtn" class="btn btn--primary" type="button">Запустить</button>
+      <button id="stopBtn" class="btn btn--danger" type="button">Остановить</button>
+      <button id="restartBtn" class="btn" type="button">Рестарт</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab tab--active" data-view="runner" type="button">Runner</button>
+    <button class="tab" data-view="scripts" type="button">Скрипты</button>
+  </div>
+
+  <div id="runnerView" class="body">
+    <div class="section">
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title">Состояние</div>
+          <span id="runBadge" class="badge">...</span>
+        </div>
+        <div class="panel__body">
+          <div class="status-grid">
+            <div class="metric">
+              <div class="metric__label">Процесс</div>
+              <div id="processValue" class="metric__value">...</div>
+            </div>
+            <div class="metric">
+              <div class="metric__label">Зависимости</div>
+              <div id="depsValue" class="metric__value">...</div>
+            </div>
+            <div class="metric">
+              <div class="metric__label">Комнаты</div>
+              <div id="roomsValue" class="metric__value">...</div>
+            </div>
+            <div class="metric">
+              <div class="metric__label">Доступы</div>
+              <div id="secretsValue" class="metric__value">...</div>
+            </div>
+          </div>
+          <p id="statusHint" class="hint"></p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title">Настройки</div>
+          <button id="saveBtn" class="btn btn--primary" type="button">Сохранить</button>
+        </div>
+        <div class="panel__body">
+          <form id="settingsForm" class="form">
+            <div class="field">
+              <label>Base URL</label>
+              <input id="baseUrl" class="input" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>Sec key</label>
+              <input id="secKey" class="input" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>Комнаты</label>
+              <textarea id="rooms" class="textarea" spellcheck="false"></textarea>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label>Bizon365 логин</label>
+                <input id="login" class="input" autocomplete="username" />
+              </div>
+              <div class="field">
+                <label>Bizon365 пароль</label>
+                <input id="password" class="input" type="password" autocomplete="new-password" placeholder="не менять" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="field">
+                <label>Плановый рестарт</label>
+                <input id="scheduledRestartTime" class="input" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>Порог тишины, минут</label>
+                <input id="silenceThresholdMinutes" class="input" type="number" min="1" max="120" />
+              </div>
+            </div>
+            <div class="field">
+              <label>Окна тишины</label>
+              <textarea id="silenceWindows" class="textarea" spellcheck="false" style="min-height:72px"></textarea>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title">Логи</div>
+          <div class="log-tabs">
+            <button id="moduleLogBtn" class="btn btn--ghost" type="button">Runner</button>
+            <button id="depsLogBtn" class="btn btn--ghost" type="button">Deps</button>
+          </div>
+        </div>
+        <div class="panel__body">
+          <pre id="logBox" class="log"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="scriptsView" class="body" hidden style="grid-template-columns:1fr">
+    <div class="section">
+      <div class="panel">
+        <div class="panel__head">
+          <div class="panel__title">Скрипты комнат</div>
+          <div class="log-tabs">
+            <button id="refreshScriptsBtn" class="btn btn--ghost" type="button">↻</button>
+            <button id="saveScriptsBtn" class="btn btn--primary" type="button">Сохранить</button>
+          </div>
+        </div>
+        <div class="panel__body">
+          <p id="scriptsHint" class="hint"></p>
+          <div id="scriptsTable" class="script-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="footerLeft">Bizon365</span>
+    <span id="footerMsg" class="statusbar__msg"></span>
+  </div>
+</div>
+
+<script>
+const API = '../api';
+const state = {
+  status: null,
+  logKind: 'module',
+  busy: false,
+  view: 'runner',
+  scriptRooms: [],
+};
+
+const el = (id) => document.getElementById(id);
+
+function setFooter(message, tone = '') {
+  el('footerMsg').textContent = message || '';
+  el('footerMsg').style.color = tone === 'bad' ? 'var(--bad)' : tone === 'ok' ? 'var(--ok)' : 'var(--text-subtle)';
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  ['installBtn','startBtn','stopBtn','restartBtn','saveBtn','refreshBtn','saveScriptsBtn','refreshScriptsBtn'].forEach((id) => {
+    el(id).disabled = busy;
+  });
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(`${API}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const data = await res.json();
+      message = data.detail || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+  return res;
+}
+
+function badge(text, cls) {
+  return `<span class="badge ${cls || ''}">${text}</span>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
+
+function setView(view) {
+  state.view = view;
+  el('runnerView').hidden = view !== 'runner';
+  el('scriptsView').hidden = view !== 'scripts';
+  document.querySelectorAll('.tab').forEach((tab) => {
+    tab.classList.toggle('tab--active', tab.dataset.view === view);
+  });
+  if (view === 'scripts') {
+    loadScripts().catch((err) => setFooter(err.message, 'bad'));
+  }
+}
+
+function renderStatus(data) {
+  state.status = data;
+  const proc = data.process || {};
+  const deps = data.deps || {};
+  const s = data.settings || {};
+  const running = Boolean(proc.running);
+
+  el('runBadge').textContent = running ? 'работает' : 'остановлен';
+  el('runBadge').className = `badge ${running ? 'badge--ok' : 'badge--bad'}`;
+  el('toolbarMeta').textContent = running && proc.pid ? `pid ${proc.pid}` : 'процесс не запущен';
+  el('processValue').innerHTML = running
+    ? `${badge('running','badge--ok')}<br>pid ${proc.pid || ''}<br>${proc.started_at || ''}`
+    : `${badge('stopped','badge--bad')}`;
+  el('depsValue').innerHTML = deps.install_running
+    ? `${badge('installing','badge--warn')} pid ${deps.install_pid || ''}`
+    : `${badge(deps.ready ? 'python ok' : 'python missing', deps.ready ? 'badge--ok' : 'badge--bad')} ${badge(deps.browser_ready ? 'chromium ok' : deps.browser_cache_ready ? 'system deps missing' : 'chromium missing', deps.browser_ready ? 'badge--ok' : 'badge--warn')}`;
+  el('roomsValue').textContent = `${(s.rooms || []).length} активных`;
+  el('secretsValue').innerHTML = `${badge(s.has_login ? 'login' : 'no login', s.has_login ? 'badge--ok' : 'badge--bad')} ${badge(s.has_password ? 'password' : 'no password', s.has_password ? 'badge--ok' : 'badge--bad')}`;
+
+  const hints = [];
+  if (!deps.ready || !deps.browser_ready) hints.push('Зависимости runner-а ставятся отдельно и не меняют окружение Nexus.');
+  if ((deps.missing_browser_libraries || []).length) hints.push(`Не хватает системных библиотек Chromium: ${deps.missing_browser_libraries.join('; ')}`);
+  if (!s.has_login || !s.has_password) hints.push('Для запуска нужны логин и пароль Bizon365 в настройках или env.');
+  el('statusHint').textContent = hints.join(' ');
+  el('footerLeft').textContent = `${(s.rooms || []).length} комнат`;
+
+  el('startBtn').disabled = state.busy || running || !deps.ready || !s.has_login || !s.has_password;
+  el('stopBtn').disabled = state.busy || !running;
+  el('restartBtn').disabled = state.busy || !deps.ready || !s.has_login || !s.has_password;
+}
+
+function renderScripts(data) {
+  state.scriptRooms = data.rooms || [];
+  const urls = data.urls || {};
+  el('scriptsHint').textContent = `JS: ${urls.script_src || ''}`;
+  el('scriptsTable').innerHTML = state.scriptRooms.map((room, idx) => `
+    <section class="script-row" data-idx="${idx}">
+      <div class="script-meta">
+        <div class="script-title">
+          <div>
+            <div class="script-room">${escapeHtml(room.room)}</div>
+            <div class="script-note">Модель берётся из OpenRouter для выбранного prompt-файла.</div>
+          </div>
+        </div>
+        <div class="script-flags">
+          <label class="checkline"><input data-field="enabled" type="checkbox" ${room.enabled ? 'checked' : ''}> активен</label>
+          <label class="checkline"><input data-field="individual_chat" type="checkbox" ${room.individual_chat ? 'checked' : ''}> личный ответ</label>
+        </div>
+        <div class="script-fields">
+          <div class="field">
+            <label>Название</label>
+            <input class="input" data-field="title" value="${escapeHtml(room.title || '')}">
+          </div>
+          <div class="field">
+            <label>Prompt</label>
+            <input class="input" data-field="prompt_path" value="${escapeHtml(room.prompt_path || '')}">
+          </div>
+          <div class="field">
+            <label>Prompt после кнопки</label>
+            <input class="input" data-field="alt_prompt_path" value="${escapeHtml(room.alt_prompt_path || '')}">
+          </div>
+          <div class="field">
+            <label>Context</label>
+            <input class="input" data-field="context" type="number" min="0" max="4" step="1" value="${escapeHtml(String(room.context ?? 4))}">
+          </div>
+        </div>
+      </div>
+      <div class="script-snippet">
+        <div class="script-snippet__head">
+          <div class="script-note">HTML для вставки в Bizon365</div>
+          <button class="btn btn--ghost" data-copy="${idx}" type="button">Копировать</button>
+        </div>
+        <pre class="snippet" id="snippet${idx}">${escapeHtml(room.snippet || '')}</pre>
+      </div>
+    </section>
+  `).join('');
+}
+
+function scriptsPayload() {
+  const rooms = [];
+  document.querySelectorAll('#scriptsTable [data-idx]').forEach((row) => {
+    const idx = Number(row.dataset.idx);
+    const original = state.scriptRooms[idx] || {};
+    const item = { ...original, room: original.room };
+    row.querySelectorAll('[data-field]').forEach((input) => {
+      const field = input.dataset.field;
+      item[field] = input.type === 'checkbox' ? input.checked : input.value;
+    });
+    rooms.push(item);
+  });
+  return {rooms};
+}
+
+async function loadScripts() {
+  const res = await api('/scripts/rooms');
+  const data = await res.json();
+  renderScripts(data);
+  return data;
+}
+
+async function saveScripts() {
+  try {
+    setBusy(true);
+    const res = await api('/scripts/rooms', {method: 'PUT', body: JSON.stringify(scriptsPayload())});
+    renderScripts(await res.json());
+    setFooter('Скрипты сохранены', 'ok');
+  } catch (err) {
+    setFooter(err.message, 'bad');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function copySnippet(idx) {
+  const text = el(`snippet${idx}`)?.textContent || '';
+  if (!text) return;
+  await navigator.clipboard.writeText(text);
+  setFooter('Скрипт скопирован', 'ok');
+}
+
+function fillForm(s) {
+  el('baseUrl').value = s.base_url || '';
+  el('secKey').value = s.sec_key || '';
+  el('rooms').value = s.rooms_text || '';
+  el('login').value = '';
+  el('password').value = '';
+  el('scheduledRestartTime').value = s.scheduled_restart_time || '03:30';
+  el('silenceThresholdMinutes').value = s.silence_threshold_minutes || 10;
+  el('silenceWindows').value = s.silence_windows_text || '';
+  el('login').placeholder = s.has_login ? 'настроен, не менять' : '';
+  el('password').placeholder = s.has_password ? 'настроен, не менять' : '';
+}
+
+function formPayload() {
+  return {
+    base_url: el('baseUrl').value,
+    sec_key: el('secKey').value,
+    rooms: el('rooms').value,
+    login: el('login').value,
+    password: el('password').value,
+    scheduled_restart_time: el('scheduledRestartTime').value,
+    silence_threshold_minutes: Number(el('silenceThresholdMinutes').value || 10),
+    silence_windows: el('silenceWindows').value,
+  };
+}
+
+async function loadStatus({fill = false} = {}) {
+  const res = await api('/status');
+  const data = await res.json();
+  renderStatus(data);
+  if (fill) fillForm(data.settings || {});
+  return data;
+}
+
+async function loadLogs() {
+  const path = state.logKind === 'deps' ? '/deps/logs?lines=260' : '/logs?lines=260';
+  const res = await api(path, {headers: {}});
+  el('logBox').textContent = await res.text();
+  el('logBox').scrollTop = el('logBox').scrollHeight;
+}
+
+async function command(path, success) {
+  try {
+    setBusy(true);
+    await api(path, {method: 'POST'});
+    setFooter(success, 'ok');
+  } catch (err) {
+    setFooter(err.message, 'bad');
+  } finally {
+    setBusy(false);
+    await refresh();
+  }
+}
+
+async function saveSettings() {
+  try {
+    setBusy(true);
+    const res = await api('/settings', {method: 'POST', body: JSON.stringify(formPayload())});
+    const settings = await res.json();
+    fillForm(settings);
+    setFooter('Настройки сохранены', 'ok');
+  } catch (err) {
+    setFooter(err.message, 'bad');
+  } finally {
+    setBusy(false);
+    await refresh();
+  }
+}
+
+async function refresh({fill = false} = {}) {
+  try {
+    await loadStatus({fill});
+    await loadLogs();
+    if (state.view === 'scripts') await loadScripts();
+    if (!state.busy) setFooter(`Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
+  } catch (err) {
+    setFooter(err.message, 'bad');
+  }
+}
+
+el('refreshBtn').addEventListener('click', () => refresh());
+el('installBtn').addEventListener('click', () => command('/deps/install', 'Установка зависимостей запущена'));
+el('startBtn').addEventListener('click', () => command('/start', 'Runner запущен'));
+el('stopBtn').addEventListener('click', () => command('/stop', 'Runner остановлен'));
+el('restartBtn').addEventListener('click', () => command('/restart', 'Runner перезапущен'));
+el('saveBtn').addEventListener('click', saveSettings);
+el('saveScriptsBtn').addEventListener('click', saveScripts);
+el('refreshScriptsBtn').addEventListener('click', () => loadScripts().catch((err) => setFooter(err.message, 'bad')));
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => setView(tab.dataset.view));
+});
+el('scriptsTable').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-copy]');
+  if (btn) copySnippet(btn.dataset.copy).catch((err) => setFooter(err.message, 'bad'));
+});
+el('moduleLogBtn').addEventListener('click', () => {
+  state.logKind = 'module';
+  loadLogs().catch((err) => setFooter(err.message, 'bad'));
+});
+el('depsLogBtn').addEventListener('click', () => {
+  state.logKind = 'deps';
+  loadLogs().catch((err) => setFooter(err.message, 'bad'));
+});
+
+refresh({fill: true});
+setInterval(() => refresh(), 5000);
+</script>
+</body>
+</html>
