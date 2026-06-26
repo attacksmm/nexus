@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GetCourse -> amoCRM docs</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0d10;--panel:#11151b;--line:#26303b;--muted:#91a0af;--text:#edf2f7}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;padding:18px;max-width:980px}
+    *::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:#0a0d11}*::-webkit-scrollbar-thumb{background:#303a45;border-radius:8px;border:2px solid #0a0d11}*{scrollbar-color:#303a45 #0a0d11}
+    h1{font-size:24px;margin:0 0 12px}h2{font-size:18px;margin:22px 0 8px}.box,pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}.muted{color:var(--muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <h1>GetCourse -> amoCRM</h1>
+  <p class="muted">Модуль принимает URL процесса GetCourse и создает или обновляет сделку amoCRM по схеме, близкой к Vakas-tools.</p>
+
+  <h2>ENV</h2>
+  <table>
+    <tr><th>Переменная</th><th>Назначение</th></tr>
+    <tr><td><code>AMO_BASE_URL</code></td><td>Аккаунт amoCRM, например <code>https://sobakovodpro.amocrm.ru</code>.</td></tr>
+    <tr><td><code>AMO_ACCESS_TOKEN</code></td><td>Токен с доступом к сделкам, контактам, полям и воронкам.</td></tr>
+    <tr><td><code>GETCOURSE_AMO_WEBHOOK_SECRET</code></td><td>Необязательный внешний секрет. Если не задан, модуль сам создает секрет в SQLite.</td></tr>
+    <tr><td><code>GETCOURSE_AMO_CUSTOMER_DB_PATH</code></td><td>Необязательный путь к БД <code>customer-db</code>. Обычно не нужен: модуль сам находит runtime-БД старого <code>getcourse-orders</code> через <code>customer-db</code>.</td></tr>
+  </table>
+
+  <h2>Что записывается в сделку</h2>
+  <div class="box">
+    <p>Название: <code>ЗАКАЗ №{number} | {object.user.name} | DD.MM.YYYY</code>.</p>
+    <p>Воронка по умолчанию: <code>0. Автооплаты</code>, статус <code>1. ПОПЫТКА АВТООПЛАТЫ</code>, ответственный <code>6269974</code>.</p>
+    <p>Поля сделки: <code>№ ГК</code>, <code>Пользователь в ГК</code>, <code>Ссылка на оплату</code>, <code>Заказ в ГК</code>, <code>Название тарифа</code>, <code>Оплачено</code>, <code>Осталось оплатить</code>, <code>Стоимость тарифа</code>.</p>
+    <p>UTM пишутся в обе группы полей amoCRM: системные tracking-поля <code>UTM_SOURCE/MEDIUM/CAMPAIGN/CONTENT/TERM</code> и текстовые поля <code>utm_source/utm_medium/utm_campaign/utm_content/utm_term</code>. Также записываются <code>yclid</code>, <code>_ym_uid</code>, <code>UTM_YM_UID</code>, <code>YM_CLIENT_ID</code>, если такие поля есть в аккаунте.</p>
+    <p>Теги по умолчанию: <code>GC</code> и <code>Автооплата</code>. Контакт создается с именем, телефоном и email.</p>
+  </div>
+
+  <h2>Связки</h2>
+  <div class="box">
+    <p>Во вкладке <code>Связки</code> отдельно настраиваются процессы <code>created</code>, <code>partial</code> и <code>paid</code>.</p>
+    <p>Для каждой связки задаются воронка, статус, ответственный за сделку, поведение при найденном дубле и задача amoCRM.</p>
+    <p>Кнопка <code>Пауза связок</code> останавливает только обработку связок. Сам модуль и панель остаются активными. При автосинхронизации из <code>getcourse-orders</code> новые строки не помечаются обработанными, пока пауза включена, поэтому после возобновления они уйдут в amoCRM.</p>
+    <p>Поведение при дубле: <code>update</code> обновляет найденную сделку, <code>create</code> всегда создает новую сделку, <code>skip</code> не трогает найденный дубль.</p>
+    <p>Поиск дубля настраивается в каждой связке отдельно. Можно искать среди сделок или среди контактов и выбрать несколько правил: поле amoCRM = значение из заказа GetCourse. Например, для сделок по умолчанию используются <code>№ ГК = number</code> и <code>ГК ID Заказа = order_id</code>; для контактов можно выбрать <code>PHONE = phone</code> или <code>EMAIL = email</code>. Локальная карта уже обработанных заказов проверяется первой.</p>
+    <p>Задача создается через amoCRM <code>POST /api/v4/tasks</code> и привязывается к сделке. В тексте задачи доступны плейсхолдеры <code>{number}</code>, <code>{order_id}</code>, <code>{name}</code>, <code>{phone}</code>, <code>{email}</code>, <code>{payment_link}</code>, <code>{title}</code>, <code>{cost_money}</code>, <code>{left_cost_money}</code>, <code>{payed_money}</code>, <code>{status}</code>.</p>
+  </div>
+
+  <h2>URL GetCourse</h2>
+  <p>Если в GetCourse уже стоят процессы на <code>/nexus/getcourse-orders/api/webhook/created|partial|paid</code>, их можно не менять. Новый модуль автоматически читает таблицу <code>getcourse_orders</code> из <code>customer-db</code>, куда пишет старый модуль, и создает или обновляет сделку amoCRM.</p>
+  <p>При первом запуске существующие старые строки помечаются как уже увиденные без отправки в amoCRM, чтобы не создать исторические дубли. Новые и обновленные строки синхронизируются дальше автоматически.</p>
+  <p>Готовые URL берутся во вкладке Webhook. Для трех процессов GetCourse используйте три отдельных endpoint-а:</p>
+  <pre>Создан заказ:
+https://junior.sobakovod.pro/nexus/getcourse-amocrm/api/webhook/created?secret=...&number={object.number}&id={object.user.id}&order_id={object.id}&positions={object.positions}&costMoney={object.cost_money}&leftCostMoney={object.left_cost_money}&payedMoney={object.payed_money}&status={object.status}&paymentLink={object.payment_link}&firstName={object.user.first_name}&lastName={object.user.last_name}&name={object.user.name}&email={object.user.email}&phone={object.user.phone}&manager_name={object.manager}&manager_email={object.manager_email}&manager_phone={object.manager_phone}&offers={object.offers}&avatarUrl={object.user.avatar_url}&utmS={object.user.create_session.utm_source}&utmM={object.user.create_session.utm_medium}&utmCa={object.user.create_session.utm_campaign}&utmCo={object.user.create_session.utm_content}&utmT={object.user.create_session.utm_term}&user_yclid={object.user.yclid}&user_ym_uid={object.user.ym_uid}&user_source={object.user.source}&user_content={object.user.content}&user_campaign={object.user.campaign}&user_term={object.user.term}&user_medium={object.user.medium}
+
+Частично оплачен:
+https://junior.sobakovod.pro/nexus/getcourse-amocrm/api/webhook/partial?secret=...&number={object.number}&id={object.user.id}&order_id={object.id}&positions={object.positions}&costMoney={object.cost_money}&leftCostMoney={object.left_cost_money}&payedMoney={object.payed_money}&status={object.status}&paymentLink={object.payment_link}&firstName={object.user.first_name}&lastName={object.user.last_name}&name={object.user.name}&email={object.user.email}&phone={object.user.phone}&manager_name={object.manager}&manager_email={object.manager_email}&manager_phone={object.manager_phone}&offers={object.offers}&avatarUrl={object.user.avatar_url}&utmS={object.user.create_session.utm_source}&utmM={object.user.create_session.utm_medium}&utmCa={object.user.create_session.utm_campaign}&utmCo={object.user.create_session.utm_content}&utmT={object.user.create_session.utm_term}&user_yclid={object.user.yclid}&user_ym_uid={object.user.ym_uid}&user_source={object.user.source}&user_content={object.user.content}&user_campaign={object.user.campaign}&user_term={object.user.term}&user_medium={object.user.medium}
+
+Оплачен:
+https://junior.sobakovod.pro/nexus/getcourse-amocrm/api/webhook/paid?secret=...&number={object.number}&id={object.user.id}&order_id={object.id}&positions={object.positions}&costMoney={object.cost_money}&leftCostMoney={object.left_cost_money}&payedMoney={object.payed_money}&status={object.status}&paymentLink={object.payment_link}&firstName={object.user.first_name}&lastName={object.user.last_name}&name={object.user.name}&email={object.user.email}&phone={object.user.phone}&manager_name={object.manager}&manager_email={object.manager_email}&manager_phone={object.manager_phone}&offers={object.offers}&avatarUrl={object.user.avatar_url}&utmS={object.user.create_session.utm_source}&utmM={object.user.create_session.utm_medium}&utmCa={object.user.create_session.utm_campaign}&utmCo={object.user.create_session.utm_content}&utmT={object.user.create_session.utm_term}&user_yclid={object.user.yclid}&user_ym_uid={object.user.ym_uid}&user_source={object.user.source}&user_content={object.user.content}&user_campaign={object.user.campaign}&user_term={object.user.term}&user_medium={object.user.medium}</pre>
+</body>
+</html>

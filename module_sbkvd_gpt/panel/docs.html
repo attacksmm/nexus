@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SBKVD GPT docs</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0f0f0f;--panel:#171717;--text:#f2f2f2;--muted:#9a9a9a;--border:#353535;--accent:#d8d1c3;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#4c4c4c #171717}
+    html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 var(--font);overflow:auto}
+    main{max-width:920px;margin:0 auto;padding:28px 18px 44px}
+    h1,h2{line-height:1.2}h1{font-size:26px}h2{font-size:18px;margin-top:28px}
+    p,li{color:var(--muted)}code,pre{font-family:"Consolas","SFMono-Regular",monospace}
+    code{color:var(--accent)}pre{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--border);background:var(--panel);padding:12px}
+    a{color:var(--accent)}
+  </style>
+</head>
+<body>
+<main>
+  <h1>SBKVD GPT</h1>
+  <p>Модуль управления SBKVD GPT для команды Sobakovod. Внутри Nexus открывается экран доступов и настроек, а сам чат вынесен на отдельный полноэкранный адрес и генерирует ответы через модуль OpenRouter.</p>
+
+  <h2>Адрес</h2>
+  <pre>/nexus/sbkvd-gpt/panel/      # настройки модуля в Nexus
+/nexus/sbkvd-gpt/panel/chat/ # отдельный полноэкранный чат</pre>
+  <p>Чат можно открывать отдельно от shell Nexus. Если пользователь не вошёл в GPT-аккаунт, чат покажет форму входа по логину.</p>
+
+  <h2>Аккаунты и доступы</h2>
+  <p>GPT-аккаунты отдельные от пользователей Nexus. Вход выполняется только по логину. Управление аккаунтами, доступными промптами и доступными моделями находится в основном экране модуля Nexus и доступно только пользователям Nexus с ролью <code>admin</code>.</p>
+
+  <h2>Промпты и модели</h2>
+  <p>Промпты берутся из Nexus file-storage: модуль показывает только <code>.txt</code> файлы, выданные конкретному GPT-аккаунту. Названия и группы промптов можно переименовывать в админке модуля без изменения самих файлов.</p>
+  <p>Модель, выбранная в интерфейсе чата, всегда передаётся в OpenRouter как явная модель и имеет приоритет над дефолтной моделью OpenRouter или моделью, назначенной prompt-файлу.</p>
+
+  <h2>Контекст</h2>
+  <p>При включённом «Хранить контекст» история сохраняется в базе <code>sbkvd-gpt</code>. В таблицы контекста модуля OpenRouter этот чат не пишет. При выключенном контексте ответ генерируется одним запросом и не сохраняется.</p>
+
+  <h2>Зависимости</h2>
+  <p>Для генерации должен быть активен модуль <code>openrouter</code>, а в нём должен быть настроен <code>OPENROUTER_API_KEY</code>.</p>
+</main>
+</body>
+</html>

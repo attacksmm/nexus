@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Документация — Подсчет</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.5;max-width:980px;margin:32px auto;padding:0 20px;color:#eee;background:#090909}
+    code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#111;border:1px solid #2b2b2b}
+    code{padding:2px 5px}pre{padding:14px;overflow:auto}
+    table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #2b2b2b;padding:8px;text-align:left}
+  </style>
+</head>
+<body>
+<h1>Подсчет v1.0.0</h1>
+<p>Модуль читает листы customer-db, считает строки по выбранным условиям и выгружает найденных клиентов в CSV.</p>
+
+<h2>Логика</h2>
+<ul>
+  <li>Подсчет идет по строкам выбранных листов. Один человек в VK и Telegram считается двумя строками.</li>
+  <li>Поддерживаются системные поля <code>id</code>, <code>platform_id</code>, <code>created_at</code>, <code>updated_at</code> и JSON-пути из <code>custom_fields</code>.</li>
+  <li>Примеры JSON-путей: <code>utms.ym_uid</code>, <code>utms.yclid</code>, <code>contact_fields.phone</code>, <code>possible_accounts.salebot_id</code>.</li>
+  <li>Модуль только читает customer-db и не изменяет клиентские записи.</li>
+</ul>
+
+<h2>Операторы</h2>
+<p><code>равно</code>, <code>не равно</code>, <code>содержит</code>, <code>не содержит</code>, <code>пусто</code>, <code>не пусто</code>, <code>начинается с</code>, <code>заканчивается на</code>, <code>больше</code>, <code>меньше</code>, <code>между</code>, <code>in list</code>.</p>
+
+<h2>API</h2>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Назначение</th></tr>
+  <tr><td>GET</td><td><code>/api/tables</code></td><td>Листы customer-db и количество строк.</td></tr>
+  <tr><td>GET</td><td><code>/api/fields?tables=vk_clients,telegram_clients</code></td><td>Подсказки JSON-полей.</td></tr>
+  <tr><td>POST</td><td><code>/api/query</code></td><td>Подсчет и предпросмотр.</td></tr>
+  <tr><td>POST</td><td><code>/api/export.csv</code></td><td>CSV экспорт.</td></tr>
+  <tr><td>GET/POST/PUT/DELETE</td><td><code>/api/presets</code></td><td>Сохраненные фильтры.</td></tr>
+</table>
+</body>
+</html>

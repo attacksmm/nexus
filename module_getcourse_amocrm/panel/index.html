@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GetCourse -> amoCRM</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0d10;--panel:#11151b;--line:#26303b;--muted:#91a0af;--text:#edf2f7;--accent:#62a8ff;--bad:#ff7a7a;--ok:#6ee7a8}
+    *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+    *::-webkit-scrollbar{width:10px;height:10px}*::-webkit-scrollbar-track{background:#0a0d11}*::-webkit-scrollbar-thumb{background:#303a45;border-radius:8px;border:2px solid #0a0d11}*{scrollbar-color:#303a45 #0a0d11}
+    .shell{display:grid;gap:14px;padding:16px;max-width:1280px;margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    h1{font-size:20px;margin:0}.muted{color:var(--muted)}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:#0f1318;color:var(--text);padding:9px 12px;border-radius:7px;cursor:pointer}.tab.active{border-color:var(--accent);color:#dcebff}
+    .panel{display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.panel.active{display:block}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.full{grid-column:1/-1}.section-title{font-size:15px;font-weight:650;margin:0 0 10px}
+    label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}.input,textarea,select{width:100%;background:#0b0f14;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 10px;font:inherit}textarea{min-height:92px;resize:vertical}
+    .btn{border:1px solid var(--line);background:#17202a;color:var(--text);border-radius:7px;padding:9px 12px;cursor:pointer}.btn.primary{background:#17446d;border-color:#2d76b8}.btn:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.metric{border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1117}.metric b{display:block;font-size:18px}.ok{color:var(--ok)}.bad{color:var(--bad)}
+    .rule-grid{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(160px,1fr) auto;gap:8px;margin-bottom:8px;align-items:center}.hint{font-size:12px;color:var(--muted);margin-top:6px}
+    pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:880px}th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;background:#0d1117}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    @media (max-width:780px){.grid,.status,.rule-grid{grid-template-columns:1fr}.shell{padding:10px}table{min-width:760px}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div>
+      <h1>GetCourse -> amoCRM</h1>
+      <div class="muted">Заказы GetCourse создаются в amoCRM как сделки с контактом, UTM и полями ГК.</div>
+    </div>
+    <div class="row">
+      <button class="btn" id="pauseBindingsBtn" onclick="toggleBindingsPause()">Пауза связок</button>
+      <button class="btn" onclick="refreshAll()">Обновить</button>
+      <a class="btn" href="docs.html" target="_blank" rel="noopener">Документация</a>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="overview">Обзор</button>
+    <button class="tab" data-tab="webhook">Webhook</button>
+    <button class="tab" data-tab="bindings">Связки</button>
+    <button class="tab" data-tab="settings">Настройки</button>
+    <button class="tab" data-tab="events">События</button>
+  </div>
+
+  <section id="overview" class="panel active">
+    <div class="status" id="status"></div>
+  </section>
+
+  <section id="bindings" class="panel">
+    <div class="grid">
+      <div class="full">
+        <p class="section-title">Настройки по процессам GetCourse</p>
+        <div class="table-wrap"><table><thead><tr><th>Процесс</th><th>Куда выгружать</th><th>Дубль</th><th>Задача</th><th></th></tr></thead><tbody id="bindingsBody"></tbody></table></div>
+      </div>
+      <div class="full" id="bindingFormWrap" style="display:none">
+        <p class="section-title" id="bindingTitle">Связка</p>
+        <div class="grid">
+          <input id="binding_id" type="hidden">
+          <input id="binding_process" type="hidden">
+          <div><label>Название</label><input id="binding_name" class="input"></div>
+          <div><label>Активна</label><select id="binding_active" class="input"><option value="1">Да</option><option value="0">Нет</option></select></div>
+          <div><label>Pipeline ID</label><input id="binding_pipeline_id" class="input"></div>
+          <div><label>Status ID</label><input id="binding_status_id" class="input"></div>
+          <div><label>На кого выгружать сделку</label><select id="binding_responsible_user_id" class="input"></select></div>
+          <div><label>Если найден дубль</label><select id="binding_duplicate_policy" class="input"><option value="update">Обновить найденную сделку</option><option value="create">Создать новую сделку</option><option value="skip">Пропустить дубль</option></select></div>
+          <div><label>Где искать дубль</label><select id="binding_duplicate_search_entity" class="input" onchange="renderDuplicateRules()"><option value="leads">В сделках</option><option value="contacts">В контактах</option></select></div>
+          <div><label>Ставить задачу</label><select id="binding_task_enabled" class="input"><option value="0">Нет</option><option value="1">Да</option></select></div>
+          <div><label>Ответственный за задачу</label><select id="binding_task_responsible_user_id" class="input"></select></div>
+          <div><label>Тип задачи</label><select id="binding_task_type_id" class="input"><option value="1">Звонок</option><option value="2">Встреча</option></select></div>
+          <div><label>Срок задачи, минут</label><input id="binding_task_due_minutes" class="input"></div>
+          <div class="full">
+            <label>Поля для поиска дубля</label>
+            <div id="duplicateRulesWrap"></div>
+            <div class="row"><button class="btn" type="button" onclick="addDuplicateRule()">Добавить поле</button><span class="hint">Правила проверяются сверху вниз. Поиск по contact найдет связанную сделку контакта.</span></div>
+          </div>
+          <div class="full"><label>Текст задачи</label><textarea id="binding_task_text"></textarea></div>
+          <div class="row full"><button class="btn primary" onclick="saveBinding()">Сохранить связку</button><button class="btn" onclick="hideBindingForm()">Отмена</button><span id="bindingSaveState" class="muted"></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="webhook" class="panel">
+    <div class="grid">
+      <div class="full">
+        <label>Создан заказ</label>
+        <pre id="webhookCreated"></pre>
+      </div>
+      <div class="full">
+        <label>Частично оплачен</label>
+        <pre id="webhookPartial"></pre>
+      </div>
+      <div class="full">
+        <label>Оплачен</label>
+        <pre id="webhookPaid"></pre>
+      </div>
+      <div class="row full">
+        <button class="btn primary" onclick="copyWebhook('created')">Скопировать создан</button>
+        <button class="btn" onclick="copyWebhook('partial')">Скопировать частично</button>
+        <button class="btn" onclick="copyWebhook('paid')">Скопировать оплачен</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="settings" class="panel">
+    <div class="grid">
+      <div><label>Pipeline ID</label><input id="pipeline_id" class="input"></div>
+      <div><label>Status ID</label><input id="status_id" class="input"></div>
+      <div><label>Responsible user ID</label><input id="responsible_user_id" class="input"></div>
+      <div><label>GetCourse base URL</label><input id="getcourse_base_url" class="input"></div>
+      <div><label>Duplicate policy</label><select id="duplicate_policy" class="input"><option value="update">Обновлять найденную сделку</option><option value="create">Всегда создавать новую</option></select></div>
+      <div><label>Timeout, sec</label><input id="request_timeout" class="input"></div>
+      <div><label>Автосинхронизация из getcourse-orders</label><select id="cdb_sync_enabled" class="input"><option value="1">Включена</option><option value="0">Выключена</option></select></div>
+      <div><label>Интервал проверки, sec</label><input id="cdb_poll_seconds" class="input"></div>
+      <div class="full"><label>Теги, по одному на строку</label><textarea id="tags"></textarea></div>
+      <div class="full"><label>Webhook secret</label><input id="webhook_secret" class="input"></div>
+      <div class="row full"><button class="btn primary" onclick="saveSettings()">Сохранить</button><span id="saveState" class="muted"></span></div>
+    </div>
+  </section>
+
+  <section id="events" class="panel">
+    <div class="row" style="margin-bottom:10px">
+      <select id="eventFilter" class="input" style="max-width:220px" onchange="loadEvents()">
+        <option value="all">Все</option><option value="ok">Успешные</option><option value="error">Ошибки</option><option value="ignored">Игнор</option>
+      </select>
+      <button class="btn" onclick="loadEvents()">Обновить</button>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>ID</th><th>Дата</th><th>Заказ</th><th>Сделка</th><th>Действие</th><th>Результат</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+  </section>
+</div>
+
+<script>
+const api = p => '../api' + p;
+let currentSettings = {};
+let bindings = [];
+let amoUsers = [];
+let amoLeadFields = [];
+let amoContactFields = [];
+let duplicateRules = [];
+let bindingsPaused = false;
+const orderSources = [
+  ['number','Номер заказа'],
+  ['order_id','ID заказа'],
+  ['phone','Телефон'],
+  ['email','Email'],
+  ['name','Имя клиента'],
+  ['payment_link','Ссылка оплаты'],
+  ['title','Название тарифа'],
+  ['cost_money','Стоимость'],
+  ['left_cost_money','Осталось оплатить'],
+  ['payed_money','Оплачено'],
+  ['status','Статус ГК'],
+  ['utm_source','utm_source'],
+  ['utm_medium','utm_medium'],
+  ['utm_campaign','utm_campaign'],
+  ['utm_content','utm_content'],
+  ['utm_term','utm_term'],
+  ['yclid','yclid'],
+  ['ym_uid','ym_uid']
+];
+function $(id){return document.getElementById(id)}
+function esc(s){return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab,.panel').forEach(el => el.classList.remove('active'));
+  btn.classList.add('active'); $(btn.dataset.tab).classList.add('active');
+}));
+async function fetchJson(path, opts){
+  const res = await fetch(api(path), opts);
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+async function loadSettings(){
+  currentSettings = await fetchJson('/settings');
+  ['pipeline_id','status_id','responsible_user_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','webhook_secret'].forEach(k => { if($(k)) $(k).value = currentSettings[k] || ''; });
+  const urls = currentSettings.webhook_urls || {};
+  $('webhookCreated').textContent = urls.created || currentSettings.webhook_url || '';
+  $('webhookPartial').textContent = urls.partial || currentSettings.webhook_url || '';
+  $('webhookPaid').textContent = urls.paid || currentSettings.webhook_url || '';
+}
+function userOptions(selected, includeEmpty){
+  const first = includeEmpty ? '<option value="">Как у сделки</option>' : '<option value="">Не выбран</option>';
+  return first + amoUsers.filter(u => u.is_active !== false).map(u => `<option value="${esc(u.id)}" ${String(selected||'')===String(u.id)?'selected':''}>${esc(u.name || u.email || u.id)} (${esc(u.id)})</option>`).join('');
+}
+async function loadAmoUsers(){
+  const data = await fetchJson('/amo/users').catch(() => ({users: []}));
+  amoUsers = data.users || [];
+}
+async function loadAmoCatalog(){
+  const data = await fetchJson('/amo/catalog').catch(() => ({lead_fields: [], contact_fields: []}));
+  amoLeadFields = data.lead_fields || [];
+  amoContactFields = data.contact_fields || [];
+}
+function duplicateFieldList(){
+  const entity = $('binding_duplicate_search_entity') ? $('binding_duplicate_search_entity').value : 'leads';
+  const top = entity === 'contacts' ? [{name:'ID', code:'', id:''},{name:'name', code:'', id:''}] : [{name:'ID', code:'', id:''},{name:'name', code:'', id:''}];
+  return top.concat((entity === 'contacts' ? amoContactFields : amoLeadFields).map(f => ({
+    id: String(f.id || ''),
+    name: String(f.name || f.code || f.id || ''),
+    code: String(f.code || '')
+  })));
+}
+function fieldKey(field){
+  if(field.field_id) return 'id:' + field.field_id;
+  if(field.field_code) return 'code:' + field.field_code;
+  return 'name:' + (field.field || '').toLowerCase();
+}
+function selectedFieldIndex(rule, fields){
+  const key = fieldKey(rule || {});
+  const idx = fields.findIndex(f => fieldKey({field:f.name, field_id:f.id, field_code:f.code}) === key || String(f.name).toLowerCase() === String((rule||{}).field||'').toLowerCase());
+  return idx;
+}
+function ruleFromField(field, source){
+  const rule = {field: field.name || '', source: source || 'number'};
+  if(field.id) rule.field_id = String(field.id);
+  if(field.code) rule.field_code = String(field.code).toUpperCase();
+  return rule;
+}
+function renderDuplicateRules(){
+  const wrap = $('duplicateRulesWrap');
+  if(!wrap) return;
+  const fields = duplicateFieldList();
+  if(!duplicateRules.length) duplicateRules = [{field:'№ ГК', source:'number'}, {field:'ГК ID Заказа', source:'order_id'}];
+  wrap.innerHTML = duplicateRules.map((rule, index) => {
+    const rowFields = fields.slice();
+    let fieldIndex = selectedFieldIndex(rule, rowFields);
+    if(fieldIndex < 0){
+      rowFields.push({id: rule.field_id || '', name: rule.field || rule.field_code || rule.field_id || 'Поле', code: rule.field_code || ''});
+      fieldIndex = rowFields.length - 1;
+    }
+    const fieldOptions = rowFields.map((f, i) => `<option value="${i}" ${i===fieldIndex?'selected':''}>${esc(f.name)}${f.code ? ' · '+esc(f.code) : ''}${f.id ? ' · '+esc(f.id) : ''}</option>`).join('');
+    const sourceOptions = orderSources.map(([value, label]) => `<option value="${esc(value)}" ${String(rule.source||'')===value?'selected':''}>${esc(label)} · ${esc(value)}</option>`).join('');
+    return `<div class="rule-grid">
+      <select class="input" onchange="setDuplicateRuleField(${index}, this.value)">${fieldOptions}</select>
+      <select class="input" onchange="setDuplicateRuleSource(${index}, this.value)">${sourceOptions}</select>
+      <button class="btn" type="button" onclick="removeDuplicateRule(${index})">Удалить</button>
+    </div>`;
+  }).join('');
+}
+function setDuplicateRuleField(index, value){
+  const fields = duplicateFieldList();
+  const field = fields[Number(value)] || fields[0] || {name:''};
+  duplicateRules[index] = ruleFromField(field, duplicateRules[index]?.source || 'number');
+}
+function setDuplicateRuleSource(index, value){
+  duplicateRules[index] = Object.assign({}, duplicateRules[index] || {}, {source:value});
+}
+function addDuplicateRule(){
+  const fields = duplicateFieldList();
+  duplicateRules.push(ruleFromField(fields[0] || {name:'name'}, 'number'));
+  renderDuplicateRules();
+}
+function removeDuplicateRule(index){
+  duplicateRules.splice(index, 1);
+  renderDuplicateRules();
+}
+async function loadBindings(){
+  bindings = await fetchJson('/bindings');
+  $('bindingsBody').innerHTML = bindings.map(row => {
+    const user = amoUsers.find(u => String(u.id) === String(row.responsible_user_id));
+    const taskUser = row.task_responsible_user_id ? (amoUsers.find(u => String(u.id) === String(row.task_responsible_user_id)) || {}).name : 'как у сделки';
+    const dup = {update:'обновить', create:'создать новую', skip:'пропустить'}[row.duplicate_policy] || row.duplicate_policy;
+    const dupEntity = row.duplicate_search_entity === 'contacts' ? 'контакты' : 'сделки';
+    const dupRules = (row.duplicate_search_fields || []).map(rule => `${rule.field || rule.field_code || rule.field_id}=${rule.source}`).join('<br>');
+    const task = Number(row.task_enabled) ? `${esc(row.task_text || 'Задача')}<br><span class="muted">${esc(row.task_due_minutes)} мин · ${esc(taskUser || '')}</span>` : '<span class="muted">нет</span>';
+    return `<tr>
+      <td><b>${esc(row.name)}</b><br><span class="muted mono">${esc(row.process)}</span></td>
+      <td>${esc(user ? user.name : row.responsible_user_id)}<br><span class="muted">pipeline ${esc(row.pipeline_id)} · status ${esc(row.status_id)}</span></td>
+      <td>${esc(dup)}<br><span class="muted">${esc(dupEntity)}</span><br><span class="muted mono">${dupRules}</span></td><td>${task}</td>
+      <td><button class="btn" onclick="editBinding(${row.id})">Настроить</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted">Связки не созданы</td></tr>';
+}
+function editBinding(id){
+  const row = bindings.find(x => Number(x.id) === Number(id));
+  if(!row) return;
+  $('bindingFormWrap').style.display = '';
+  $('bindingTitle').textContent = 'Связка: ' + (row.name || row.process);
+  $('binding_id').value = row.id || '';
+  $('binding_process').value = row.process || '';
+  $('binding_name').value = row.name || '';
+  $('binding_active').value = String(row.active ?? 1);
+  $('binding_pipeline_id').value = row.pipeline_id || '';
+  $('binding_status_id').value = row.status_id || '';
+  $('binding_responsible_user_id').innerHTML = userOptions(row.responsible_user_id, false);
+  $('binding_duplicate_policy').value = row.duplicate_policy || 'update';
+  $('binding_duplicate_search_entity').value = row.duplicate_search_entity || 'leads';
+  duplicateRules = (row.duplicate_search_fields || []).map(rule => Object.assign({}, rule));
+  renderDuplicateRules();
+  $('binding_task_enabled').value = String(row.task_enabled ? 1 : 0);
+  $('binding_task_responsible_user_id').innerHTML = userOptions(row.task_responsible_user_id, true);
+  $('binding_task_type_id').value = String(row.task_type_id || 1);
+  $('binding_task_due_minutes').value = row.task_due_minutes || 60;
+  $('binding_task_text').value = row.task_text || '';
+  $('bindingSaveState').textContent = '';
+}
+function hideBindingForm(){ $('bindingFormWrap').style.display = 'none'; }
+async function saveBinding(){
+  $('bindingSaveState').textContent = 'Сохраняю...';
+  const payload = {
+    id: $('binding_id').value,
+    process: $('binding_process').value,
+    name: $('binding_name').value,
+    active: $('binding_active').value,
+    pipeline_id: $('binding_pipeline_id').value,
+    status_id: $('binding_status_id').value,
+    responsible_user_id: $('binding_responsible_user_id').value,
+    duplicate_policy: $('binding_duplicate_policy').value,
+    duplicate_search_entity: $('binding_duplicate_search_entity').value,
+    duplicate_search_fields: duplicateRules,
+    task_enabled: $('binding_task_enabled').value,
+    task_responsible_user_id: $('binding_task_responsible_user_id').value,
+    task_type_id: $('binding_task_type_id').value,
+    task_due_minutes: $('binding_task_due_minutes').value,
+    task_text: $('binding_task_text').value
+  };
+  await fetchJson('/bindings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  $('bindingSaveState').textContent = 'Сохранено';
+  await loadBindings();
+}
+async function loadStatus(){
+  const env = await fetchJson('/env-status');
+  const stats = await fetchJson('/stats');
+  bindingsPaused = !!(env.bindings_paused || stats.bindings_paused);
+  $('pauseBindingsBtn').textContent = bindingsPaused ? 'Возобновить связки' : 'Пауза связок';
+  $('pauseBindingsBtn').classList.toggle('primary', bindingsPaused);
+  $('status').innerHTML = [
+    ['amoCRM', env.ready ? 'готово' : 'нет ENV', env.ready],
+    ['Связки', bindingsPaused ? 'на паузе' : 'работают', !bindingsPaused],
+    ['Webhook secret', env.webhook_secret ? 'включен' : 'пустой', env.webhook_secret],
+    ['getcourse-orders DB', env.customer_db_ready ? 'найдена' : 'не найдена', env.customer_db_ready],
+    ['Автосинхронизация', env.customer_db_sync_enabled ? 'включена' : 'выключена', env.customer_db_sync_enabled],
+    ['Событий', stats.events, true],
+    ['Успешно', stats.success, true],
+    ['Ошибок', stats.errors, stats.errors === 0],
+    ['Связок заказ-сделка', stats.mapped_orders, true]
+  ].map(([k,v,ok]) => `<div class="metric"><span class="muted">${esc(k)}</span><b class="${ok?'ok':'bad'}">${esc(v)}</b></div>`).join('');
+}
+async function toggleBindingsPause(){
+  const btn = $('pauseBindingsBtn');
+  btn.disabled = true;
+  try{
+    await fetchJson('/bindings/toggle-pause', {method:'POST'});
+    await refreshAll();
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function saveSettings(){
+  $('saveState').textContent = 'Сохраняю...';
+  const payload = {};
+  ['pipeline_id','status_id','responsible_user_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','webhook_secret'].forEach(k => payload[k] = $(k).value);
+  await fetchJson('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  $('saveState').textContent = 'Сохранено';
+  await refreshAll();
+}
+async function loadEvents(){
+  const rows = await fetchJson('/events?limit=100&result=' + encodeURIComponent($('eventFilter').value));
+  $('eventsBody').innerHTML = rows.map(row => `<tr>
+    <td class="mono">${row.id}</td><td>${esc(row.received_at)}</td><td>№ ${esc(row.number)}<br><span class="muted">${esc(row.order_id)}</span></td>
+    <td class="mono">${esc(row.lead_id)}</td><td>${esc(row.action)}</td>
+    <td class="${row.success ? 'ok' : (row.ignored ? 'muted' : 'bad')}">${row.success ? 'OK' : esc(row.error || 'ignored')}</td>
+  </tr>`).join('') || '<tr><td colspan="6" class="muted">Пока нет событий</td></tr>';
+}
+async function copyWebhook(kind){
+  const urls = currentSettings.webhook_urls || {};
+  const map = {created:'webhookCreated', partial:'webhookPartial', paid:'webhookPaid'};
+  await navigator.clipboard.writeText(urls[kind] || $(map[kind]).textContent || currentSettings.webhook_url || '');
+}
+async function refreshAll(){
+  await loadAmoUsers();
+  await loadAmoCatalog();
+  await loadSettings();
+  await loadBindings();
+  await loadStatus();
+  await loadEvents();
+}
+refreshAll().catch(err => { document.body.insertAdjacentHTML('afterbegin', `<pre class="bad">${esc(err.message)}</pre>`); });
+</script>
+</body>
+</html>

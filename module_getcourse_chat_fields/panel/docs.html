@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Поля чатов GetCourse — docs</title></head>
+<body>
+<h1>Поля чатов GetCourse</h1>
+<p>Модуль читает завершенные оплаченные заказы из <code>customer-db.cdb_getcourse_orders</code>, берет номер потока из актуальных чатов, берет VK/TG ссылки из Google Sheet <code>1zu1__XcKxJH8yC9ForDvibaUnKFCS1pxWHEjLgqlVXA</code> и записывает поля обратно в заказ и в GetCourse addfields.</p>
+
+<h2>Логика</h2>
+<ul>
+  <li>Источник заказов: записи с <code>status=Завершен</code> и <code>payment_state=paid</code>, обновленные не раньше настройки <code>start_date</code>.</li>
+  <li>Курс щенка определяется по фразе <code>Первые шаги к воспитанию</code> или слову <code>Щенок</code>; курс собаки — по <code>Послушная собака</code> или <code>Современный собаковод</code>. Если есть оба, выбирается щенок.</li>
+  <li>Тариф <code>Стандарт</code> записывается, но поля VK/TG ссылок остаются пустыми.</li>
+  <li><code>Поток</code> записывается только цифрой из <code>stream_number</code> или названия чата, например <code>51</code>.</li>
+  <li><code>Номер куратора</code> берется из Google Sheets: ищется лист <code>Щ{поток}</code> для щенка или <code>С{поток}</code> для собаки, читается ячейка из настройки <code>curator_cell</code>. Сопоставление задается в настройке <code>curator_map</code>, например <code>Ирина=Куратор 1;Слава=Куратор 2;Настасья=Куратор 3</code>.</li>
+  <li>Если лист потока, credentials или понятное значение куратора не найдены, заказ получает статус <code>pending_curator</code>, ничего не записывается в customer-db/GetCourse, и следующий scan попробует снова.</li>
+  <li>VK/TG ссылки для не-стандартных тарифов берутся только из таблицы ссылок: щенок VK <code>gid=65520414</code>, щенок TG <code>gid=1437498106</code>, собака VK <code>gid=443062527</code>, собака TG <code>gid=304757615</code>. Если таблица недоступна или строки потока нет, заказ получает <code>pending_chat_links</code> и не записывается.</li>
+  <li>Панель обзора показывает все доступные потоки из таблицы ссылок в формате <code>Поток / Куратор / Платформа / Название / Ссылка</code>, без технических статусов модуля создания чатов.</li>
+  <li>Вкладка <code>Потоки</code> показывает локально кэшированный снимок листов потоков: список потоков, учеников по почтам, ссылку на пользователя GetCourse и ссылку на заказ. Сначала ссылки строятся по локальной <code>customer-db</code>. Если почты там нет, модуль может ограниченно добрать данные через GetCourse Export API и сохранить результат в локальный кэш.</li>
+  <li>Для обработки заказа текущий поток выбирается из <code>course-chat-creator.runs</code>: <code>test_mode=0</code>, <code>status&lt;&gt;error</code>, непустой <code>link</code>, сортировка по <code>created_at DESC, id DESC</code>.</li>
+</ul>
+
+<h2>Записываемые поля</h2>
+<ul>
+  <li><code>Поток</code></li>
+  <li><code>Ссылка на чат ВК</code></li>
+  <li><code>Ссылка на чат ТГ</code></li>
+  <li><code>Номер куратора</code></li>
+</ul>
+<p>Имена полей настраиваются в панели. В customer-db также пишутся служебные ключи <code>chat_fields_*</code> для диагностики.</p>
+
+<h2>GetCourse</h2>
+<p>Для записи в GetCourse нужны ENV <code>GETCOURSE_ACCOUNT_NAME</code> и <code>GETCOURSE_API_TOKEN</code>. Модуль пишет поля в пользователя через <code>https://{account}.getcourse.ru/pl/api/users</code>, <code>action=add</code>, <code>system.refresh_if_exists=1</code> и <code>user.addfields</code>; в заказ — через <code>https://{account}.getcourse.ru/pl/api/deals</code> с <code>deal.deal_number</code> и <code>deal.addfields</code>.</p>
+<p>Пользовательские поля отправляются по ID, потому что в аккаунте есть дубликат поля <code>Поток</code>: <code>10335965</code> = Поток, <code>12513209</code> = Ссылка на чат ВК, <code>12513210</code> = Ссылка на чат ТГ, <code>13834169</code> = Номер куратора.</p>
+<p>Для вкладки <code>Потоки</code> GetCourse Export API используется только через фоновую очередь <code>gc_export_lookup_jobs</code> для email, которых нет в локальной <code>customer-db</code>. Открытие вкладки и refresh Google Sheets не вызывают GetCourse API. Worker берет по одному email, работает с коротким timeout, ведет журнал <code>gc_export_api_calls</code> и по умолчанию не делает больше <code>80</code> запросов за 2 часа, оставляя запас до лимита GetCourse <code>100</code>. Результаты кэшируются в <code>gc_export_lookup_cache</code>.</p>
+
+<h2>Google Sheets</h2>
+<p>По умолчанию используется таблица <code>1NbKpXgHCJVE1dzpxeDLNGzSfz53vfK0joBRrNtIAaqk</code>. Для приватной таблицы нужен service account JSON в <code>GETCOURSE_CHAT_FIELDS_GOOGLE_CREDENTIALS_FILE</code>, <code>GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE</code> или путь в настройках панели.</p>
+<p>Снимок учеников хранится в таблице модуля <code>flow_students_cache</code>. Настройка <code>students_cache_minutes</code> задает TTL, <code>students_data_range</code> — диапазон чтения строк учеников и верхних строк с куратором, по умолчанию <code>A1:AC300</code>. Если указан более узкий диапазон, модуль расширит его минимум до колонки <code>AC</code>, чтобы видеть объединенные заголовки кураторов. Ручная кнопка обновления принудительно перечитывает Google Sheets, а кнопка <code>GC lookup</code> отдельно ставит недостающие email в фоновую очередь.</p>
+
+<h2>API</h2>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
+  <tr><td>GET</td><td><code>/health</code></td><td>Проверка модуля</td></tr>
+  <tr><td>GET/POST</td><td><code>/settings</code></td><td>Настройки</td></tr>
+  <tr><td>GET</td><td><code>/latest-chats</code></td><td>Последние найденные чаты из модуля создания чатов</td></tr>
+  <tr><td>GET</td><td><code>/chat-flows</code></td><td>Все потоки и ссылки из Google Sheet ссылок</td></tr>
+  <tr><td>GET/POST</td><td><code>/flow-students</code>, <code>/flow-students/refresh</code></td><td>Кэшированный снимок учеников по потокам и ручное обновление из Google Sheets</td></tr>
+  <tr><td>GET/POST</td><td><code>/gc-lookup/status</code>, <code>/gc-lookup/enqueue</code></td><td>Статус и постановка email в очередь GetCourse Export lookup</td></tr>
+  <tr><td>POST</td><td><code>/scan</code></td><td>Ручной scan</td></tr>
+  <tr><td>GET</td><td><code>/orders</code></td><td>Журнал обработанных заказов</td></tr>
+  <tr><td>GET</td><td><code>/source-orders</code></td><td>Просмотр исходных заказов customer-db без записи в GetCourse</td></tr>
+  <tr><td>GET</td><td><code>/runs</code></td><td>Запуски scanner</td></tr>
+</table>
+</body>
+</html>

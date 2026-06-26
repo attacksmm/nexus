@@ -45,9 +45,8 @@ def _verify_token(token: str) -> str | None:
         return None
 
 
-async def verify_token_from_request(request: Request) -> dict | None:
+async def verify_token_value(token: str | None) -> dict | None:
     """Returns user dict (with role, module_access) or None."""
-    token = request.cookies.get("nexus_token")
     if not token:
         return None
     username = _verify_token(token)
@@ -56,10 +55,19 @@ async def verify_token_from_request(request: Request) -> dict | None:
     return await get_user_by_username(username)
 
 
+async def verify_token_from_request(request: Request) -> dict | None:
+    return await verify_token_value(request.cookies.get("nexus_token"))
+
+
 def can_access_module(user: dict, module_id: str) -> bool:
     if user["role"] == "admin":
         return True
-    access = json.loads(user.get("module_access") or "[]")
+    try:
+        access = json.loads(user.get("module_access") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(access, list):
+        return False
     return not access or module_id in access
 
 
@@ -143,13 +151,15 @@ async def api_user_create(request: Request):
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
     role = data.get("role", "viewer")
-    module_access = json.dumps(data.get("module_access", []))
+    module_access = _normalize_module_access(data.get("module_access", []))
+    if module_access is None:
+        return _err("module_access должен быть списком модулей")
     if not username or not password:
         return _err("username и password обязательны")
     if role not in ("admin", "editor", "viewer"):
         return _err("Недопустимая роль")
     try:
-        uid = await create_user(username, pwd_ctx.hash(password), role, module_access)
+        uid = await create_user(username, pwd_ctx.hash(password), role, json.dumps(module_access))
         return {"id": uid, "username": username, "role": role}
     except Exception as e:
         return _err(str(e))
@@ -162,11 +172,13 @@ async def api_user_update(uid: int, request: Request):
         return _forbidden()
     data = await request.json()
     role = data.get("role", "viewer")
-    module_access = json.dumps(data.get("module_access", []))
+    module_access = _normalize_module_access(data.get("module_access", []))
+    if module_access is None:
+        return _err("module_access должен быть списком модулей")
     active = int(data.get("active", 1))
     if role not in ("admin", "editor", "viewer"):
         return _err("Недопустимая роль")
-    await update_user(uid, role, module_access, active)
+    await update_user(uid, role, json.dumps(module_access), active)
     return {"ok": True}
 
 
@@ -300,6 +312,21 @@ def _parse_env_content(content: str) -> dict[str, str]:
             continue
         parsed[key] = value
     return parsed
+
+
+def _normalize_module_access(value) -> list[str] | None:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    result = []
+    seen = set()
+    for item in value:
+        module_id = str(item).strip()
+        if module_id and module_id not in seen:
+            result.append(module_id)
+            seen.add(module_id)
+    return result
 
 
 def _read_env_values() -> dict[str, str]:

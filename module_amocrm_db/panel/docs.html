@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Документация — amoCRM → DB</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.5;max-width:980px;margin:32px auto;padding:0 20px;color:#e8e8e8;background:#0b0b0b}
+    code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#111;border:1px solid #2a2a2a}
+    code{padding:2px 5px}pre{padding:14px;overflow:auto}
+    h1,h2{line-height:1.2}table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #2a2a2a;padding:8px;text-align:left}
+  </style>
+</head>
+<body>
+<h1>amoCRM → DB v1.0.0</h1>
+<p>Модуль принимает webhook amoCRM по сделкам, догружает актуальные данные сделки через amoCRM API и сохраняет snapshot в customer-db таблицу <code>amo_deals</code> с названием «Сделки amoCRM».</p>
+
+<h2>ENV</h2>
+<table>
+  <tr><th>Переменная</th><th>Описание</th></tr>
+  <tr><td><code>AMO_BASE_URL</code></td><td>URL аккаунта amoCRM, например <code>https://sobakovodpro.amocrm.ru</code>.</td></tr>
+  <tr><td><code>AMO_ACCESS_TOKEN</code></td><td>Токен с доступом к сделкам, контактам и воронкам.</td></tr>
+  <tr><td><code>AMO_DB_WEBHOOK_SECRET</code></td><td>Необязательный секрет webhook. Если задан, имеет приоритет над настройкой в панели.</td></tr>
+  <tr><td><code>AMO_DB_CUSTOMER_DB_PATH</code></td><td>Необязательный путь к SQLite базе customer-db.</td></tr>
+</table>
+
+<h2>Webhook</h2>
+<p>URL берется во вкладке «Webhook». Если задан секрет, amoCRM должна отправлять запрос на URL с <code>?secret=...</code>. Модуль принимает стандартный <code>application/x-www-form-urlencoded</code> формат amoCRM и JSON для ручного теста.</p>
+<pre><code>POST /nexus/amocrm-db/api/webhook?secret=...
+leads[status][0][id]=123456
+leads[status][0][pipeline_id]=111
+leads[status][0][status_id]=142</code></pre>
+<p>Ответ для amoCRM всегда HTTP 200, чтобы amoCRM не отключала webhook при временной ошибке обработки. Ошибки фиксируются во вкладке «События».</p>
+
+<h2>Что сохраняется</h2>
+<p>Ключ записи в Базе клиентов: <code>platform_id = deal_id</code>. В <code>custom_fields</code> сохраняются сумма, воронка, статус, ответственный, даты, теги, контакты, телефоны, email, UTM, <code>yclid</code>, <code>ym_uid</code>, кастомные поля, raw snapshot сделки, ссылка на amoCRM и служебные поля синхронизации.</p>
+
+<h2>API</h2>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Назначение</th></tr>
+  <tr><td>GET</td><td><code>/health</code></td><td>Проверка модуля.</td></tr>
+  <tr><td>GET</td><td><code>/env-status</code></td><td>Готовность ENV и customer-db.</td></tr>
+  <tr><td>GET/POST</td><td><code>/settings</code></td><td>Webhook secret, timeout, debounce.</td></tr>
+  <tr><td>POST</td><td><code>/webhook</code></td><td>Webhook amoCRM.</td></tr>
+  <tr><td>GET</td><td><code>/amo/pipelines</code></td><td>Каталог воронок/статусов.</td></tr>
+  <tr><td>GET</td><td><code>/deals</code></td><td>Список сделок для UI.</td></tr>
+  <tr><td>GET</td><td><code>/deals/{deal_id}</code></td><td>Полная запись сделки.</td></tr>
+  <tr><td>POST</td><td><code>/deals/{deal_id}/sync</code></td><td>Ручная синхронизация сделки из amoCRM.</td></tr>
+  <tr><td>GET</td><td><code>/events</code></td><td>Журнал webhook/sync событий.</td></tr>
+</table>
+</body>
+</html>

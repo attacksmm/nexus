@@ -1,0 +1,19 @@
+{
+  "id": "getcourse-chat-fields",
+  "name": "Поля чатов GetCourse",
+  "version": "1.0.44",
+  "description": "Выдает завершенным заказам GetCourse поля потока и ссылок на актуальные учебные чаты.",
+  "env_vars": {
+    "GETCOURSE_ACCOUNT_NAME": "Имя аккаунта GetCourse, например sobakovod для https://sobakovod.getcourse.ru",
+    "GETCOURSE_API_TOKEN": "API token GetCourse для записи addfields пользователю",
+    "GETCOURSE_CHAT_FIELDS_CUSTOMER_DB_PATH": "Необязательный абсолютный путь к SQLite БД customer-db",
+    "GETCOURSE_CHAT_FIELDS_COURSE_CHAT_DB_PATH": "Необязательный абсолютный путь к SQLite БД course-chat-creator",
+    "GETCOURSE_CHAT_FIELDS_CURATOR_SPREADSHEET_ID": "Необязательный ID Google Sheet с листами потоков",
+    "GETCOURSE_CHAT_FIELDS_GOOGLE_CREDENTIALS_FILE": "Необязательный путь к JSON service account для чтения Google Sheets",
+    "GETCOURSE_CHAT_FIELDS_LINKS_SPREADSHEET_ID": "Необязательный ID Google Sheet со ссылками на учебные чаты. По умолчанию таблица Tilda chat links"
+  },
+  "env_required": [
+    "GETCOURSE_ACCOUNT_NAME",
+    "GETCOURSE_API_TOKEN"
+  ]
+}

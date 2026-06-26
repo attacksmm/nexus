@@ -22,14 +22,18 @@
     textarea{min-height:260px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.45}
     .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{min-height:34px;border:1px solid #555;background:#f2f2f2;color:#080808;padding:7px 12px;font-weight:650}.ghost{background:transparent;color:var(--text)}.danger{background:#2a1114;color:var(--bad);border-color:#67343a}
     .surface{border:1px solid var(--line);background:var(--panel);padding:12px;display:grid;gap:10px;min-width:0}.surface--plain{border:0;background:transparent;padding:0}
+    .auth-grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:14px;align-items:start}.auth-shot{width:100%;min-height:320px;max-height:620px;object-fit:contain;background:#050505;border:1px solid var(--line);cursor:crosshair}.auth-tools{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end}
     pre{margin:0;border:1px solid var(--line);background:#050505;color:#d8d8d8;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;scrollbar-color:#555 #090909}
     pre[hidden]{display:none}
     .table{border:1px solid var(--line);background:var(--panel);overflow:hidden}.table-head,.row{display:grid;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line)}.table-head{color:var(--muted);font-size:12px;background:#0b0b0b}.row:last-child{border-bottom:0}.row:hover{background:var(--soft)}
     .people-head,.people-row{grid-template-columns:92px minmax(130px,1.1fr) minmax(150px,1fr) minmax(140px,1fr) 92px 80px 176px}
     .course-head,.course-row{grid-template-columns:90px 70px minmax(220px,1.2fr) minmax(240px,1fr) 80px 110px}
-    .run-head,.run-row{grid-template-columns:90px minmax(220px,1fr) 80px 110px 80px 90px minmax(160px,1fr)}
+    .run-head,.run-row{grid-template-columns:90px minmax(220px,1fr) 80px 110px 80px 110px minmax(160px,1fr) 130px}
+    .broadcast-head,.broadcast-row{grid-template-columns:36px 88px minmax(260px,1fr) 90px 90px 90px 120px}
+    .history-head,.history-row{grid-template-columns:70px minmax(220px,1fr) 110px 110px minmax(160px,1fr) 130px}
+    .check-cell{display:flex;align-items:center;justify-content:center}.check-cell input{width:18px;min-height:18px}.check-cell--head{justify-content:center}.check-cell--head input{accent-color:#f2f2f2}
     .cell-main{font-weight:600}.cell-sub{margin-top:2px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.pill{width:max-content;max-width:100%;border:1px solid var(--line2);padding:2px 6px;color:var(--muted);font-size:12px}.on{color:var(--ok)}.off{color:var(--bad)}.warn{color:var(--warn)}
-    @media(max-width:900px){body{height:auto;overflow:auto}.shell{height:auto}.create-grid,.grid,.grid3{grid-template-columns:1fr}.people-head,.people-row,.course-head,.course-row,.run-head,.run-row{grid-template-columns:1fr}.table-head{display:none}.tabs{position:sticky;top:0;z-index:2}.tab{width:104px}}
+    @media(max-width:900px){body{height:auto;overflow:auto}.shell{height:auto}.create-grid,.auth-grid,.grid,.grid3{grid-template-columns:1fr}.people-head,.people-row,.course-head,.course-row,.run-head,.run-row,.broadcast-head,.broadcast-row,.history-head,.history-row{grid-template-columns:1fr}.table-head{display:none}.tabs{position:sticky;top:0;z-index:2}.tab{width:104px}}
   </style>
 </head>
 <body>
@@ -40,7 +44,9 @@
     <button class="tab" data-view="courses" type="button">Курсы</button>
     <button class="tab" data-view="templates" type="button">Шаблоны</button>
     <button class="tab" data-view="telegram" type="button">Telegram</button>
+    <button class="tab" data-view="vk-auth" type="button">VK Авторизация</button>
     <button class="tab" data-view="remove" type="button">Удаление</button>
+    <button class="tab" data-view="broadcast" type="button">Рассылки</button>
     <button class="tab" data-view="runs" type="button">История</button>
   </nav>
 
@@ -70,6 +76,9 @@
             </label>
             <label>Курс
               <select id="course"></select>
+            </label>
+            <label>Куратор
+              <select id="curator"></select>
             </label>
           </div>
           <div class="actions">
@@ -158,6 +167,39 @@
       </div>
     </section>
 
+    <section class="view" id="view-vk-auth" hidden>
+      <div class="head">
+        <div>
+          <h1>Авторизация ВКонтакте</h1>
+          <p class="muted">Серверная VK Web-сессия используется только для автоматической выдачи админок при создании VK-чата.</p>
+        </div>
+        <span class="pill" id="vkAuthPill">Не проверено</span>
+      </div>
+      <div class="auth-grid">
+        <div class="surface">
+          <div class="actions">
+            <button class="btn" id="vkAuthOpenBtn" type="button">Открыть VK</button>
+            <button class="btn ghost" id="vkAuthRefreshBtn" type="button">Обновить</button>
+            <button class="btn ghost" id="vkAuthLiveBtn" type="button">Live: выкл</button>
+            <button class="btn ghost" id="vkAdminsRetryBtn" type="button">Довыдать админки</button>
+            <button class="btn ghost" id="vkAuthCloseBtn" type="button">Закрыть браузер</button>
+            <button class="btn danger" id="vkAuthResetBtn" type="button">Сбросить профиль</button>
+          </div>
+          <div class="auth-tools">
+            <label>Ввод в серверный браузер<input id="vkAuthText" autocomplete="off" placeholder="код, телефон или текст"></label>
+            <button class="btn ghost" id="vkAuthTypeBtn" type="button">Ввести</button>
+            <button class="btn ghost" id="vkAuthEnterBtn" type="button">Enter</button>
+          </div>
+          <p class="muted">Клик по скриншоту отправляет клик в серверный браузер. Так можно нажать проверку VK или поле ввода.</p>
+          <pre id="vkAuthStatus">Нажмите «Открыть VK». Если появится QR, код или проверка, действуйте прямо по скриншоту.</pre>
+        </div>
+        <div class="surface">
+          <h2>Скрин серверного браузера</h2>
+          <img id="vkAuthShot" class="auth-shot" alt="VK auth screenshot">
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-remove" hidden>
       <div class="head"><h1>Удаление из учебных чатов</h1><p class="muted">Проверяет только чаты потоков с учебным названием.</p></div>
       <div class="surface">
@@ -171,10 +213,56 @@
       </div>
     </section>
 
+    <section class="view" id="view-broadcast" hidden>
+      <div class="head">
+        <div>
+          <h1>Рассылки по обучающим чатам</h1>
+          <p class="muted">Получатели — только чаты с названием вида «N. DD.MM.YYYY - ...».</p>
+        </div>
+        <div class="actions">
+          <button class="btn ghost" id="broadcastStatusBtn" type="button">Статус</button>
+          <button class="btn ghost" id="broadcastScanBtn" type="button">Найти чаты</button>
+          <button class="btn ghost" id="broadcastToggleAllBtn" type="button" hidden>Выбрать все</button>
+        </div>
+      </div>
+      <div class="surface">
+        <div class="grid3">
+          <label>Платформы
+            <select id="broadcastPlatform"><option value="all">VK и Telegram</option><option value="vk">Только VK</option><option value="telegram">Только Telegram</option></select>
+          </label>
+          <label>Режим выбора
+            <select id="broadcastMode"><option value="selected">Только выбранные</option><option value="all_except">Все найденные кроме снятых</option></select>
+          </label>
+          <label>Получатели
+            <input id="broadcastSummary" readonly value="Чаты не найдены">
+          </label>
+          <label>Скорость
+            <select id="broadcastSpeed"><option value="balanced">Баланс: 2.5-5 сек</option><option value="safe">Осторожно: 5-9 сек</option><option value="fast">Быстро: 1.2-2.5 сек</option></select>
+          </label>
+        </div>
+        <textarea id="broadcastMessage" placeholder="Текст рассылки"></textarea>
+        <div class="actions">
+          <button class="btn danger" id="broadcastSendBtn" type="button">Отправить рассылку</button>
+        </div>
+        <pre id="broadcastStatus" hidden></pre>
+      </div>
+      <div class="table">
+        <div class="table-head broadcast-head"><span class="check-cell check-cell--head"><input id="broadcastToggleAllCheck" type="checkbox" title="Выбрать все"></span><span>Платформа</span><span>Чат</span><span>Поток</span><span>Дата</span><span>Источник</span><span>Статус</span></div>
+        <div id="broadcastChats"></div>
+      </div>
+      <div class="surface">
+        <div class="head"><h2>История рассылок</h2><button class="btn ghost" id="broadcastHistoryBtn" type="button">Обновить</button></div>
+        <div class="table">
+          <div class="table-head history-head"><span>ID</span><span>Текст</span><span>Статус</span><span>Отправка</span><span>Итог</span><span></span></div>
+          <div id="broadcastHistory"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-runs" hidden>
       <div class="head"><h1>История запусков</h1><div class="actions"><button class="btn ghost" id="runsRefresh" type="button">Обновить</button><button class="btn ghost" id="runsClear" type="button">Очистить</button></div></div>
       <div class="table">
-        <div class="table-head run-head"><span>Платформа</span><span>Название</span><span>Поток</span><span>Дата</span><span>Режим</span><span>Статус</span><span>Ссылка / ошибка</span></div>
+        <div class="table-head run-head"><span>Платформа</span><span>Название</span><span>Поток</span><span>Дата</span><span>Режим</span><span>Статус</span><span>Ссылка / ошибка</span><span></span></div>
         <div id="runsList"></div>
       </div>
     </section>
@@ -187,10 +275,25 @@ const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const show = (el, data) => { el.hidden = false; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
 const hide = el => { el.hidden = true; el.textContent = ""; };
-let people = [], courses = [], templates = [], editPersonId = null;
+let people = [], courses = [], templates = [], broadcastChats = [], broadcastHistory = [], editPersonId = null;
+let vkAuthLiveTimer = null, vkAdminsRetrying = false, vkAdminsAutoRetried = false;
 const roleLabels = {admin:"Админ", author:"Автор курса", kurator:"Куратор", tech:"Техподдержка"};
 const parityLabels = {any:"Все", even:"Четные", odd:"Нечетные"};
 const enabledLabel = value => value ? "Да" : "Нет";
+const defaultCurator = () => people.find(p => p.kind === "kurator" && p.enabled && String(p.name || "").trim().toLowerCase() === "ирина") || people.find(p => p.kind === "kurator" && p.enabled);
+function vkHandle(person) {
+  const mention = String(person.vk_mention || "");
+  const mentionMatch = mention.match(/\|(@?[^|\]]+)\]/);
+  if (mentionMatch) return mentionMatch[1].startsWith("@") ? mentionMatch[1] : `@${mentionMatch[1]}`;
+  const raw = String(person.vk_id || "").trim().replace(/^https?:\/\//, "").replace(/^@/, "");
+  const clean = raw.replace(/^(vk\.com|vk\.ru|m\.vk\.com|m\.vk\.ru)\//i, "").split(/[/?#]/)[0];
+  if (!clean) return "";
+  return clean.startsWith("id") || /^\d+$/.test(clean) ? `id${clean.replace(/^id/, "")}` : `@${clean}`;
+}
+function curatorLabel(person) {
+  const handle = vkHandle(person);
+  return handle ? `${handle} - ${person.name}` : person.name;
+}
 
 document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
@@ -242,6 +345,7 @@ function editCourse(c) {
 async function loadPeople() {
   const data = await getJson("/people");
   people = data.items;
+  renderCurators();
   $("peopleList").innerHTML = people.map(p => `<div class="row people-row">
     <span>${esc(roleLabels[p.kind] || p.kind)}</span>
     <span><span class="cell-main">${esc(p.name)}</span></span>
@@ -250,6 +354,15 @@ async function loadPeople() {
     <span class="${p.enabled ? "on" : "off"}">${enabledLabel(p.enabled)}</span>
     <span class="actions"><button class="btn ghost" type="button" data-person-action="edit" data-id="${p.id}">Править</button><button class="btn danger" type="button" data-person-action="delete" data-id="${p.id}">Удалить</button></span>
   </div>`).join("");
+}
+function renderCurators() {
+  const active = people.filter(p => p.kind === "kurator" && p.enabled);
+  const current = $("curator").value;
+  $("curator").innerHTML = active.map(p => `<option value="${p.id}">${esc(curatorLabel(p))}</option>`).join("");
+  if (active.length) {
+    const fallback = defaultCurator();
+    $("curator").value = active.some(p => String(p.id) === current) ? current : String(fallback.id);
+  }
 }
 function editPerson(p) {
   editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
@@ -324,6 +437,103 @@ $("tgConfirmBtn").onclick = async () => {
   } catch(e) { show($("tgAuthStatus"), e); }
 };
 
+function renderVkAuth(data) {
+  const state = data.vk_web || data;
+  const status = state.status || "unknown";
+  $("vkAuthPill").textContent = state.authorized ? "Авторизовано" : (status === "waiting_auth" ? "Жду вход" : status);
+  $("vkAuthPill").className = "pill " + (state.authorized ? "on" : status === "error" ? "off" : "warn");
+  show($("vkAuthStatus"), state);
+  if (state.screenshot || state.browser_open) {
+    $("vkAuthShot").src = `${api}/vk-web/auth/screenshot?t=${Date.now()}`;
+  }
+}
+function refreshVkShot() {
+  if ($("vkAuthShot").getAttribute("src")) {
+    $("vkAuthShot").src = `${api}/vk-web/auth/screenshot?t=${Date.now()}`;
+  }
+}
+function setVkLive(enabled) {
+  if (vkAuthLiveTimer) {
+    clearInterval(vkAuthLiveTimer);
+    vkAuthLiveTimer = null;
+  }
+  $("vkAuthLiveBtn").textContent = enabled ? "Live: вкл" : "Live: выкл";
+  $("vkAuthLiveBtn").className = "btn ghost" + (enabled ? " on" : "");
+  if (enabled) {
+    vkAuthLiveTimer = setInterval(refreshVkShot, 2000);
+  }
+}
+async function retryPendingVkAdmins(auto=false) {
+  if (vkAdminsRetrying || (auto && vkAdminsAutoRetried)) return;
+  vkAdminsRetrying = true;
+  if (auto) vkAdminsAutoRetried = true;
+  $("vkAdminsRetryBtn").disabled = true;
+  show($("vkAuthStatus"), auto ? "Авторизация есть. Автоматически довыдаю админки для последнего незавершённого VK-чата..." : "Довыдаю админки для последнего незавершённого VK-чата...");
+  try {
+    const data = await postJson("/vk-web/admins/retry-pending", {});
+    show($("vkAuthStatus"), data);
+    await loadRuns();
+    refreshVkShot();
+  } catch(e) {
+    show($("vkAuthStatus"), e);
+  } finally {
+    vkAdminsRetrying = false;
+    $("vkAdminsRetryBtn").disabled = false;
+  }
+}
+async function loadVkAuth(openBrowser=false) {
+  try {
+    const data = openBrowser ? await postJson("/vk-web/auth/open", {}) : await getJson("/vk-web/auth/status");
+    renderVkAuth(data);
+    await loadStatus();
+    if ((data.vk_web || data).authorized) {
+      retryPendingVkAdmins(true);
+    }
+  } catch(e) { show($("vkAuthStatus"), e); $("vkAuthPill").textContent = "Ошибка"; $("vkAuthPill").className = "pill off"; }
+}
+$("vkAuthOpenBtn").onclick = () => { setVkLive(true); loadVkAuth(true); };
+$("vkAuthRefreshBtn").onclick = () => loadVkAuth(false);
+$("vkAuthLiveBtn").onclick = () => setVkLive(!vkAuthLiveTimer);
+$("vkAdminsRetryBtn").onclick = () => retryPendingVkAdmins(false);
+$("vkAuthCloseBtn").onclick = async () => {
+  try { setVkLive(false); renderVkAuth(await postJson("/vk-web/auth/close", {})); await loadStatus(); }
+  catch(e) { show($("vkAuthStatus"), e); }
+};
+$("vkAuthResetBtn").onclick = async () => {
+  if (!confirm("Сбросить VK Web профиль? Рабочая авторизованная сессия не будет сброшена сервером.")) return;
+  try { renderVkAuth(await postJson("/vk-web/auth/reset", {})); $("vkAuthShot").removeAttribute("src"); await loadStatus(); }
+  catch(e) { show($("vkAuthStatus"), e); }
+};
+$("vkAuthShot").addEventListener("click", async event => {
+  const img = $("vkAuthShot");
+  if (!img.getAttribute("src")) return;
+  const rect = img.getBoundingClientRect();
+  const scaleX = img.naturalWidth / Math.max(1, rect.width);
+  const scaleY = img.naturalHeight / Math.max(1, rect.height);
+  const payload = {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY,
+    image_width: img.naturalWidth,
+    image_height: img.naturalHeight,
+  };
+  try { renderVkAuth(await postJson("/vk-web/auth/click", payload)); await loadStatus(); }
+  catch(e) { show($("vkAuthStatus"), e); }
+});
+$("vkAuthTypeBtn").onclick = async () => {
+  try { renderVkAuth(await postJson("/vk-web/auth/type", {text:$("vkAuthText").value})); $("vkAuthText").value = ""; await loadStatus(); }
+  catch(e) { show($("vkAuthStatus"), e); }
+};
+$("vkAuthEnterBtn").onclick = async () => {
+  try { renderVkAuth(await postJson("/vk-web/auth/key", {key:"Enter"})); await loadStatus(); }
+  catch(e) { show($("vkAuthStatus"), e); }
+};
+$("vkAuthText").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    $("vkAuthTypeBtn").click();
+  }
+});
+
 $("removeBtn").onclick = async () => {
   const dry = $("removeDryRun").value === "true";
   if (!dry && !confirm("Удалить человека из найденных учебных чатов?")) return;
@@ -331,8 +541,153 @@ $("removeBtn").onclick = async () => {
   catch(e) { show($("removeResult"), e); }
 };
 
+function selectedBroadcastKeys() {
+  return Array.from(document.querySelectorAll("#broadcastChats input[data-chat-key]:checked")).map(input => input.dataset.chatKey);
+}
+function excludedBroadcastKeys() {
+  return Array.from(document.querySelectorAll("#broadcastChats input[data-chat-key]:not(:checked)")).map(input => input.dataset.chatKey);
+}
+function updateBroadcastSummary() {
+  const total = broadcastChats.length;
+  const ready = broadcastChats.filter(c => c.can_send).length;
+  const checked = selectedBroadcastKeys().length;
+  const mode = $("broadcastMode").value;
+  const target = mode === "all_except" ? total - excludedBroadcastKeys().length : checked;
+  const speedEta = {fast:1.9, balanced:3.8, safe:7.0};
+  const etaSeconds = Math.max(0, Math.round((target - 1) * (speedEta[$("broadcastSpeed").value] || speedEta.balanced)));
+  const eta = etaSeconds >= 60 ? ` / ~${Math.ceil(etaSeconds / 60)} мин` : (etaSeconds ? ` / ~${etaSeconds} сек` : "");
+  $("broadcastSummary").value = `${target} выбрано / ${total} найдено / ${ready} готово${eta}`;
+  updateBroadcastToggleAll();
+}
+function updateBroadcastToggleAll() {
+  const boxes = Array.from(document.querySelectorAll("#broadcastChats input[data-chat-key]:not(:disabled)"));
+  const btn = $("broadcastToggleAllBtn");
+  const headCheck = $("broadcastToggleAllCheck");
+  btn.hidden = boxes.length === 0;
+  headCheck.disabled = boxes.length === 0;
+  if (!boxes.length) {
+    headCheck.checked = false;
+    headCheck.indeterminate = false;
+    headCheck.title = "Нет доступных чатов";
+    return;
+  }
+  const allChecked = boxes.every(input => input.checked);
+  const someChecked = boxes.some(input => input.checked);
+  btn.textContent = allChecked ? "Отменить все" : "Выбрать все";
+  headCheck.checked = allChecked;
+  headCheck.indeterminate = someChecked && !allChecked;
+  headCheck.title = allChecked ? "Отменить все" : "Выбрать все";
+}
+function renderBroadcastChats() {
+  $("broadcastChats").innerHTML = broadcastChats.map(chat => {
+    const sources = (chat.sources || []).join("+");
+    const statusClass = chat.can_send ? "on" : "warn";
+    const status = chat.can_send ? "можно отправить" : (chat.error || chat.status || "недоступен");
+    return `<div class="row broadcast-row">
+      <span class="check-cell"><input type="checkbox" data-chat-key="${esc(chat.chat_key)}" ${chat.can_send ? "checked" : ""} ${chat.can_send ? "" : "disabled"}></span>
+      <span>${esc(chat.platform === "telegram" ? "Telegram" : "VK")}</span>
+      <span><span class="cell-main">${esc(chat.title)}</span><span class="cell-sub">${esc(chat.chat_key)}</span></span>
+      <span>${esc(chat.stream_number || "")}</span><span>${esc(chat.date_start || "")}</span>
+      <span>${esc(sources)}</span><span class="${statusClass}">${esc(status)}</span>
+    </div>`;
+  }).join("");
+  updateBroadcastSummary();
+}
+function renderBroadcastHistory() {
+  $("broadcastHistory").innerHTML = broadcastHistory.map(item => {
+    const counts = item.counts || {};
+    const sent = counts.sent || 0;
+    const deleted = counts.deleted || 0;
+    const errors = (counts.error || 0) + (counts.delete_error || 0);
+    const skipped = counts.skipped || 0;
+    const when = item.sent_at ? new Date(item.sent_at * 1000).toLocaleString("ru-RU") : "";
+    const canDelete = sent > 0 || (item.messages || []).some(msg => msg.status === "delete_error");
+    return `<div class="row history-row">
+      <span>${item.id}</span>
+      <span><span class="cell-main">${esc((item.message || "").slice(0, 120))}</span></span>
+      <span class="${item.status === "done" || item.status === "deleted" ? "on" : item.status === "partial" ? "warn" : "off"}">${esc(item.status)}</span>
+      <span>${esc(when)}</span>
+      <span class="cell-sub">sent: ${sent}, deleted: ${deleted}, errors: ${errors}, skipped: ${skipped}</span>
+      <span>${canDelete ? `<button class="btn danger" type="button" data-broadcast-delete="${item.id}">Удалить</button>` : ""}</span>
+    </div>`;
+  }).join("");
+}
+async function loadBroadcastStatus() {
+  try { show($("broadcastStatus"), await getJson("/broadcast/status")); }
+  catch(e) { show($("broadcastStatus"), e); }
+}
+async function loadBroadcastChats() {
+  try {
+    show($("broadcastStatus"), "Ищу обучающие чаты...");
+    const data = await getJson(`/broadcast/chats?platform=${encodeURIComponent($("broadcastPlatform").value)}`);
+    broadcastChats = data.items || [];
+    renderBroadcastChats();
+    show($("broadcastStatus"), data.status || data);
+  } catch(e) { show($("broadcastStatus"), e); }
+}
+async function loadBroadcastHistory() {
+  try {
+    const data = await getJson("/broadcasts?limit=30");
+    broadcastHistory = data.items || [];
+    renderBroadcastHistory();
+  } catch(e) {
+    $("broadcastHistory").innerHTML = `<div class="row history-row"><span>${esc(JSON.stringify(e))}</span></div>`;
+  }
+}
+$("broadcastStatusBtn").onclick = loadBroadcastStatus;
+$("broadcastScanBtn").onclick = loadBroadcastChats;
+$("broadcastHistoryBtn").onclick = loadBroadcastHistory;
+$("broadcastPlatform").onchange = loadBroadcastChats;
+$("broadcastMode").onchange = updateBroadcastSummary;
+$("broadcastSpeed").onchange = updateBroadcastSummary;
+$("broadcastToggleAllBtn").onclick = () => {
+  toggleBroadcastAll();
+};
+$("broadcastToggleAllCheck").onchange = () => {
+  toggleBroadcastAll($("broadcastToggleAllCheck").checked);
+};
+function toggleBroadcastAll(forceValue) {
+  const boxes = Array.from(document.querySelectorAll("#broadcastChats input[data-chat-key]:not(:disabled)"));
+  const shouldCheck = typeof forceValue === "boolean" ? forceValue : boxes.some(input => !input.checked);
+  boxes.forEach(input => { input.checked = shouldCheck; });
+  updateBroadcastSummary();
+}
+$("broadcastChats").addEventListener("change", event => {
+  if (event.target.matches("input[data-chat-key]")) updateBroadcastSummary();
+});
+$("broadcastHistory").addEventListener("click", async event => {
+  const btn = event.target.closest("button[data-broadcast-delete]");
+  if (!btn) return;
+  const id = Number(btn.dataset.broadcastDelete);
+  if (!confirm(`Удалить сообщения рассылки #${id} из чатов?`)) return;
+  try {
+    show($("broadcastStatus"), await postJson(`/broadcasts/${id}/delete`, {}));
+    await loadBroadcastHistory();
+  } catch(e) { show($("broadcastStatus"), e); }
+});
+$("broadcastSendBtn").onclick = async () => {
+  const mode = $("broadcastMode").value;
+  const payload = {
+    platforms: $("broadcastPlatform").value === "all" ? ["vk", "telegram"] : [$("broadcastPlatform").value],
+    mode,
+    speed: $("broadcastSpeed").value,
+    selected: selectedBroadcastKeys(),
+    excluded: excludedBroadcastKeys(),
+    message: $("broadcastMessage").value
+  };
+  const count = mode === "all_except" ? broadcastChats.length - payload.excluded.length : payload.selected.length;
+  if (!payload.message.trim()) { show($("broadcastStatus"), "Введите текст рассылки."); return; }
+  if (count < 1) { show($("broadcastStatus"), "Выберите хотя бы один чат."); return; }
+  if (!confirm(`Отправить рассылку в ${count} чат(ов)?`)) return;
+  try {
+    show($("broadcastStatus"), "Отправка началась...");
+    show($("broadcastStatus"), await postJson("/broadcast/send", payload));
+    await loadBroadcastHistory();
+  } catch(e) { show($("broadcastStatus"), e); }
+};
+
 function createPayload() {
-  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, test_mode:$("testMode").value};
+  return {platform:$("platform").value, stream_number:$("stream").value, start_date:$("date").value, date_start:$("date").value, course_choice:$("course").value, course_type:$("course").value, curator_id:$("curator").value, test_mode:$("testMode").value};
 }
 function formatElapsed(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -341,7 +696,7 @@ function formatElapsed(ms) {
   return `${min}:${sec}`;
 }
 $("previewBtn").onclick = async () => {
-  try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}`)); }
+  try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}&curator_id=${encodeURIComponent($("curator").value)}`)); }
   catch(e) { show($("previewResult"), e); }
 };
 $("createBtn").onclick = async () => {
@@ -370,11 +725,28 @@ async function loadRuns() {
     const data = await getJson("/runs?limit=50");
     $("runsList").innerHTML = data.items.map(r => `<div class="row run-row">
       <span>${esc(r.platform === "telegram" ? "Telegram" : "VK")}</span><span>${esc(r.title)}</span><span>${esc(r.stream_number)}</span><span>${esc(r.date_start)}</span>
-      <span>${r.test_mode ? "Проверка" : "Боевой"}</span><span class="${r.status === "ok" ? "on" : "off"}">${r.status === "ok" ? "Готово" : "Ошибка"}</span>
+      <span>${r.test_mode ? "Проверка" : "Боевой"}</span><span class="${r.status === "ok" ? "on" : r.status && r.status.startsWith("needs_") ? "warn" : "off"}">${r.status === "ok" ? "Готово" : r.status === "needs_vk_web_admins" ? "Нужны админки" : r.status === "needs_members" ? "Нужны участники" : "Ошибка"}</span>
       <span class="cell-sub">${esc(r.link || r.error || "")}</span>
+      <span>${r.platform === "vk" && r.status === "needs_vk_web_admins" ? '<button class="btn ghost" type="button" data-run-action="retry-vk-admins" data-id="' + esc(r.id) + '">Довыдать</button>' : ""}</span>
     </div>`).join("");
   } catch(e) { $("runsList").innerHTML = `<div class="row run-row"><span>${esc(JSON.stringify(e))}</span></div>`; }
 }
+async function retryVkAdminsRun(runId) {
+  if (!runId) return;
+  show($("createResult"), `Довыдаю VK-админки для запуска #${runId}...`);
+  try {
+    const data = await postJson("/vk-web/admins/retry", {run_id: runId});
+    show($("createResult"), data);
+    await loadRuns();
+    refreshVkShot();
+  } catch(e) {
+    show($("createResult"), e);
+  }
+}
+$("runsList").addEventListener("click", event => {
+  const btn = event.target.closest("button[data-run-action='retry-vk-admins']");
+  if (btn) retryVkAdminsRun(Number(btn.dataset.id));
+});
 $("runsRefresh").onclick = loadRuns;
 $("runsClear").onclick = async () => {
   if (!confirm("Очистить историю запусков?")) return;
@@ -384,7 +756,7 @@ $("runsClear").onclick = async () => {
 
 async function init() {
   $("tgPassword").value = ""; $("tgCode").value = "";
-  await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns();
+  await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns(); await loadBroadcastStatus(); await loadBroadcastHistory();
 }
 init().catch(() => {});
 </script>

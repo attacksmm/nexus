@@ -1,8 +1,8 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.0.7",
-  "description": "Nexus-модуль для создания учебных Telegram/VK чатов с редактируемыми админами, кураторами, авторами, курсами и шаблонами сообщений.",
+  "version": "1.1.5",
+  "description": "Nexus-модуль для создания учебных Telegram/VK чатов, VK Web-авторизации для авто-админок и рассылок по обучающим чатам с удалением отправленных сообщений.",
   "env_required": [
     "VK_USER_TOKEN",
     "TELEGRAM_API_ID",
@@ -17,6 +17,9 @@
     "VK_TEST_USER_TOKEN": "Опционально: отдельный пользовательский VK token для test_mode.",
     "VK_GROUP_TOKEN": "Опционально: VK group token для настройки истории чата, если доступно.",
     "VK_GROUP_ID": "Опционально: ID сообщества VK для добавления бота/сообщества в беседу.",
-    "TELEGRAM_SESSION_FILE": "Опционально: путь к Telethon session-файлу. По умолчанию data/telegram.session внутри модуля."
+    "VK_WEB_PROFILE_DIR": "Опционально: путь к persistent Chromium-профилю VK Web. По умолчанию data/vk-web-profile внутри модуля.",
+    "VK_WEB_HEADLESS": "Опционально: 1/0, запускать серверный Chromium headless. По умолчанию 1.",
+    "TELEGRAM_SESSION_FILE": "Опционально: путь к Telethon session-файлу. По умолчанию data/telegram.session внутри модуля.",
+    "TELEGRAM_MTPROTO_PROXY_URL": "Опционально: MTProto proxy URL формата https://t.me/proxy?server=...&port=...&secret=... для Telegram через Telethon."
   }
 }

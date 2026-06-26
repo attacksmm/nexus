@@ -1,0 +1,10 @@
+{
+  "id": "sbkvd-gpt",
+  "name": "SBKVD GPT",
+  "version": "1.0.6",
+  "description": "Полноэкранный GPT-чат для команды Sobakovod с отдельными логинами, персональными промптами/моделями и локальным контекстом поверх OpenRouter.",
+  "env_vars": {
+    "OPENROUTER_API_KEY": "Используется модулем OpenRouter для генерации ответов."
+  },
+  "env_required": []
+}

@@ -15,10 +15,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from orchestrator.auth import can_access_module, verify_token_from_request
+
 router = APIRouter()
 
 _db_path = None
 _logger: logging.Logger | None = None
+MODULE_ID = "amocrm-senler"
 
 SENLER_API = "https://senler.ru/api"
 SENLER_V = "2"
@@ -46,6 +49,13 @@ CATEGORY_LABELS = {
     "success": "Успех",
     "closed_lost": "Закрыто",
 }
+
+
+async def _require_panel_user(request: Request) -> dict:
+    user = await verify_token_from_request(request)
+    if not user or not can_access_module(user, MODULE_ID):
+        raise HTTPException(401, "unauthorized")
+    return user
 
 
 def setup(ctx):
@@ -1017,7 +1027,8 @@ async def health():
 
 
 @router.get("/env-status")
-async def env_status():
+async def env_status(request: Request):
+    await _require_panel_user(request)
     env = _env()
     settings = await _settings_map()
     return {
@@ -1031,7 +1042,8 @@ async def env_status():
 
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(request: Request):
+    await _require_panel_user(request)
     settings = await _settings_map()
     env = _env()
     return {
@@ -1046,12 +1058,14 @@ async def get_settings():
 
 @router.post("/settings")
 async def post_settings(request: Request):
+    await _require_panel_user(request)
     data = await request.json()
     return await _save_settings(data if isinstance(data, dict) else {})
 
 
 @router.get("/amo/statuses")
-async def amo_statuses():
+async def amo_statuses(request: Request):
+    await _require_panel_user(request)
     settings = await _settings_map()
     pipelines, error = await _amo_status_catalog(settings)
     if error:
@@ -1060,7 +1074,8 @@ async def amo_statuses():
 
 
 @router.get("/bindings")
-async def list_bindings():
+async def list_bindings(request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -1119,6 +1134,7 @@ async def list_bindings():
 
 @router.post("/bindings")
 async def save_binding(request: Request):
+    await _require_panel_user(request)
     data = await request.json()
     binding_id = int(data.get("id") or 0)
     category = _clean(data.get("category"), 32)
@@ -1198,7 +1214,8 @@ async def save_binding(request: Request):
 
 
 @router.put("/bindings/{binding_id}/toggle")
-async def toggle_binding(binding_id: int):
+async def toggle_binding(binding_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute(
             "UPDATE status_bindings SET active=1-active, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
@@ -1209,7 +1226,8 @@ async def toggle_binding(binding_id: int):
 
 
 @router.delete("/bindings/{binding_id}")
-async def delete_binding(binding_id: int):
+async def delete_binding(binding_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         await db.execute("DELETE FROM status_bindings WHERE id=?", (binding_id,))
         await db.commit()
@@ -1217,7 +1235,8 @@ async def delete_binding(binding_id: int):
 
 
 @router.get("/events")
-async def list_events(limit: int = 200, result: str = "all"):
+async def list_events(request: Request, limit: int = 200, result: str = "all"):
+    await _require_panel_user(request)
     limit = max(1, min(500, int(limit)))
     where = ""
     if result == "ok":
@@ -1233,7 +1252,8 @@ async def list_events(limit: int = 200, result: str = "all"):
 
 
 @router.get("/events/{event_id}")
-async def get_event(event_id: int):
+async def get_event(event_id: int, request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM events WHERE id=?", (event_id,))
@@ -1250,7 +1270,8 @@ async def get_event(event_id: int):
 
 
 @router.get("/stats")
-async def stats():
+async def stats(request: Request):
+    await _require_panel_user(request)
     async with aiosqlite.connect(_db_path) as db:
         total = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
         success = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=1")).fetchone())[0]

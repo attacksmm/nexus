@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from orchestrator.auth import (
-    ENV_PATH, ensure_default_users, require_admin,
+    ENV_PATH, can_access_module, ensure_default_users, require_admin,
     _read_env_values,
     router as auth_router, verify_token_from_request,
 )
@@ -22,6 +22,7 @@ from orchestrator.db import init_db, update_module_status
 
 BASE_DIR = Path(__file__).parent
 UPLOADS_DIR.mkdir(exist_ok=True)
+MAX_MODULE_ZIP_BYTES = 100 * 1024 * 1024
 
 manager = ModuleManager(BASE_DIR)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -52,6 +53,51 @@ def _unauth_json():
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
+def _cpu_model() -> str:
+    try:
+        for line in Path("/proc/cpuinfo").read_text(errors="replace").splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    try:
+        return os.uname().machine
+    except Exception:
+        return ""
+
+
+async def _visible_modules_for(user: dict) -> list[dict]:
+    modules = await manager.list_modules()
+    if require_admin(user):
+        return modules
+    return [m for m in modules if can_access_module(user, m["id"])]
+
+
+def _can_manage_module(user: dict | None, module_id: str) -> bool:
+    if not user or user["role"] not in ("admin", "editor"):
+        return False
+    return can_access_module(user, module_id)
+
+
+@app.middleware("http")
+async def module_panel_access_middleware(request: Request, call_next):
+    parts = [p for p in request.scope.get("path", "").strip("/").split("/") if p]
+    if "panel" in parts:
+        panel_idx = parts.index("panel")
+        module_id = parts[panel_idx - 1] if panel_idx > 0 else ""
+        panel_tail = parts[panel_idx + 1 :]
+        if module_id == "sbkvd-gpt" and panel_tail[:1] == ["chat"]:
+            return await call_next(request)
+        modules = await manager.list_modules()
+        if any(m["id"] == module_id for m in modules):
+            user = await verify_token_from_request(request)
+            if not user:
+                return _auth_redirect(request)
+            if not can_access_module(user, module_id):
+                return PlainTextResponse("Недостаточно прав", status_code=403)
+    return await call_next(request)
+
+
 # ── Pages ───────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -59,7 +105,7 @@ async def index(request: Request):
     user = await verify_token_from_request(request)
     if not user:
         return _auth_redirect(request)
-    modules = await manager.list_modules()
+    modules = await _visible_modules_for(user)
     return templates.TemplateResponse("shell.html", {
         "request": request, "user": user, "modules": modules, "rp": _rp(request),
     })
@@ -84,21 +130,40 @@ async def api_list(request: Request):
     user = await verify_token_from_request(request)
     if not user:
         return _unauth_json()
-    return await manager.list_modules()
+    return await _visible_modules_for(user)
 
 
 @app.post("/api/modules/upload")
-async def api_upload(request: Request, file: UploadFile = File(...)):
+async def api_upload(request: Request, file: UploadFile | None = File(None)):
     user = await verify_token_from_request(request)
-    if not user or user["role"] not in ("admin", "editor"):
+    if not require_admin(user):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
-    if not file.filename.endswith(".zip"):
+    if not file:
+        return JSONResponse({"error": "Файл не передан"}, status_code=400)
+    raw_name = (file.filename or "").replace("\\", "/")
+    safe_name = Path(raw_name).name
+    if not safe_name or safe_name in {".", ".."} or not safe_name.lower().endswith(".zip"):
         return JSONResponse({"error": "Только .zip файлы"}, status_code=400)
 
-    zip_path = UPLOADS_DIR / file.filename
-    async with aiofiles.open(zip_path, "wb") as f:
-        content = await file.read()
-        await f.write(content)
+    zip_path = UPLOADS_DIR / f"{int(time.time() * 1000)}-{safe_name}"
+    size = 0
+    too_large = False
+    try:
+        async with aiofiles.open(zip_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_MODULE_ZIP_BYTES:
+                    too_large = True
+                    break
+                await f.write(chunk)
+    finally:
+        await file.close()
+    if too_large:
+        zip_path.unlink(missing_ok=True)
+        return JSONResponse({"error": "ZIP файл слишком большой"}, status_code=413)
 
     try:
         meta = await manager.install_from_zip(zip_path, app)
@@ -125,7 +190,7 @@ async def api_unload(module_id: str, request: Request):
 @app.post("/api/modules/{module_id}/pause")
 async def api_pause(module_id: str, request: Request):
     user = await verify_token_from_request(request)
-    if not user or user["role"] not in ("admin", "editor"):
+    if not _can_manage_module(user, module_id):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     try:
         await manager.pause(module_id, app)
@@ -152,7 +217,7 @@ async def api_env_template(request: Request):
     if not require_admin(user):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
 
-    modules = await manager.list_modules()
+    modules = await _visible_modules_for(user)
     configured = {k for k, v in _read_env_values().items() if v}
     configured.update(k for k, v in os.environ.items() if v)
 
@@ -224,6 +289,8 @@ async def api_server_stats(request: Request):
     return {
         "cpu_percent": psutil.cpu_percent(interval=0.3),
         "cpu_count": psutil.cpu_count(),
+        "cpu_count_physical": psutil.cpu_count(logical=False),
+        "cpu_model": _cpu_model(),
         "ram_total": vm.total,
         "ram_used": vm.used,
         "ram_percent": vm.percent,
@@ -239,7 +306,7 @@ async def api_server_stats(request: Request):
 @app.post("/api/modules/{module_id}/resume")
 async def api_resume(module_id: str, request: Request):
     user = await verify_token_from_request(request)
-    if not user or user["role"] not in ("admin", "editor"):
+    if not _can_manage_module(user, module_id):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
     try:
         await manager.resume(module_id, app)

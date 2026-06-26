@@ -6,8 +6,10 @@ import mimetypes
 import os
 import random
 import re
+import shutil
 import sqlite3
 import time
+from urllib.parse import parse_qs, urlparse
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,7 +18,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 try:
     from orchestrator.auth import can_access_module, require_admin, verify_token_from_request
@@ -36,6 +38,10 @@ _ctx = None
 _logger = None
 _db_initialized = False
 _tg_auth_pending: dict[str, dict[str, Any]] = {}
+_vk_web_lock = asyncio.Lock()
+_vk_web_playwright: Any | None = None
+_vk_web_context: Any | None = None
+_vk_web_page: Any | None = None
 
 
 COURSE_DEFAULTS = [
@@ -169,6 +175,35 @@ def _init_db() -> None:
                 response_json TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS broadcasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platforms TEXT NOT NULL DEFAULT '[]',
+                message TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'selected',
+                selected_json TEXT NOT NULL DEFAULT '[]',
+                excluded_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'draft',
+                error TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                sent_at INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS broadcast_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broadcast_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                chat_key TEXT NOT NULL,
+                chat_title TEXT NOT NULL,
+                peer_id TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                message_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                deleted_at INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(broadcast_id) REFERENCES broadcasts(id)
+            );
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -264,6 +299,11 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _exc_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    return text or exc.__class__.__name__
+
+
 def _bool(value: Any) -> bool:
     return str(value).lower() in {"1", "true", "yes", "y", "да"}
 
@@ -336,9 +376,25 @@ def _people(kind: str | None = None, *, enabled: bool = True) -> list[dict[str, 
         return [dict(row) for row in db.execute(sql, args).fetchall()]
 
 
-def _selected_people(stream_number: str) -> dict[str, list[dict[str, Any]]]:
+def _default_curator_id() -> int | None:
+    kurators = _people("kurator", enabled=True)
+    for person in kurators:
+        if _clean(person.get("name")).lower() == "ирина":
+            return int(person["id"])
+    return int(kurators[0]["id"]) if kurators else None
+
+
+def _selected_people(stream_number: str, curator_id: Any | None = None) -> dict[str, list[dict[str, Any]]]:
     is_even = _stream_is_even(stream_number)
     result: dict[str, list[dict[str, Any]]] = {"admins": [], "kurators": [], "authors": [], "techs": []}
+    selected_curator_id: int | None = None
+    if curator_id not in (None, ""):
+        try:
+            selected_curator_id = int(curator_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="curator_id must be a numeric people id")
+    else:
+        selected_curator_id = _default_curator_id()
     for person in _people(enabled=True):
         kind = person["kind"]
         if kind == "admin":
@@ -348,10 +404,23 @@ def _selected_people(stream_number: str) -> dict[str, list[dict[str, Any]]]:
         elif kind == "tech":
             result["techs"].append(person)
         elif kind == "kurator":
-            parity = person.get("parity") or "any"
-            if parity == "any" or (parity == "even" and is_even) or (parity == "odd" and not is_even):
-                result["kurators"].append(person)
+            if selected_curator_id is not None:
+                if int(person["id"]) == selected_curator_id:
+                    result["kurators"].append(person)
+            else:
+                parity = person.get("parity") or "any"
+                if parity == "any" or (parity == "even" and is_even) or (parity == "odd" and not is_even):
+                    result["kurators"].append(person)
+    if selected_curator_id is not None and not result["kurators"]:
+        raise HTTPException(status_code=400, detail="Selected curator is disabled or not found")
     return result
+
+
+def _selected_curator_id(stream_number: str, curator_id: Any | None = None) -> int | None:
+    selected = _selected_people(stream_number, curator_id)
+    if selected["kurators"]:
+        return int(selected["kurators"][0]["id"])
+    return None
 
 
 def _vk_ids(people: list[dict[str, Any]]) -> list[int]:
@@ -444,6 +513,10 @@ def _mentions(people: list[dict[str, Any]], platform: str) -> str:
                 ref = f"@{screen_name}" if screen_name and not screen_name.isdigit() else _clean(person.get("name"))
         else:
             ref = _tg_username(person.get("tg_ref")) or _clean(person.get("name"))
+        if person.get("kind") == "kurator":
+            name = _clean(person.get("name"))
+            if ref and name and name.lower() not in ref.lower():
+                ref = f"{ref} - {name}"
         if ref:
             items.append(ref)
     return ", ".join(items) if items else "не указаны"
@@ -503,6 +576,36 @@ def _record_run(platform: str, title: str, stream_number: str, date_start: str, 
             ),
         )
         db.commit()
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _update_run(run_id: int, status: str, response_json: dict[str, Any], *, error: str = "") -> None:
+    _ensure_db()
+    with _db() as db:
+        db.execute(
+            "UPDATE runs SET status=?, error=?, response_json=? WHERE id=?",
+            (status, error, json.dumps(response_json, ensure_ascii=False), run_id),
+        )
+        db.commit()
+
+
+def _vk_admin_run(run_id: int | None = None) -> dict[str, Any] | None:
+    _ensure_db()
+    with _db() as db:
+        if run_id:
+            row = db.execute("SELECT * FROM runs WHERE id=? AND platform='vk'", (run_id,)).fetchone()
+        else:
+            row = db.execute("SELECT * FROM runs WHERE platform='vk' AND status='needs_vk_web_admins' ORDER BY id DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
 
 
 async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
@@ -585,6 +688,340 @@ async def _upload_vk_chat_photo(peer_id: int, photo_path: Path, token: str) -> b
         return False
 
 
+def _vk_web_profile_dir() -> Path:
+    return Path(_clean(os.environ.get("VK_WEB_PROFILE_DIR")) or (_data_dir() / "vk-web-profile"))
+
+
+def _vk_web_screenshot_path() -> Path:
+    return _data_dir() / "vk-web-last.png"
+
+
+async def _vk_web_start() -> tuple[Any, Any]:
+    global _vk_web_playwright, _vk_web_context, _vk_web_page
+    async with _vk_web_lock:
+        if _vk_web_context is not None:
+            pages = list(getattr(_vk_web_context, "pages", []) or [])
+            if _vk_web_page is None or getattr(_vk_web_page, "is_closed", lambda: True)():
+                _vk_web_page = pages[0] if pages else await _vk_web_context.new_page()
+            return _vk_web_context, _vk_web_page
+        try:
+            from playwright.async_api import async_playwright
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Playwright is not installed: {exc}")
+        profile_dir = _vk_web_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        _vk_web_playwright = await async_playwright().start()
+        _vk_web_context = await _vk_web_playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=_clean(os.environ.get("VK_WEB_HEADLESS") or "1").lower() not in {"0", "false", "no"},
+            viewport={"width": 1366, "height": 900},
+            locale="ru-RU",
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        pages = list(getattr(_vk_web_context, "pages", []) or [])
+        _vk_web_page = pages[0] if pages else await _vk_web_context.new_page()
+        _vk_web_page.set_default_timeout(10000)
+        return _vk_web_context, _vk_web_page
+
+
+async def _vk_web_stop() -> None:
+    global _vk_web_playwright, _vk_web_context, _vk_web_page
+    async with _vk_web_lock:
+        context, playwright = _vk_web_context, _vk_web_playwright
+        _vk_web_context = None
+        _vk_web_playwright = None
+        _vk_web_page = None
+    if context is not None:
+        try:
+            await context.close()
+        except Exception:
+            pass
+    if playwright is not None:
+        try:
+            await playwright.stop()
+        except Exception:
+            pass
+
+
+async def _vk_web_save_screenshot(page: Any | None = None) -> str:
+    if page is None:
+        _, page = await _vk_web_start()
+    path = _vk_web_screenshot_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    await page.screenshot(path=str(path), full_page=False)
+    return str(path)
+
+
+async def _vk_web_is_authorized(page: Any, *, navigate: bool = True) -> tuple[bool, str]:
+    if navigate:
+        await page.goto("https://vk.com/im", wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(2500)
+    url = _clean(getattr(page, "url", ""))
+    cookies = await page.context.cookies("https://vk.com")
+    cookie_names = {cookie.get("name") for cookie in cookies}
+    body = ""
+    try:
+        body = (await page.locator("body").inner_text(timeout=3000)).lower()
+    except Exception:
+        body = ""
+    login_words = ("войти", "телефон или почта", "qr", "код", "пароль")
+    app_words = ("мессенджер", "сообщения", "новости", "моя страница", "друзья")
+    if "not_robot_captcha" in body or "captcha-widget" in body or await page.locator("iframe[src*='not_robot_captcha'], [data-test-id='captcha-widget']").count():
+        return False, "captcha_required"
+    has_session_cookie = bool(cookie_names.intersection({"remixsid", "remixusid", "remixua"}))
+    looks_like_login = any(word in body for word in login_words) and not any(word in body for word in app_words)
+    if any(part in url.lower() for part in ("/login", "act=login", "login.vk.", "connect.vk.")):
+        return False, "waiting_auth"
+    if has_session_cookie and not looks_like_login:
+        return True, "authorized"
+    if any(word in body for word in app_words) and not looks_like_login:
+        return True, "authorized"
+    return False, "waiting_auth"
+
+
+async def _vk_web_auth_state(*, open_browser: bool = False, screenshot: bool = False) -> dict[str, Any]:
+    profile_dir = _vk_web_profile_dir()
+    state = {
+        "available": True,
+        "browser_open": _vk_web_context is not None,
+        "authorized": False,
+        "status": "not_opened",
+        "profile_dir": str(profile_dir),
+        "screenshot": False,
+        "screenshot_url": "../api/vk-web/auth/screenshot",
+    }
+    if not open_browser and _vk_web_context is None:
+        state["profile_exists"] = profile_dir.exists()
+        return state
+    try:
+        _, page = await _vk_web_start()
+        authorized, status_value = await _vk_web_is_authorized(page, navigate=open_browser)
+        state.update({"browser_open": True, "authorized": authorized, "status": status_value, "url": getattr(page, "url", "")})
+        if screenshot:
+            await _vk_web_save_screenshot(page)
+            state["screenshot"] = True
+    except HTTPException:
+        raise
+    except Exception as exc:
+        state.update({"status": "error", "error": _exc_text(exc)})
+        try:
+            await _vk_web_save_screenshot()
+            state["screenshot"] = True
+        except Exception:
+            pass
+    return state
+
+
+async def _vk_web_interaction_state(page: Any) -> dict[str, Any]:
+    authorized, status_value = await _vk_web_is_authorized(page, navigate=False)
+    await _vk_web_save_screenshot(page)
+    return {
+        "available": True,
+        "browser_open": True,
+        "authorized": authorized,
+        "status": status_value,
+        "url": getattr(page, "url", ""),
+        "profile_dir": str(_vk_web_profile_dir()),
+        "screenshot": True,
+        "screenshot_url": "../api/vk-web/auth/screenshot",
+    }
+
+
+async def _vk_web_require_authorized() -> Any:
+    _, page = await _vk_web_start()
+    authorized, status_value = await _vk_web_is_authorized(page, navigate=True)
+    if not authorized:
+        await _vk_web_save_screenshot(page)
+        if status_value == "captcha_required":
+            raise HTTPException(status_code=409, detail="VK требует проверку «не робот». Откройте вкладку «VK Авторизация», пройдите проверку и повторите создание/выдачу админок.")
+        raise HTTPException(status_code=409, detail="Нужно авторизовать ВКонтакте во вкладке «Авторизация ВКонтакте».")
+    return page
+
+
+async def _vk_web_raise_if_captcha(page: Any) -> None:
+    if await page.locator("iframe[src*='not_robot_captcha'], [data-test-id='captcha-widget']").count():
+        await _vk_web_save_screenshot(page)
+        raise RuntimeError("VK требует проверку «не робот». Откройте вкладку «VK Авторизация», пройдите проверку и повторите выдачу админок.")
+
+
+def _vk_member_role(member: dict[str, Any]) -> str:
+    return _clean(member.get("role") or member.get("member_role") or member.get("is_admin") and "admin")
+
+
+async def _vk_admin_state(peer_id: int, target_ids: list[int], token: str) -> dict[str, Any]:
+    members_resp = await _vk_method("messages.getConversationMembers", {"peer_id": peer_id}, token)
+    if isinstance(members_resp, dict) and "error" in members_resp:
+        return {"ok": False, "error": members_resp["error"], "admins": [], "members": [], "missing_admins": target_ids}
+    raw_items = members_resp.get("items", []) if isinstance(members_resp, dict) else []
+    profiles = {int(p.get("id")): p for p in (members_resp.get("profiles", []) if isinstance(members_resp, dict) else []) if p.get("id") is not None}
+    rows: list[dict[str, Any]] = []
+    admins: list[int] = []
+    for item in raw_items:
+        member_id = int(item.get("member_id", 0) or 0)
+        profile = profiles.get(member_id, {})
+        role = _vk_member_role(item)
+        is_admin = role in {"admin", "creator", "administrator"} or bool(item.get("is_admin"))
+        if is_admin:
+            admins.append(member_id)
+        rows.append({
+            "id": member_id,
+            "role": role,
+            "is_admin": is_admin,
+            "screen_name": profile.get("screen_name", ""),
+            "name": " ".join(filter(None, [_clean(profile.get("first_name")), _clean(profile.get("last_name"))])),
+        })
+    missing = [user_id for user_id in target_ids if user_id not in admins]
+    return {"ok": True, "admins": admins, "members": rows, "missing_admins": missing}
+
+
+async def _vk_wait_for_chat_members(chat_id: int, peer_id: int, target_ids: list[int], token: str, *, timeout_seconds: int = 75) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    attempts: list[dict[str, Any]] = []
+    missing = list(target_ids)
+    while time.time() < deadline:
+        state = await _vk_admin_state(peer_id, target_ids, token)
+        present = [int(item.get("id")) for item in state.get("members", []) if item.get("id") in target_ids]
+        missing = [user_id for user_id in target_ids if user_id not in present]
+        attempts.append({"present": present, "missing": missing, "error": state.get("error")})
+        if not missing:
+            return {"ok": True, "present": present, "missing": [], "attempts": attempts[-5:]}
+        for user_id in missing:
+            try:
+                await _vk_method("messages.addChatUser", {"chat_id": chat_id, "user_id": user_id}, token)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+        await asyncio.sleep(2.5)
+    return {"ok": False, "present": [user_id for user_id in target_ids if user_id not in missing], "missing": missing, "attempts": attempts[-5:]}
+
+
+async def _vk_try_api_admins(peer_id: int, target_ids: list[int], token: str) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for admin_id in target_ids:
+        await asyncio.sleep(0.5)
+        resp = await _vk_method("messages.setMemberRole", {"peer_id": peer_id, "member_id": admin_id, "role": "admin"}, token)
+        ok = not (isinstance(resp, dict) and "error" in resp)
+        results.append({"member_id": admin_id, "ok": ok, "response": resp})
+    state = await _vk_admin_state(peer_id, target_ids, token)
+    return {"ok": not state.get("missing_admins"), "results": results, "state": state}
+
+
+async def _vk_web_click_first(page: Any, selectors: list[str], *, timeout: int = 2500) -> bool:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first()
+            await locator.wait_for(state="visible", timeout=timeout)
+            await locator.click(timeout=timeout)
+            await page.wait_for_timeout(700)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _vk_web_open_members(page: Any, peer_id: int) -> None:
+    chat_id = peer_id - 2000000000
+    await page.goto(f"https://vk.com/im?sel=c{chat_id}", wait_until="domcontentloaded", timeout=45000)
+    await page.wait_for_timeout(3000)
+    await _vk_web_raise_if_captcha(page)
+    try:
+        await page.get_by_text(re.compile(r"\d+\s+участник", re.IGNORECASE)).click(timeout=5000)
+        await page.wait_for_timeout(2500)
+        await _vk_web_raise_if_captcha(page)
+    except Exception:
+        await _vk_web_raise_if_captcha(page)
+        pass
+    if await _vk_web_click_first(page, [
+        "[aria-label*='Информация']",
+        "[aria-label*='информация']",
+        "[data-testid*='conversation_header']",
+        ".ConvoHeader",
+        ".im-page--title-main",
+        ".im-page--chat-header",
+    ]):
+        await _vk_web_raise_if_captcha(page)
+        await _vk_web_click_first(page, [
+            "text=/Участники/i",
+            "text=/участник/i",
+            "[href*='members']",
+            "[data-testid*='members']",
+        ], timeout=3500)
+    await page.wait_for_timeout(1500)
+    await _vk_web_raise_if_captcha(page)
+
+
+async def _vk_web_promote_one(page: Any, peer_id: int, user_id: int, person: dict[str, Any] | None = None) -> None:
+    await _vk_web_open_members(page, peer_id)
+    screen = _vk_screen_name((person or {}).get("vk_id")) or _vk_screen_name((person or {}).get("vk_mention"))
+    found = await page.evaluate(
+        """({userId, screen}) => {
+            const needles = [`/id${userId}`, `sel=${userId}`, `/${screen}`].filter(Boolean).map(String);
+            const links = Array.from(document.querySelectorAll('a[href]'));
+            const link = links.find((a) => needles.some((n) => a.href.includes(n)));
+            if (!link) return false;
+            let row = link;
+            let node = link;
+            for (let i = 0; i < 8 && node; i += 1) {
+                const box = node.getBoundingClientRect();
+                const hasAction = !!node.querySelector('button, [role="button"], [aria-label]');
+                if (box.width > 420 || hasAction || node.matches('[role="listitem"], .vkuiSimpleCell, .ListItem, .im-member, .nim-dialog, li')) {
+                    row = node;
+                }
+                node = node.parentElement;
+            }
+            row.scrollIntoView({block: 'center'});
+            row.setAttribute('data-nexus-target-member', String(userId));
+            return true;
+        }""",
+        {"userId": user_id, "screen": screen},
+    )
+    if not found:
+        raise RuntimeError(f"VK member {user_id} was not found in conversation members UI")
+    row = page.locator(f"[data-nexus-target-member='{user_id}']").first()
+    await row.hover(timeout=5000)
+    clicked_menu = await _vk_web_click_first(page, [
+        f"[data-nexus-target-member='{user_id}'] [aria-label*='…']",
+        f"[data-nexus-target-member='{user_id}'] [aria-label*='Ещё']",
+        f"[data-nexus-target-member='{user_id}'] [aria-label*='Еще']",
+        f"[data-nexus-target-member='{user_id}'] [aria-label*='Действ']",
+        f"[data-nexus-target-member='{user_id}'] .vkuiIconButton",
+        f"[data-nexus-target-member='{user_id}'] .vkuiTappable",
+        f"[data-nexus-target-member='{user_id}'] button",
+        f"[data-nexus-target-member='{user_id}'] [role='button']",
+    ], timeout=2500)
+    if not clicked_menu:
+        await row.click(button="right", timeout=5000)
+        await page.wait_for_timeout(700)
+    if not await _vk_web_click_first(page, [
+        "text=/Назначить администратором/i",
+        "text=/Сделать администратором/i",
+        "text=/Назначить админ/i",
+    ], timeout=4000):
+        raise RuntimeError(f"VK admin action was not found for member {user_id}")
+    await page.wait_for_timeout(1500)
+    await _vk_web_click_first(page, ["text=/Подтвердить/i", "text=/Назначить/i", "text=/Да/i"], timeout=1500)
+
+
+async def _vk_web_promote_admins(peer_id: int, target_people: list[dict[str, Any]], target_ids: list[int], token: str) -> dict[str, Any]:
+    page = await _vk_web_require_authorized()
+    by_id: dict[int, dict[str, Any]] = {}
+    for person in target_people:
+        for user_id in await _resolve_vk_people_ids([person], token):
+            by_id[user_id] = person
+    results: list[dict[str, Any]] = []
+    for user_id in target_ids:
+        try:
+            await _vk_web_promote_one(page, peer_id, user_id, by_id.get(user_id))
+            state = await _vk_admin_state(peer_id, [user_id], token)
+            ok = not state.get("missing_admins")
+            results.append({"member_id": user_id, "ok": ok, "state": state})
+        except Exception as exc:
+            await _vk_web_save_screenshot(page)
+            results.append({"member_id": user_id, "ok": False, "error": _exc_text(exc), "screenshot_url": "../api/vk-web/auth/screenshot"})
+    final_state = await _vk_admin_state(peer_id, target_ids, token)
+    return {"ok": not final_state.get("missing_admins"), "results": results, "state": final_state, "screenshot_url": "../api/vk-web/auth/screenshot"}
+
+
 async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
     _check_password(data, trusted=trusted)
     test_mode = _bool(data.get("test_mode"))
@@ -593,7 +1030,7 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     date_start = _clean(data.get("date_start") or data.get("start_date") or "17 марта")
     course = _course_by_input(data.get("course_type") or data.get("course_choice") or "puppy")
     title = _format_title(stream_number, date_start, course, "vk")
-    selected = _selected_people(stream_number)
+    selected = _selected_people(stream_number, data.get("curator_id"))
     staff_people = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
     chat_member_ids = await _resolve_vk_people_ids(staff_people, token)
     if test_mode:
@@ -623,23 +1060,142 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
             await _vk_method("messages.addChatUser", {"chat_id": chat_id, "user_id": user_id}, token)
         except Exception:
             pass
-    if not test_mode:
-        for admin_id in chat_member_ids:
-            await asyncio.sleep(0.5)
-            await _vk_method("messages.setMemberRole", {"peer_id": peer_id, "member_id": admin_id, "role": "admin"}, token)
+    members_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "test_mode" if test_mode else "no_staff_members"}
+    if not test_mode and chat_member_ids:
+        members_result = await _vk_wait_for_chat_members(chat_id, peer_id, chat_member_ids, token)
     photo = _avatar_path()
     if photo:
         await _upload_vk_chat_photo(peer_id, photo, token)
+    welcome_photo = _asset_path("welcome_message_photo.jpg")
+    if welcome_photo:
+        attachment = await _upload_vk_message_photo(peer_id, welcome_photo, token)
+        if attachment:
+            await _vk_method("messages.send", {"peer_id": peer_id, "attachment": attachment, "random_id": random.randint(1, 2**31 - 1)}, token)
+            await asyncio.sleep(1)
     welcome_text = _render_template("vk_welcome", course=course, stream_number=stream_number, date_start=date_start, selected=selected, platform="vk")
-    welcome_resp = await _vk_method("messages.send", {"peer_id": peer_id, "message": welcome_text, "random_id": 0}, token)
+    welcome_resp = await _vk_method("messages.send", {"peer_id": peer_id, "message": welcome_text, "random_id": random.randint(1, 2**31 - 1)}, token)
     if isinstance(welcome_resp, int):
         await asyncio.sleep(2)
         await _vk_method("messages.pin", {"peer_id": peer_id, "message_id": welcome_resp}, token)
+    admin_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "test_mode" if test_mode else "no_staff_members"}
+    run_status = "ok"
+    run_error = ""
+    if not test_mode and chat_member_ids:
+        if members_result.get("missing"):
+            missing_members = ", ".join(map(str, members_result.get("missing") or []))
+            admin_result = {"ok": False, "skipped": True, "reason": "members_missing", "missing_members": members_result.get("missing") or []}
+            run_status = "needs_members"
+            run_error = f"VK не подтвердил всех участников после наполнения беседы: missing_members={missing_members}"
+        else:
+            await asyncio.sleep(3)
+            api_result = await _vk_try_api_admins(peer_id, chat_member_ids, token)
+            admin_result = api_result
+            missing_admins = list(((api_result.get("state") or {}).get("missing_admins") or []))
+            if missing_admins:
+                try:
+                    web_result = await _vk_web_promote_admins(peer_id, staff_people, missing_admins, token)
+                except Exception as exc:
+                    final_state = await _vk_admin_state(peer_id, chat_member_ids, token)
+                    web_result = {
+                        "ok": False,
+                        "error": _exc_text(exc),
+                        "state": final_state,
+                        "screenshot_url": "../api/vk-web/auth/screenshot",
+                    }
+                admin_result = {"ok": web_result.get("ok"), "api": api_result, "web": web_result}
+                missing = list((web_result.get("state") or {}).get("missing_admins") or [])
+                if missing:
+                    run_status = "needs_vk_web_admins"
+                    run_error = f"VK Web не смог выдать админки после наполнения беседы: missing_admins={', '.join(map(str, missing))}"
     invite_data = await _vk_method("messages.getInviteLink", {"peer_id": peer_id}, token)
     invite_link = invite_data.get("link", "") if isinstance(invite_data, dict) else ""
-    response = {"message": "Success! VK chat created.", "group_link": invite_link, "chat_id": chat_id, "peer_id": peer_id, "test_mode": test_mode, "title": title}
-    _record_run("vk", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id=str(chat_id))
+    response = {
+        "message": "Success! VK chat created." if run_status == "ok" else "VK chat created, but follow-up action is required.",
+        "group_link": invite_link,
+        "chat_id": chat_id,
+        "peer_id": peer_id,
+        "test_mode": test_mode,
+        "title": title,
+        "curator_id": _selected_curator_id(stream_number, data.get("curator_id")),
+        "members_result": members_result,
+        "admin_result": admin_result,
+        "needs_attention": run_status != "ok",
+        "followup_status": run_status,
+        "detail": run_error,
+    }
+    _record_run("vk", title, stream_number, date_start, course["key"], test_mode, run_status, data, response, error=run_error, link=invite_link, chat_id=str(chat_id))
     return response
+
+
+async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]:
+    row = _vk_admin_run(run_id)
+    if not row:
+        return {"ok": True, "skipped": True, "reason": "no_pending_vk_admin_runs"}
+    request_json = _json_dict(row.get("request_json"))
+    response_json = _json_dict(row.get("response_json"))
+    peer_id = int(response_json.get("peer_id") or 0)
+    if not peer_id and row.get("chat_id"):
+        peer_id = 2000000000 + int(row["chat_id"])
+    if not peer_id:
+        raise HTTPException(status_code=400, detail="В запуске не сохранён peer_id VK-чата")
+    chat_id = peer_id - 2000000000
+    test_mode = bool(row.get("test_mode"))
+    token = _clean(os.environ.get("VK_TEST_USER_TOKEN") if test_mode and os.environ.get("VK_TEST_USER_TOKEN") else os.environ.get("VK_USER_TOKEN"))
+    stream_number = _clean(row.get("stream_number") or request_json.get("stream_number"))
+    selected = _selected_people(stream_number, request_json.get("curator_id"))
+    staff_people = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
+    target_ids = await _resolve_vk_people_ids(staff_people, token)
+    if not target_ids:
+        result = {"ok": True, "skipped": True, "reason": "no_staff_members", "run_id": row["id"], "peer_id": peer_id}
+        response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
+        _update_run(int(row["id"]), "ok", response_json)
+        return result
+    members_result = await _vk_wait_for_chat_members(chat_id, peer_id, target_ids, token, timeout_seconds=20)
+    if members_result.get("missing"):
+        missing_members = list(members_result.get("missing") or [])
+        error = f"VK не подтвердил всех участников перед выдачей админок: missing_members={', '.join(map(str, missing_members))}"
+        result = {"ok": False, "run_id": row["id"], "peer_id": peer_id, "members_result": members_result, "error": error}
+        response_json.update({"members_result": members_result, "admin_result": result, "needs_attention": True, "followup_status": "needs_members", "detail": error})
+        _update_run(int(row["id"]), "needs_members", response_json, error=error)
+        return result
+    state = await _vk_admin_state(peer_id, target_ids, token)
+    missing_admins = list(state.get("missing_admins") or [])
+    api_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "already_admin", "state": state}
+    if missing_admins:
+        api_result = await _vk_try_api_admins(peer_id, missing_admins, token)
+        missing_admins = list(((api_result.get("state") or {}).get("missing_admins") or []))
+    web_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "api_completed"}
+    if missing_admins:
+        try:
+            web_result = await _vk_web_promote_admins(peer_id, staff_people, missing_admins, token)
+        except Exception as exc:
+            final_state = await _vk_admin_state(peer_id, target_ids, token)
+            web_result = {
+                "ok": False,
+                "error": _exc_text(exc),
+                "state": final_state,
+                "screenshot_url": "../api/vk-web/auth/screenshot",
+            }
+    final_state = (web_result.get("state") or api_result.get("state") or state)
+    final_missing = list(final_state.get("missing_admins") or [])
+    result = {
+        "ok": not final_missing,
+        "run_id": row["id"],
+        "peer_id": peer_id,
+        "members_result": members_result,
+        "api": api_result,
+        "web": web_result,
+        "state": final_state,
+        "missing_admins": final_missing,
+    }
+    if final_missing:
+        error = f"VK Web не смог выдать админки: missing_admins={', '.join(map(str, final_missing))}"
+        response_json.update({"admin_result": result, "needs_attention": True, "followup_status": "needs_vk_web_admins", "detail": error})
+        _update_run(int(row["id"]), "needs_vk_web_admins", response_json, error=error)
+    else:
+        response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
+        _update_run(int(row["id"]), "ok", response_json)
+    return result
 
 
 def _telegram_credentials() -> tuple[int, str, str]:
@@ -655,6 +1211,58 @@ def _telegram_session_file() -> str:
     return _clean(os.environ.get("TELEGRAM_SESSION_FILE")) or str(_data_dir() / "telegram.session")
 
 
+def _telegram_proxy_url() -> str:
+    return _clean(os.environ.get("TELEGRAM_MTPROTO_PROXY_URL") or os.environ.get("TELEGRAM_PROXY_URL"))
+
+
+def _telegram_proxy_config() -> tuple[Any | None, tuple[str, int, str] | None]:
+    raw = _telegram_proxy_url()
+    if not raw:
+        return None, None
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc == "t.me" and parsed.path == "/proxy":
+        query = parse_qs(parsed.query)
+        server = _clean((query.get("server") or [""])[0])
+        port_raw = _clean((query.get("port") or [""])[0])
+        secret = _clean((query.get("secret") or [""])[0])
+    else:
+        server = _clean(parsed.hostname or "")
+        port_raw = str(parsed.port or "")
+        secret = _clean((parse_qs(parsed.query).get("secret") or [""])[0] or parsed.password or "")
+    if not server or not port_raw or not secret:
+        raise HTTPException(status_code=503, detail="Telegram MTProto proxy URL is invalid")
+    try:
+        port = int(port_raw)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Telegram MTProto proxy port is invalid")
+    from telethon import connection
+    return connection.ConnectionTcpMTProxyRandomizedIntermediate, (server, port, secret)
+
+
+def _telegram_client(api_id: int, api_hash: str, session_file: str):
+    from telethon import TelegramClient
+    conn, proxy = _telegram_proxy_config()
+    kwargs: dict[str, Any] = {"connection_retries": 1, "request_retries": 1, "timeout": 8}
+    if conn and proxy:
+        kwargs["connection"] = conn
+        kwargs["proxy"] = proxy
+    return TelegramClient(session_file, api_id, api_hash, **kwargs)
+
+
+async def _telegram_connect(client: Any) -> None:
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            await asyncio.wait_for(client.connect(), timeout=40)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                await asyncio.sleep(3)
+    if last_exc:
+        raise last_exc
+
+
 async def _telegram_auth_state(*, include_user: bool = False) -> dict[str, Any]:
     try:
         from telethon import TelegramClient
@@ -664,8 +1272,11 @@ async def _telegram_auth_state(*, include_user: bool = False) -> dict[str, Any]:
         api_id, api_hash, session_file = _telegram_credentials()
     except HTTPException as exc:
         return {"api": False, "authorized": False, "session_file": _telegram_session_file(), "error": exc.detail}
-    client = TelegramClient(session_file, api_id, api_hash)
-    await client.connect()
+    client = _telegram_client(api_id, api_hash, session_file)
+    try:
+        await _telegram_connect(client)
+    except Exception as exc:
+        return {"api": True, "authorized": False, "session_file": session_file, "proxy": bool(_telegram_proxy_url()), "error": f"Telegram connection failed: {_exc_text(exc)}"}
     try:
         authorized = await client.is_user_authorized()
         me = await client.get_me() if authorized else None
@@ -673,6 +1284,7 @@ async def _telegram_auth_state(*, include_user: bool = False) -> dict[str, Any]:
             "api": True,
             "authorized": authorized,
             "session_file": session_file,
+            "proxy": bool(_telegram_proxy_url()),
         }
         if include_user:
             state["user"] = {
@@ -681,6 +1293,8 @@ async def _telegram_auth_state(*, include_user: bool = False) -> dict[str, Any]:
                 "phone": getattr(me, "phone", None),
             } if me else None
         return state
+    except Exception as exc:
+        return {"api": True, "authorized": False, "session_file": session_file, "proxy": bool(_telegram_proxy_url()), "error": f"Telegram status failed: {_exc_text(exc)}"}
     finally:
         await client.disconnect()
 
@@ -710,6 +1324,417 @@ async def _resolve_vk_target_id(target: str, token: str) -> int:
 
 def _is_course_chat_title(title: Any) -> bool:
     return bool(COURSE_CHAT_TITLE_RE.search(_clean(title)))
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(str(value))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except Exception:
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def _chat_title_meta(title: str) -> dict[str, str]:
+    match = re.match(r"^\s*(\d+)\.\s*(\d{2}\.\d{2}\.\d{4})", title or "")
+    if not match:
+        return {"stream_number": "", "date_start": ""}
+    return {"stream_number": match.group(1), "date_start": match.group(2)}
+
+
+def _broadcast_empty_status(reason: str) -> dict[str, Any]:
+    return {"ok": False, "reason": reason, "items": []}
+
+
+def _broadcast_normalize_platform(value: Any) -> str:
+    platform = _clean(value).lower()
+    if platform in {"tg", "telegram"}:
+        return "telegram"
+    if platform == "vk":
+        return "vk"
+    return ""
+
+
+def _broadcast_chat_key(platform: str, value: Any, title: str) -> str:
+    marker = _clean(value) or _clean(title).lower()
+    return f"{platform}:{marker}"
+
+
+def _merge_broadcast_chat(candidates: dict[str, dict[str, Any]], item: dict[str, Any]) -> None:
+    key = _clean(item.get("chat_key"))
+    if not key:
+        return
+    existing = candidates.get(key)
+    if not existing:
+        candidates[key] = item
+        return
+    sources = set(_json_array(existing.get("sources")))
+    sources.update(_json_array(item.get("sources")))
+    existing["sources"] = sorted(sources)
+    for field in ("peer_id", "chat_id", "title", "stream_number", "date_start", "link"):
+        if not existing.get(field) and item.get(field):
+            existing[field] = item[field]
+    if item.get("can_send"):
+        existing["can_send"] = True
+        existing["status"] = "ready"
+        existing["error"] = ""
+    elif not existing.get("can_send") and item.get("error"):
+        existing["error"] = item["error"]
+
+
+def _runs_broadcast_chats(platforms: set[str]) -> list[dict[str, Any]]:
+    _ensure_db()
+    items: list[dict[str, Any]] = []
+    with _db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM runs WHERE status='ok' ORDER BY id DESC").fetchall()]
+    for row in rows:
+        platform = _broadcast_normalize_platform(row.get("platform"))
+        title = _clean(row.get("title"))
+        if platform not in platforms or not _is_course_chat_title(title):
+            continue
+        response = _json_object(row.get("response_json"))
+        meta = _chat_title_meta(title)
+        if platform == "vk":
+            chat_id = _clean(row.get("chat_id") or response.get("chat_id"))
+            peer_id = _clean(response.get("peer_id"))
+            if not peer_id and chat_id.isdigit():
+                peer_id = str(2000000000 + int(chat_id))
+            key_value = peer_id or chat_id or title
+            items.append({
+                "platform": "vk",
+                "chat_key": _broadcast_chat_key("vk", key_value, title),
+                "title": title,
+                "stream_number": meta["stream_number"],
+                "date_start": meta["date_start"],
+                "peer_id": peer_id,
+                "chat_id": chat_id,
+                "link": _clean(row.get("link")),
+                "sources": ["runs"],
+                "can_send": bool(peer_id),
+                "status": "ready" if peer_id else "needs_live_scan",
+                "error": "" if peer_id else "peer_id not stored in runs",
+            })
+        elif platform == "telegram":
+            chat_id = _clean(row.get("chat_id") or response.get("chat_id") or response.get("channel_id"))
+            items.append({
+                "platform": "telegram",
+                "chat_key": _broadcast_chat_key("telegram", chat_id or title, title),
+                "title": title,
+                "stream_number": meta["stream_number"],
+                "date_start": meta["date_start"],
+                "peer_id": "",
+                "chat_id": chat_id,
+                "link": _clean(row.get("link")),
+                "sources": ["runs"],
+                "can_send": False,
+                "status": "needs_live_scan",
+                "error": "Telegram entity is resolved by live scan",
+            })
+    return items
+
+
+async def _scan_vk_broadcast_chats(limit: int = 500) -> dict[str, Any]:
+    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    if not token:
+        return _broadcast_empty_status("VK_USER_TOKEN is not configured")
+    items: list[dict[str, Any]] = []
+    offset = 0
+    while offset < limit:
+        data = await _vk_method("messages.getConversations", {"count": min(200, limit - offset), "offset": offset}, token)
+        if isinstance(data, dict) and "error" in data:
+            return {"ok": False, "reason": data["error"], "items": items}
+        conversations = data.get("items", []) if isinstance(data, dict) else []
+        if not conversations:
+            break
+        for item in conversations:
+            conv = item.get("conversation", {}) or {}
+            peer = conv.get("peer", {}) or {}
+            peer_id = int(peer.get("id", 0) or 0)
+            title = _clean((conv.get("chat_settings") or {}).get("title"))
+            if peer_id <= 2000000000 or not _is_course_chat_title(title):
+                continue
+            meta = _chat_title_meta(title)
+            chat_id = str(peer_id - 2000000000)
+            items.append({
+                "platform": "vk",
+                "chat_key": _broadcast_chat_key("vk", peer_id, title),
+                "title": title,
+                "stream_number": meta["stream_number"],
+                "date_start": meta["date_start"],
+                "peer_id": str(peer_id),
+                "chat_id": chat_id,
+                "link": "",
+                "sources": ["live"],
+                "can_send": True,
+                "status": "ready",
+                "error": "",
+            })
+        if len(conversations) < 200:
+            break
+        offset += len(conversations)
+    return {"ok": True, "items": items}
+
+
+async def _scan_tg_broadcast_chats(limit: int = 500) -> dict[str, Any]:
+    try:
+        from telethon import TelegramClient
+    except Exception as exc:
+        return _broadcast_empty_status(f"Telethon is not installed: {exc}")
+    try:
+        api_id, api_hash, session_file = _telegram_credentials()
+    except HTTPException as exc:
+        return _broadcast_empty_status(str(exc.detail))
+    client = _telegram_client(api_id, api_hash, session_file)
+    try:
+        await _telegram_connect(client)
+    except Exception as exc:
+        return _broadcast_empty_status(f"Telegram connection failed: {_exc_text(exc)}")
+    try:
+        if not await client.is_user_authorized():
+            return _broadcast_empty_status("Telegram session is not authorized")
+        items: list[dict[str, Any]] = []
+        async for dialog in client.iter_dialogs(limit=limit):
+            title = _clean(getattr(dialog, "name", ""))
+            if not _is_course_chat_title(title):
+                continue
+            entity = dialog.entity
+            chat_id = str(getattr(entity, "id", "") or "")
+            meta = _chat_title_meta(title)
+            items.append({
+                "platform": "telegram",
+                "chat_key": _broadcast_chat_key("telegram", chat_id or title, title),
+                "title": title,
+                "stream_number": meta["stream_number"],
+                "date_start": meta["date_start"],
+                "peer_id": "",
+                "chat_id": chat_id,
+                "link": "",
+                "sources": ["live"],
+                "can_send": True,
+                "status": "ready",
+                "error": "",
+            })
+        return {"ok": True, "items": items}
+    finally:
+        await client.disconnect()
+
+
+async def _broadcast_chat_candidates(platforms: set[str], *, limit: int = 500) -> dict[str, Any]:
+    candidates: dict[str, dict[str, Any]] = {}
+    scan_status: dict[str, Any] = {}
+    for item in _runs_broadcast_chats(platforms):
+        _merge_broadcast_chat(candidates, item)
+    if "vk" in platforms:
+        vk = await _scan_vk_broadcast_chats(limit=limit)
+        scan_status["vk"] = {k: v for k, v in vk.items() if k != "items"}
+        for item in vk.get("items", []):
+            _merge_broadcast_chat(candidates, item)
+    if "telegram" in platforms:
+        tg = await _scan_tg_broadcast_chats(limit=limit)
+        scan_status["telegram"] = {k: v for k, v in tg.items() if k != "items"}
+        # Merge Telegram runs by title because runs often do not store entity id.
+        title_index = {
+            (item.get("platform"), _clean(item.get("title")).lower()): key
+            for key, item in candidates.items()
+            if item.get("platform") == "telegram"
+        }
+        for item in tg.get("items", []):
+            title_key = ("telegram", _clean(item.get("title")).lower())
+            old_key = title_index.get(title_key)
+            if old_key and old_key != item["chat_key"]:
+                existing = candidates.pop(old_key)
+                item["sources"] = sorted(set(_json_array(existing.get("sources"))) | set(_json_array(item.get("sources"))))
+            _merge_broadcast_chat(candidates, item)
+    items = sorted(candidates.values(), key=lambda x: (x.get("platform", ""), x.get("date_start", ""), x.get("stream_number", ""), x.get("title", "")))
+    return {"ok": True, "items": items, "status": scan_status}
+
+
+def _broadcast_filter_selection(items: list[dict[str, Any]], mode: str, selected: set[str], excluded: set[str]) -> list[dict[str, Any]]:
+    if mode == "all_except":
+        return [item for item in items if item.get("chat_key") not in excluded]
+    return [item for item in items if item.get("chat_key") in selected]
+
+
+def _broadcast_message_counts(broadcast_id: int) -> dict[str, int]:
+    with _db() as db:
+        rows = db.execute("SELECT status, COUNT(*) count FROM broadcast_messages WHERE broadcast_id=? GROUP BY status", (broadcast_id,)).fetchall()
+    return {row["status"]: int(row["count"]) for row in rows}
+
+
+def _broadcast_delay_bounds(data: dict[str, Any]) -> tuple[int, int, str]:
+    speed = _clean(data.get("speed") or "balanced").lower()
+    profiles = {
+        "fast": (1200, 2500),
+        "balanced": (2500, 5000),
+        "safe": (5000, 9000),
+    }
+    if speed not in profiles:
+        speed = "balanced"
+    min_ms, max_ms = profiles[speed]
+    try:
+        custom_min = int(data.get("delay_min_ms") or 0)
+        custom_max = int(data.get("delay_max_ms") or 0)
+        if custom_min >= 500 and custom_max >= custom_min:
+            min_ms, max_ms = min(custom_min, 60000), min(custom_max, 120000)
+            speed = "custom"
+    except Exception:
+        pass
+    return min_ms, max_ms, speed
+
+
+async def _broadcast_sleep(delay_bounds: tuple[int, int], *, index: int, total: int) -> None:
+    if index >= total - 1:
+        return
+    min_ms, max_ms = delay_bounds
+    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
+
+
+async def _send_vk_broadcast_message(chat: dict[str, Any], message: str) -> tuple[bool, str, str]:
+    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    peer_id = _clean(chat.get("peer_id"))
+    if not token:
+        return False, "", "VK_USER_TOKEN is not configured"
+    if not peer_id:
+        return False, "", "peer_id is empty"
+    last_error = ""
+    for attempt in range(3):
+        response = await _vk_method("messages.send", {"peer_id": peer_id, "message": message, "random_id": random.randint(1, 2**31 - 1)}, token)
+        if isinstance(response, dict) and "error" in response:
+            error = response["error"]
+            code = int(error.get("error_code", 0) or 0) if isinstance(error, dict) else 0
+            last_error = str(error)
+            if code in {6, 9, 10} and attempt < 2:
+                await asyncio.sleep(3 + attempt * 5)
+                continue
+            return False, "", last_error
+        if response:
+            return True, str(response), ""
+        last_error = "VK did not return message id"
+    return False, "", last_error
+
+
+async def _delete_vk_broadcast_message(peer_id: str, message_id: str) -> tuple[bool, str]:
+    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    if not token:
+        return False, "VK_USER_TOKEN is not configured"
+    if not message_id:
+        return False, "message_id is empty"
+    params = {"message_ids": message_id, "delete_for_all": 1}
+    if peer_id:
+        params["peer_id"] = peer_id
+    response = await _vk_method("messages.delete", params, token)
+    if isinstance(response, dict) and "error" in response:
+        return False, str(response["error"])
+    return True, ""
+
+
+async def _send_tg_broadcast_message(chat: dict[str, Any], message: str) -> tuple[bool, str, str]:
+    try:
+        from telethon import TelegramClient
+    except Exception as exc:
+        return False, "", f"Telethon is not installed: {exc}"
+    try:
+        api_id, api_hash, session_file = _telegram_credentials()
+    except HTTPException as exc:
+        return False, "", str(exc.detail)
+    title = _clean(chat.get("title"))
+    chat_id = _clean(chat.get("chat_id"))
+    client = _telegram_client(api_id, api_hash, session_file)
+    try:
+        await _telegram_connect(client)
+        if not await client.is_user_authorized():
+            return False, "", "Telegram session is not authorized"
+        entity = None
+        async for dialog in client.iter_dialogs(limit=500):
+            entity_id = str(getattr(dialog.entity, "id", "") or "")
+            dialog_title = _clean(getattr(dialog, "name", ""))
+            if (chat_id and entity_id == chat_id) or (title and dialog_title == title):
+                entity = dialog.entity
+                break
+        if entity is None:
+            return False, "", "Telegram chat was not found by live scan"
+        sent = await client.send_message(entity, message)
+        return True, str(getattr(sent, "id", "") or ""), ""
+    except Exception as exc:
+        return False, "", str(exc)
+    finally:
+        await client.disconnect()
+
+
+async def _delete_tg_broadcast_message(chat_title: str, chat_id: str, message_id: str) -> tuple[bool, str]:
+    try:
+        from telethon import TelegramClient
+    except Exception as exc:
+        return False, f"Telethon is not installed: {exc}"
+    if not message_id:
+        return False, "message_id is empty"
+    try:
+        api_id, api_hash, session_file = _telegram_credentials()
+    except HTTPException as exc:
+        return False, str(exc.detail)
+    client = _telegram_client(api_id, api_hash, session_file)
+    try:
+        await _telegram_connect(client)
+        if not await client.is_user_authorized():
+            return False, "Telegram session is not authorized"
+        entity = None
+        async for dialog in client.iter_dialogs(limit=500):
+            entity_id = str(getattr(dialog.entity, "id", "") or "")
+            dialog_title = _clean(getattr(dialog, "name", ""))
+            if (chat_id and entity_id == chat_id) or (chat_title and dialog_title == chat_title):
+                entity = dialog.entity
+                break
+        if entity is None:
+            return False, "Telegram chat was not found by live scan"
+        await client.delete_messages(entity, [int(message_id)])
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        await client.disconnect()
+
+
+async def _telegram_broadcast_entity_map(client: Any, chats: list[dict[str, Any]]) -> dict[str, Any]:
+    ids = {_clean(chat.get("chat_id")) for chat in chats if _clean(chat.get("chat_id"))}
+    titles = {_clean(chat.get("title")) for chat in chats if _clean(chat.get("title"))}
+    found: dict[str, Any] = {}
+    async for dialog in client.iter_dialogs(limit=1000):
+        entity_id = str(getattr(dialog.entity, "id", "") or "")
+        dialog_title = _clean(getattr(dialog, "name", ""))
+        if entity_id in ids:
+            found[f"id:{entity_id}"] = dialog.entity
+        if dialog_title in titles:
+            found[f"title:{dialog_title}"] = dialog.entity
+    return found
+
+
+async def _send_tg_with_entity(client: Any, entity: Any, message: str) -> tuple[bool, str, str]:
+    for attempt in range(2):
+        try:
+            sent = await client.send_message(entity, message)
+            return True, str(getattr(sent, "id", "") or ""), ""
+        except Exception as exc:
+            wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+            if exc.__class__.__name__ == "FloodWaitError" and wait_seconds and wait_seconds <= 180 and attempt == 0:
+                await asyncio.sleep(wait_seconds + 2)
+                continue
+            return False, "", _exc_text(exc)
+    return False, "", "Telegram send failed"
 
 
 async def _remove_vk_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
@@ -760,8 +1785,8 @@ async def _remove_tg_from_course_chats(target: str, *, dry_run: bool = True, lim
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
     api_id, api_hash, session_file = _telegram_credentials()
-    client = TelegramClient(session_file, api_id, api_hash)
-    await client.connect()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
     try:
         if not await client.is_user_authorized():
             raise HTTPException(status_code=401, detail="Telegram session is not authorized")
@@ -803,15 +1828,15 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     if not stream_number or not date_start:
         raise HTTPException(status_code=400, detail="Missing required parameters: stream_number, start_date")
     title = _format_title(stream_number, date_start, course, "tg")
-    selected = _selected_people(stream_number)
+    selected = _selected_people(stream_number, data.get("curator_id"))
     admins = _tg_refs(selected["admins"])
     kurators = _tg_refs(selected["kurators"])
     authors = _tg_refs(selected["authors"])
     techs = _tg_refs(selected["techs"])
     all_users = [] if test_mode else list(dict.fromkeys(admins + kurators + authors + techs))
     api_id, api_hash, session_file = _telegram_credentials()
-    client = TelegramClient(session_file, api_id, api_hash)
-    await client.connect()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
     if not await client.is_user_authorized():
         raise HTTPException(status_code=401, detail="Telegram session is not authorized. Configure TELEGRAM_SESSION_FILE with an authorized Telethon session.")
     async with client:
@@ -980,7 +2005,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         except Exception as exc:
             _log("warning", "Telegram invite export failed: %s", exc)
             invite_link = ""
-    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids}
+    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids, "curator_id": _selected_curator_id(stream_number, data.get("curator_id"))}
     _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
     return response
 
@@ -1055,8 +2080,8 @@ async def telegram_auth_send_code(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
     api_id, api_hash, session_file = _telegram_credentials()
-    client = TelegramClient(session_file, api_id, api_hash)
-    await client.connect()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
     try:
         sent = await client.send_code_request(phone)
         _tg_auth_pending[phone] = {
@@ -1086,8 +2111,8 @@ async def telegram_auth_confirm(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
     api_id, api_hash, session_file = _telegram_credentials()
-    client = TelegramClient(session_file, api_id, api_hash)
-    await client.connect()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
     try:
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=pending["phone_code_hash"])
@@ -1103,10 +2128,119 @@ async def telegram_auth_confirm(request: Request):
         await client.disconnect()
 
 
+@router.get("/vk-web/auth/status")
+async def vk_web_auth_status(request: Request):
+    await _require_panel_access(request)
+    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=True, screenshot=True)}
+
+
+@router.post("/vk-web/auth/open")
+async def vk_web_auth_open(request: Request):
+    await _require_panel_access(request)
+    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=True, screenshot=True)}
+
+
+@router.get("/vk-web/auth/screenshot")
+async def vk_web_auth_screenshot(request: Request):
+    await _require_panel_access(request)
+    path = _vk_web_screenshot_path()
+    if _vk_web_context is not None:
+        try:
+            await _vk_web_save_screenshot()
+        except Exception:
+            pass
+    if not path.exists():
+        return Response(status_code=404)
+    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/vk-web/auth/click")
+async def vk_web_auth_click(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    _, page = await _vk_web_start()
+    viewport = getattr(page, "viewport_size", None) or {"width": 1366, "height": 900}
+    image_width = float(data.get("image_width") or viewport["width"])
+    image_height = float(data.get("image_height") or viewport["height"])
+    x = float(data.get("x") or 0)
+    y = float(data.get("y") or 0)
+    click_x = max(0, min(float(viewport["width"]), x * float(viewport["width"]) / max(1, image_width)))
+    click_y = max(0, min(float(viewport["height"]), y * float(viewport["height"]) / max(1, image_height)))
+    await page.mouse.click(click_x, click_y)
+    await page.wait_for_timeout(1200)
+    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
+
+
+@router.post("/vk-web/auth/type")
+async def vk_web_auth_type(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    text = str(data.get("text") or "")
+    _, page = await _vk_web_start()
+    if text:
+        await page.keyboard.type(text, delay=25)
+        await page.wait_for_timeout(700)
+    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
+
+
+@router.post("/vk-web/auth/key")
+async def vk_web_auth_key(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    key = _clean(data.get("key")) or "Enter"
+    allowed = {"Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"}
+    if key not in allowed:
+        raise HTTPException(status_code=400, detail="Unsupported key")
+    _, page = await _vk_web_start()
+    await page.keyboard.press(key)
+    await page.wait_for_timeout(900)
+    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
+
+
+@router.post("/vk-web/admins/retry")
+async def vk_web_admins_retry(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    run_id = data.get("run_id")
+    if run_id in (None, ""):
+        raise HTTPException(status_code=400, detail="run_id is required")
+    return {"ok": True, "result": await _retry_vk_admins_from_run(int(run_id))}
+
+
+@router.post("/vk-web/admins/retry-pending")
+async def vk_web_admins_retry_pending(request: Request):
+    await _require_panel_access(request)
+    return {"ok": True, "result": await _retry_vk_admins_from_run(None)}
+
+
+@router.post("/vk-web/auth/close")
+async def vk_web_auth_close(request: Request):
+    await _require_panel_access(request)
+    await _vk_web_stop()
+    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=False)}
+
+
+@router.post("/vk-web/auth/reset")
+async def vk_web_auth_reset(request: Request):
+    await _require_panel_access(request)
+    state = await _vk_web_auth_state(open_browser=True, screenshot=True)
+    if state.get("authorized"):
+        raise HTTPException(status_code=409, detail="Профиль авторизован. Сброс отменён, чтобы не потерять рабочую VK-сессию.")
+    await _vk_web_stop()
+    profile_dir = _vk_web_profile_dir()
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir)
+    shot = _vk_web_screenshot_path()
+    if shot.exists():
+        shot.unlink()
+    return {"ok": True, "reset": True, "profile_dir": str(profile_dir)}
+
+
 @router.get("/status")
 async def status():
     _ensure_db()
     telegram = await _telegram_auth_state()
+    vk_web = await _vk_web_auth_state(open_browser=False)
     required_env = {
         "vk_user_token": bool(os.environ.get("VK_USER_TOKEN")),
         "telegram_api": bool(os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")),
@@ -1118,6 +2252,7 @@ async def status():
         "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
         "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
         "vk_group_id": bool(os.environ.get("VK_GROUP_ID")),
+        "vk_web_profile": bool(vk_web.get("profile_exists") or vk_web.get("browser_open")),
     }
     return {
         "ok": True,
@@ -1125,6 +2260,7 @@ async def status():
         "required_env": required_env,
         "optional_env": optional_env,
         "telegram": telegram,
+        "vk_web": vk_web,
         "asset_group_photo": bool(_avatar_path()),
         "asset_welcome_photo": bool(_asset_path("welcome_message_photo.jpg")),
     }
@@ -1254,14 +2390,15 @@ async def update_template(request: Request):
 
 
 @router.get("/preview")
-async def preview(stream_number: str = "51", start_date: str = "01.06.2026", course: str = "puppy"):
+async def preview(stream_number: str = "51", start_date: str = "01.06.2026", course: str = "puppy", curator_id: str = ""):
     course_row = _course_by_input(course)
-    selected = _selected_people(stream_number)
+    selected = _selected_people(stream_number, curator_id)
     return {
         "ok": True,
         "vk_title": _format_title(stream_number, start_date, course_row, "vk"),
         "tg_title": _format_title(stream_number, start_date, course_row, "tg"),
         "selected": selected,
+        "curator_id": _selected_curator_id(stream_number, curator_id),
         "vk_welcome": _render_template("vk_welcome", course=course_row, stream_number=stream_number, date_start=start_date, selected=selected, platform="vk"),
         "tg_welcome": _render_template("tg_welcome", course=course_row, stream_number=stream_number, date_start=start_date, selected=selected, platform="tg"),
     }
@@ -1285,6 +2422,245 @@ async def clear_runs(request: Request):
         db.execute("DELETE FROM runs")
         db.commit()
     return {"ok": True}
+
+
+@router.get("/broadcast/status")
+async def broadcast_status(request: Request):
+    await _require_panel_access(request)
+    _ensure_db()
+    vk_token = _clean(os.environ.get("VK_USER_TOKEN"))
+    vk_user: dict[str, Any] | None = None
+    vk_error = ""
+    if vk_token:
+        try:
+            users = await _vk_method("users.get", {"fields": "screen_name"}, vk_token)
+            if isinstance(users, list) and users:
+                user = users[0]
+                vk_user = {
+                    "id": user.get("id"),
+                    "screen_name": user.get("screen_name"),
+                    "name": " ".join(filter(None, [_clean(user.get("first_name")), _clean(user.get("last_name"))])),
+                }
+            elif isinstance(users, dict) and "error" in users:
+                vk_error = str(users["error"])
+        except Exception as exc:
+            vk_error = str(exc)
+    telegram = await _telegram_auth_state(include_user=True)
+    return {
+        "ok": True,
+        "vk": {"configured": bool(vk_token), "user": vk_user, "error": vk_error},
+        "telegram": telegram,
+        "course_title_rule": r"^\d+\. DD.MM.YYYY",
+    }
+
+
+@router.get("/broadcast/chats")
+async def broadcast_chats(request: Request, platform: str = "all", limit: int = 500):
+    await _require_panel_access(request)
+    normalized = _broadcast_normalize_platform(platform)
+    platforms = {"vk", "telegram"} if platform == "all" or not normalized else {normalized}
+    limit = max(1, min(1000, int(limit)))
+    return await _broadcast_chat_candidates(platforms, limit=limit)
+
+
+@router.get("/broadcasts")
+async def list_broadcasts(request: Request, limit: int = 30):
+    await _require_panel_access(request)
+    _ensure_db()
+    limit = max(1, min(100, int(limit)))
+    with _db() as db:
+        rows = [dict(row) for row in db.execute("SELECT * FROM broadcasts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+        messages = [dict(row) for row in db.execute(
+            """SELECT * FROM broadcast_messages
+               WHERE broadcast_id IN (SELECT id FROM broadcasts ORDER BY id DESC LIMIT ?)
+               ORDER BY id DESC""",
+            (limit,),
+        ).fetchall()]
+    by_broadcast: dict[int, list[dict[str, Any]]] = {}
+    for row in messages:
+        by_broadcast.setdefault(int(row["broadcast_id"]), []).append(row)
+    for row in rows:
+        row["platforms"] = _json_array(row.get("platforms"))
+        row["selected"] = _json_array(row.get("selected_json"))
+        row["excluded"] = _json_array(row.get("excluded_json"))
+        row["result"] = _json_object(row.get("result_json"))
+        row["messages"] = by_broadcast.get(int(row["id"]), [])
+        counts: dict[str, int] = {}
+        for msg in row["messages"]:
+            counts[msg["status"]] = counts.get(msg["status"], 0) + 1
+        row["counts"] = counts
+    return {"ok": True, "items": rows}
+
+
+@router.post("/broadcast/send")
+async def send_broadcast(request: Request):
+    await _require_panel_access(request)
+    _ensure_db()
+    data = await request.json()
+    message = str(data.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    requested_platforms = data.get("platforms") or ["vk", "telegram"]
+    if isinstance(requested_platforms, str):
+        requested_platforms = [requested_platforms]
+    platforms = {_broadcast_normalize_platform(item) for item in requested_platforms}
+    platforms = {item for item in platforms if item}
+    if not platforms:
+        raise HTTPException(status_code=400, detail="platforms must include vk or telegram")
+    mode = _clean(data.get("mode") or "selected")
+    if mode not in {"selected", "all_except"}:
+        raise HTTPException(status_code=400, detail="mode must be selected or all_except")
+    selected = {_clean(item) for item in (data.get("selected") or []) if _clean(item)}
+    excluded = {_clean(item) for item in (data.get("excluded") or []) if _clean(item)}
+    candidates = await _broadcast_chat_candidates(platforms)
+    targets = _broadcast_filter_selection(candidates["items"], mode, selected, excluded)
+    if not targets:
+        raise HTTPException(status_code=400, detail="No chats selected for broadcast")
+    delay_min_ms, delay_max_ms, speed = _broadcast_delay_bounds(data)
+    created_at = int(time.time())
+    with _db() as db:
+        cur = db.execute(
+            """INSERT INTO broadcasts(platforms,message,mode,selected_json,excluded_json,status,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                json.dumps(sorted(platforms), ensure_ascii=False),
+                message,
+                mode,
+                json.dumps(sorted(selected), ensure_ascii=False),
+                json.dumps(sorted(excluded), ensure_ascii=False),
+                "running",
+                created_at,
+            ),
+        )
+        broadcast_id = int(cur.lastrowid)
+        db.commit()
+    tg_client = None
+    tg_entities: dict[str, Any] = {}
+    tg_error = ""
+    tg_targets = [chat for chat in targets if chat.get("platform") == "telegram" and chat.get("can_send")]
+    if tg_targets:
+        try:
+            api_id, api_hash, session_file = _telegram_credentials()
+            tg_client = _telegram_client(api_id, api_hash, session_file)
+            await _telegram_connect(tg_client)
+            if not await tg_client.is_user_authorized():
+                tg_error = "Telegram session is not authorized"
+            else:
+                tg_entities = await _telegram_broadcast_entity_map(tg_client, tg_targets)
+        except Exception as exc:
+            tg_error = f"Telegram connection failed: {_exc_text(exc)}"
+    sent = 0
+    errors = 0
+    skipped = 0
+    try:
+        for index, chat in enumerate(targets):
+            status_value = "sent"
+            message_id = ""
+            error = ""
+            if not chat.get("can_send"):
+                status_value = "skipped"
+                error = _clean(chat.get("error")) or "chat is not sendable"
+                skipped += 1
+            elif chat.get("platform") == "vk":
+                ok, message_id, error = await _send_vk_broadcast_message(chat, message)
+                status_value = "sent" if ok else "error"
+            elif chat.get("platform") == "telegram":
+                if tg_error:
+                    ok, message_id, error = False, "", tg_error
+                elif tg_client is None:
+                    ok, message_id, error = False, "", "Telegram client is not initialized"
+                else:
+                    chat_id = _clean(chat.get("chat_id"))
+                    title = _clean(chat.get("title"))
+                    entity = tg_entities.get(f"id:{chat_id}") or tg_entities.get(f"title:{title}")
+                    if entity is None:
+                        ok, message_id, error = False, "", "Telegram chat was not found by live scan"
+                    else:
+                        ok, message_id, error = await _send_tg_with_entity(tg_client, entity, message)
+                status_value = "sent" if ok else "error"
+            else:
+                status_value = "error"
+                error = "unknown platform"
+            if status_value == "sent":
+                sent += 1
+            elif status_value == "error":
+                errors += 1
+            with _db() as db:
+                db.execute(
+                    """INSERT INTO broadcast_messages(broadcast_id,platform,chat_key,chat_title,peer_id,chat_id,message_id,status,error)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        broadcast_id,
+                        _clean(chat.get("platform")),
+                        _clean(chat.get("chat_key")),
+                        _clean(chat.get("title")),
+                        _clean(chat.get("peer_id")),
+                        _clean(chat.get("chat_id")),
+                        message_id,
+                        status_value,
+                        error,
+                    ),
+                )
+                db.commit()
+            await _broadcast_sleep((delay_min_ms, delay_max_ms), index=index, total=len(targets))
+    finally:
+        if tg_client is not None:
+            await tg_client.disconnect()
+    final_status = "done"
+    if errors and sent:
+        final_status = "partial"
+    elif errors and not sent:
+        final_status = "error"
+    elif skipped and not sent:
+        final_status = "skipped"
+    result = {"target_count": len(targets), "sent": sent, "errors": errors, "skipped": skipped, "speed": speed, "delay_min_ms": delay_min_ms, "delay_max_ms": delay_max_ms}
+    with _db() as db:
+        db.execute(
+            "UPDATE broadcasts SET status=?, sent_at=?, result_json=? WHERE id=?",
+            (final_status, int(time.time()), json.dumps(result, ensure_ascii=False), broadcast_id),
+        )
+        db.commit()
+    return {"ok": True, "id": broadcast_id, "status": final_status, "result": result, "counts": _broadcast_message_counts(broadcast_id)}
+
+
+@router.post("/broadcasts/{broadcast_id}/delete")
+async def delete_broadcast_messages(broadcast_id: int, request: Request):
+    await _require_panel_access(request)
+    _ensure_db()
+    with _db() as db:
+        broadcast = db.execute("SELECT * FROM broadcasts WHERE id=?", (broadcast_id,)).fetchone()
+        if not broadcast:
+            raise HTTPException(status_code=404, detail="broadcast not found")
+        rows = [dict(row) for row in db.execute(
+            "SELECT * FROM broadcast_messages WHERE broadcast_id=? AND status IN ('sent','delete_error') ORDER BY id",
+            (broadcast_id,),
+        ).fetchall()]
+    deleted = 0
+    errors = 0
+    for row in rows:
+        if row["platform"] == "vk":
+            ok, error = await _delete_vk_broadcast_message(_clean(row.get("peer_id")), _clean(row.get("message_id")))
+        elif row["platform"] == "telegram":
+            ok, error = await _delete_tg_broadcast_message(_clean(row.get("chat_title")), _clean(row.get("chat_id")), _clean(row.get("message_id")))
+        else:
+            ok, error = False, "unknown platform"
+        new_status = "deleted" if ok else "delete_error"
+        if ok:
+            deleted += 1
+        else:
+            errors += 1
+        with _db() as db:
+            db.execute(
+                "UPDATE broadcast_messages SET status=?, error=?, deleted_at=? WHERE id=?",
+                (new_status, error, int(time.time()) if ok else 0, row["id"]),
+            )
+            db.commit()
+        await asyncio.sleep(0.3)
+    status_value = "deleted" if rows and errors == 0 else ("delete_error" if errors else _clean(broadcast["status"]))
+    with _db() as db:
+        db.execute("UPDATE broadcasts SET status=?, deleted_at=? WHERE id=?", (status_value, int(time.time()) if deleted else 0, broadcast_id))
+        db.commit()
+    return {"ok": True, "id": broadcast_id, "deleted": deleted, "errors": errors, "counts": _broadcast_message_counts(broadcast_id)}
 
 
 @router.post("/members/remove")

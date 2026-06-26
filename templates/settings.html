@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Nexus — Настройки</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23060606'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23f2f2f2' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23f2f2f2'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="{{ rp }}/static/styles.css?v=2" />
+  <link rel="stylesheet" href="{{ rp }}/static/styles.css?v=3" />
   <style>
     .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }
     .stat-card { background:var(--panel); border:1px solid var(--border); padding:12px 14px; display:grid; gap:6px; }
@@ -188,7 +188,7 @@ const API = parts.slice(0, panelIdx).join('/') + '/api';
           <table>
             <tr><th>Метод</th><th>Путь</th><th>Доступ</th><th>Описание</th></tr>
             <tr><td>GET</td><td><code>/nexus/api/modules</code></td><td>все</td><td>Список модулей</td></tr>
-            <tr><td>POST</td><td><code>/nexus/api/modules/upload</code></td><td>editor+</td><td>Установить ZIP</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/modules/upload</code></td><td>admin</td><td>Установить ZIP</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/modules/{id}/pause</code></td><td>editor+</td><td>Пауза</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/modules/{id}/resume</code></td><td>editor+</td><td>Возобновить</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/modules/{id}/unload</code></td><td>admin</td><td>Выгрузить (удалить)</td></tr>
@@ -205,7 +205,7 @@ const API = parts.slice(0, panelIdx).join('/') + '/api';
           <table>
             <tr><th>Роль</th><th>Права</th></tr>
             <tr><td><code>admin</code></td><td>Полный доступ: управление пользователями, ENV, выгрузка модулей</td></tr>
-            <tr><td><code>editor</code></td><td>Загрузка модулей, пауза/возобновление</td></tr>
+            <tr><td><code>editor</code></td><td>Пауза/возобновление разрешённых модулей</td></tr>
             <tr><td><code>viewer</code></td><td>Только просмотр разрешённых модулей</td></tr>
           </table>
           <p><code>module_access</code> — JSON-массив ID модулей. Пустой массив (<code>[]</code>) = доступ ко всем.</p>
@@ -340,13 +340,17 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
       <label class="form-label">Роль
         <select id="userDialogRole" class="form-input">
           <option value="viewer">viewer — только просмотр</option>
-          <option value="editor">editor — загрузка модулей, пауза/возобновление</option>
+          <option value="editor">editor — пауза/возобновление разрешённых модулей</option>
           <option value="admin">admin — полный доступ</option>
         </select>
       </label>
-      <label class="form-label">Доступ к модулям (через запятую, пусто = все)
-        <input id="userDialogModules" class="form-input" placeholder="customer-db, analytics" />
-      </label>
+      <div class="form-label">Доступ к модулям
+        <label class="check-row check-row--all">
+          <input id="userDialogAllModules" type="checkbox" />
+          <span>Все модули</span>
+        </label>
+        <div id="userDialogModuleChecks" class="module-check-list"></div>
+      </div>
       <p id="userDialogStatus" class="status-line"></p>
     </div>
     <div class="dialog__foot">
@@ -397,7 +401,10 @@ async function loadServerStats() {
   if (!res?.ok) { document.getElementById("sCpu").textContent = "Ошибка"; return; }
   const s = await res.json();
 
-  document.getElementById("sCpu").textContent = s.cpu_percent.toFixed(1) + "% / " + s.cpu_count + " ядер";
+  const cpuLabel = s.cpu_count_physical && s.cpu_count_physical !== s.cpu_count
+    ? `${s.cpu_count_physical} физ. / ${s.cpu_count} vCPU`
+    : `${s.cpu_count} vCPU`;
+  document.getElementById("sCpu").textContent = s.cpu_percent.toFixed(1) + "% / " + cpuLabel + (s.cpu_model ? " / " + s.cpu_model : "");
   setBar("sCpuBar", s.cpu_percent);
 
   document.getElementById("sRam").textContent = fmtBytes(s.ram_used) + " / " + fmtBytes(s.ram_total) + " (" + s.ram_percent + "%)";
@@ -432,7 +439,18 @@ loadServerStats();
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
+let accessModules = [];
+
+async function loadAccessModules() {
+  if (accessModules.length) return accessModules;
+  const res = await fetch(RP + "/api/modules");
+  if (!res.ok) return [];
+  accessModules = await res.json();
+  return accessModules;
+}
+
 async function loadUsers() {
+  await loadAccessModules();
   const res = await fetch(RP + "/api/settings/users");
   if (!res.ok) return;
   const users = await res.json();
@@ -453,7 +471,12 @@ async function loadUsers() {
 }
 
 function parseAccess(s) {
-  try { const a = JSON.parse(s); return a.length ? a.join(", ") : "все модули"; } catch { return "все"; }
+  try {
+    const a = JSON.parse(s);
+    if (!Array.isArray(a) || !a.length) return "все модули";
+    const names = new Map(accessModules.map(m => [m.id, m.name || m.id]));
+    return a.map(id => names.get(id) || id).join(", ");
+  } catch { return "все"; }
 }
 
 document.getElementById("addUserBtn").addEventListener("click", () => openUserDialog());
@@ -485,7 +508,8 @@ async function removeUser(id, name) {
   loadUsers();
 }
 
-function openUserDialog(user = null) {
+async function openUserDialog(user = null) {
+  await loadAccessModules();
   document.getElementById("userDialogId").value = user?.id ?? "";
   document.getElementById("userDialogTitle").textContent = user ? `Пользователь: ${user.username}` : "Новый пользователь";
   document.getElementById("userDialogUsername").value = user?.username ?? "";
@@ -493,12 +517,43 @@ function openUserDialog(user = null) {
   document.getElementById("userDialogPassword").value = "";
   document.getElementById("userDialogPwdNote").textContent = user ? "(оставьте пустым, чтобы не менять)" : "";
   document.getElementById("userDialogRole").value = user?.role ?? "viewer";
+  let selected = [];
   try {
     const a = JSON.parse(user?.module_access || "[]");
-    document.getElementById("userDialogModules").value = a.join(", ");
-  } catch { document.getElementById("userDialogModules").value = ""; }
+    selected = Array.isArray(a) ? a : [];
+  } catch { selected = []; }
+  renderModuleChecks(selected);
   document.getElementById("userDialogStatus").textContent = "";
   document.getElementById("userDialog").hidden = false;
+}
+
+function renderModuleChecks(selected) {
+  const allBox = document.getElementById("userDialogAllModules");
+  const list = document.getElementById("userDialogModuleChecks");
+  const allModules = !selected.length;
+  allBox.checked = allModules;
+  if (!accessModules.length) {
+    list.innerHTML = '<span style="color:var(--text-subtle);font-size:.8rem">Нет установленных модулей</span>';
+    return;
+  }
+  const selectedSet = new Set(selected);
+  list.innerHTML = accessModules.map(m => `
+    <label class="check-row">
+      <input class="module-access-check" type="checkbox" value="${escAttr(m.id)}" ${selectedSet.has(m.id) ? "checked" : ""} ${allModules ? "disabled" : ""} />
+      <span>${esc(m.name || m.id)}</span>
+      <code>${esc(m.id)}</code>
+    </label>`).join("");
+  allBox.onchange = () => {
+    document.querySelectorAll(".module-access-check").forEach(cb => {
+      cb.disabled = allBox.checked;
+      if (allBox.checked) cb.checked = false;
+    });
+  };
+}
+
+function selectedModuleAccess() {
+  if (document.getElementById("userDialogAllModules").checked) return [];
+  return [...document.querySelectorAll(".module-access-check:checked")].map(cb => cb.value);
 }
 
 document.getElementById("userDialogClose").addEventListener("click", () => { document.getElementById("userDialog").hidden = true; });
@@ -509,9 +564,12 @@ document.getElementById("userDialogSave").addEventListener("click", async () => 
   const username = document.getElementById("userDialogUsername").value.trim();
   const password = document.getElementById("userDialogPassword").value;
   const role = document.getElementById("userDialogRole").value;
-  const modulesRaw = document.getElementById("userDialogModules").value;
-  const module_access = modulesRaw.trim() ? modulesRaw.split(",").map(s => s.trim()).filter(Boolean) : [];
+  const module_access = selectedModuleAccess();
   const st = document.getElementById("userDialogStatus");
+  if (!document.getElementById("userDialogAllModules").checked && !module_access.length) {
+    st.textContent = "Выберите хотя бы один модуль или включите «Все модули»";
+    return;
+  }
 
   if (id) {
     // update
@@ -615,6 +673,7 @@ document.getElementById("envUploadBtn").addEventListener("click", async () => {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
 function esc(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
 
 // init
 loadUsers();

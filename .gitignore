@@ -5,4 +5,12 @@ data/
 modules/
 uploads/
 .env
+.env.*
 *.db
+*.sqlite
+*.sqlite3
+module_*/data/
+module_*/logs/
+.playwright-cli/
+output/
+backups/

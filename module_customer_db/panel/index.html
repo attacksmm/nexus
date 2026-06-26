@@ -134,6 +134,7 @@
     </div>
     <div class="dialog__body scroll-zone">
       <input id="recId" type="hidden" />
+      <input id="recSourceTable" type="hidden" />
       <label class="form-label">platform_id
         <input id="recPlatformId" class="form-input" placeholder="ID на платформе (VK, TG, …)" />
       </label>
@@ -290,21 +291,26 @@ async function loadRecords() {
   } else {
     tbody.innerHTML = data.items.map(r => {
       const cf = r.custom_fields || {};
+      const sourceTable = r.source_table || currentTable;
+      const sourceLabel = r.source_display_name || sourceTable;
       // показываем основные поля если есть
       const main = ["name","имя","phone","телефон","email","source","источник"]
         .filter(k => cf[k])
         .slice(0, 4)
         .map(k => `<span class="cf-badge">${esc(k)}: ${esc(previewValue(cf[k]))}</span>`)
         .join("");
+      const sourceBadge = currentTable === "default" && sourceTable !== "default"
+        ? `<span class="cf-badge">лист: ${esc(sourceLabel)}</span>`
+        : "";
       const extra = Object.keys(cf).length - 4;
       return `<tr>
         <td style="color:var(--text-subtle)">${r.id}</td>
         <td>${esc(r.platform_id) || '<span style="color:var(--text-subtle)">—</span>'}</td>
-        <td>${main || '<span style="color:var(--text-subtle);font-size:.78rem">пусто</span>'}${extra > 0 ? `<span style="color:var(--text-subtle);font-size:.72rem"> +${extra}</span>` : ""}</td>
+        <td>${sourceBadge}${main || '<span style="color:var(--text-subtle);font-size:.78rem">пусто</span>'}${extra > 0 ? `<span style="color:var(--text-subtle);font-size:.72rem"> +${extra}</span>` : ""}</td>
         <td style="color:var(--text-subtle)">${(r.created_at||"").slice(0,10)}</td>
         <td style="display:flex;gap:3px">
-          <button class="btn btn--xs" onclick="editRecord(${r.id})">✎</button>
-          <button class="btn btn--xs btn--danger" onclick="delRecord(${r.id})">×</button>
+          <button class="btn btn--xs" onclick="editRecord(${r.id}, '${escAttr(sourceTable)}')">✎</button>
+          <button class="btn btn--xs btn--danger" onclick="delRecord(${r.id}, '${escAttr(sourceTable)}')">×</button>
         </td>
       </tr>`;
     }).join("");
@@ -333,6 +339,7 @@ $("recDialog").addEventListener("click", e => { if (e.target === $("recDialog"))
 
 function openRecDialog(rec = null) {
   $("recId").value = rec?.id ?? "";
+  $("recSourceTable").value = rec?.source_table ?? currentTable;
   $("recTitle").textContent = rec ? `Запись #${rec.id}` : "Новая запись";
   $("recPlatformId").value = rec?.platform_id ?? "";
   buildCfEditor(rec?.custom_fields ?? {});
@@ -391,7 +398,8 @@ $("recSave").addEventListener("click", async () => {
     if (k) cf[k] = parsed.value;
   }
   const body = { platform_id, custom_fields: cf };
-  const url = id ? `${API}/tables/${currentTable}/records/${id}` : `${API}/tables/${currentTable}/records`;
+  const targetTable = id ? ($("recSourceTable").value || currentTable) : currentTable;
+  const url = id ? `${API}/tables/${targetTable}/records/${id}` : `${API}/tables/${currentTable}/records`;
   const method = id ? "PUT" : "POST";
   const res = await fetch(url, { method, headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
   if (!res.ok) { const e = await res.json().catch(() => ({})); $("recStatus").textContent = e.detail || e.error || "Ошибка"; $("recStatus").className = "status-line status-line--err"; return; }
@@ -399,15 +407,17 @@ $("recSave").addEventListener("click", async () => {
   loadRecords();
 });
 
-async function editRecord(id) {
-  const res = await fetch(`${API}/tables/${currentTable}/records/${id}`);
+async function editRecord(id, sourceTable = currentTable) {
+  const res = await fetch(`${API}/tables/${sourceTable}/records/${id}`);
   if (!res.ok) return;
-  openRecDialog(await res.json());
+  const rec = await res.json();
+  rec.source_table = sourceTable;
+  openRecDialog(rec);
 }
 
-async function delRecord(id) {
+async function delRecord(id, sourceTable = currentTable) {
   if (!confirm("Удалить запись?")) return;
-  await fetch(`${API}/tables/${currentTable}/records/${id}`, { method: "DELETE" });
+  await fetch(`${API}/tables/${sourceTable}/records/${id}`, { method: "DELETE" });
   loadRecords();
 }
 
@@ -436,6 +446,7 @@ $("tblSave").addEventListener("click", async () => {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 
 function esc(s) { return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function escAttr(s) { return esc(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;"); }
 
 function isStructuredValue(value) {
   return value !== null && typeof value === "object";

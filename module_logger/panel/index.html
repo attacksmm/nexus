@@ -79,6 +79,13 @@
     .status-bar{position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;
       gap:10px;padding:3px 12px;background:rgba(2,2,2,.88);border-top:1px solid var(--border);
       font-size:.72rem;color:var(--text-subtle);z-index:2;pointer-events:none;}
+    .busy{position:absolute;right:12px;top:10px;display:inline-flex;align-items:center;gap:8px;
+      min-height:28px;padding:4px 10px;border:1px solid var(--border-mid);
+      background:rgba(16,16,16,.94);color:var(--text-muted);font-size:.76rem;z-index:4;
+      box-shadow:0 10px 30px rgba(0,0,0,.35);}
+    .busy__spin{width:13px;height:13px;border:2px solid var(--border-strong);border-top-color:var(--text);
+      border-radius:50%;animation:spin .75s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
   </style>
 </head>
 <body>
@@ -91,12 +98,14 @@
       <button id="liveBtn"     class="btn"         type="button">Live</button>
       <button id="errBtn"      class="btn btn--err" type="button">Ошибки</button>
       <button id="downloadBtn" class="btn btn--ghost" type="button" title="Скачать">↓</button>
-      <button id="clearBtn"    class="btn btn--danger" type="button">Очистить</button>
+      <button id="clearViewBtn" class="btn btn--ghost" type="button">Очистить окно</button>
+      <button id="rotateBtn"    class="btn btn--danger" type="button">Новая версия</button>
       <button id="scrollBtn"   class="btn btn--ghost" type="button">↓↓</button>
     </div>
   </div>
 
   <div class="term-area">
+    <div id="busy" class="busy" hidden><span class="busy__spin"></span><span id="busyText">Загрузка</span></div>
     <div class="terminal" id="terminal">[Выберите вкладку]</div>
     <div class="status-bar">
       <span id="statusLines">0 строк</span>
@@ -136,17 +145,25 @@ let errMode = false;
 let lineCount = 0;
 let allLines = [];      // полный буфер для фильтрации
 let searchQuery = '';
+let busyCount = 0;
 
 const term   = document.getElementById('terminal');
 const tabbar = document.getElementById('tabbar');
 const liveDot = document.getElementById('liveDot');
 const errBtn  = document.getElementById('errBtn');
 const searchInput = document.getElementById('searchInput');
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+tabbar.addEventListener('wheel', (event) => {
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+  event.preventDefault();
+  tabbar.scrollLeft += event.deltaY;
+}, {passive:false});
 
 // ── Modules & tabs ────────────────────────────────────────────────────────────
 
 async function loadModules() {
-  const res = await fetch(API + '/modules').catch(() => null);
+  const res = await withBusy(fetch(API + '/modules').catch(() => null), 'Обновление модулей');
   if (!res?.ok) return;
   const mods = await res.json();
   const selectedExists = activeTab && mods.some(m => m.id === activeTab);
@@ -184,7 +201,8 @@ async function selectTab(id, syncPath = true) {
   if (syncPath) syncModulePath();
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('tab--active', t.dataset.id === id));
   document.getElementById('statusModule').textContent = id;
-  document.getElementById('clearBtn').disabled = id === 'nexus';
+  document.getElementById('clearViewBtn').disabled = false;
+  document.getElementById('rotateBtn').disabled = id === 'nexus';
   await loadLogs();
   logsLoadedFor = id;
   if (autoLive) startLive();
@@ -193,7 +211,7 @@ async function selectTab(id, syncPath = true) {
 async function loadLogs() {
   if (!activeTab) return;
   term.textContent = 'Загрузка…';
-  const res = await fetch(`${API}/logs/${activeTab}?lines=500`).catch(() => null);
+  const res = await withBusy(fetch(`${API}/logs/${activeTab}?lines=500`).catch(() => null), 'Загрузка логов');
   if (!res?.ok) { term.textContent = '[ошибка загрузки]'; return; }
   const text = await res.text();
   allLines = text.split('\n');
@@ -310,16 +328,35 @@ document.getElementById('downloadBtn').addEventListener('click', () => {
   }).click();
 });
 
-document.getElementById('clearBtn').addEventListener('click', async () => {
-  if (!activeTab || activeTab === 'nexus') return;
-  if (!confirm(`Очистить логи «${activeTab}»?`)) return;
-  await fetch(`${API}/logs/${activeTab}`, {method:'DELETE'});
+document.getElementById('clearViewBtn').addEventListener('click', () => {
+  if (!activeTab) return;
   allLines = [];
-  await loadLogs();
-  loadModules();
+  applyFilters();
+  term.textContent = `[окно очищено: ${activeTab}]\nФайл лога не изменен. Новые live-строки появятся ниже.`;
+  document.getElementById('statusLines').textContent = '0 строк';
+});
+
+document.getElementById('rotateBtn').addEventListener('click', async () => {
+  if (!activeTab || activeTab === 'nexus') return;
+  if (!confirm(`Создать новую версию логов «${activeTab}»?\n\nТекущий файл будет скопирован в archive, после этого окно и текущий module.log станут пустыми.`)) return;
+  stopLive();
+  const res = await withBusy(fetch(`${API}/logs/${activeTab}/rotate`, {method:'POST'}), 'Архивация логов');
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    alert(data.error || 'Не удалось создать новую версию логов');
+    if (autoLive) startLive();
+    return;
+  }
+  allLines = [];
+  applyFilters();
+  term.textContent = `[новая версия логов создана]\nАрхив: ${data.archived}\nРазмер архива: ${fmtSize(Number(data.size || 0))}`;
+  document.getElementById('statusLines').textContent = '0 строк';
+  await loadModules();
+  if (autoLive) startLive();
 });
 
 function formatLogLine(line) {
+  line = formatLogTimestamp(line);
   const jsonStart = line.indexOf('{');
   if (jsonStart < 0) return line;
   const prefix = line.slice(0, jsonStart).trimEnd();
@@ -333,6 +370,26 @@ function formatLogLine(line) {
   }
 }
 
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function formatMskDate(date) {
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth()+1)}-${pad2(date.getUTCDate())} ${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())} MSK`;
+}
+
+function formatLogTimestamp(line) {
+  const iso = line.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:\+\d{2}:\d{2}|Z)\s+(.*)$/);
+  if (iso) {
+    const date = new Date(`${iso[1]}T${iso[2]}Z`);
+    if (!Number.isNaN(date.getTime())) return `${formatMskDate(new Date(date.getTime() + MSK_OFFSET_MS))} ${iso[3]}`;
+  }
+  const plain = line.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\s+(.*)$/);
+  if (plain) {
+    const date = new Date(`${plain[1]}T${plain[2]}Z`);
+    if (!Number.isNaN(date.getTime())) return `${formatMskDate(new Date(date.getTime() + MSK_OFFSET_MS))} ${plain[3]}`;
+  }
+  return line;
+}
+
 function scrollBottom() {
   requestAnimationFrame(() => { term.scrollTop = term.scrollHeight; });
 }
@@ -343,6 +400,17 @@ function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;'
 function fmtSize(b) {
   if (b<1024) return b+'B'; if (b<1048576) return (b/1024).toFixed(1)+'K';
   return (b/1048576).toFixed(1)+'M';
+}
+function setBusy(on, text='Загрузка') {
+  busyCount = Math.max(0, busyCount + (on ? 1 : -1));
+  const busy = document.getElementById('busy');
+  document.getElementById('busyText').textContent = text;
+  busy.hidden = busyCount === 0;
+}
+async function withBusy(promise, text='Загрузка') {
+  setBusy(true, text);
+  try { return await promise; }
+  finally { setBusy(false, text); }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

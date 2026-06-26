@@ -1,0 +1,21 @@
+{
+  "id": "chat-moderators",
+  "name": "Куратор чатов",
+  "version": "0.1.23",
+  "description": "VK/TG куратор учебных чатов Sobakovod с историей действий, управлением токенами в модуле и безопасным отключенным runtime по умолчанию.",
+  "env_required": [],
+  "env_vars": {
+    "NEXUS_CHAT_MODERATORS_RUNTIME_ENABLED": "Опционально: 1/true включает возможность ручного старта runtime. По умолчанию выключено.",
+    "NEXUS_CHAT_MODERATORS_TG_ENABLED": "Опционально: 1/true разрешает ручной старт Telegram-модератора.",
+    "NEXUS_CHAT_MODERATORS_VK_ENABLED": "Опционально: 1/true разрешает ручной старт VK-модератора.",
+    "NEXUS_CHAT_MODERATORS_DRY_RUN": "Опционально: 1/true запрещает реальные удаления/ответы/реакции. По умолчанию включено.",
+    "NEXUS_CHAT_MODERATORS_TG_SEND_RESPONSES": "Опционально: 1/true включает ответные сообщения Telegram. По умолчанию выключено.",
+    "NEXUS_CHAT_MODERATORS_VK_SEND_RESPONSES": "Опционально: 1/true включает ответные сообщения VK. По умолчанию выключено.",
+    "TELEGRAM_BOT_TOKEN_MODERATOR": "Токен Telegram бота-модератора.",
+    "TELEGRAM_LOG_CHAT_ID": "Опционально: Telegram chat_id для уведомлений модератора. По умолчанию -1002852064172.",
+    "KURATOR_LOG_CHAT_ID": "Опционально: совместимость со старым TG кураторботом, chat_id уведомлений.",
+    "VK_USER_TOKEN": "Пользовательский VK token для боевого VK longpoll.",
+    "VK_LOG_CHAT_ID": "VK peer_id чата логов модератора.",
+    "OPENROUTER_API_KEY": "OpenRouter API key для AI-классификации сообщений. Модель берётся из модуля OpenRouter."
+  }
+}

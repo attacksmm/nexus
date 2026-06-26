@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Трекер</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070707;--panel:#101010;--panel2:#171717;--panel3:#1f1f1f;--line:#2c2c2c;--line2:#474747;--text:#f2f2f2;--muted:#9d9d9d;--soft:#cfcfcf;--accent:#f4f4f4;--accentText:#050505;--ok:#8fe09d;--bad:#ff8e99;--warn:#f0cf72}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}
+    .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr)}
+    .top{height:42px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line);background:#0b0b0b;min-width:0}
+    .brand{font-weight:800}.tabs{display:flex;gap:2px;height:100%;align-items:stretch}.tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);padding:0 12px}.tab.active{color:var(--text);border-bottom-color:var(--accent)}.status{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+    .btn{min-height:29px;border:1px solid var(--line2);background:var(--panel2);color:var(--text);padding:5px 10px}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accentText)}.btn.ghost{background:transparent;border-color:var(--line)}.btn.bad{background:#2a1215;border-color:#6b3038;color:#ffd1d6}
+    .main{min-height:0;display:grid;grid-template-columns:320px minmax(0,1fr)}
+    .side{min-height:0;overflow:auto;border-right:1px solid var(--line);background:#0d0d0d}.workspace{min-height:0;overflow:hidden;background:#080808}
+    .section{padding:12px;border-bottom:1px solid var(--line)}h2{margin:0 0 9px;font-size:13px}.sub{color:var(--muted);font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    label{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 5px}.input,.select,.textarea{width:100%;min-height:31px;border:1px solid var(--line2);background:#070707;color:var(--text);padding:6px 8px;outline:none}.textarea{min-height:94px;resize:vertical}.input:focus,.select:focus,.textarea:focus{border-color:#777}
+    .actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.metric{border:1px solid var(--line);background:#101010;padding:8px}.metric b{display:block;font-size:20px}.metric span{color:var(--muted);font-size:12px}
+    .view{height:100%;display:none;grid-template-rows:auto minmax(0,1fr)}.view.active{display:grid}.toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel)}.toolbar .field{min-width:180px}.toolbar .field.search{flex:1;min-width:240px}
+    .table-wrap{min-height:0;overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}th{position:sticky;top:0;background:#141414;color:var(--muted);z-index:2}tr:hover td{background:#111}.row{cursor:pointer}.badge{display:inline-flex;border:1px solid var(--line2);padding:1px 6px;color:var(--soft);background:#121212}.badge.ok{color:var(--ok);border-color:#365f3d;background:#102015}.badge.warn{color:var(--warn);border-color:#65541a;background:#1c1706}.badge.bad{color:var(--bad);border-color:#6b3038;background:#241114}
+    .detail{position:absolute;right:0;top:42px;bottom:0;width:min(620px,100%);background:#0d0d0d;border-left:1px solid var(--line2);display:grid;grid-template-rows:auto minmax(0,1fr);box-shadow:-18px 0 35px rgba(0,0,0,.25);z-index:5}.detail[hidden]{display:none}.detail-head{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)}.detail-body{min-height:0;overflow:auto;padding:12px;display:grid;gap:12px}.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:5px 10px}.k{color:var(--muted)}.v{min-width:0;word-break:break-word}.pre{margin:0;padding:10px;border:1px solid var(--line);background:#050505;color:#cfcfcf;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:220px;overflow:auto}
+    .chart{display:grid;gap:5px}.bar{display:grid;grid-template-columns:92px minmax(0,1fr) 46px;gap:7px;align-items:center}.bar-line{height:8px;background:#202020}.bar-fill{height:8px;background:#dcdcdc}.script-box{margin:0;padding:12px;border:1px solid var(--line);background:#030303;color:#9fe0aa;white-space:pre-wrap;word-break:break-all;font-size:12px}
+    @media(max-width:980px){.main{grid-template-columns:1fr}.side{border-right:0;border-bottom:1px solid var(--line);max-height:42vh}.top{height:auto;min-height:42px;flex-wrap:wrap}.tabs{order:3;width:100%;height:36px;overflow:auto}.detail{top:78px}.metrics{grid-template-columns:repeat(4,minmax(110px,1fr));overflow:auto}.toolbar .field,.toolbar .field.search{min-width:100%;flex:1}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="brand">Трекер</div>
+    <div class="tabs">
+      <button class="tab active" data-view="overview" type="button">Обзор</button>
+      <button class="tab" data-view="people" type="button">Люди</button>
+      <button class="tab" data-view="events" type="button">События</button>
+      <button class="tab" data-view="forms" type="button">Формы</button>
+      <button class="tab" data-view="sites" type="button">Сайты</button>
+      <button class="tab" data-view="script" type="button">Скрипт</button>
+      <button class="tab" data-view="settings" type="button">Настройки</button>
+    </div>
+    <button id="refreshBtn" class="btn ghost" type="button">↻</button>
+    <span id="topStatus" class="status"></span>
+  </div>
+  <div class="main">
+    <aside class="side">
+      <div class="section">
+        <h2>Состояние</h2>
+        <div class="metrics">
+          <div class="metric"><b id="mProfiles">0</b><span>людей</span></div>
+          <div class="metric"><b id="mEvents">0</b><span>событий</span></div>
+          <div class="metric"><b id="mPageviews">0</b><span>визитов</span></div>
+          <div class="metric"><b id="mForms">0</b><span>форм</span></div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>Источники</h2>
+        <div id="sourcesChart" class="chart"></div>
+      </div>
+      <div class="section">
+        <h2>Быстрый поиск</h2>
+        <input id="quickSearch" class="input" placeholder="email, телефон, visit_id, utm_term">
+        <div class="actions" style="margin-top:8px">
+          <button id="quickSearchBtn" class="btn primary" type="button">Найти</button>
+          <button id="clearSearchBtn" class="btn" type="button">Сброс</button>
+        </div>
+      </div>
+    </aside>
+    <main class="workspace">
+      <section id="view-overview" class="view active">
+        <div class="toolbar"><div class="field search"><label>Сводка</label><div class="sub">Последние 14 дней, профили и источники обновляются из живого журнала.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>День</th><th>Событий</th></tr></thead><tbody id="dailyRows"></tbody></table></div>
+      </section>
+      <section id="view-people" class="view">
+        <div class="toolbar">
+          <div class="field search"><label>Поиск</label><input id="peopleQuery" class="input" placeholder="email, телефон, имя, visit_id, utm_term"></div>
+          <button id="peopleSearchBtn" class="btn primary" type="button">Поиск</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Последний визит</th><th>Человек</th><th>Контакты</th><th>Источник</th><th>Страница</th><th>Событий</th></tr></thead><tbody id="peopleRows"></tbody></table></div>
+      </section>
+      <section id="view-events" class="view">
+        <div class="toolbar">
+          <div class="field"><label>Тип</label><select id="eventType" class="select"><option value="">Все</option><option value="pageview">pageview</option><option value="form_submit_success">form_submit_success</option><option value="custom">custom</option></select></div>
+          <div class="field search"><label>Host</label><input id="eventHost" class="input" placeholder="sobakovod.pro"></div>
+          <button id="eventsSearchBtn" class="btn primary" type="button">Показать</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>Время</th><th>Тип</th><th>Host</th><th>Страница</th><th>Гео</th><th>UTM</th></tr></thead><tbody id="eventRows"></tbody></table></div>
+      </section>
+      <section id="view-forms" class="view">
+        <div class="toolbar"><div class="field search"><label>Подтвержденные формы</label><div class="sub">Скрипт отправляет форму только после success-сигнала или ручного confirmForm().</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Время</th><th>Человек</th><th>Контакты</th><th>Причина</th><th>Страница</th><th>Поля</th></tr></thead><tbody id="formRows"></tbody></table></div>
+      </section>
+      <section id="view-sites" class="view">
+        <div class="toolbar"><div class="field search"><label>Сайты</label><div class="sub">Host появляется после первого события со страницы.</div></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Host</th><th>Событий</th><th>Людей</th><th>Первый визит</th><th>Последний визит</th></tr></thead><tbody id="siteRows"></tbody></table></div>
+      </section>
+      <section id="view-script" class="view">
+        <div class="toolbar">
+          <div class="field"><label>Site key</label><input id="siteKey" class="input" value="sobakovod"></div>
+          <div class="field"><label>Политика</label><input id="policyUrl" class="input" value="https://sobakovod.pro/popd"></div>
+          <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="consentRequired" type="checkbox" checked> баннер согласия</label>
+          <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="autoConsent" type="checkbox" checked> продолжение = согласие</label>
+          <button id="buildSnippetBtn" class="btn primary" type="button">Собрать</button>
+          <button id="copySnippetBtn" class="btn" type="button">Копировать</button>
+        </div>
+        <div class="section">
+          <h2>Snippet</h2>
+          <pre id="snippetBox" class="script-box"></pre>
+          <p class="sub">Баннер занимает нижнюю тонкую полосу, не блокирует страницу и не меняет формы. До согласия скрипт не ставит visitor cookie и не отправляет формы; формы с отмеченной галочкой ПДн могут подтвердить consent автоматически.</p>
+        </div>
+      </section>
+      <section id="view-settings" class="view">
+        <div class="toolbar"><div class="field search"><label>Настройки</label><div class="sub">Сырые события чистятся вручную кнопкой ниже. Профили людей остаются.</div></div></div>
+        <div class="section">
+          <div class="actions">
+            <div style="width:180px"><label>Raw retention, мес.</label><input id="retentionMonths" class="input" type="number" min="1" max="60" value="6"></div>
+            <label style="display:flex;gap:8px;align-items:center;margin-top:18px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="customerSync" type="checkbox" checked> sync в customer-db</label>
+            <button id="saveSettingsBtn" class="btn primary" type="button">Сохранить</button>
+            <button id="cleanupBtn" class="btn bad" type="button">Очистить raw</button>
+          </div>
+          <p id="settingsStatus" class="sub"></p>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+<aside id="detail" class="detail" hidden>
+  <div class="detail-head"><b id="detailTitle"></b><button id="detailClose" class="btn ghost" type="button">×</button></div>
+  <div id="detailBody" class="detail-body"></div>
+</aside>
+<script>
+const modBase = location.pathname.split('/panel/')[0];
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = s => s ? String(s).replace('T',' ').replace('Z','') : '';
+let state = {stats:null, people:[], events:[], forms:[], sites:[], settings:null};
+
+async function req(path, opts){
+  const res = await fetch(API + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+  return data;
+}
+function switchView(name){
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
+}
+function renderStats(){
+  const s = state.stats || {};
+  $('mProfiles').textContent = Number(s.profiles||0).toLocaleString('ru-RU');
+  $('mEvents').textContent = Number(s.events||0).toLocaleString('ru-RU');
+  $('mPageviews').textContent = Number(s.pageviews||0).toLocaleString('ru-RU');
+  $('mForms').textContent = Number(s.confirmed||0).toLocaleString('ru-RU');
+  $('topStatus').textContent = `${Number(s.sites||0)} сайтов`;
+  const max = Math.max(1, ...(s.top_sources||[]).map(x => Number(x.count||0)));
+  $('sourcesChart').innerHTML = (s.top_sources||[]).map(x => `<div class="bar"><span class="mono">${esc(x.source)}</span><div class="bar-line"><div class="bar-fill" style="width:${Math.max(3,Number(x.count||0)/max*100)}%"></div></div><span>${Number(x.count||0)}</span></div>`).join('') || '<div class="sub">Нет данных</div>';
+  $('dailyRows').innerHTML = (s.daily||[]).map(x => `<tr><td>${esc(x.day)}</td><td>${Number(x.count||0).toLocaleString('ru-RU')}</td></tr>`).join('') || '<tr><td colspan="2" class="sub">Нет событий</td></tr>';
+}
+function contact(p){return [p.last_phone||p.first_phone, p.last_email||p.first_email].filter(Boolean).join(' · ')}
+function personName(p){return p.last_name || p.first_name || p.visit_id}
+function sourceText(p){return [p.last_utm_source||p.first_utm_source, p.last_utm_campaign||p.first_utm_campaign, p.last_utm_term||p.first_utm_term].filter(Boolean).join(' / ')}
+function renderPeople(){
+  $('peopleRows').innerHTML = state.people.map(p => `<tr class="row" data-visit="${esc(p.visit_id)}"><td>${fmt(p.updated_at)}</td><td><b>${esc(personName(p))}</b><br><span class="sub mono">${esc(p.visit_id)}</span></td><td>${esc(contact(p))}</td><td>${esc(sourceText(p))}</td><td title="${esc(p.last_page_url)}">${esc(p.last_page_url)}</td><td>${Number(p.event_count||0)}</td></tr>`).join('') || '<tr><td colspan="6" class="sub">Нет профилей</td></tr>';
+  document.querySelectorAll('[data-visit]').forEach(row => row.onclick = () => openProfile(row.dataset.visit));
+}
+function utm(e){return [e.utm_source,e.utm_campaign,e.utm_term].filter(Boolean).join(' / ')}
+function renderEvents(){
+  $('eventRows').innerHTML = state.events.map(e => `<tr class="row" data-event='${esc(JSON.stringify(e))}'><td>${fmt(e.created_at)}</td><td><span class="badge ${e.confirmed?'ok':''}">${esc(e.event_type)}</span></td><td>${esc(e.site_host)}</td><td title="${esc(e.page_url)}">${esc(e.page_url)}</td><td>${esc([e.country,e.city].filter(Boolean).join(', '))}</td><td>${esc(utm(e))}</td></tr>`).join('') || '<tr><td colspan="6" class="sub">Нет событий</td></tr>';
+  document.querySelectorAll('[data-event]').forEach(row => row.onclick = () => openEvent(JSON.parse(row.dataset.event)));
+}
+function renderForms(){
+  $('formRows').innerHTML = state.forms.map(e => `<tr class="row" data-event='${esc(JSON.stringify(e))}'><td>${fmt(e.created_at)}</td><td>${esc(e.name || e.visit_id)}</td><td>${esc([e.phone,e.email].filter(Boolean).join(' · '))}</td><td><span class="badge ok">${esc(e.confirmation_reason || e.event_type)}</span></td><td title="${esc(e.page_url)}">${esc(e.page_url)}</td><td>${esc(Object.keys(e.form_fields||{}).join(', '))}</td></tr>`).join('') || '<tr><td colspan="6" class="sub">Нет подтвержденных форм</td></tr>';
+  document.querySelectorAll('[data-event]').forEach(row => row.onclick = () => openEvent(JSON.parse(row.dataset.event)));
+}
+function renderSites(){
+  $('siteRows').innerHTML = state.sites.map(s => `<tr><td>${esc(s.site_host)}</td><td>${Number(s.events||0)}</td><td>${Number(s.people||0)}</td><td>${fmt(s.first_seen)}</td><td>${fmt(s.last_seen)}</td></tr>`).join('') || '<tr><td colspan="5" class="sub">Нет сайтов</td></tr>';
+}
+function renderSettings(){
+  const s = state.settings || {};
+  $('retentionMonths').value = s.retention_months || 6;
+  $('customerSync').checked = !!s.customer_db_sync;
+  $('settingsStatus').textContent = `GeoIP: ${s.geo?.configured ? s.geo.path : 'не настроен'} · customer-db: ${s.customer_db_path || 'не найден'}`;
+}
+function renderSnippet(){
+  const site = $('siteKey').value.trim() || 'sobakovod';
+  const src = location.origin + modBase + '/api/script.js';
+  const attrs = [
+    `src="${src}"`,
+    'async',
+    `data-site="${site.replace(/"/g,'&quot;')}"`
+  ];
+  if ($('consentRequired').checked) {
+    attrs.push('data-consent="required"', 'data-banner="1"');
+    const policy = $('policyUrl').value.trim();
+    if (policy) attrs.push(`data-policy-url="${policy.replace(/"/g,'&quot;')}"`);
+    if ($('autoConsent').checked) attrs.push('data-auto-consent="continue"', 'data-auto-consent-delay="3000"');
+  }
+  $('snippetBox').textContent = `<script ${attrs.join(' ')}><\/script>`;
+}
+async function loadStats(){state.stats = await req('/stats'); renderStats()}
+async function loadPeople(){const q = $('peopleQuery').value.trim(); const data = await req('/profiles?q=' + encodeURIComponent(q)); state.people = data.items || []; renderPeople()}
+async function loadEvents(){const qs = new URLSearchParams(); if($('eventType').value)qs.set('event_type',$('eventType').value); if($('eventHost').value.trim())qs.set('site_host',$('eventHost').value.trim()); const data = await req('/events?' + qs); state.events = data.items || []; renderEvents()}
+async function loadForms(){const data = await req('/forms'); state.forms = data.items || []; renderForms()}
+async function loadSites(){const data = await req('/sites'); state.sites = data.items || []; renderSites()}
+async function loadSettings(){state.settings = await req('/settings'); renderSettings()}
+async function loadAll(){try{await Promise.all([loadStats(),loadPeople(),loadEvents(),loadForms(),loadSites(),loadSettings()]); renderSnippet()}catch(e){$('topStatus').textContent = e.message}}
+async function openProfile(visitId){
+  const data = await req('/profiles/' + encodeURIComponent(visitId));
+  const p = data.profile;
+  $('detailTitle').textContent = personName(p);
+  $('detailBody').innerHTML = `<div class="kv">
+    <div class="k">visit_id</div><div class="v mono">${esc(p.visit_id)}</div>
+    <div class="k">Контакты</div><div class="v">${esc(contact(p))}</div>
+    <div class="k">Источник</div><div class="v">${esc(sourceText(p))}</div>
+    <div class="k">Гео</div><div class="v">${esc([p.last_country,p.last_city].filter(Boolean).join(', '))}</div>
+    <div class="k">Устройство</div><div class="v">${esc([p.last_device,p.last_browser].filter(Boolean).join(' · '))}</div>
+    <div class="k">Последняя страница</div><div class="v">${esc(p.last_page_url)}</div>
+  </div><h2>Ключи склейки</h2><pre class="pre">${esc(JSON.stringify(data.keys||[],null,2))}</pre><h2>Последние события</h2><pre class="pre">${esc(JSON.stringify((data.events||[]).slice(0,20),null,2))}</pre>`;
+  $('detail').hidden = false;
+}
+function openEvent(e){
+  $('detailTitle').textContent = `${e.event_type} · ${fmt(e.created_at)}`;
+  $('detailBody').innerHTML = `<div class="kv">
+    <div class="k">visit_id</div><div class="v mono">${esc(e.visit_id)}</div>
+    <div class="k">Страница</div><div class="v">${esc(e.page_url)}</div>
+    <div class="k">Контакты</div><div class="v">${esc([e.name,e.phone,e.email].filter(Boolean).join(' · '))}</div>
+    <div class="k">Гео</div><div class="v">${esc([e.country,e.city,e.ip].filter(Boolean).join(' · '))}</div>
+  </div><h2>Поля формы</h2><pre class="pre">${esc(JSON.stringify(e.form_fields||{},null,2))}</pre><h2>Payload</h2><pre class="pre">${esc(JSON.stringify(e.payload||{},null,2))}</pre>`;
+  $('detail').hidden = false;
+}
+document.querySelectorAll('.tab').forEach(btn => btn.onclick = () => switchView(btn.dataset.view));
+$('detailClose').onclick = () => $('detail').hidden = true;
+$('refreshBtn').onclick = loadAll;
+$('peopleSearchBtn').onclick = loadPeople;
+$('eventsSearchBtn').onclick = loadEvents;
+$('quickSearchBtn').onclick = () => { $('peopleQuery').value = $('quickSearch').value; switchView('people'); loadPeople(); };
+$('clearSearchBtn').onclick = () => { $('quickSearch').value=''; $('peopleQuery').value=''; loadPeople(); };
+$('buildSnippetBtn').onclick = renderSnippet;
+$('siteKey').addEventListener('input', renderSnippet);
+$('policyUrl').addEventListener('input', renderSnippet);
+$('consentRequired').addEventListener('change', renderSnippet);
+$('autoConsent').addEventListener('change', renderSnippet);
+$('copySnippetBtn').onclick = () => navigator.clipboard && navigator.clipboard.writeText($('snippetBox').textContent);
+$('saveSettingsBtn').onclick = async () => { await req('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({retention_months:Number($('retentionMonths').value||6),customer_db_sync:$('customerSync').checked})}); await loadSettings(); };
+$('cleanupBtn').onclick = async () => { if(!confirm('Удалить raw-события старше retention?'))return; const r=await req('/cleanup',{method:'POST'}); $('settingsStatus').textContent=`Удалено raw-событий: ${r.deleted_events}`; await loadStats(); };
+loadAll();
+</script>
+</body>
+</html>
