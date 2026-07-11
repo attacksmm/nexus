@@ -1,6 +1,7 @@
 [Unit]
 Description=Nexus Orchestrator
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -11,6 +12,16 @@ EnvironmentFile=-/home/attack/nexus/.env
 ExecStart=/home/attack/nexus/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8080 --root-path /nexus
 Restart=always
 RestartSec=3
+TimeoutStartSec=90s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+MemoryAccounting=yes
+MemoryHigh=2800M
+MemoryMax=3600M
+TasksMax=1024
+LimitNOFILE=65536
+OOMPolicy=stop
 
 [Install]
 WantedBy=multi-user.target
