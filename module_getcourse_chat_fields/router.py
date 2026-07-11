@@ -101,6 +101,10 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _db_connect(path):
+    return aiosqlite.connect(path, timeout=30)
+
+
 def setup(ctx):
     global _ctx, _db_path, _logger, _poll_task, _gc_lookup_task, _gc_write_task
     _ctx = ctx
@@ -151,7 +155,10 @@ async def _require_user(request: Request) -> dict[str, Any]:
 async def _init_db() -> None:
     assert _db_path is not None
     _db_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -295,7 +302,7 @@ def _env() -> dict[str, str]:
 
 async def _settings_map() -> dict[str, str]:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT key,value FROM settings")
         rows = await cur.fetchall()
     data = DEFAULT_SETTINGS.copy()
@@ -307,7 +314,7 @@ async def _settings_map() -> dict[str, str]:
 async def _save_settings(data: dict[str, Any]) -> dict[str, str]:
     allowed = set(DEFAULT_SETTINGS)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         for key in allowed:
             if key not in data:
                 continue
@@ -738,7 +745,7 @@ async def _customer_order_index(settings: dict[str, str]) -> dict[str, dict[str,
     limit = _bounded_int(settings.get("students_order_lookup_limit"), 100, 200000, 20000)
     web_base = _getcourse_web_base_url(settings)
     rows: list[dict[str, Any]]
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -884,7 +891,7 @@ def _deal_updated_from_export_row(row: dict[str, Any]) -> str:
 
 async def _gc_export_calls_used() -> int:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             "SELECT COUNT(*) FROM gc_export_api_calls WHERE datetime(requested_at) >= datetime('now','-2 hours')"
         )
@@ -905,7 +912,7 @@ async def _gc_export_next_budget_at(settings: dict[str, str], needed: int = 4) -
         return ""
     to_expire = used - max(0, limit - needed)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             """
             SELECT datetime(requested_at,'+2 hours')
@@ -922,7 +929,7 @@ async def _gc_export_next_budget_at(settings: dict[str, str], needed: int = 4) -
 
 async def _record_gc_export_call(purpose: str, details: dict[str, Any]) -> None:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             "INSERT INTO gc_export_api_calls(purpose,details_json) VALUES(?,?)",
             (_clean(purpose, 100), json.dumps(details, ensure_ascii=False)),
@@ -987,7 +994,7 @@ async def _load_gc_lookup_cache(emails: list[str], settings: dict[str, str]) -> 
     cache_days = _bounded_int(settings.get("gc_export_lookup_cache_days"), 1, 365, 30)
     placeholders = ",".join("?" for _ in emails)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             f"""
@@ -1018,7 +1025,7 @@ async def _load_gc_lookup_cache(emails: list[str], settings: dict[str, str]) -> 
 
 async def _save_gc_lookup_cache(email_key: str, item: dict[str, Any], status: str = "ok", error: str = "") -> None:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             """
             INSERT INTO gc_export_lookup_cache(email,gc_user_id,user_url,order_id,order_url,status,error,source_json,updated_at)
@@ -1056,7 +1063,7 @@ async def _patch_flow_students_cache_email(email_key: str, item: dict[str, Any])
         return 0
     assert _db_path is not None
     patched_rows = 0
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT key,value_json FROM flow_students_cache")
         rows = await cur.fetchall()
         for cache_key, value_json in rows:
@@ -1191,7 +1198,7 @@ async def _enqueue_gc_lookup_emails(emails: list[str], reason: str = "manual") -
         return {"queued": 0, "emails": []}
     assert _db_path is not None
     queued = 0
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         for email in normalized:
             cur = await db.execute(
                 """
@@ -1221,7 +1228,7 @@ async def _enqueue_gc_lookup_emails(emails: list[str], reason: str = "manual") -
 
 async def _existing_gc_lookup_emails() -> set[str]:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT email FROM gc_export_lookup_jobs")
         return {_norm(row[0]) for row in await cur.fetchall() if row and row[0]}
 
@@ -1242,7 +1249,7 @@ async def _enqueue_missing_from_students_cache(settings: dict[str, str], limit: 
 async def _open_gc_lookup_jobs_count(settings: dict[str, str]) -> int:
     max_attempts = _bounded_int(settings.get("gc_export_lookup_job_max_attempts"), 1, 10, 3)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             """
             SELECT COUNT(*)
@@ -1260,7 +1267,7 @@ async def _open_gc_write_jobs_count(settings: dict[str, str] | None = None) -> i
     active_settings = settings or await _settings_map()
     max_attempts = _bounded_int(active_settings.get("gc_fields_write_job_max_attempts"), 1, 10, 3)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             """
             SELECT COUNT(*)
@@ -1313,7 +1320,7 @@ async def _deal_number_from_customer_source(source_record_id: Any) -> str:
     db_path = _customer_db_path()
     if not db_path.exists():
         return ""
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         cur = await db.execute("SELECT custom_fields FROM cdb_getcourse_orders WHERE id=?", (record_id,))
         row = await cur.fetchone()
     fields = _json_dict((row or [""])[0])
@@ -1325,7 +1332,7 @@ async def _lookup_cache_by_email(emails: list[str]) -> dict[str, dict[str, Any]]
         return {}
     placeholders = ",".join("?" for _ in emails)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             f"SELECT * FROM gc_export_lookup_cache WHERE email IN ({placeholders})",
@@ -1337,7 +1344,7 @@ async def _lookup_cache_by_email(emails: list[str]) -> dict[str, dict[str, Any]]
 
 async def _existing_gc_write_job_keys() -> set[tuple[str, str]]:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             """
             SELECT email, order_id
@@ -1432,9 +1439,212 @@ async def _fields_write_candidates_from_cache(settings: dict[str, str], limit: i
     return result
 
 
+def _flow_students_effective_curators(snapshot: dict[str, Any] | None) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str, str], str]]:
+    flow_curators: dict[tuple[str, str], str] = {}
+    student_curators: dict[tuple[str, str, str], str] = {}
+    if not snapshot:
+        return flow_curators, student_curators
+    for flow in snapshot.get("items") or []:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 50)
+        if not course_key or not stream:
+            continue
+        flow_key = (course_key, stream)
+        flow_curator = _clean(flow.get("curator_value"), 100)
+        if flow_curator:
+            flow_curators[flow_key] = flow_curator
+        for student in flow.get("students") or []:
+            email = _norm(student.get("email"))
+            if not _valid_email(email):
+                continue
+            effective = _clean(student.get("responsible_curator") or flow_curator, 100)
+            if effective:
+                student_curators[(course_key, stream, email)] = effective
+    return flow_curators, student_curators
+
+
+async def _curator_change_write_candidates(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+    settings: dict[str, str],
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    old_flow_curators, old_student_curators = _flow_students_effective_curators(previous)
+    if not old_flow_curators and not old_student_curators:
+        return []
+    curator_values = {value for _, value in _curator_name_map(settings)}
+    emails = sorted(
+        {
+            _norm(student.get("email"))
+            for flow in current.get("items") or []
+            for student in flow.get("students") or []
+            if _valid_email(_norm(student.get("email")))
+        }
+    )
+    lookup_cache = await _lookup_cache_by_email(emails)
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for flow in current.get("items") or []:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 100)
+        vk_link = _clean(flow.get("vk_link"), 2000)
+        tg_link = _clean(flow.get("tg_link"), 2000)
+        flow_curator = _clean(flow.get("curator_value"), 100)
+        flow_key = (course_key, stream)
+        if not course_key or not stream or not vk_link or not tg_link:
+            continue
+        for student in flow.get("students") or []:
+            email = _norm(student.get("email"))
+            if not _valid_email(email):
+                continue
+            curator = _clean(student.get("responsible_curator") or flow_curator, 100)
+            previous_curator = _clean(old_student_curators.get((course_key, stream, email)) or old_flow_curators.get(flow_key), 100)
+            if not previous_curator or previous_curator == curator or curator not in curator_values:
+                continue
+            gc_user_id = _clean(student.get("gc_user_id"), 100)
+            order_id = _clean(student.get("order_id"), 100)
+            cached = lookup_cache.get(email) or {}
+            if not gc_user_id:
+                gc_user_id = _clean(cached.get("gc_user_id"), 100)
+            if not order_id:
+                order_id = _clean(cached.get("order_id"), 100)
+            if not gc_user_id or not order_id:
+                continue
+            source = _json_dict(cached.get("source_json"))
+            deal_number = _deal_number_from_source(source)
+            if not deal_number:
+                deal_number = await _deal_number_from_customer_source(student.get("source_record_id"))
+            if not deal_number:
+                continue
+            key = (email, order_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            output_fields = {
+                settings["field_stream"]: stream,
+                settings["field_vk"]: vk_link,
+                settings["field_tg"]: tg_link,
+                settings["field_curator"]: curator,
+            }
+            output_fields = {key: value for key, value in output_fields.items() if _clean(value)}
+            if len(output_fields) != 4:
+                continue
+            result.append(
+                {
+                    "email": email,
+                    "gc_user_id": gc_user_id,
+                    "order_id": order_id,
+                    "deal_number": deal_number,
+                    "fields": output_fields,
+                    "user_fields": _getcourse_user_addfields(output_fields, settings),
+                    "flow": {
+                        "course": flow.get("course"),
+                        "course_key": course_key,
+                        "stream": stream,
+                        "sheet_title": flow.get("sheet_title"),
+                        "change_reason": "curator_changed_from_sheets",
+                        "previous_curator": previous_curator,
+                        "new_curator": curator,
+                    },
+                }
+            )
+            if len(result) >= max(1, int(limit or 500)):
+                return result
+    return result
+
+
+async def _fields_write_reconciliation_candidates(settings: dict[str, str], limit: int = 500) -> list[dict[str, Any]]:
+    ttl = _bounded_int(settings.get("students_cache_minutes"), 1, 1440, 30)
+    cache = await _load_flow_students_cache(_flow_students_cache_key(settings), ttl, allow_stale=True)
+    if not cache:
+        return []
+    expected: dict[tuple[str, str], dict[str, Any]] = {}
+    for flow in cache.get("items") or []:
+        stream = _clean(flow.get("stream"), 100)
+        vk_link = _clean(flow.get("vk_link"), 2000)
+        tg_link = _clean(flow.get("tg_link"), 2000)
+        flow_curator = _clean(flow.get("curator_value"), 100)
+        if not stream or not vk_link or not tg_link or not flow_curator:
+            continue
+        for student in flow.get("students") or []:
+            email = _norm(student.get("email"))
+            order_id = _clean(student.get("order_id"), 100)
+            if not _valid_email(email) or not order_id:
+                continue
+            curator = _clean(student.get("responsible_curator") or flow_curator, 100)
+            if not curator:
+                continue
+            output_fields = {
+                settings["field_stream"]: stream,
+                settings["field_vk"]: vk_link,
+                settings["field_tg"]: tg_link,
+                settings["field_curator"]: curator,
+            }
+            output_fields = {key: value for key, value in output_fields.items() if _clean(value)}
+            if len(output_fields) != 4:
+                continue
+            expected[(email, order_id)] = {
+                "fields": output_fields,
+                "flow": {
+                    "course": flow.get("course"),
+                    "course_key": flow.get("course_key"),
+                    "stream": stream,
+                    "sheet_title": flow.get("sheet_title"),
+                    "change_reason": "field_write_reconciliation",
+                },
+            }
+    if not expected:
+        return []
+    assert _db_path is not None
+    result: list[dict[str, Any]] = []
+    async with _db_connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT email,gc_user_id,order_id,deal_number,status,payload_json,result_json
+            FROM gc_fields_write_jobs
+            WHERE status <> 'running'
+            """
+        )
+        rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        email = _norm(row.get("email"))
+        order_id = _clean(row.get("order_id"), 100)
+        wanted = expected.get((email, order_id))
+        if not wanted:
+            continue
+        payload = _json_dict(row.get("payload_json"))
+        result_payload = _json_dict(row.get("result_json"))
+        current_fields = _json_dict(payload.get("fields")) or _json_dict(result_payload.get("fields"))
+        wanted_fields = wanted["fields"]
+        if all(_clean(current_fields.get(key)) == _clean(value) for key, value in wanted_fields.items()):
+            continue
+        gc_user_id = _clean(row.get("gc_user_id"), 100)
+        deal_number = _clean(row.get("deal_number"), 100)
+        if not gc_user_id or not deal_number:
+            continue
+        result.append(
+            {
+                "email": email,
+                "gc_user_id": gc_user_id,
+                "order_id": order_id,
+                "deal_number": deal_number,
+                "fields": wanted_fields,
+                "user_fields": _getcourse_user_addfields(wanted_fields, settings),
+                "flow": {
+                    **wanted["flow"],
+                    "previous_fields": current_fields,
+                },
+            }
+        )
+        if len(result) >= max(1, int(limit or 500)):
+            return result
+    return result
+
+
 async def _gc_lookup_status(settings: dict[str, str] | None = None) -> dict[str, Any]:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT status,COUNT(*) FROM gc_export_lookup_jobs GROUP BY status")
         counts = {str(row[0]): int(row[1] or 0) for row in await cur.fetchall()}
         cur = await db.execute(
@@ -1487,7 +1697,7 @@ async def _gc_lookup_status(settings: dict[str, str] | None = None) -> dict[str,
 async def _claim_gc_lookup_job(settings: dict[str, str]) -> dict[str, Any] | None:
     max_attempts = _bounded_int(settings.get("gc_export_lookup_job_max_attempts"), 1, 10, 3)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -1536,7 +1746,7 @@ async def _finish_gc_lookup_job(job_id: int, status: str, error: str = "", resul
     if status == "failed":
         attempts = 1
         assert _db_path is not None
-        async with aiosqlite.connect(_db_path) as db_read:
+        async with _db_connect(_db_path) as db_read:
             cur = await db_read.execute("SELECT attempts FROM gc_export_lookup_jobs WHERE id=?", (int(job_id),))
             row = await cur.fetchone()
             attempts = int((row or [1])[0] or 1)
@@ -1545,7 +1755,7 @@ async def _finish_gc_lookup_job(job_id: int, status: str, error: str = "", resul
     if delay_seconds:
         next_run_expr = f"strftime('%Y-%m-%dT%H:%M:%SZ','now','+{int(delay_seconds)} seconds')"
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             f"""
             UPDATE gc_export_lookup_jobs
@@ -1567,7 +1777,7 @@ async def _defer_gc_lookup_job(job_id: int, error: str = "", delay_seconds: int 
     delay_seconds = max(60, min(7200, int(delay_seconds or 600)))
     next_run_expr = f"strftime('%Y-%m-%dT%H:%M:%SZ','now','+{delay_seconds} seconds')"
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             f"""
             UPDATE gc_export_lookup_jobs
@@ -1942,7 +2152,7 @@ def _flow_students_snapshot_sync(
 
 async def _load_flow_students_cache(cache_key: str, max_age_minutes: int, allow_stale: bool = False) -> dict[str, Any] | None:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT value_json,updated_at FROM flow_students_cache WHERE key=?", (cache_key,))
         row = await cur.fetchone()
@@ -1964,7 +2174,7 @@ async def _load_flow_students_cache(cache_key: str, max_age_minutes: int, allow_
 async def _save_flow_students_cache(cache_key: str, data: dict[str, Any]) -> None:
     assert _db_path is not None
     updated_at = _clean(data.get("updated_at") or _now(), 40)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             """
             INSERT INTO flow_students_cache(key,value_json,updated_at) VALUES(?,?,?)
@@ -2009,6 +2219,7 @@ async def _flow_students(settings: dict[str, str], refresh: bool = False) -> dic
             },
         }
     async with _students_cache_lock:
+        previous_cache = await _load_flow_students_cache(cache_key, ttl, allow_stale=True)
         spreadsheet_id = _curator_spreadsheet_id(settings)
         credentials_path = _curator_credentials_path(settings)
         if not spreadsheet_id:
@@ -2050,12 +2261,104 @@ async def _flow_students(settings: dict[str, str], refresh: bool = False) -> dic
         }
         if data.get("ok"):
             await _save_flow_students_cache(cache_key, data)
+            _chat_flows_cache.clear()
+            try:
+                changed_candidates = await _curator_change_write_candidates(previous_cache, data, settings, limit=500)
+                if changed_candidates:
+                    data["curator_change_jobs"] = await _enqueue_gc_fields_write_items(changed_candidates, force=True)
+                else:
+                    data["curator_change_jobs"] = {"queued": 0, "candidates": 0, "items": []}
+            except Exception as exc:
+                data["curator_change_jobs"] = {"queued": 0, "candidates": 0, "items": [], "error": _clean(str(exc), 1000)}
+                _log("warning", "curator-change enqueue failed: %s", exc)
         else:
             stale = await _load_flow_students_cache(cache_key, ttl, allow_stale=True)
             if stale:
                 stale["stale_due_error"] = "; ".join(_clean(error.get("error"), 300) for error in data.get("errors") or [])[:1000]
                 return stale
         return data
+
+
+async def _flow_students_for_processing(settings: dict[str, str]) -> dict[str, Any] | None:
+    cache_key = _flow_students_cache_key(settings)
+    ttl = _bounded_int(settings.get("students_cache_minutes"), 1, 1440, 30)
+    cached = await _load_flow_students_cache(cache_key, ttl)
+    if cached:
+        return cached
+    refreshed = await _flow_students(settings, refresh=True)
+    if refreshed and refreshed.get("ok"):
+        return refreshed
+    stale = await _load_flow_students_cache(cache_key, ttl, allow_stale=True)
+    return stale
+
+
+def _student_order_date_matches(student_date: Any, fields: dict[str, Any], row: dict[str, Any]) -> bool:
+    text = _clean(student_date, 50)
+    match = re.search(r"(\d{1,2})[./-](\d{1,2})", text)
+    if not match:
+        return False
+    day = int(match.group(1))
+    month = int(match.group(2))
+    for value in (fields.get("received_at"), row.get("updated_at"), row.get("created_at")):
+        raw = _clean(value, 80)
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if parsed.day == day and parsed.month == month:
+            return True
+    return False
+
+
+def _student_flow_match(snapshot: dict[str, Any] | None, row: dict[str, Any], fields: dict[str, Any], course_key: str) -> dict[str, Any] | None:
+    if not snapshot:
+        return None
+    email = _norm(fields.get("email") or fields.get("user_email"))
+    gc_user_id = _clean(fields.get("gc_user_id"), 100)
+    order_id = _clean(fields.get("order_id") or row.get("platform_id"), 100)
+    matches: list[tuple[int, int, dict[str, Any]]] = []
+    for flow in snapshot.get("items") or []:
+        if _clean(flow.get("course_key"), 50) != course_key:
+            continue
+        stream = _clean(flow.get("stream"), 100)
+        if not stream:
+            continue
+        for student in flow.get("students") or []:
+            score = 0
+            reasons: list[str] = []
+            if order_id and _clean(student.get("order_id"), 100) == order_id:
+                score += 100
+                reasons.append("order_id")
+            if gc_user_id and _clean(student.get("gc_user_id"), 100) == gc_user_id:
+                score += 50
+                reasons.append("gc_user_id")
+            if email and _norm(student.get("email")) == email:
+                score += 25
+                reasons.append("email")
+            if score <= 0:
+                continue
+            if _student_order_date_matches(student.get("date"), fields, row):
+                score += 30
+                reasons.append("date")
+            matches.append(
+                (
+                    score,
+                    _bounded_int(stream, 0, 100000, 0),
+                    {
+                        "flow": flow,
+                        "student": student,
+                        "stream": stream,
+                        "match_reasons": reasons,
+                        "score": score,
+                    },
+                )
+            )
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return matches[0][2]
 
 
 def _parse_chat_link_rows(rows: list[list[Any]], course_key: str, platform: str, wanted_stream: str = "") -> dict[str, Any]:
@@ -2624,7 +2927,7 @@ async def _latest_chats() -> dict[str, dict[str, dict[str, Any] | None]]:
     }
     if not db_path.exists():
         return result
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         for course_key in result:
             for platform in ("vk", "telegram"):
@@ -2647,19 +2950,36 @@ async def _customer_rows(settings: dict[str, str], limit: int) -> list[dict[str,
     db_path = _customer_db_path()
     if not db_path.exists():
         return []
-    async with aiosqlite.connect(db_path) as db:
+    assert _db_path is not None
+    async with _db_connect(db_path) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute("ATTACH DATABASE ? AS mod", (str(_db_path),))
         cur = await db.execute(
             """
-            SELECT id, platform_id, custom_fields, created_at, updated_at
-            FROM cdb_getcourse_orders
-            WHERE datetime(COALESCE(updated_at, created_at)) >= datetime(?)
-            ORDER BY datetime(COALESCE(updated_at, created_at)) ASC, id ASC
+            SELECT c.id, c.platform_id, c.custom_fields, c.created_at, c.updated_at
+            FROM cdb_getcourse_orders c
+            LEFT JOIN mod.processed_orders p ON p.source_record_id = c.id
+            WHERE datetime(COALESCE(c.updated_at, c.created_at)) >= datetime(?)
+              AND (
+                p.source_record_id IS NULL
+                OR p.status NOT IN ('processed','skipped')
+                OR datetime(COALESCE(c.updated_at, c.created_at)) > datetime(COALESCE(p.updated_at, '1970-01-01T00:00:00Z'))
+              )
+            ORDER BY CASE
+                       WHEN p.source_record_id IS NULL THEN 0
+                       WHEN datetime(COALESCE(c.updated_at, c.created_at)) > datetime(COALESCE(p.updated_at, '1970-01-01T00:00:00Z')) THEN 1
+                       WHEN p.status NOT IN ('processed','skipped') THEN 2
+                       ELSE 3
+                     END,
+                     datetime(COALESCE(c.updated_at, c.created_at)) DESC,
+                     c.id DESC
             LIMIT ?
             """,
             (settings.get("start_date") or _today(), max(1, min(5000, int(limit)))),
         )
-        return [dict(row) for row in await cur.fetchall()]
+        rows = [dict(row) for row in await cur.fetchall()]
+        await db.execute("DETACH DATABASE mod")
+        return rows
 
 
 def _source_order_summary(row: dict[str, Any], state: dict[str, Any] | None) -> dict[str, Any]:
@@ -2697,7 +3017,7 @@ async def _source_orders(settings: dict[str, str], query: str = "", date_from: s
     query = _clean(query, 300)
     date_from = _clean(date_from, 30)
     max_limit = max(1, min(500, int(limit)))
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         if query:
             like = f"%{query}%"
@@ -2739,7 +3059,7 @@ async def _processed_state(record_ids: list[int]) -> dict[int, dict[str, Any]]:
         return {}
     placeholders = ",".join("?" for _ in record_ids)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             f"SELECT * FROM processed_orders WHERE source_record_id IN ({placeholders})",
@@ -2770,7 +3090,7 @@ async def _update_customer_fields(record_id: int, fields: dict[str, Any], patch:
     db_path = _customer_db_path()
     merged = dict(fields)
     merged.update(patch)
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         await db.execute(
             """
             UPDATE cdb_getcourse_orders
@@ -2880,13 +3200,13 @@ async def _write_getcourse_deal(gc_user_id: str, deal_number: str, fields: dict[
     return await _post_getcourse_import("/pl/api/deals", "add", _getcourse_deal_payload(gc_user_id, deal_number, fields, email, phone), settings, "students-fields:deal")
 
 
-async def _enqueue_gc_fields_write_jobs(settings: dict[str, str], limit: int = 50) -> dict[str, Any]:
-    candidates = await _fields_write_candidates_from_cache(settings, limit=limit)
+async def _enqueue_gc_fields_write_items(candidates: list[dict[str, Any]], force: bool = False) -> dict[str, Any]:
     if not candidates:
         return {"queued": 0, "candidates": 0, "items": []}
     queued = 0
+    conflict_where = "gc_fields_write_jobs.status <> 'running'" if force else "gc_fields_write_jobs.status NOT IN ('completed','pending','running')"
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         for item in candidates:
             payload = {
                 "fields": item["fields"],
@@ -2894,16 +3214,20 @@ async def _enqueue_gc_fields_write_jobs(settings: dict[str, str], limit: int = 5
                 "flow": item["flow"],
             }
             cur = await db.execute(
-                """
+                f"""
                 INSERT INTO gc_fields_write_jobs(email,gc_user_id,order_id,deal_number,status,last_error,payload_json,result_json,updated_at)
-                VALUES(?,?,?,?, 'pending', '', ?, '{}', ?)
+                VALUES(?,?,?,?, 'pending', '', ?, '{{}}', ?)
                 ON CONFLICT(email, order_id) DO UPDATE SET
+                    gc_user_id=excluded.gc_user_id,
+                    deal_number=excluded.deal_number,
                     status='pending',
+                    attempts=0,
                     next_run_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),
                     last_error='',
                     payload_json=excluded.payload_json,
+                    result_json='{{}}',
                     updated_at=excluded.updated_at
-                WHERE gc_fields_write_jobs.status NOT IN ('completed','pending','running')
+                WHERE {conflict_where}
                 """,
                 (
                     item["email"],
@@ -2919,10 +3243,20 @@ async def _enqueue_gc_fields_write_jobs(settings: dict[str, str], limit: int = 5
     return {"queued": queued, "candidates": len(candidates), "items": candidates[:20]}
 
 
+async def _enqueue_gc_fields_write_jobs(settings: dict[str, str], limit: int = 50) -> dict[str, Any]:
+    candidates = await _fields_write_candidates_from_cache(settings, limit=limit)
+    return await _enqueue_gc_fields_write_items(candidates, force=False)
+
+
+async def _enqueue_gc_fields_reconciliation_jobs(settings: dict[str, str], limit: int = 50) -> dict[str, Any]:
+    candidates = await _fields_write_reconciliation_candidates(settings, limit=limit)
+    return await _enqueue_gc_fields_write_items(candidates, force=True)
+
+
 async def _gc_fields_write_status(settings: dict[str, str] | None = None) -> dict[str, Any]:
     active_settings = settings or await _settings_map()
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT status,COUNT(*) FROM gc_fields_write_jobs GROUP BY status")
         counts = {str(row[0]): int(row[1] or 0) for row in await cur.fetchall()}
         cur = await db.execute(
@@ -2961,7 +3295,7 @@ async def _gc_fields_write_status(settings: dict[str, str] | None = None) -> dic
 async def _claim_gc_fields_write_job(settings: dict[str, str]) -> dict[str, Any] | None:
     max_attempts = _bounded_int(settings.get("gc_fields_write_job_max_attempts"), 1, 10, 3)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -2970,7 +3304,13 @@ async def _claim_gc_fields_write_job(settings: dict[str, str]) -> dict[str, Any]
             WHERE status IN ('pending','failed')
               AND attempts < ?
               AND datetime(next_run_at) <= datetime('now')
-            ORDER BY datetime(next_run_at) ASC, id ASC
+            ORDER BY CASE
+                       WHEN payload_json LIKE '%field_write_reconciliation%' THEN 0
+                       WHEN payload_json LIKE '%curator_changed_from_sheets%' THEN 0
+                       ELSE 1
+                     END,
+                     datetime(next_run_at) ASC,
+                     id ASC
             LIMIT 1
             """,
             (max_attempts,),
@@ -2986,11 +3326,30 @@ async def _claim_gc_fields_write_job(settings: dict[str, str]) -> dict[str, Any]
         return dict(row)
 
 
+async def _mark_exhausted_gc_fields_write_jobs(settings: dict[str, str]) -> int:
+    max_attempts = _bounded_int(settings.get("gc_fields_write_job_max_attempts"), 1, 10, 3)
+    assert _db_path is not None
+    async with _db_connect(_db_path) as db:
+        cur = await db.execute(
+            """
+            UPDATE gc_fields_write_jobs
+            SET status='failed_exhausted',
+                last_error=CASE WHEN COALESCE(last_error,'')='' THEN 'max attempts exhausted' ELSE last_error END,
+                updated_at=?
+            WHERE status IN ('pending','failed')
+              AND attempts >= ?
+            """,
+            (_now(), max_attempts),
+        )
+        await db.commit()
+        return max(0, int(cur.rowcount or 0))
+
+
 async def _finish_gc_fields_write_job(job_id: int, status: str, error: str = "", result: dict[str, Any] | None = None) -> None:
     delay_seconds = 0
     if status == "failed":
         assert _db_path is not None
-        async with aiosqlite.connect(_db_path) as db_read:
+        async with _db_connect(_db_path) as db_read:
             cur = await db_read.execute("SELECT attempts FROM gc_fields_write_jobs WHERE id=?", (int(job_id),))
             row = await cur.fetchone()
         attempts = int((row or [1])[0] or 1)
@@ -2999,7 +3358,7 @@ async def _finish_gc_fields_write_job(job_id: int, status: str, error: str = "",
     if delay_seconds:
         next_run_expr = f"strftime('%Y-%m-%dT%H:%M:%SZ','now','+{int(delay_seconds)} seconds')"
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             f"""
             UPDATE gc_fields_write_jobs
@@ -3015,7 +3374,7 @@ async def _defer_gc_fields_write_job(job_id: int, error: str = "", delay_seconds
     delay_seconds = max(60, min(7200, int(delay_seconds or 600)))
     next_run_expr = f"strftime('%Y-%m-%dT%H:%M:%SZ','now','+{delay_seconds} seconds')"
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             f"""
             UPDATE gc_fields_write_jobs
@@ -3075,11 +3434,22 @@ async def _gc_write_loop() -> None:
                 await asyncio.sleep(sleep_seconds)
                 continue
             async with _gc_write_lock:
+                exhausted = await _mark_exhausted_gc_fields_write_jobs(settings)
+                if exhausted:
+                    _log("warning", "gc fields write marked %s exhausted jobs", exhausted)
+                budget_left = await _gc_export_budget_left(settings)
+                if budget_left < 2:
+                    await asyncio.sleep(sleep_seconds)
+                    continue
                 job = await _claim_gc_fields_write_job(settings)
                 if job:
                     await _process_gc_fields_write_job(job, settings)
-                elif await _gc_export_budget_left(settings) >= 2:
-                    result = await _enqueue_gc_fields_write_jobs(settings, limit=20)
+                else:
+                    result = await _enqueue_gc_fields_reconciliation_jobs(settings, limit=20)
+                    if int(result.get("queued") or 0) > 0:
+                        _log("info", "gc fields reconciliation queued %s jobs", result.get("queued"))
+                    else:
+                        result = await _enqueue_gc_fields_write_jobs(settings, limit=20)
                     if int(result.get("queued") or 0) > 0:
                         _log("info", "gc fields write auto-enqueued %s jobs", result.get("queued"))
         except asyncio.CancelledError:
@@ -3091,7 +3461,7 @@ async def _gc_write_loop() -> None:
 
 async def _mark_processed(data: dict[str, Any]) -> None:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             """
             INSERT INTO processed_orders(
@@ -3137,7 +3507,14 @@ async def _mark_processed(data: dict[str, Any]) -> None:
         await db.commit()
 
 
-async def _process_row(row: dict[str, Any], chats: dict[str, dict[str, dict[str, Any] | None]], settings: dict[str, str], state: dict[str, Any] | None, force: bool = False) -> dict[str, Any]:
+async def _process_row(
+    row: dict[str, Any],
+    chats: dict[str, dict[str, dict[str, Any] | None]],
+    settings: dict[str, str],
+    state: dict[str, Any] | None,
+    force: bool = False,
+    student_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     fields = _json_dict(row.get("custom_fields"))
     source_hash = _source_hash(fields, settings)
     gc_ready = bool(_env()["account_name"] and _env()["api_token"])
@@ -3159,19 +3536,54 @@ async def _process_row(row: dict[str, Any], chats: dict[str, dict[str, dict[str,
     if not course_key:
         await _mark_processed({**base, "status": "failed", "error": "course not detected", "details": {"title": fields.get("title")}})
         return {"action": "failed"}
+    student_match = _student_flow_match(student_snapshot, row, fields, course_key)
+    student_flow: dict[str, Any] | None = student_match.get("flow") if student_match else None
+    student_item: dict[str, Any] = student_match.get("student") if student_match else {}
     course_chats = chats.get(course_key) or {}
-    vk_chat = course_chats.get("vk")
-    tg_chat = course_chats.get("telegram")
-    if not vk_chat or not tg_chat:
-        await _mark_processed({**base, "status": "failed", "course_key": course_key, "tariff": tariff, "error": "latest VK/TG chat not found", "details": {"latest_chats": course_chats}})
-        return {"action": "failed"}
-    stream = _stream_number(
-        vk_chat.get("stream_number") if vk_chat else "",
-        tg_chat.get("stream_number") if tg_chat else "",
-        vk_chat.get("title") if vk_chat else "",
-        tg_chat.get("title") if tg_chat else "",
-    )
-    curator = await _resolve_curator(course_key, stream, settings)
+    if student_flow:
+        stream = _clean(student_flow.get("stream"), 100)
+        vk_chat = {
+            "platform": "vk",
+            "title": _clean(student_flow.get("vk_title"), 300),
+            "stream_number": stream,
+            "link": _clean(student_flow.get("vk_link"), 2000),
+            "course_key": course_key,
+            "source": "flow_students_sheet",
+        }
+        tg_chat = {
+            "platform": "telegram",
+            "title": _clean(student_flow.get("tg_title"), 300),
+            "stream_number": stream,
+            "link": _clean(student_flow.get("tg_link"), 2000),
+            "course_key": course_key,
+            "source": "flow_students_sheet",
+        }
+    else:
+        vk_chat = course_chats.get("vk")
+        tg_chat = course_chats.get("telegram")
+        if not vk_chat or not tg_chat:
+            await _mark_processed({**base, "status": "failed", "course_key": course_key, "tariff": tariff, "error": "latest VK/TG chat not found", "details": {"latest_chats": course_chats}})
+            return {"action": "failed"}
+        stream = _stream_number(
+            vk_chat.get("stream_number") if vk_chat else "",
+            tg_chat.get("stream_number") if tg_chat else "",
+            vk_chat.get("title") if vk_chat else "",
+            tg_chat.get("title") if tg_chat else "",
+        )
+    curator_value = _clean(student_item.get("responsible_curator") or (student_flow or {}).get("curator_value"), 100)
+    if curator_value:
+        curator = {
+            "ok": True,
+            "status": "ok",
+            "value": curator_value,
+            "raw_value": _clean(student_item.get("responsible_curator_raw") or (student_flow or {}).get("curator_raw"), 300),
+            "worksheet_title": _clean((student_flow or {}).get("sheet_title"), 300),
+            "sheet_id": (student_flow or {}).get("sheet_id") or "",
+            "url": _clean((student_flow or {}).get("sheet_url"), 1000),
+            "source": "flow_students_sheet",
+        }
+    else:
+        curator = await _resolve_curator(course_key, stream, settings)
     if not curator.get("ok"):
         await _mark_processed({
             **base,
@@ -3180,13 +3592,36 @@ async def _process_row(row: dict[str, Any], chats: dict[str, dict[str, dict[str,
             "tariff": tariff,
             "stream": stream,
             "error": _clean(curator.get("error") or curator.get("status"), 2000),
-            "details": {"latest_chats": {"vk": vk_chat, "telegram": tg_chat}, "curator": curator},
+            "details": {"latest_chats": {"vk": vk_chat, "telegram": tg_chat}, "curator": curator, "student_flow_match": student_match or {}},
         })
         return {"action": "pending_curator", "error": curator.get("error")}
     is_standard = tariff == "standard"
     link_result: dict[str, Any] = {"ok": True, "vk": {}, "telegram": {}, "standard_no_links": True}
     if not is_standard:
-        link_result = await _resolve_chat_links(course_key, stream, settings)
+        if student_flow and _clean(student_flow.get("vk_link"), 2000) and _clean(student_flow.get("tg_link"), 2000):
+            link_result = {
+                "ok": True,
+                "status": "ok",
+                "vk": {
+                    "course_key": course_key,
+                    "platform": "vk",
+                    "title": _clean(student_flow.get("vk_title"), 300),
+                    "stream_number": stream,
+                    "link": _clean(student_flow.get("vk_link"), 2000),
+                    "source": "flow_students_sheet",
+                },
+                "telegram": {
+                    "course_key": course_key,
+                    "platform": "telegram",
+                    "title": _clean(student_flow.get("tg_title"), 300),
+                    "stream_number": stream,
+                    "link": _clean(student_flow.get("tg_link"), 2000),
+                    "source": "flow_students_sheet",
+                },
+                "error": "",
+            }
+        else:
+            link_result = await _resolve_chat_links(course_key, stream, settings)
         if not link_result.get("ok"):
             await _mark_processed({
                 **base,
@@ -3199,6 +3634,7 @@ async def _process_row(row: dict[str, Any], chats: dict[str, dict[str, dict[str,
                     "latest_chats": {"vk": vk_chat, "telegram": tg_chat},
                     "curator": curator,
                     "chat_links": link_result,
+                    "student_flow_match": student_match or {},
                 },
             })
             return {"action": "pending_chat_links", "error": link_result.get("error")}
@@ -3230,6 +3666,7 @@ async def _process_row(row: dict[str, Any], chats: dict[str, dict[str, dict[str,
             "curator": _clean(settings.get("user_field_curator_id"), 100),
         },
         "latest_chats": {"vk": vk_chat, "telegram": tg_chat},
+        "student_flow_match": student_match or {},
         "curator": curator,
         "chat_links": link_result,
     }
@@ -3304,8 +3741,12 @@ async def _scan_once(*, force_failed: bool = False, limit: int = 200) -> dict[st
             summary["source_rows"] = len(rows)
             states = await _processed_state([int(row["id"]) for row in rows])
             chats = await _latest_chats()
+            student_snapshot = await _flow_students_for_processing(settings) if rows else None
+            if student_snapshot:
+                summary["students_cache_updated_at"] = _clean(student_snapshot.get("cache_updated_at") or student_snapshot.get("updated_at"), 40)
+                summary["students_cache_age_seconds"] = int(student_snapshot.get("cache_age_seconds") or 0)
             for row in rows:
-                result = await _process_row(row, chats, settings, states.get(int(row["id"])), force=force_failed)
+                result = await _process_row(row, chats, settings, states.get(int(row["id"])), force=force_failed, student_snapshot=student_snapshot)
                 action = result.get("action")
                 if action in {"processed", "dry_run", "customer_only"}:
                     summary["processed"] += 1
@@ -3325,7 +3766,7 @@ async def _scan_once(*, force_failed: bool = False, limit: int = 200) -> dict[st
 
 async def _create_scan_run(dry_run: bool) -> int:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("INSERT INTO scan_runs(dry_run) VALUES(?)", (1 if dry_run else 0,))
         await db.commit()
         return int(cur.lastrowid)
@@ -3333,7 +3774,7 @@ async def _create_scan_run(dry_run: bool) -> int:
 
 async def _finish_scan_run(run_id: int, summary: dict[str, Any]) -> None:
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             """
             UPDATE scan_runs
@@ -3509,7 +3950,7 @@ async def orders(request: Request, status: str = "all", limit: int = 100):
         args.append(status)
     args.append(max(1, min(500, int(limit))))
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             f"""
@@ -3538,7 +3979,7 @@ async def source_orders(request: Request, query: str = "", date_from: str = "", 
 async def runs(request: Request, limit: int = 30):
     await _require_user(request)
     assert _db_path is not None
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM scan_runs ORDER BY id DESC LIMIT ?",

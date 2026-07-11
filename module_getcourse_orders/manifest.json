@@ -1,7 +1,7 @@
 {
   "id": "getcourse-orders",
   "name": "Заказы GetCourse",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "description": "Принимает webhook заказов GetCourse, пишет их в customer-db и распределяет оплаченных клиентов по группам Senler.",
   "env_vars": {
     "SENLER_ACCESS_TOKEN": "Токен API Senler. Senler -> Настройки -> API -> Токен доступа",

@@ -21,10 +21,12 @@ router = APIRouter()
 
 _db_path = None
 _logger: logging.Logger | None = None
+_webhook_watchdog_task: asyncio.Task | None = None
 MODULE_ID = "amocrm-senler"
 
 SENLER_API = "https://senler.ru/api"
 SENLER_V = "2"
+AMO_WEBHOOK_SETTINGS = ["add_lead", "status_lead", "update_lead", "responsible_lead"]
 _EP_SUB_ADD = f"{SENLER_API}/subscribers/add"
 _EP_SUB_DEL = f"{SENLER_API}/subscribers/del"
 _EP_SUB_GET = f"{SENLER_API}/subscribers/get"
@@ -51,6 +53,10 @@ CATEGORY_LABELS = {
 }
 
 
+def _db_connect(path):
+    return aiosqlite.connect(path, timeout=30)
+
+
 async def _require_panel_user(request: Request) -> dict:
     user = await verify_token_from_request(request)
     if not user or not can_access_module(user, MODULE_ID):
@@ -59,18 +65,26 @@ async def _require_panel_user(request: Request) -> dict:
 
 
 def setup(ctx):
-    global _db_path, _logger
+    global _db_path, _logger, _webhook_watchdog_task
     _db_path = ctx.db_path
     _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.amocrm-senler"))
     loop = asyncio.get_event_loop()
     if loop.is_running():
         loop.create_task(_init_db())
+        if _webhook_watchdog_enabled() and (_webhook_watchdog_task is None or _webhook_watchdog_task.done()):
+            _webhook_watchdog_task = loop.create_task(_webhook_watchdog_loop())
     else:
         loop.run_until_complete(_init_db())
+        if _webhook_watchdog_enabled():
+            settings = loop.run_until_complete(_settings_map())
+            loop.run_until_complete(_ensure_amo_webhook(settings))
 
 
 async def _init_db():
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -309,11 +323,42 @@ def _env() -> dict[str, str]:
         "amo_base_url": os.environ.get("AMO_BASE_URL", "").strip().rstrip("/"),
         "amo_token": os.environ.get("AMO_ACCESS_TOKEN", "").strip(),
         "webhook_secret": os.environ.get("AMO_SENLER_WEBHOOK_SECRET", "").strip(),
+        "webhook_url": os.environ.get("AMO_SENLER_WEBHOOK_URL", "").strip(),
+        "webhook_public_base": os.environ.get("AMO_SENLER_PUBLIC_BASE", "https://junior.sobakovod.pro/nexus").strip().rstrip("/"),
+        "webhook_watchdog": os.environ.get("AMO_SENLER_WEBHOOK_WATCHDOG", "").strip().lower(),
+        "webhook_watchdog_interval": os.environ.get("AMO_SENLER_WEBHOOK_WATCHDOG_INTERVAL", "").strip(),
     }
 
 
+def _webhook_watchdog_enabled() -> bool:
+    return _env()["webhook_watchdog"] in {"1", "true", "yes", "on"}
+
+
+def _webhook_watchdog_interval() -> int:
+    try:
+        return max(300, min(86400, int(_env()["webhook_watchdog_interval"] or "3600")))
+    except Exception:
+        return 3600
+
+
+def _amo_webhook_destination(settings: dict[str, str]) -> str:
+    env = _env()
+    if env["webhook_url"]:
+        return env["webhook_url"]
+    url = f"{env['webhook_public_base']}/{MODULE_ID}/api/webhook"
+    secret = _clean(settings.get("webhook_secret"), 200)
+    if secret:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}secret={secret}"
+    return url
+
+
+def _safe_webhook_destination(url: str) -> str:
+    return re.sub(r"([?&]secret=)[^&]+", r"\1***", str(url or ""))
+
+
 async def _settings_map() -> dict[str, str]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT key,value FROM settings")
         rows = await cur.fetchall()
     data = DEFAULT_SETTINGS.copy()
@@ -325,7 +370,7 @@ async def _settings_map() -> dict[str, str]:
 
 async def _save_settings(data: dict[str, Any]) -> dict[str, str]:
     allowed = {"webhook_secret", "vk_field", "request_timeout"}
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         for key in allowed:
             if key not in data:
                 continue
@@ -524,7 +569,7 @@ async def _find_binding(event: dict[str, Any]) -> dict[str, Any] | None:
     pipeline_id = _clean(event.get("pipeline_id"), 64)
     status_id = _clean(event.get("status_id"), 64)
     category = _category_for_action(action)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         if category:
             cur = await db.execute(
@@ -600,6 +645,51 @@ async def _amo_post(path: str, payload: Any, settings: dict[str, str]) -> tuple[
         return None, str(exc)
 
 
+async def _ensure_amo_webhook(settings: dict[str, str]) -> tuple[bool, str, dict[str, Any]]:
+    destination = _amo_webhook_destination(settings)
+    if not destination:
+        return False, "AMO webhook URL пустой", {}
+    body, error = await _amo_get("/api/v4/webhooks", settings)
+    if error:
+        return False, error, {"destination": destination}
+    webhooks = ((body or {}).get("_embedded") or {}).get("webhooks") or []
+    current = None
+    for item in webhooks:
+        if isinstance(item, dict) and _clean(item.get("destination"), 1000) == destination:
+            current = item
+            break
+    current_settings = current.get("settings") if isinstance(current, dict) else []
+    if isinstance(current_settings, dict):
+        enabled_settings = {key for key, value in current_settings.items() if value}
+    else:
+        enabled_settings = set(current_settings or [])
+    desired_settings = set(AMO_WEBHOOK_SETTINGS)
+    if current and not current.get("disabled") and desired_settings.issubset(enabled_settings):
+        return True, "", {"destination": destination, "id": current.get("id"), "disabled": False}
+
+    payload = {"destination": destination, "settings": AMO_WEBHOOK_SETTINGS, "sort": 4}
+    registered, register_error = await _amo_post("/api/v4/webhooks", payload, settings)
+    if register_error:
+        return False, register_error, {"destination": destination, "current": current}
+    return True, "", {"destination": destination, "current": current, "registered": registered}
+
+
+async def _webhook_watchdog_loop() -> None:
+    while True:
+        try:
+            settings = await _settings_map()
+            ok, error, details = await _ensure_amo_webhook(settings)
+            if ok:
+                _log("info", "amo webhook watchdog OK: %s", _safe_webhook_destination(details.get("destination", "")))
+            else:
+                _log("warning", "amo webhook watchdog FAIL: %s", error)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("error", "amo webhook watchdog error: %s", exc)
+        await asyncio.sleep(_webhook_watchdog_interval())
+
+
 async def _load_deal(deal_id: str, settings: dict[str, str]) -> tuple[dict[str, Any], str]:
     if not deal_id:
         return {}, "deal_id пустой"
@@ -671,7 +761,7 @@ async def _responsible_name(user_id: str, settings: dict[str, str]) -> tuple[str
     name = _clean((body or {}).get("name"), 300)
     if not name:
         return "", "amoCRM user name пустой"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             """
             INSERT INTO responsible_cache(amo_user_id,name,updated_at) VALUES(?,?,?)
@@ -681,35 +771,6 @@ async def _responsible_name(user_id: str, settings: dict[str, str]) -> tuple[str
         )
         await db.commit()
     return name, ""
-
-
-def _amo_success_note_text(vk_id: str, subscription_id: str, responsible_name: str, deal_id: str) -> str:
-    lines = [
-        "amoCRM -> Senler: подписчик обработан и отправлен в Senler.",
-        f"Группа Senler: {subscription_id}",
-        f"Сделка amoCRM: {deal_id}",
-        f"VK диалог: https://vk.ru/gim225075265?sel={vk_id}",
-    ]
-    if responsible_name:
-        lines.insert(3, f"Ответственный: {responsible_name}")
-    return "\n".join(lines)
-
-
-async def _amo_add_success_note(
-    deal_id: str,
-    vk_id: str,
-    subscription_id: str,
-    responsible_name: str,
-    settings: dict[str, str],
-) -> tuple[bool, str, dict[str, Any]]:
-    text = _amo_success_note_text(vk_id, subscription_id, responsible_name, deal_id)
-    body, error = await _amo_post(
-        f"/api/v4/leads/{deal_id}/notes",
-        [{"note_type": "common", "params": {"text": text}}],
-        settings,
-    )
-    details = {"request": {"note_type": "common", "params": {"text": text}}, "response": body}
-    return not error, error, details
 
 
 async def _senler_check(access_token: str, group_id: str, subscription_id: str, vk_id: str, timeout: int) -> tuple[bool | None, Any]:
@@ -838,7 +899,7 @@ async def _senler_apply(subscription_id: str, vk_id: str, responsible_name: str,
 async def _other_subscription_ids(binding_id: int | None, current_subscription_id: str) -> list[str]:
     if not binding_id:
         return []
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             """
             SELECT DISTINCT subscription_id
@@ -887,7 +948,7 @@ async def _store_event(row: dict[str, Any]) -> int:
         "responsible_user_id", "responsible_name", "vk_id", "binding_id", "subscription_id",
         "success", "ignored", "error", "details", "raw_payload",
     ]
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             f"INSERT INTO events({','.join(keys)}) VALUES({','.join(['?'] * len(keys))})",
             tuple(row.get(k, "") for k in keys),
@@ -976,16 +1037,7 @@ async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict
             error = remove_error
     elif ok:
         senler_details["exclusive_remove"] = {"enabled": False}
-    if ok:
-        note_ok, note_error, note_details = await _amo_add_success_note(
-            deal_id, vk_id, binding["subscription_id"], responsible_name, settings
-        )
-        senler_details["amo_note"] = {"ok": note_ok, "error": note_error, "details": note_details}
-        if not note_ok:
-            note_warning = f"amo note не добавлен: {note_error}"
-            error = f"{error}; {note_warning}" if error else note_warning
-    else:
-        senler_details["amo_note"] = {"ok": False, "skipped": True}
+    senler_details["amo_note"] = {"disabled": True, "skipped": True}
     base_row["success"] = int(ok)
     base_row["error"] = error
     base_row["details"] = json.dumps(
@@ -1063,6 +1115,14 @@ async def post_settings(request: Request):
     return await _save_settings(data if isinstance(data, dict) else {})
 
 
+@router.get("/webhook/status")
+async def webhook_status(request: Request):
+    await _require_panel_user(request)
+    settings = await _settings_map()
+    ok, error, details = await _ensure_amo_webhook(settings)
+    return {"ok": ok, "error": error, "details": details}
+
+
 @router.get("/amo/statuses")
 async def amo_statuses(request: Request):
     await _require_panel_user(request)
@@ -1076,7 +1136,7 @@ async def amo_statuses(request: Request):
 @router.get("/bindings")
 async def list_bindings(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
@@ -1179,7 +1239,7 @@ async def save_binding(request: Request):
         "status_name": "Событие создания сделки",
     }
     row_name = name or f"{CATEGORY_LABELS[category]}: {first_status['status_name']}"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         if binding_id:
             await db.execute(
                 """
@@ -1216,7 +1276,7 @@ async def save_binding(request: Request):
 @router.put("/bindings/{binding_id}/toggle")
 async def toggle_binding(binding_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             "UPDATE status_bindings SET active=1-active, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
             (binding_id,),
@@ -1228,7 +1288,7 @@ async def toggle_binding(binding_id: int, request: Request):
 @router.delete("/bindings/{binding_id}")
 async def delete_binding(binding_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute("DELETE FROM status_bindings WHERE id=?", (binding_id,))
         await db.commit()
     return {"ok": True}
@@ -1245,7 +1305,7 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
         where = "WHERE success=0 AND ignored=0"
     elif result == "ignored":
         where = "WHERE ignored=1"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(row) for row in await cur.fetchall()]
@@ -1254,7 +1314,7 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
 @router.get("/events/{event_id}")
 async def get_event(event_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM events WHERE id=?", (event_id,))
         row = await cur.fetchone()
@@ -1272,7 +1332,7 @@ async def get_event(event_id: int, request: Request):
 @router.get("/stats")
 async def stats(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         total = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
         success = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=1")).fetchone())[0]
         ignored = (await (await db.execute("SELECT COUNT(*) FROM events WHERE ignored=1")).fetchone())[0]

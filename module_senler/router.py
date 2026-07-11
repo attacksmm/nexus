@@ -55,6 +55,10 @@ class ChannelCheckIn(BaseModel):
     user_id: str
 
 
+def _db_connect(path):
+    return aiosqlite.connect(path, timeout=30)
+
+
 def setup(ctx):
     global _db_path, _logger
     _db_path = ctx.db_path
@@ -68,7 +72,10 @@ def setup(ctx):
 
 
 async def _init_db():
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -242,7 +249,7 @@ async def env_status(request: Request):
     """Показывает наличие переменных ENV (без значений)."""
     await _require_panel_user(request)
     token, group_id = _get_credentials()
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         channels = await _load_channels(db)
     has_channel_token = any(ch.get("has_api_key") for ch in channels)
     return {
@@ -258,7 +265,7 @@ async def env_status(request: Request):
 async def list_channels(request: Request):
     await _require_panel_user(request)
     _, default_channel_id = _get_credentials()
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         channels = await _load_channels(db)
     return {"items": channels, "default_channel_id": default_channel_id}
 
@@ -269,7 +276,7 @@ async def upsert_channel(data: ChannelIn, request: Request):
     channel_id = _clean_channel_id(data.id)
     name = _clean_channel_name(data.name, channel_id)
     api_key = str(data.api_key or "").strip()
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         channels = await _load_channels(db, include_secrets=True)
         updated = False
         for channel in channels:
@@ -293,7 +300,7 @@ async def delete_channel(channel_id: str, request: Request):
     _, default_channel_id = _get_credentials()
     if channel_id == default_channel_id:
         raise HTTPException(400, "Канал из SENLER_GROUP_ID удаляется через ENV")
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT COUNT(*) FROM bindings WHERE channel_id=?", (channel_id,))
         used = (await cur.fetchone())[0]
         if used:
@@ -311,7 +318,7 @@ async def check_channel(channel_id: str, data: ChannelCheckIn, request: Request)
     user_id = str(data.user_id or "").strip()
     if not user_id:
         raise HTTPException(400, "ID пользователя обязателен")
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         access_token, effective_channel_id = await _channel_credentials(db, channel_id)
     if not access_token:
         raise HTTPException(400, "API ключ канала не задан")
@@ -343,7 +350,7 @@ async def check_channel(channel_id: str, data: ChannelCheckIn, request: Request)
 @router.get("/pages")
 async def list_pages(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM pages")
         pages = [dict(r) for r in await cur.fetchall()]
@@ -353,7 +360,7 @@ async def list_pages(request: Request):
 @router.delete("/pages/{page_id}")
 async def delete_page(page_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT url FROM pages WHERE id=?", (page_id,))
         row = await cur.fetchone()
         if row:
@@ -368,7 +375,7 @@ async def delete_page(page_id: int, request: Request):
 @router.get("/bindings")
 async def list_bindings(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM bindings ORDER BY id DESC")
         return [dict(r) for r in await cur.fetchall()]
@@ -408,7 +415,7 @@ async def create_binding(request: Request):
     )
     if not b.page_url or not b.subscription_id or not b.channel_id:
         return JSONResponse({"error": "page_url, channel_id и subscription_id обязательны"}, status_code=400)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         channels = await _load_channels(db)
         if channels and all(ch["id"] != b.channel_id for ch in channels):
             return JSONResponse({"error": "Канал не найден в настройках"}, status_code=400)
@@ -431,7 +438,7 @@ async def create_binding(request: Request):
 @router.put("/bindings/{bid}/toggle")
 async def toggle_binding(bid: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute("UPDATE bindings SET active = 1-active WHERE id=?", (bid,))
         await db.commit()
     return {"ok": True}
@@ -440,7 +447,7 @@ async def toggle_binding(bid: int, request: Request):
 @router.delete("/bindings/{bid}")
 async def delete_binding(bid: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute("DELETE FROM bindings WHERE id=?", (bid,))
         await db.commit()
     return {"ok": True}
@@ -451,7 +458,7 @@ async def delete_binding(bid: int, request: Request):
 @router.get("/visits")
 async def list_visits(request: Request, limit: int = 200):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM visits ORDER BY id DESC LIMIT ?", (min(limit, 500),)
@@ -462,7 +469,7 @@ async def list_visits(request: Request, limit: int = 200):
 @router.get("/visits/{vid}")
 async def get_visit(vid: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM visits WHERE id=?", (vid,))
         row = await cur.fetchone()
@@ -479,7 +486,7 @@ async def get_visit(vid: int, request: Request):
 @router.get("/stats")
 async def stats(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         (pages,)    = (await (await db.execute("SELECT COUNT(*) FROM pages")).fetchone())
         (bindings,) = (await (await db.execute("SELECT COUNT(*) FROM bindings WHERE active=1")).fetchone())
         (visits,)   = (await (await db.execute("SELECT COUNT(*) FROM visits")).fetchone())
@@ -527,7 +534,7 @@ async def track(request: Request):
         ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "")
 
         # Сохраняем/обновляем страницу
-        async with aiosqlite.connect(_db_path) as db:
+        async with _db_connect(_db_path) as db:
             await db.execute(
                 "INSERT INTO pages(url, visit_count) VALUES(?,1)"
                 " ON CONFLICT(url) DO UPDATE SET visit_count=visit_count+1",
@@ -554,7 +561,7 @@ async def track(request: Request):
             if not vk_id:
                 _logger.warning(f"track: no vk_id in param '{binding['vk_id_param']}' for {page_url}")
                 details = json.dumps({"reason": f"параметр '{binding['vk_id_param']}' не найден в URL"}, ensure_ascii=False)
-                async with aiosqlite.connect(_db_path) as db:
+                async with _db_connect(_db_path) as db:
                     await db.execute(
                         "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error,details) VALUES(?,?,?,?,0,?,?)",
                         (page_url, "", ip, binding["id"], f"no param {binding['vk_id_param']}", details),
@@ -562,10 +569,10 @@ async def track(request: Request):
                     await db.commit()
                 continue
 
-            async with aiosqlite.connect(_db_path) as db:
+            async with _db_connect(_db_path) as db:
                 access_token, effective_channel_id = await _channel_credentials(db, channel_id)
             success, error, details = await _senler_add_binding_lists(access_token, effective_channel_id, binding, vk_id)
-            async with aiosqlite.connect(_db_path) as db:
+            async with _db_connect(_db_path) as db:
                 await db.execute(
                     "INSERT INTO visits(page_url,vk_id,ip,binding_id,success,error,details) VALUES(?,?,?,?,?,?,?)",
                     (page_url, vk_id, ip, binding["id"], int(success), error, details),

@@ -35,6 +35,7 @@ TABLE_NAME = "getcourse_orders"
 TABLE_DISPLAY_NAME = "Заказы GetCourse"
 PROCESSABLE_PAYMENT_STATES = {"paid", "partial", "unpaid"}
 MODULE_ID = "getcourse-orders"
+PAYMENT_STATE_RANK = {"unknown": 0, "unpaid": 1, "partial": 2, "paid": 3}
 
 DEFAULT_SETTINGS = {
     "webhook_secret": "",
@@ -44,6 +45,10 @@ DEFAULT_SETTINGS = {
     "vk_fields": "utmT,utm_term,user_term",
     "request_timeout": "12",
 }
+
+
+def _db_connect(path):
+    return aiosqlite.connect(path, timeout=30)
 
 
 async def _require_panel_user(request: Request) -> dict:
@@ -66,7 +71,10 @@ def setup(ctx):
 
 
 async def _init_db():
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -153,7 +161,7 @@ def _env() -> dict[str, str]:
 
 
 async def _settings_map() -> dict[str, str]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute("SELECT key,value FROM settings")
         rows = await cur.fetchall()
     data = DEFAULT_SETTINGS.copy()
@@ -165,7 +173,7 @@ async def _settings_map() -> dict[str, str]:
 
 async def _save_settings(data: dict[str, Any]) -> dict[str, str]:
     allowed = {"webhook_secret", "paid_statuses", "partial_statuses", "unpaid_statuses", "vk_fields", "request_timeout"}
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         for key in allowed:
             if key not in data:
                 continue
@@ -205,6 +213,37 @@ def _payment_state(status: str, settings: dict[str, str]) -> str:
     if normalized in _split_values(settings.get("unpaid_statuses", "")):
         return "unpaid"
     return "unknown"
+
+
+def _financial_payment_state(cost_money: float, left_cost_money: float, payed_money: float) -> str:
+    epsilon = 0.009
+    if payed_money <= epsilon:
+        return ""
+    if left_cost_money <= epsilon or (cost_money > epsilon and payed_money + epsilon >= cost_money):
+        return "paid"
+    return "partial"
+
+
+def _resolve_payment_state(
+    status: str,
+    settings: dict[str, str],
+    forced_payment_state: str,
+    cost_money: float,
+    left_cost_money: float,
+    payed_money: float,
+) -> tuple[str, str]:
+    forced_state = forced_payment_state if forced_payment_state in PROCESSABLE_PAYMENT_STATES else ""
+    status_state = _payment_state(status, settings)
+    financial_state = _financial_payment_state(cost_money, left_cost_money, payed_money)
+
+    if forced_state:
+        if financial_state and PAYMENT_STATE_RANK[financial_state] > PAYMENT_STATE_RANK[forced_state]:
+            return financial_state, f"webhook/{forced_state}+money/{financial_state}"
+        return forced_state, f"webhook/{forced_state}"
+
+    if financial_state and PAYMENT_STATE_RANK[financial_state] > PAYMENT_STATE_RANK.get(status_state, 0):
+        return financial_state, f"status+money/{financial_state}"
+    return status_state, "status"
 
 
 def _money(value: Any) -> float:
@@ -306,7 +345,14 @@ def _normalize_order(payload: dict[str, Any], settings: dict[str, str], forced_p
     left_cost_money = _money(payload.get("leftCostMoney") or payload.get("left_cost_money"))
     payed_money = _money(payload.get("payedMoney") or payload.get("payed_money"))
     title = " ".join(part for part in (_flatten_text(positions), _flatten_text(offers)) if part).strip()
-    payment_state = forced_payment_state if forced_payment_state in PROCESSABLE_PAYMENT_STATES else _payment_state(status, settings)
+    payment_state, payment_state_source = _resolve_payment_state(
+        status,
+        settings,
+        forced_payment_state,
+        cost_money,
+        left_cost_money,
+        payed_money,
+    )
     vk_id = _extract_vk_id(payload, settings)
 
     fields = {
@@ -315,7 +361,7 @@ def _normalize_order(payload: dict[str, Any], settings: dict[str, str], forced_p
         "gc_user_id": _clean(payload.get("id"), 100),
         "status": status,
         "payment_state": payment_state,
-        "payment_state_source": f"webhook/{forced_payment_state}" if forced_payment_state else "status",
+        "payment_state_source": payment_state_source,
         "positions": positions,
         "offers": offers,
         "title": title,
@@ -426,7 +472,7 @@ async def _ensure_customer_table(db: aiosqlite.Connection) -> None:
 async def _upsert_customer_order(order: dict[str, Any]) -> dict[str, Any]:
     db_path = _customer_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(db_path) as db:
+    async with _db_connect(db_path) as db:
         await _ensure_customer_table(db)
         platform_id = order["platform_id"]
         if not platform_id:
@@ -553,7 +599,7 @@ def _rule_matches(order: dict[str, Any], rule: dict[str, Any]) -> bool:
 
 
 async def _active_rules() -> list[dict[str, Any]]:
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM rules WHERE active=1 ORDER BY id")
         return [dict(row) for row in await cur.fetchall()]
@@ -561,7 +607,7 @@ async def _active_rules() -> list[dict[str, Any]]:
 
 async def _all_active_subscription_ids(except_ids: set[str] | None = None) -> list[str]:
     except_ids = except_ids or set()
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             "SELECT DISTINCT subscription_id FROM rules WHERE active=1 AND subscription_id<>'' ORDER BY subscription_id"
         )
@@ -788,7 +834,7 @@ async def _store_event(row: dict[str, Any]) -> int:
         "method", "order_id", "platform_id", "payment_state", "status", "vk_id", "customer_record_id",
         "rules_matched_json", "success", "ignored", "error", "details", "raw_payload",
     ]
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         cur = await db.execute(
             f"INSERT INTO events({','.join(keys)}) VALUES({','.join(['?'] * len(keys))})",
             tuple(row.get(k, "") for k in keys),
@@ -874,7 +920,7 @@ async def post_settings(request: Request):
 @router.get("/rules")
 async def list_rules(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM rules ORDER BY id DESC")
         rows = [dict(row) for row in await cur.fetchall()]
@@ -905,7 +951,7 @@ async def save_rule(request: Request):
     if not conditions["conditions"]:
         return JSONResponse({"error": "Добавьте хотя бы одно условие"}, status_code=400)
     conditions_json = json.dumps(conditions, ensure_ascii=False)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         if rule_id:
             await db.execute(
                 """
@@ -930,7 +976,7 @@ async def save_rule(request: Request):
 @router.put("/rules/{rule_id}/toggle")
 async def toggle_rule(rule_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute(
             "UPDATE rules SET active=1-active, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
             (rule_id,),
@@ -942,7 +988,7 @@ async def toggle_rule(rule_id: int, request: Request):
 @router.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         await db.execute("DELETE FROM rules WHERE id=?", (rule_id,))
         await db.commit()
     return {"ok": True}
@@ -959,7 +1005,7 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
         where = "WHERE success=0 AND ignored=0"
     elif result == "ignored":
         where = "WHERE ignored=1"
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(row) for row in await cur.fetchall()]
@@ -968,7 +1014,7 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
 @router.get("/events/{event_id}")
 async def get_event(event_id: int, request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM events WHERE id=?", (event_id,))
         row = await cur.fetchone()
@@ -986,7 +1032,7 @@ async def get_event(event_id: int, request: Request):
 @router.get("/stats")
 async def stats(request: Request):
     await _require_panel_user(request)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _db_connect(_db_path) as db:
         total = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
         success = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=1")).fetchone())[0]
         ignored = (await (await db.execute("SELECT COUNT(*) FROM events WHERE ignored=1")).fetchone())[0]
