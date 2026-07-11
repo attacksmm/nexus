@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import shutil
 import sys
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -53,8 +54,12 @@ class ModuleManager:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     async def install_from_zip(self, zip_path: Path, app: FastAPI) -> dict:
-        manifest, module_dir = self._extract_zip(zip_path)
+        manifest, staging_dir = self._extract_zip_to_staging(zip_path)
         module_id = manifest["id"]
+        module_dir = MODULES_DIR / module_id
+        rollback_dir = MODULES_DIR / f".rollback-{module_id}-{uuid.uuid4().hex}"
+        old_meta = next((row for row in await get_modules_by_status() if row["id"] == module_id), None)
+        old_exists = module_dir.exists()
         meta = {
             "id": module_id,
             "name": manifest["name"],
@@ -64,9 +69,45 @@ class ModuleManager:
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "manifest_json": json.dumps(manifest, ensure_ascii=False),
         }
-        await upsert_module(meta)
-        await self._mount_module(module_id, module_dir, app)
-        return meta
+        try:
+            await self._unmount_module(module_id, app)
+            if old_exists:
+                module_dir.rename(rollback_dir)
+                old_data = rollback_dir / "data"
+                if old_data.exists():
+                    staged_data = staging_dir / "data"
+                    if staged_data.exists():
+                        shutil.rmtree(staged_data)
+                    old_data.rename(staged_data)
+            staging_dir.rename(module_dir)
+            await self._mount_module(module_id, module_dir, app)
+            await upsert_module(meta)
+        except Exception:
+            await self._unmount_module(module_id, app)
+            failed_dir = MODULES_DIR / f".failed-{module_id}-{uuid.uuid4().hex}"
+            if module_dir.exists():
+                module_dir.rename(failed_dir)
+            if old_exists and rollback_dir.exists():
+                failed_data = failed_dir / "data"
+                staged_data = staging_dir / "data"
+                recovered_data = failed_data if failed_data.exists() else staged_data
+                if recovered_data.exists():
+                    rollback_data = rollback_dir / "data"
+                    if rollback_data.exists():
+                        shutil.rmtree(rollback_data)
+                    recovered_data.rename(rollback_data)
+                rollback_dir.rename(module_dir)
+                if old_meta and old_meta.get("status") == "active":
+                    await self._mount_module(module_id, module_dir, app)
+            if failed_dir.exists():
+                shutil.rmtree(failed_dir, ignore_errors=True)
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        else:
+            if rollback_dir.exists():
+                shutil.rmtree(rollback_dir, ignore_errors=True)
+            return meta
 
     async def unload(self, module_id: str, app: FastAPI):
         await self._unmount_module(module_id, app)
@@ -103,7 +144,7 @@ class ModuleManager:
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    def _extract_zip(self, zip_path: Path) -> tuple[dict, Path]:
+    def _extract_zip_to_staging(self, zip_path: Path) -> tuple[dict, Path]:
         with zipfile.ZipFile(zip_path) as zf:
             if "manifest.json" not in zf.namelist():
                 raise ValueError("manifest.json missing in ZIP")
@@ -118,28 +159,19 @@ class ModuleManager:
         if not module_id.replace("-", "_").isidentifier():
             raise ValueError(f"Invalid module id: {module_id!r}")
 
-        module_dir = MODULES_DIR / module_id
-
-        # сохраняем data/ при обновлении — там БД и логи модуля
-        data_backup: Path | None = None
-        if module_dir.exists():
-            data_dir = module_dir / "data"
-            if data_dir.exists():
-                import tempfile
-                data_backup = Path(tempfile.mkdtemp()) / "data"
-                shutil.copytree(data_dir, data_backup)
-            shutil.rmtree(module_dir)
-
-        module_dir.mkdir(parents=True)
-
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(module_dir)
-
-        if data_backup and data_backup.exists():
-            shutil.copytree(data_backup, module_dir / "data")
-            shutil.rmtree(data_backup.parent)
-
-        return manifest, module_dir
+        MODULES_DIR.mkdir(parents=True, exist_ok=True)
+        staging_dir = MODULES_DIR / f".staging-{module_id}-{uuid.uuid4().hex}"
+        staging_dir.mkdir(parents=True)
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(staging_dir)
+            router_file = staging_dir / "router.py"
+            if router_file.exists():
+                compile(router_file.read_bytes(), str(router_file), "exec")
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        return manifest, staging_dir
 
     @staticmethod
     def _validate_zip_members(zf: zipfile.ZipFile) -> None:
@@ -171,18 +203,18 @@ class ModuleManager:
             ctx.logger = get_module_logger(module_id, module_dir / "data" / "logs")
             ctx.logger.info(f"Module {module_id} mounting")
             try:
+                self._loaded[module_id] = mod
                 if hasattr(mod, "setup"):
                     result = mod.setup(ctx)
                     if hasattr(result, "__await__"):
                         await result
             except Exception as e:
                 ctx.logger.error(f"setup() failed: {e}", exc_info=True)
-                await update_module_status(module_id, "error")
+                await self._unmount_module(module_id, app)
                 raise
             if hasattr(mod, "router"):
                 app.include_router(mod.router, prefix=f"/{module_id}/api")
             ctx.logger.info(f"Module {module_id} active")
-            self._loaded[module_id] = mod
 
         for d, suffix in [(module_dir / "panel", "panel"), (module_dir / "static", "static")]:
             if d.exists():
