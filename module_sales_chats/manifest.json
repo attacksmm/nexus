@@ -1,0 +1,16 @@
+{
+  "id": "sales-chats",
+  "name": "Чаты продаж",
+  "version": "1.0.1",
+  "description": "Единый рабочий чат отдела продаж по клиентам из customer-db с отправкой через VK Community API и Telegram Bot API.",
+  "env_vars": {
+    "SBKVD_LETTER_VK_TOKEN": "Токен сообщества VK с доступом к сообщениям. Используется тот же токен, что в модуле Рассылки.",
+    "SBKVD_LETTER_TELEGRAM_BOT_TOKEN": "Токен Telegram-бота. Используется тот же токен, что в модуле Рассылки.",
+    "SBKVD_LETTER_TELEGRAM_API_BASE": "Необязательный базовый URL Telegram Bot API или закрытого HTTPS-прокси.",
+    "SBKVD_LETTER_TELEGRAM_PROXY_URL": "Необязательный HTTP/SOCKS proxy для Telegram Bot API.",
+    "SALES_CHATS_CUSTOMER_DB_PATH": "Необязательный абсолютный путь к SQLite Базы клиентов.",
+    "SALES_CHATS_WEBHOOK_SECRET": "Необязательный секрет для внешнего входящего webhook Telegram/SaleBot. Если не задан, модуль создаёт секрет в своей БД.",
+    "VK_GROUP_ID": "ID VK-группы для ссылок на диалоги. Если не задан, используется 225075265."
+  },
+  "env_required": []
+}

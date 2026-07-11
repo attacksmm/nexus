@@ -8,13 +8,13 @@ from pathlib import Path
 import aiofiles
 import psutil
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from orchestrator.auth import (
     ENV_PATH, can_access_module, ensure_default_users, require_admin,
-    _read_env_values,
+    _read_env_values, enforce_rate_limit,
     router as auth_router, verify_token_from_request,
 )
 from orchestrator.core import ModuleManager, UPLOADS_DIR
@@ -23,6 +23,9 @@ from orchestrator.db import init_db, update_module_status
 BASE_DIR = Path(__file__).parent
 UPLOADS_DIR.mkdir(exist_ok=True)
 MAX_MODULE_ZIP_BYTES = 100 * 1024 * 1024
+LOGIN_BODY_LIMIT_BYTES = 64 * 1024
+ADMIN_BODY_LIMIT_BYTES = 2 * 1024 * 1024
+MODULE_UPLOAD_BODY_LIMIT_BYTES = 105 * 1024 * 1024
 
 manager = ModuleManager(BASE_DIR)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -53,6 +56,16 @@ def _unauth_json():
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
+def _request_body_limit(path: str) -> int | None:
+    if path in {"/login", "/sales-chats/api/login", "/sbkvd-gpt/api/login"}:
+        return LOGIN_BODY_LIMIT_BYTES
+    if path == "/api/modules/upload":
+        return MODULE_UPLOAD_BODY_LIMIT_BYTES
+    if path.startswith("/api/settings/"):
+        return ADMIN_BODY_LIMIT_BYTES
+    return None
+
+
 def _cpu_model() -> str:
     try:
         for line in Path("/proc/cpuinfo").read_text(errors="replace").splitlines():
@@ -81,12 +94,31 @@ def _can_manage_module(user: dict | None, module_id: str) -> bool:
 
 @app.middleware("http")
 async def module_panel_access_middleware(request: Request, call_next):
+    request_path = request.scope.get("path", "")
+    root_path = request.scope.get("root_path", "") or ""
+    if root_path and request_path.startswith(root_path):
+        request_path = request_path[len(root_path):] or "/"
+    body_limit = _request_body_limit(request_path)
+    content_length = request.headers.get("content-length", "").strip()
+    if body_limit is not None and content_length:
+        try:
+            if int(content_length) > body_limit:
+                return JSONResponse({"error": "Тело запроса слишком большое"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"error": "Некорректный Content-Length"}, status_code=400)
     parts = [p for p in request.scope.get("path", "").strip("/").split("/") if p]
     if "panel" in parts:
         panel_idx = parts.index("panel")
         module_id = parts[panel_idx - 1] if panel_idx > 0 else ""
         panel_tail = parts[panel_idx + 1 :]
         if module_id == "sbkvd-gpt" and panel_tail[:1] == ["chat"]:
+            return await call_next(request)
+        if module_id == "sales-chats" and panel_tail[:1] == ["chat"]:
+            if len(panel_tail) > 1 and panel_tail[-1] != "index.html":
+                root_path = request.scope.get("root_path", "") or ""
+                rewritten = f"{root_path}/sales-chats/panel/chat/index.html"
+                request.scope["path"] = rewritten
+                request.scope["raw_path"] = rewritten.encode()
             return await call_next(request)
         modules = await manager.list_modules()
         if any(m["id"] == module_id for m in modules):
@@ -123,6 +155,16 @@ async def settings_page(request: Request):
     })
 
 
+@app.get("/sales-chats/panel/chat/{chat_path:path}")
+async def sales_chats_panel_chat_deep_link(chat_path: str):
+    runtime = BASE_DIR / "modules" / "sales-chats" / "panel" / "chat" / "index.html"
+    source = BASE_DIR / "module_sales_chats" / "panel" / "chat" / "index.html"
+    path = runtime if runtime.exists() else source
+    if not path.exists():
+        return PlainTextResponse("sales-chats chat panel not found", status_code=404)
+    return FileResponse(str(path), media_type="text/html; charset=utf-8")
+
+
 # ── Modules API ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/modules")
@@ -138,6 +180,7 @@ async def api_upload(request: Request, file: UploadFile | None = File(None)):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    enforce_rate_limit(request, "nexus-module-upload", limit=20, window_seconds=3600, subject=user["username"])
     if not file:
         return JSONResponse({"error": "Файл не передан"}, status_code=400)
     raw_name = (file.filename or "").replace("\\", "/")
@@ -301,6 +344,18 @@ async def api_server_stats(request: Request):
         "load_avg": list(psutil.getloadavg()),
         "modules": [{"id": m["id"], "name": m["name"], "status": m["status"], "version": m["version"]} for m in modules],
     }
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """Minimal readiness probe for nginx/systemd; does not expose module details."""
+    try:
+        modules = await manager.list_modules()
+    except Exception:
+        return JSONResponse({"ok": False}, status_code=503)
+    if any(module.get("status") == "error" for module in modules):
+        return JSONResponse({"ok": False}, status_code=503)
+    return {"ok": True}
 
 
 @app.post("/api/modules/{module_id}/resume")

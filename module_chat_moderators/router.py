@@ -107,7 +107,7 @@ PROFANITY_RE = re.compile(
     r")"
 )
 MILD_INTERJECTION_RE = re.compile(r"(?i)\bблин\b")
-CANINE_SEX_TERM_RE = re.compile(r"(?i)\bсук(?:а|и|е|у|ой|ою|ами?|ах)?\b")
+CANINE_SEX_TERM_RE = re.compile(r"(?i)\b(?:сук(?:а|и|е|у|ой|ою|ами?|ах)?|сучк(?:а|и|е|у|ой|ою|ами?|ах)?)\b")
 CANINE_CONTEXT_RE = re.compile(
     r"(?i)\b(?:"
     r"собак\w*|пес|пёс|пса|псу|псом|псы|псов|щен\w*|кобел\w*|"
@@ -306,6 +306,7 @@ _logger = None
 _runtime: RuntimeManager | None = None
 _prompt_cache: dict[str, Any] = {}
 _openrouter_model_cache: dict[str, Any] = {}
+MODERATION_DEGRADED_CATEGORY = "не проверено"
 
 
 async def setup(ctx):
@@ -322,7 +323,10 @@ async def setup(ctx):
         "chat-moderators setup completed; runtime is not auto-started; corrected_stale=%s",
         ",".join(corrected) if corrected else "-",
     )
-    if _truthy(_settings().get("runtime_enabled")):
+    settings = _settings()
+    if _env_forces_false("NEXUS_CHAT_MODERATORS_RUNTIME_ENABLED"):
+        _log("info", "chat-moderators runtime auto-start skipped: env runtime disabled")
+    elif _truthy(settings.get("runtime_enabled")):
         try:
             result = await _runtime.start("all")
             _log("info", "chat-moderators runtime auto-start completed: %s", result)
@@ -1187,6 +1191,17 @@ def _env_default(key: str, fallback: str) -> str:
     return fallback
 
 
+def _env_forces_false(env_key: str) -> bool:
+    value = os.getenv(env_key)
+    return value is not None and not _truthy(value)
+
+
+def _setting_enabled(settings: dict[str, str], key: str, env_key: str) -> bool:
+    if _env_forces_false(env_key):
+        return False
+    return _truthy(settings.get(key))
+
+
 def _settings() -> dict[str, str]:
     with _db() as db:
         rows = db.execute("SELECT key,value FROM settings").fetchall()
@@ -1249,6 +1264,59 @@ def _mask_secret(value: str, *, kind: str = "token") -> str:
     return f"{value[:4]}…{value[-4:]}"
 
 
+def _secret_validation(key: str) -> dict[str, str]:
+    if key != "vk_user_token":
+        return {"status": "unchecked", "error": ""}
+    invalid_markers = ("invalid access_token", "User authorization failed")
+    try:
+        with _db() as db:
+            state = db.execute(
+                """
+                SELECT status,last_error AS error
+                FROM runtime_state
+                WHERE platform='vk'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if state and state["status"] == "running" and not str(state["error"] or "").strip():
+                return {"status": "ok", "error": ""}
+            if state and any(marker in str(state["error"] or "") for marker in invalid_markers):
+                return {"status": "invalid", "error": str(state["error"] or "")}
+            row = db.execute(
+                """
+                SELECT action,status,error
+                FROM moderation_actions
+                WHERE platform='vk'
+                  AND action IN ('runtime_start','runtime_loop_started','runtime_token_selected','runtime_loop_error')
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+    except Exception:
+        return {"status": "unchecked", "error": ""}
+    if not row:
+        return {"status": "unchecked", "error": ""}
+    error = str(row["error"] or "")
+    if row["status"] == "ok":
+        return {"status": "ok", "error": ""}
+    if row["status"] == "error" and any(marker in error for marker in invalid_markers):
+        return {"status": "invalid", "error": error}
+    return {"status": "unchecked", "error": ""}
+
+
+def _is_vk_auth_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    markers = (
+        "invalid access_token",
+        "user authorization failed",
+        "user is blocked",
+        "access_token has expired",
+        "authorization failed",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _secret_status() -> list[dict[str, Any]]:
     stored = _stored_secrets()
     items: list[dict[str, Any]] = []
@@ -1270,18 +1338,22 @@ def _secret_status() -> list[dict[str, Any]]:
         else:
             value = ""
             source = "missing"
+        validation = _secret_validation(key) if value else {"status": "missing", "error": ""}
+        ready = bool(value) and validation.get("status") != "invalid"
         items.append(
             {
                 "key": key,
                 "env": spec.get("env", ""),
                 "label": spec.get("label", key),
                 "kind": spec.get("kind", "token"),
-                "ready": bool(value),
+                "ready": ready,
                 "source": source,
                 "env_present": bool(env_value),
                 "module_present": bool(stored_value),
                 "masked": _mask_secret(value, kind=str(spec.get("kind") or "token")),
                 "env_wins": bool(env_value and stored_value),
+                "validation_status": validation.get("status", "unchecked"),
+                "validation_error": validation.get("error", ""),
             }
         )
     return items
@@ -1689,6 +1761,13 @@ def _should_downgrade_vk_negative(text: str) -> bool:
     return bool(GENERAL_VENT_RE.match(value))
 
 
+def _should_downgrade_vk_refund(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value or REFUND_RE.search(value):
+        return False
+    return _has_canine_context(value)
+
+
 def _rule_based_category(text: str) -> str:
     value = str(text or "").strip()
     if not value:
@@ -1737,20 +1816,31 @@ class ModerationAnalyzer:
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "reasoning": {"exclude": True, "effort": "none"},
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        client_kwargs: dict[str, Any] = {"timeout": self._timeout}
+        proxy = (
+            os.getenv("OPENROUTER_HTTPS_PROXY", "")
+            or os.getenv("OPENROUTER_HTTP_PROXY", "")
+        ).strip()
+        if proxy:
+            client_kwargs.update(proxy=proxy, trust_env=False)
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
         if resp.status_code >= 400:
-            _log("warning", "OpenRouter moderation HTTP %s model=%s body=%s", resp.status_code, model, resp.text[:500])
-            return ""
+            _log("warning", "OpenRouter moderation HTTP %s model=%s proxy=%s body=%s", resp.status_code, model, bool(proxy), resp.text[:500])
+            raise RuntimeError(f"OpenRouter moderation HTTP {resp.status_code}")
         data = resp.json()
         choices = data.get("choices") or []
         if not choices:
-            return ""
+            raise RuntimeError("OpenRouter moderation returned no choices")
         content = choices[0].get("message", {}).get("content", "")
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        return str(content or "").strip().lower()
+        result = str(content or "").strip().lower()
+        if not result:
+            raise RuntimeError("OpenRouter moderation returned empty content")
+        return result
 
     async def analyze_tg(self, text: str) -> str:
         if not text or len(text.strip()) < 2:
@@ -1759,7 +1849,7 @@ class ModerationAnalyzer:
         if rule_category:
             return rule_category
         if not _secret_value("openrouter_api_key"):
-            return "ок"
+            return MODERATION_DEGRADED_CATEGORY
         try:
             result = await self._call_openrouter(
                 system_prompt=TG_SYSTEM_PROMPT,
@@ -1773,7 +1863,7 @@ class ModerationAnalyzer:
             return "ок"
         except Exception as error:
             _log("error", "TG OpenRouter moderation failed: %s", error)
-            return "ок"
+            return MODERATION_DEGRADED_CATEGORY
 
     async def analyze_vk(self, text: str) -> str:
         if not text or len(text.strip()) < 3:
@@ -1789,7 +1879,7 @@ class ModerationAnalyzer:
             if rule_category:
                 return rule_category
             if not _secret_value("openrouter_api_key"):
-                return "нейтрально"
+                return MODERATION_DEGRADED_CATEGORY
             result = await self._call_openrouter(
                 system_prompt=_vk_system_prompt(),
                 text=analysis_text[:2000],
@@ -1799,13 +1889,15 @@ class ModerationAnalyzer:
             )
             for category in ("возврат", "техпод", "негатив", "скам", "удалить"):
                 if category in result:
+                    if category == "возврат" and _should_downgrade_vk_refund(analysis_text):
+                        return "нейтрально"
                     if category == "негатив" and _should_downgrade_vk_negative(analysis_text):
                         return "нейтрально"
                     return category
             return "нейтрально"
         except Exception as error:
             _log("error", "VK OpenRouter moderation failed: %s", error)
-            return "нейтрально"
+            return MODERATION_DEGRADED_CATEGORY
 
 
 class TelegramModeratorRuntime:
@@ -2294,6 +2386,11 @@ class VKModeratorRuntime:
                             asyncio.run(self.process_chat_update(event))
                 except Exception as error:
                     _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
+                    if _is_vk_auth_error(error):
+                        _set_runtime_state("vk", "error", error=str(error))
+                        self.stop_event.set()
+                        _log("error", "VK longpoll stopped after auth error: %s", error)
+                        break
                     _log("warning", "VK longpoll loop error: %s", error)
                     time.sleep(5)
                     self._recreate_longpoll()
@@ -2882,7 +2979,7 @@ class RuntimeManager:
         async with self.lock:
             result: dict[str, Any] = {"ok": True, "started": []}
             if platform in {"telegram", "all"}:
-                if not _truthy(settings.get("tg_enabled")):
+                if not _setting_enabled(settings, "tg_enabled", "NEXUS_CHAT_MODERATORS_TG_ENABLED"):
                     result.setdefault("skipped", []).append({"platform": "telegram", "reason": "tg_enabled=false"})
                 else:
                     try:
@@ -2895,7 +2992,7 @@ class RuntimeManager:
                         _record_action(platform="telegram", action="runtime_start", status="error", error=str(error))
                         raise
             if platform in {"vk", "all"}:
-                if not _truthy(settings.get("vk_enabled")):
+                if not _setting_enabled(settings, "vk_enabled", "NEXUS_CHAT_MODERATORS_VK_ENABLED"):
                     result.setdefault("skipped", []).append({"platform": "vk", "reason": "vk_enabled=false"})
                 else:
                     try:

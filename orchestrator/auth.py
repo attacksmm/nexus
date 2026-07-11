@@ -1,9 +1,12 @@
 import json
 import os
 import re
+import secrets
+import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jose import JWTError, jwt
@@ -14,14 +17,16 @@ from orchestrator.db import (
     update_user, update_user_password,
 )
 
-_FALLBACK_SECRET = "change-me-in-production-please-use-env"
+_RUNTIME_FALLBACK_SECRET = secrets.token_urlsafe(48)
 ALGORITHM = "HS256"
 TOKEN_TTL_HOURS = 24 * 7
+MAX_ENV_UPLOAD_BYTES = 1024 * 1024
+_RATE_BUCKETS: dict[tuple[str, str], deque[float]] = {}
 
 
 def _secret() -> str:
     """Читает NEXUS_SECRET из окружения каждый раз — обновляется без перезапуска."""
-    return os.environ.get("NEXUS_SECRET") or _FALLBACK_SECRET
+    return os.environ.get("NEXUS_SECRET") or _RUNTIME_FALLBACK_SECRET
 
 pwd_ctx = CryptContext(schemes=["argon2"], deprecated="auto")
 router = APIRouter()
@@ -75,6 +80,45 @@ def require_admin(user: dict | None) -> bool:
     return user is not None and user["role"] == "admin"
 
 
+def _request_client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    if peer in {"127.0.0.1", "::1"}:
+        forwarded = (request.headers.get("x-real-ip") or "").strip()
+        if forwarded:
+            return forwarded[:128]
+    return peer[:128]
+
+
+def enforce_rate_limit(
+    request: Request,
+    scope: str,
+    *,
+    limit: int,
+    window_seconds: int,
+    subject: str = "",
+) -> None:
+    """Small in-process limiter for the single-worker production deployment."""
+    now = time.monotonic()
+    identity = f"{_request_client_ip(request)}:{str(subject).strip().casefold()[:128]}"
+    key = (scope, identity)
+    bucket = _RATE_BUCKETS.setdefault(key, deque())
+    cutoff = now - max(1, int(window_seconds))
+    while bucket and bucket[0] <= cutoff:
+        bucket.popleft()
+    if len(bucket) >= max(1, int(limit)):
+        retry_after = max(1, int(bucket[0] + window_seconds - now) + 1)
+        raise HTTPException(
+            status_code=429,
+            detail="Слишком много запросов. Повторите позже.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    bucket.append(now)
+    if len(_RATE_BUCKETS) > 5000:
+        stale = [item_key for item_key, events in _RATE_BUCKETS.items() if not events or events[-1] <= cutoff]
+        for item_key in stale[:1000]:
+            _RATE_BUCKETS.pop(item_key, None)
+
+
 # ── Default user ──────────────────────────────────────────────────────────────
 
 async def ensure_default_users():
@@ -114,11 +158,19 @@ async def login_page(request: Request):
 
 @router.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+    enforce_rate_limit(request, "nexus-login", limit=20, window_seconds=300)
     row = await get_user_by_username(username)
     if row and pwd_ctx.verify(password, row["password_hash"]):
         token = _make_token(username)
         resp = RedirectResponse(_rp(request) + "/", status_code=303)
-        resp.set_cookie("nexus_token", token, httponly=True, samesite="lax", max_age=TOKEN_TTL_HOURS * 3600)
+        resp.set_cookie(
+            "nexus_token",
+            token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=TOKEN_TTL_HOURS * 3600,
+        )
         return resp
     return templates.TemplateResponse(
         "login.html", {"request": request, "error": "Неверный логин или пароль", "rp": _rp(request)}
@@ -147,6 +199,7 @@ async def api_user_create(request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
@@ -170,6 +223,7 @@ async def api_user_update(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     role = data.get("role", "viewer")
     module_access = _normalize_module_access(data.get("module_access", []))
@@ -187,6 +241,7 @@ async def api_user_password(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     pwd = data.get("password", "").strip()
     if len(pwd) < 8:
@@ -200,6 +255,7 @@ async def api_user_delete(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     # нельзя удалить себя
     if user["username"] == (await _get_user_by_id(uid)):
         return _err("Нельзя удалить собственный аккаунт")
@@ -240,12 +296,16 @@ async def api_env_upload(request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    enforce_rate_limit(request, "nexus-env-upload", limit=10, window_seconds=3600, subject=user["username"])
     form = await request.form()
     file = form.get("file")
     if not file:
         return _err("Файл не передан")
 
-    content = (await file.read()).decode("utf-8", errors="replace")
+    raw_content = await file.read(MAX_ENV_UPLOAD_BYTES + 1)
+    if len(raw_content) > MAX_ENV_UPLOAD_BYTES:
+        return JSONResponse({"error": "ENV файл слишком большой"}, status_code=413)
+    content = raw_content.decode("utf-8", errors="replace")
     parsed = _parse_env_content(content)
 
     if not parsed:
@@ -304,9 +364,9 @@ def _parse_env_content(content: str) -> dict[str, str]:
             continue
         # убираем инлайн-комментарий (не внутри кавычек)
         value = _strip_inline_comment(rest)
-        # убираем кавычки
+        # убираем кавычки и восстанавливаем экранированные символы
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-            value = value[1:-1]
+            value = _decode_env_value(value)
         # пропускаем пустые значения (незаполненные строки шаблона)
         if not value:
             continue
@@ -339,11 +399,14 @@ def _write_env_values(values: dict[str, str]) -> None:
     if ENV_PATH.exists():
         backup_path = ENV_PATH.parent / ".env.bak"
         backup_path.write_text(ENV_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        backup_path.chmod(0o600)
     tmp_path = ENV_PATH.parent / ".env.tmp"
-    with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
         for k, v in values.items():
-            f.write(f"{k}={v}\n")
+            f.write(f"{k}={_encode_env_value(str(v))}\n")
     tmp_path.replace(ENV_PATH)
+    ENV_PATH.chmod(0o600)
 
 
 def _strip_inline_comment(s: str) -> str:
@@ -356,9 +419,41 @@ def _strip_inline_comment(s: str) -> str:
                 in_q = ch
             elif in_q == ch:
                 in_q = None
-        elif ch == "#" and in_q is None:
+        elif ch == "#" and in_q is None and i > 0 and s[i - 1].isspace():
             return s[:i].strip()
     return s
+
+
+def _decode_env_value(value: str) -> str:
+    quote = value[0]
+    inner = value[1:-1]
+    if quote == "'":
+        return inner
+    result: list[str] = []
+    index = 0
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+    while index < len(inner):
+        if inner[index] == "\\" and index + 1 < len(inner):
+            next_char = inner[index + 1]
+            result.append(escapes.get(next_char, next_char))
+            index += 2
+            continue
+        result.append(inner[index])
+        index += 1
+    return "".join(result)
+
+
+def _encode_env_value(value: str) -> str:
+    if value and not any(ch.isspace() or ch in {"#", "'", '"', "\\"} for ch in value):
+        return value
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
 
 
 def _parse_env_keys() -> list[str]:

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nexus</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0b0b;--panel:#141414;--panel2:#1b1b1b;--hover:#252525;--text:#f2f2f2;--muted:#9a9a9a;--subtle:#747474;--border:#333;--border2:#505050;--accent:#d8d1c3;--accent-text:#080808;--bad:#e08773;--ok:#90dda1;--vk:#8bbcff;--tg:#91d4ff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#4c4c4c #141414}
+    *::-webkit-scrollbar{width:9px;height:9px}*::-webkit-scrollbar-track{background:#141414}*::-webkit-scrollbar-thumb{background:#4c4c4c;border:2px solid #141414}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:14px/1.45 var(--font)}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}[hidden]{display:none!important}
+    .app{--left-w:340px;--right-w:310px;height:100dvh;display:grid;grid-template-columns:minmax(0,var(--left-w)) minmax(0,1fr) minmax(0,var(--right-w));background:var(--bg)}
+    .app.left-collapsed{--left-w:0px}.app.right-collapsed{--right-w:0px}
+    .left,.right{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--panel);overflow:hidden}.left{grid-column:1;width:var(--left-w);border-right:1px solid var(--border)}.right{grid-column:3;width:var(--right-w);border-left:1px solid var(--border)}
+    .app.left-collapsed .left{border-right-width:0;pointer-events:none}.app.right-collapsed .right{border-left-width:0;pointer-events:none}
+    .head{min-height:54px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel)}
+    .head-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+    .brand{display:grid;gap:1px;min-width:0}.brand strong{font-size:15px}.brand span,.brand strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{color:var(--muted)}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .btn{min-height:32px;padding:6px 10px;border:1px solid var(--border2);background:var(--panel2);color:var(--text);display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap}.btn:hover{background:var(--hover)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn.icon{width:34px;padding:0}.btn:disabled{opacity:.45;cursor:default}
+    .settings-panel{display:none;flex:0 0 auto;max-height:min(58dvh,560px);overflow:auto;padding:10px;border-bottom:1px solid var(--border);background:#101010}.settings-panel.open{display:grid;gap:10px}.settings-title{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--text);font-weight:650}.settings-note{color:var(--muted);font-size:12px}
+    .filters{padding:10px;border-bottom:1px solid var(--border);display:grid;gap:8px}.search{width:100%;min-height:34px;border:1px solid var(--border2);background:#090909;color:var(--text);padding:7px 9px;outline:none}.segments{display:flex;gap:6px}.seg{flex:1;min-height:30px;border:1px solid var(--border);background:transparent;color:var(--muted)}.seg.active{background:var(--panel2);border-color:var(--border2);color:var(--text)}
+    .thread-list{min-height:0;overflow:auto;padding:6px;display:grid;gap:4px;align-content:start}.thread{border:1px solid transparent;background:transparent;color:var(--text);padding:9px;text-align:left;display:grid;gap:4px;min-width:0}.thread:hover,.thread.active{background:var(--panel2);border-color:var(--border)}.thread-top{display:flex;align-items:center;gap:8px;min-width:0}.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);flex:0 0 auto}.dot.vk{background:var(--vk)}.dot.telegram{background:var(--tg)}.thread-name{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-last{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-meta{color:var(--subtle);font-size:11px}
+    .main{grid-column:2;min-width:0;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto;background:var(--bg)}.chat-head{min-height:54px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--panel)}.chat-title{display:grid;gap:1px;min-width:0;justify-self:start;text-align:left}.chat-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-actions{display:flex;gap:8px;justify-self:end}
+    .messages{min-height:0;overflow:auto;padding:18px 14px;display:flex;flex-direction:column;gap:10px}.empty{margin:auto;color:var(--muted);text-align:center}.msg{max-width:min(720px,82%);display:grid;gap:4px}.msg.out{align-self:flex-end}.msg.in{align-self:flex-start}.msg-meta{font-size:11px;color:var(--subtle);display:flex;gap:8px}.bubble{padding:10px 11px;border:1px solid var(--border);background:var(--panel);white-space:pre-wrap;overflow-wrap:anywhere}.msg.out .bubble{background:#24211b;border-color:#5b5140}.msg.failed .bubble{border-color:#6b352f;color:#ffd0c9}
+    .composer{padding:10px;border-top:1px solid var(--border);background:var(--panel);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}.templates{grid-column:1/-1;display:grid;grid-template-columns:minmax(150px,260px) auto minmax(0,1fr);gap:6px;align-items:center}.template-select{min-width:0;min-height:30px;border:1px solid var(--border);background:#090909;color:var(--text);padding:5px 8px;outline:none}.template-editor{border:1px solid var(--border);background:#101010;padding:8px}.template-editor summary{cursor:pointer;color:var(--muted)}.template-grid{display:grid;grid-template-columns:1fr;gap:6px;align-items:start;margin-top:8px}.template-grid input,.template-grid textarea{width:100%;border:1px solid var(--border2);background:#090909;color:var(--text);padding:7px 9px;outline:none}.template-grid textarea{min-height:96px;max-height:220px;resize:vertical}.template-grid .actions{display:flex;gap:6px;flex-wrap:wrap}.composer textarea{width:100%;min-height:46px;max-height:160px;resize:vertical;border:1px solid var(--border2);background:#090909;color:var(--text);padding:9px;outline:none}
+    .card{padding:12px;border-bottom:1px solid var(--border);display:grid;gap:9px}.right-body{min-height:0;overflow:auto}.kv{display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px;border-bottom:1px solid #242424;padding:5px 0}.kv span:first-child{color:var(--subtle)}.kv span:last-child{overflow-wrap:anywhere}.status{height:28px;display:flex;align-items:center;padding:0 10px;border-top:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:12px}.error{color:var(--bad)}
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:18px;z-index:20}.login{width:min(420px,100%);background:var(--panel);border:1px solid var(--border2);padding:18px;display:grid;gap:12px}.login h1{margin:0;font-size:18px}.login input{width:100%;min-height:38px;border:1px solid var(--border2);background:#090909;color:var(--text);padding:8px 10px}
+    @media(max-width:1020px){.app{--left-w:300px;--right-w:0px}.right{display:none}}
+    @media(max-width:720px){
+      .app{display:block;height:100dvh;overflow:hidden}.main{height:100dvh;grid-column:auto}.left,.right{width:min(86vw,340px);box-shadow:0 0 0 100vmax rgba(0,0,0,.42);pointer-events:auto}
+      .left{position:fixed;inset:0 auto 0 0;z-index:8;transform:translateX(-105%);transition:.16s transform ease}.app.sidebar-open .left{transform:none}
+      .right{display:flex;position:fixed;inset:0 0 0 auto;z-index:9;transform:translateX(105%);transition:.16s transform ease}.app.right-open .right{transform:none}
+      .app.left-collapsed .left,.app.right-collapsed .right{pointer-events:auto}
+      .chat-head{grid-template-columns:auto minmax(0,1fr) auto;padding:8px}.chat-actions{gap:6px}.chat-actions .wide{display:none}.btn{min-height:30px;padding:5px 8px}.msg{max-width:92%}
+      .composer{grid-template-columns:minmax(0,1fr) auto;padding:8px}.templates{grid-template-columns:minmax(0,1fr) auto}.templates .muted{display:none}.template-grid{grid-template-columns:1fr}.composer textarea{min-height:44px}
+    }
+  </style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="left">
+    <header class="head">
+      <div class="brand"><strong id="loginLabel">-</strong><span class="small muted">оператор</span></div>
+      <div class="head-actions"><button id="settingsBtn" class="btn icon ghost" type="button" title="Настройки">⚙</button><button id="collapseLeftBtn" class="btn icon ghost" type="button" title="Свернуть список">‹</button><button id="logoutBtn" class="btn ghost" type="button">Выйти</button></div>
+    </header>
+    <section id="settingsPanel" class="settings-panel">
+      <div>
+        <div class="settings-title">Настройки</div>
+        <div class="settings-note">Личные шаблоны видны только вашему пользователю.</div>
+      </div>
+      <details id="personalTemplateEditor" class="template-editor" open>
+        <summary>Личный шаблон</summary>
+        <div class="template-grid">
+          <input id="personalTemplateTitle" placeholder="Название шаблона">
+          <textarea id="personalTemplateText" placeholder="Текст шаблона с переменными из customer-db"></textarea>
+          <div class="actions"><button id="newPersonalTemplateBtn" class="btn ghost" type="button">Новый</button><button id="saveTemplateBtn" class="btn primary" type="button">Сохранить</button><button id="deleteTemplateBtn" class="btn ghost" type="button">Удалить</button></div>
+        </div>
+      </details>
+    </section>
+    <div class="filters">
+      <input id="searchInput" class="search" placeholder="Поиск по клиенту или ID">
+      <div class="segments"><button class="seg active" data-channel="" type="button">Все</button><button class="seg" data-channel="vk" type="button">VK</button><button class="seg" data-channel="telegram" type="button">TG</button></div>
+    </div>
+    <div id="threadList" class="thread-list"></div>
+  </aside>
+
+  <main class="main">
+    <header class="chat-head">
+      <button id="menuBtn" class="btn icon" type="button">≡</button>
+      <div class="chat-title"><strong id="chatName">Выберите диалог</strong><span id="chatMeta" class="small muted">customer-db + live</span></div>
+      <div class="chat-actions"><a id="externalLink" class="btn ghost wide" href="#" target="_blank" rel="noreferrer" hidden>Открыть VK</a><button id="rightToggleBtn" class="btn ghost" type="button">Карточка</button><button id="refreshBtn" class="btn ghost" type="button">Обновить</button></div>
+    </header>
+    <section id="messages" class="messages"><div class="empty">Выберите клиента слева.</div></section>
+    <form id="composer" class="composer">
+      <div class="templates">
+        <select id="templateSelect" class="template-select"><option value="">Шаблоны</option></select>
+        <button id="insertTemplateBtn" class="btn ghost" type="button">Вставить</button>
+        <span class="small muted">Любое поле: {utm_source}, {yclid}, {ym_uid}. Для ссылок: {url.utm_source}</span>
+      </div>
+      <textarea id="messageInput" placeholder="Сообщение клиенту" disabled></textarea>
+      <button id="sendBtn" class="btn primary" type="submit" disabled>Отправить</button>
+    </form>
+    <footer class="status" id="statusText">Готово</footer>
+  </main>
+
+  <aside class="right">
+    <header class="head"><div class="brand"><strong>Карточка клиента</strong><span class="small muted">customer-db</span></div><button id="collapseRightBtn" class="btn icon ghost" type="button" title="Свернуть карточку">›</button></header>
+    <div class="right-body"><div id="customerBox" class="card"><div class="muted">Нет выбранного клиента</div></div></div>
+  </aside>
+</div>
+
+<div id="loginOverlay" class="overlay" hidden>
+  <form id="loginForm" class="login">
+    <h1>Вход в чаты продаж</h1>
+    <div class="muted">Введите логин, добавленный в модуле.</div>
+    <input id="loginInput" autocomplete="username" autofocus>
+    <button class="btn primary" type="submit">Войти</button>
+    <div id="loginError" class="error small"></div>
+  </form>
+</div>
+
+<script>
+const API = (() => {
+  const marker = '/panel/chat';
+  const idx = location.pathname.indexOf(marker);
+  if (idx >= 0) return location.pathname.slice(0, idx) + '/api';
+  return new URL('../../api', location.href).pathname.replace(/\/$/, '');
+})();
+const $ = id => document.getElementById(id);
+const state = {account:null,threads:[],thread:null,messages:[],customer:null,templates:[],editingTemplateId:null,channel:'',q:'',loading:false};
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function setStatus(t,bad=false){$('statusText').textContent=t;$('statusText').classList.toggle('error',bad)}
+async function api(path, options={}){const res=await fetch(API+path,{credentials:'same-origin',...options});const raw=await res.text();let data={};try{data=raw?JSON.parse(raw):{}}catch{data={detail:raw}}if(!res.ok)throw new Error(data.detail||data.error||`HTTP ${res.status}`);return data}
+const json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+function dt(raw){if(!raw)return'';const d=new Date(raw);return Number.isNaN(d.getTime())?raw:d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}
+function renderThreads(){
+  const list=$('threadList'); list.innerHTML='';
+  if(!state.threads.length){list.innerHTML='<div class="empty">Диалогов нет. Проверьте разрешённые листы customer-db.</div>';return}
+  for(const t of state.threads){
+    const b=document.createElement('button'); b.type='button'; b.className='thread'+(state.thread?.id===t.id?' active':'');
+    b.innerHTML=`<div class="thread-top"><span class="dot ${esc(t.channel)}"></span><span class="thread-name">${esc(t.display_name||t.recipient_id)}</span></div><div class="thread-last">${esc(t.last_message||'Истории пока нет')}</div><div class="thread-meta">${esc(t.channel.toUpperCase())} · ${esc(t.recipient_id)}${t.unread_count?` · непрочитано ${Number(t.unread_count)}`:''}</div>`;
+    b.onclick=()=>openThread(t.id); list.append(b);
+  }
+}
+async function loadThreads(syncLive=false){setStatus(syncLive?'Обновляю каналы...':'Загрузка списка...');const data=await api(`/threads?q=${encodeURIComponent(state.q)}&channel=${encodeURIComponent(state.channel)}&sync_live=${syncLive?'1':'0'}`);state.threads=data.items||[];renderThreads();setStatus(`Диалогов: ${state.threads.length}`)}
+function chatBasePath(){const marker='/panel/chat';const idx=location.pathname.indexOf(marker);return idx>=0?location.pathname.slice(0,idx+marker.length):location.pathname.replace(/\/+$/,'')}
+function threadPath(thread){
+  const table=thread?.customer_table||'';
+  const platform=thread?.customer_platform_id||thread?.recipient_id||'';
+  if(!table||!platform)return chatBasePath()+'/';
+  return `${chatBasePath()}/${encodeURIComponent(table)}/${encodeURIComponent(platform)}`;
+}
+function updateThreadUrl(){if(!state.thread)return;const path=threadPath(state.thread);if(path&&location.pathname!==path)history.replaceState(null,'',path)}
+function deepLinkParts(){
+  const marker='/panel/chat/';
+  const idx=location.pathname.indexOf(marker);
+  if(idx<0)return null;
+  const tail=location.pathname.slice(idx+marker.length).replace(/^\/+|\/+$/g,'');
+  if(!tail)return null;
+  const parts=tail.split('/').filter(Boolean).map(x=>decodeURIComponent(x));
+  if(parts.length<2)return null;
+  return {table:parts[0],platform_id:parts.slice(1).join('/')};
+}
+function customerName(){
+  const fields=state.customer?.custom_fields||{};
+  return fields.name||fields.full_name||fields.first_name||state.thread?.display_name||'';
+}
+function pathValue(obj,path){
+  if(!obj||!path)return '';
+  const parts=String(path).split('.');
+  let current=obj;
+  for(const part of parts){
+    if(current&&typeof current==='object'&&part in current)current=current[part];
+    else return '';
+  }
+  if(Array.isArray(current))current=current[0]??'';
+  if(current&&typeof current==='object')return '';
+  return String(current??'');
+}
+function templateValue(key){
+  const fields=state.customer?.custom_fields||{};
+  if(key==='recipient_id')return state.thread?.recipient_id||'';
+  if(key==='channel')return state.thread?.channel||'';
+  if(key==='customer_table')return state.thread?.customer_table||state.customer?.source_table||'';
+  if(key==='platform_id')return state.thread?.customer_platform_id||state.customer?.platform_id||state.thread?.recipient_id||'';
+  if(key==='name')return customerName();
+  if(key==='first_name')return fields.first_name||String(customerName()).split(/\s+/).filter(Boolean)[0]||'';
+  if(fields.utms&&typeof fields.utms==='object'){
+    if(key in fields.utms)return String(fields.utms[key]??'');
+    if(key==='ym_uid'&&'_ym_uid' in fields.utms)return String(fields.utms._ym_uid??'');
+  }
+  return pathValue(fields,key)||pathValue(state.customer,key)||'';
+}
+function templateVars(text){
+  return String(text||'').replace(/\{([A-Za-z0-9_.:-]{1,120})\}/g,(_,raw)=>{
+    let key=String(raw).trim(); let encode=false;
+    if(key.startsWith('url.')){key=key.slice(4);encode=true}
+    else if(key.startsWith('urlencode:')){key=key.slice(10);encode=true}
+    const value=templateValue(key);
+    return encode?encodeURIComponent(value).replace(/%20/g,'+'):value;
+  });
+}
+function renderTemplates(){
+  const select=$('templateSelect');
+  select.innerHTML='<option value="">Шаблоны</option>'+state.templates.map(t=>`<option value="${Number(t.id)}">${t.scope==='personal'?'Личный: ':'Общий: '}${esc(t.title)}</option>`).join('');
+  $('deleteTemplateBtn').disabled=true;
+}
+async function loadTemplates(){
+  const data=await api('/templates');
+  state.templates=data.items||[];
+  renderTemplates();
+}
+function selectedTemplate(){
+  const id=Number($('templateSelect').value||0);
+  return state.templates.find(t=>Number(t.id)===id)||null;
+}
+function insertAtCursor(textarea,text){
+  const start=textarea.selectionStart??textarea.value.length;
+  const end=textarea.selectionEnd??textarea.value.length;
+  textarea.value=textarea.value.slice(0,start)+text+textarea.value.slice(end);
+  const pos=start+text.length;
+  textarea.focus(); textarea.setSelectionRange(pos,pos);
+}
+function insertTemplate(){
+  const tpl=selectedTemplate();
+  if(!tpl)return;
+  insertAtCursor($('messageInput'), templateVars(tpl.text));
+}
+function fillPersonalEditor(tpl=null){
+  state.editingTemplateId=tpl?.scope==='personal'?Number(tpl.id):null;
+  $('personalTemplateTitle').value=tpl?.scope==='personal'?tpl.title:'';
+  $('personalTemplateText').value=tpl?.scope==='personal'?tpl.text:'';
+  $('deleteTemplateBtn').disabled=!state.editingTemplateId;
+}
+function syncPersonalEditor(){
+  const tpl=selectedTemplate();
+  if($('personalTemplateEditor').open)fillPersonalEditor(tpl?.scope==='personal'?tpl:null);
+}
+function settingsOpen(){return $('settingsPanel').classList.contains('open')}
+function openSettings(){
+  $('settingsPanel').classList.add('open');
+  if(isMobile())$('app').classList.add('sidebar-open');
+}
+function toggleSettings(){
+  $('settingsPanel').classList.toggle('open');
+  if(isMobile())$('app').classList.add('sidebar-open');
+  if(settingsOpen())syncPersonalEditor();
+}
+function openPersonalEditor(){
+  const tpl=selectedTemplate();
+  openSettings();
+  $('personalTemplateEditor').open=true;
+  fillPersonalEditor(tpl?.scope==='personal'?tpl:null);
+}
+async function saveCurrentTemplate(){
+  const title=$('personalTemplateTitle').value.trim();
+  const text=$('personalTemplateText').value.trim();
+  if(!title||!text){setStatus('Название и текст шаблона обязательны',true);return}
+  if(state.editingTemplateId)await api('/templates/'+state.editingTemplateId,json('PUT',{title,text}));
+  else {const created=await api('/templates',json('POST',{title,text}));state.editingTemplateId=created.id}
+  await loadTemplates();
+  $('templateSelect').value=String(state.editingTemplateId||'');
+  setStatus('Личный шаблон сохранён');
+}
+async function deleteSelectedTemplate(){
+  const tpl=state.editingTemplateId?state.templates.find(t=>Number(t.id)===Number(state.editingTemplateId)):selectedTemplate();
+  if(!tpl||tpl.scope!=='personal')return;
+  if(!confirm('Удалить личный шаблон?'))return;
+  await api('/templates/'+tpl.id,{method:'DELETE'});
+  state.editingTemplateId=null; fillPersonalEditor(null);
+  await loadTemplates();
+  setStatus('Шаблон удалён');
+}
+async function openDeepLink(){
+  const link=deepLinkParts();
+  if(!link)return false;
+  setStatus('Открываю клиента из ссылки...');
+  const data=await api(`/customer-thread?table=${encodeURIComponent(link.table)}&platform_id=${encodeURIComponent(link.platform_id)}`);
+  await openThread(data.thread_id);
+  loadThreads().catch(e=>setStatus(e.message,true));
+  return true;
+}
+function renderMessages(){
+  const box=$('messages'); box.innerHTML='';
+  if(!state.messages.length){box.innerHTML='<div class="empty">Истории пока нет.</div>';return}
+  for(const m of state.messages){
+    const node=document.createElement('section'); node.className=`msg ${m.direction} ${m.status==='failed'?'failed':''}`;
+    node.innerHTML=`<div class="msg-meta"><span>${esc(m.direction==='out'?(m.author_name||'Вы'):'Клиент')}</span><span>${esc(dt(m.created_at))}</span>${m.status==='failed'?`<span class="error">${esc(m.error||'ошибка')}</span>`:''}</div><div class="bubble">${esc(m.text)}</div>`;
+    box.append(node);
+  }
+  box.scrollTop=box.scrollHeight;
+}
+function renderCustomer(){
+  const c=state.customer; const box=$('customerBox');
+  if(!c){box.innerHTML='<div class="muted">Карточка не найдена в customer-db.</div>';return}
+  const fields=c.custom_fields||{};
+  const pairs=[['Лист',c.source_table],['platform_id',c.platform_id],['created',dt(c.created_at)],['updated',dt(c.updated_at)]];
+  for(const key of ['name','full_name','first_name','phone','email','vk_id','telegram_id','utm_term']){
+    if(fields[key])pairs.push([key,fields[key]]);
+  }
+  box.innerHTML=pairs.map(([k,v])=>`<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('')+`<details><summary class="muted">Все поля JSON</summary><pre class="mono small">${esc(JSON.stringify(fields,null,2))}</pre></details>`;
+}
+async function openThread(id){
+  state.loading=true; setStatus('Загрузка диалога...');
+  try{
+    const data=await api('/threads/'+encodeURIComponent(id)); state.thread=data.thread; state.messages=data.messages||[]; state.customer=data.customer||null;
+    $('chatName').textContent=state.thread.display_name||state.thread.recipient_id; $('chatMeta').textContent=`${state.thread.channel.toUpperCase()} · ${state.thread.recipient_id}`;
+    $('messageInput').disabled=false; $('sendBtn').disabled=false;
+    if(state.thread.vk_url){$('externalLink').href=state.thread.vk_url;$('externalLink').hidden=false}else $('externalLink').hidden=true;
+    updateThreadUrl(); renderThreads(); renderMessages(); renderCustomer(); closeSidebar(); setStatus('Готово');
+  }catch(e){setStatus(e.message,true)}
+  finally{state.loading=false}
+}
+async function sendMessage(){
+  if(!state.thread||state.loading)return; const text=templateVars($('messageInput').value.trim()); if(!text)return;
+  $('messageInput').value=text;
+  $('sendBtn').disabled=true; setStatus('Отправка...');
+  try{await api('/send',json('POST',{thread_id:state.thread.id,text}));$('messageInput').value='';await openThread(state.thread.id);await loadThreads();setStatus('Сообщение отправлено')}
+  catch(e){setStatus('Ошибка отправки: '+e.message,true);await openThread(state.thread.id).catch(()=>{})}
+  finally{$('sendBtn').disabled=false}
+}
+async function loadMe(){const data=await api('/me');state.account=data.account;$('loginOverlay').hidden=!!state.account;$('loginLabel').textContent=state.account?.display_name||state.account?.login||'-';return !!state.account}
+async function init(){const ok=await loadMe();if(!ok){setStatus('Введите логин');return}await loadTemplates().catch(e=>setStatus(e.message,true));const opened=await openDeepLink().catch(e=>{setStatus(e.message,true);return false});if(!opened)await loadThreads()}
+function isMobile(){return matchMedia('(max-width:720px)').matches}
+function closeSidebar(){$('app').classList.remove('sidebar-open')}
+function toggleLeft(){if(isMobile()){$('app').classList.toggle('sidebar-open');$('app').classList.remove('right-open')}else $('app').classList.toggle('left-collapsed')}
+function toggleRight(){if(isMobile()){$('app').classList.toggle('right-open');$('app').classList.remove('sidebar-open')}else $('app').classList.toggle('right-collapsed')}
+
+$('loginForm').onsubmit=async e=>{e.preventDefault();$('loginError').textContent='';try{await api('/login',json('POST',{login:$('loginInput').value}));await init()}catch(err){$('loginError').textContent=err.message}};
+$('logoutBtn').onclick=async()=>{await api('/logout',{method:'POST'}).catch(()=>{});state.account=null;$('loginOverlay').hidden=false};
+$('composer').onsubmit=e=>{e.preventDefault();sendMessage()};
+$('refreshBtn').onclick=()=>state.thread?openThread(state.thread.id).then(()=>loadThreads(true)):loadThreads(true);
+$('menuBtn').onclick=toggleLeft;
+$('settingsBtn').onclick=toggleSettings;
+$('collapseLeftBtn').onclick=toggleLeft;
+$('rightToggleBtn').onclick=toggleRight;
+$('collapseRightBtn').onclick=toggleRight;
+$('insertTemplateBtn').onclick=insertTemplate;
+$('newPersonalTemplateBtn').onclick=()=>{state.editingTemplateId=null;openPersonalEditor();fillPersonalEditor(null);$('personalTemplateTitle').focus()};
+$('saveTemplateBtn').onclick=()=>saveCurrentTemplate().catch(e=>setStatus(e.message,true));
+$('deleteTemplateBtn').onclick=()=>deleteSelectedTemplate().catch(e=>setStatus(e.message,true));
+$('templateSelect').onchange=()=>{if(settingsOpen())syncPersonalEditor()};
+$('searchInput').oninput=()=>{clearTimeout(window.__qTimer);window.__qTimer=setTimeout(()=>{state.q=$('searchInput').value.trim();loadThreads().catch(e=>setStatus(e.message,true))},250)};
+document.querySelectorAll('.seg').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.seg').forEach(x=>x.classList.toggle('active',x===btn));state.channel=btn.dataset.channel||'';loadThreads().catch(e=>setStatus(e.message,true))});
+init().catch(e=>{setStatus('Ошибка инициализации: '+e.message,true);$('loginOverlay').hidden=false});
+</script>
+</body>
+</html>

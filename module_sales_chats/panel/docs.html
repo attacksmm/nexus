@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Чаты продаж — документация</title>
+  <style>
+    :root{color-scheme:dark}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#4c4c4c #101010}
+    body{max-width:900px;margin:32px auto;padding:0 20px;background:#0b0c0b;color:#e9eeea;font:14px/1.6 system-ui}
+    h1,h2{line-height:1.25}code{background:#1b1e1c;padding:2px 5px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#101210;border:1px solid #303630;padding:12px}li{margin:5px 0}
+  </style>
+</head>
+<body>
+  <h1>Модуль «Чаты продаж»</h1>
+  <p>Единый рабочий чат для отдела продаж. Список людей берётся из разрешённых листов <code>customer-db</code>, сообщения отправляются через те же VK и Telegram токены, что использует модуль «Рассылки».</p>
+
+  <h2>Администрирование</h2>
+  <ol>
+    <li>Во вкладке «Люди» добавьте логины для fullscreen-чата. Вход без пароля, как в <code>sbkvd-gpt</code>.</li>
+    <li>Во вкладке «Листы customer-db» выберите таблицы, канал и поле с ID получателя.</li>
+    <li>Во вкладке «Общие шаблоны» настройте шаблоны, доступные всем пользователям fullscreen-чата.</li>
+    <li>Откройте <code>/nexus/sales-chats/panel/chat/</code> или кнопку «Открыть fullscreen».</li>
+  </ol>
+
+  <h2>Шаблоны и переменные</h2>
+  <p>Личные шаблоны пользователь настраивает в fullscreen-чате через кнопку «Мои шаблоны». Общие шаблоны настраиваются администратором в модуле. Переменные подставляются из карточки <code>customer-db</code> при вставке и повторно перед отправкой.</p>
+  <pre>{name}
+{first_name}
+{platform_id}
+{utm_source}
+{utm_medium}
+{utm_campaign}
+{utm_content}
+{utm_term}
+{yclid}
+{ym_uid}
+{url.utm_source}
+{url.yclid}</pre>
+  <p>Префикс <code>url.</code> кодирует значение для ссылки. UTM-поля, <code>yclid</code> и <code>ym_uid</code> можно писать коротко, модуль найдёт их внутри <code>utms</code> в customer-db.</p>
+
+  <h2>Telegram</h2>
+  <p>Модуль не вызывает <code>getUpdates</code> и не меняет webhook Telegram-бота, чтобы не ломать текущую Salebot-воронку. Отправка через Bot API доступна сразу, а входящие Telegram-сообщения можно передавать в модуль отдельным webhook из Salebot или другой интеграции.</p>
+  <pre>POST /nexus/sales-chats/api/inbound/telegram?secret=...
+Content-Type: application/json
+
+{
+  "chat_id": "123456789",
+  "text": "Сообщение клиента",
+  "message_id": "987",
+  "name": "Имя клиента"
+}</pre>
+
+  <h2>ENV</h2>
+  <ul>
+    <li><code>SBKVD_LETTER_VK_TOKEN</code> — VK Community token.</li>
+    <li><code>SBKVD_LETTER_TELEGRAM_BOT_TOKEN</code> — Telegram bot token.</li>
+    <li><code>SBKVD_LETTER_TELEGRAM_API_BASE</code> и <code>SBKVD_LETTER_TELEGRAM_PROXY_URL</code> — необязательные настройки доступа к Bot API.</li>
+    <li><code>SALES_CHATS_CUSTOMER_DB_PATH</code> — необязательный override пути customer-db.</li>
+    <li><code>SALES_CHATS_WEBHOOK_SECRET</code> — необязательный секрет inbound webhook; если не задан, секрет создаётся в БД модуля.</li>
+  </ul>
+</body>
+</html>

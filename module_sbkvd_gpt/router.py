@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from orchestrator.auth import require_admin, verify_token_from_request
+from orchestrator.auth import enforce_rate_limit, require_admin, verify_token_from_request
 
 router = APIRouter()
 
@@ -24,6 +24,12 @@ SESSION_COOKIE = "sbkvd_gpt_session"
 SESSION_TTL_DAYS = 30
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_HISTORY_LIMIT = 80
+IMAGE_MODEL_PREFERENCE = [
+    "openai/gpt-4.1-mini",
+    "openai/gpt-4.1",
+    "openai/gpt-5.1",
+    "openai/gpt-5.2",
+]
 
 _db_path: Path | None = None
 _module_dir: Path | None = None
@@ -401,8 +407,31 @@ async def _ensure_model_access(account_id: int, model: str) -> str:
     return model
 
 
-async def _service_models() -> list[dict[str, str]]:
-    ids: set[str] = set(DEFAULT_MODEL_GRANTS)
+def _model_supports_image_from_item(item: dict[str, Any]) -> bool | None:
+    if "supports_image" in item:
+        return bool(item.get("supports_image"))
+    input_modalities = item.get("input_modalities")
+    if not input_modalities and isinstance(item.get("architecture"), dict):
+        input_modalities = item["architecture"].get("input_modalities")
+    if isinstance(input_modalities, list):
+        values = {str(value).strip().lower() for value in input_modalities}
+        if values:
+            return "image" in values
+    return None
+
+
+def _default_model_supports_image(model: str) -> bool:
+    model = str(model or "").strip().lower()
+    if model.startswith("deepseek/"):
+        return False
+    return any(marker in model for marker in ("gpt-4.1", "gpt-5", "claude", "gemini"))
+
+
+async def _service_models() -> list[dict[str, Any]]:
+    models: dict[str, dict[str, Any]] = {
+        model: {"id": model, "name": model, "supports_image": _default_model_supports_image(model)}
+        for model in DEFAULT_MODEL_GRANTS
+    }
     db_path = _openrouter_db_path()
     if db_path.exists():
         async with aiosqlite.connect(db_path) as db:
@@ -410,20 +439,65 @@ async def _service_models() -> list[dict[str, str]]:
                 cur = await db.execute("SELECT models_json FROM model_cache WHERE id=1")
                 row = await cur.fetchone()
                 for item in json.loads(row[0] if row else "[]"):
+                    if not isinstance(item, dict):
+                        continue
                     model_id = str(item.get("id") or "").strip()
                     if model_id:
-                        ids.add(model_id)
+                        model_item = {
+                            "id": model_id,
+                            "name": item.get("name") or model_id,
+                            "supports_image": _model_supports_image_from_item(item),
+                        }
+                        if model_item["supports_image"] is None:
+                            model_item["supports_image"] = _default_model_supports_image(model_id)
+                        models[model_id] = model_item
             except Exception:
                 pass
             try:
                 cur = await db.execute("SELECT value FROM settings WHERE key IN ('default_model','summary_model')")
-                ids.update(str(row[0]).strip() for row in await cur.fetchall() if str(row[0]).strip())
+                for row in await cur.fetchall():
+                    model_id = str(row[0]).strip()
+                    if model_id and model_id not in models:
+                        models[model_id] = {"id": model_id, "name": model_id, "supports_image": _default_model_supports_image(model_id)}
             except Exception:
                 pass
     async with aiosqlite.connect(_must_db()) as db:
         cur = await db.execute("SELECT model FROM account_models")
-        ids.update(str(row[0]).strip() for row in await cur.fetchall() if str(row[0]).strip())
-    return [{"id": model, "name": model} for model in sorted(ids)]
+        for row in await cur.fetchall():
+            model_id = str(row[0]).strip()
+            if model_id and model_id not in models:
+                models[model_id] = {"id": model_id, "name": model_id, "supports_image": _default_model_supports_image(model_id)}
+    return [models[model] for model in sorted(models)]
+
+
+async def _model_supports_image(model: str) -> bool:
+    for item in await _service_models():
+        if item["id"] == model:
+            return bool(item.get("supports_image"))
+    return _default_model_supports_image(model)
+
+
+def _image_model_rank(model: str) -> tuple[int, str]:
+    try:
+        return (IMAGE_MODEL_PREFERENCE.index(model), model)
+    except ValueError:
+        return (len(IMAGE_MODEL_PREFERENCE), model)
+
+
+async def _image_capable_model(account_id: int, requested_model: str) -> str:
+    if await _model_supports_image(requested_model):
+        return requested_model
+    async with aiosqlite.connect(_must_db()) as db:
+        allowed = await _account_model_set(db, account_id)
+    candidates = [
+        str(item.get("id") or "").strip()
+        for item in await _service_models()
+        if str(item.get("id") or "").strip() in allowed and item.get("supports_image")
+    ]
+    candidates = [model for model in candidates if model]
+    if not candidates:
+        raise HTTPException(400, "Для аккаунта не назначена модель с поддержкой изображений. Добавьте GPT-4.1 mini, GPT-4.1 или GPT-5.1 в доступы.")
+    return sorted(candidates, key=_image_model_rank)[0]
 
 
 def _short_title(text: str) -> str:
@@ -447,7 +521,7 @@ async def _thread_history(db: aiosqlite.Connection, account_id: int, thread_id: 
     return [
         {"role": row[0], "content": row[1], "created_at": row[2], "attachment_url": row[3] or ""}
         for row in rows
-        if row[0] in {"user", "assistant"} and row[1]
+        if row[0] in {"user", "assistant"} and (row[1] or row[3])
     ]
 
 
@@ -496,6 +570,7 @@ def _history_for_model(items: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 @router.post("/login")
 async def login(data: LoginIn, request: Request):
+    enforce_rate_limit(request, "sbkvd-gpt-login", limit=20, window_seconds=300)
     login_key = _normalize_login(data.login)
     async with aiosqlite.connect(_must_db()) as db:
         db.row_factory = aiosqlite.Row
@@ -504,6 +579,7 @@ async def login(data: LoginIn, request: Request):
         if not account:
             raise HTTPException(401, "Логин не найден в списке доступа")
         token = secrets.token_urlsafe(40)
+        await db.execute("DELETE FROM sessions WHERE expires_at<=?", (_now(),))
         await db.execute(
             "INSERT INTO sessions(token,account_id,expires_at,created_at) VALUES(?,?,?,?)",
             (token, account["id"], _session_expires(), _now()),
@@ -514,6 +590,7 @@ async def login(data: LoginIn, request: Request):
         SESSION_COOKIE,
         token,
         httponly=True,
+        secure=True,
         samesite="lax",
         max_age=SESSION_TTL_DAYS * 24 * 3600,
         path=_cookie_path(request),
@@ -616,11 +693,13 @@ async def message(data: MessageIn, request: Request):
     account = await _require_gpt_account(request)
     account_id = int(account["id"])
     text = _clean(data.message, 50000)
-    if not text:
-        raise HTTPException(400, "message is required")
+    attachment_url = _clean(data.attachment_url, 2_500_000)
+    if not text and not attachment_url:
+        raise HTTPException(400, "message or image is required")
     prompt_path = await _ensure_prompt_access(account_id, data.prompt_path)
     model = await _ensure_model_access(account_id, data.model)
-    attachment_url = _clean(data.attachment_url, 2_500_000)
+    if attachment_url:
+        model = await _image_capable_model(account_id, model)
     history: list[dict[str, Any]] = []
     thread_id = ""
     if data.keep_context:
