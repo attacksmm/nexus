@@ -31,6 +31,7 @@
     const FETCH_TIMEOUT = 180000;
     const MINIMUM_REPLY_DELAY_MS = 60000;
 
+    console.log('[NEXUS-BIZON] Runtime 1.1.22 loaded');
     console.log('[NEXUS-BIZON] Config loaded:', CFG);
     console.log('[NEXUS-BIZON] Status:', { isActive });
 
@@ -73,7 +74,10 @@
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         return fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Nexus-Bizon-Key': String(CFG.SEC_KEY || '')
+            },
             body: JSON.stringify(body),
             signal: controller.signal
         }).then(async res => {
@@ -93,12 +97,13 @@
     function lookupUser(bizonUserId, message = '') {
         const query = new URLSearchParams({
             user_id: String(bizonUserId || ''),
-            room_key: getRoomKey(),
-            sec_key: String(CFG.SEC_KEY || '')
+            room_key: getRoomKey()
         });
         const cleanMessage = String(message || '').trim();
         if (cleanMessage.length >= 80) query.set('message', cleanMessage);
-        return fetch(`${apiBase()}/user_lookup?${query.toString()}`)
+        return fetch(`${apiBase()}/user_lookup?${query.toString()}`, {
+            headers: { 'X-Nexus-Bizon-Key': String(CFG.SEC_KEY || '') }
+        })
             .then(res => res.json())
             .then(data => (data && data.client_id) ? data : null)
             .catch(() => null);
@@ -258,7 +263,8 @@
                     clientId: utmTerm,
                     assistant_id: getPromptFile(),
                     thread_id: threadId || '',
-                    room_key: getRoomKey()
+                    room_key: getRoomKey(),
+                    sec_key: String(CFG.SEC_KEY || '')
                 }).then(() => {
                     mappingSent = true;
                     console.log('[NEXUS-BIZON] Mapping registered', { bizonUserId, clientId: utmTerm, threadId, attempts: mappingAttempts });
@@ -509,7 +515,8 @@
             clientId,
             assistant_id: promptFile,
             thread_id: threadId,
-            room_key: getRoomKey()
+            room_key: getRoomKey(),
+            sec_key: String(CFG.SEC_KEY || '')
         }).catch(() => null);
     }
 

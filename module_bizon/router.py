@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -65,6 +66,7 @@ _data_dir: Path | None = None
 _log_file: Path | None = None
 _logger = None
 _generation_slots = asyncio.Semaphore(15)
+_public_auth_log_last: dict[str, float] = {}
 
 
 class SettingsIn(BaseModel):
@@ -109,6 +111,7 @@ class ProcessIn(BaseModel):
     assistant_id: str = ""
     thread_id: str = ""
     room_key: str = ""
+    sec_key: str = ""
 
 
 class PublicChatIn(BaseModel):
@@ -201,6 +204,7 @@ async def _init_db() -> None:
             "scheduled_restart_time": "03:30",
             "silence_windows": json.dumps(DEFAULT_SILENCE_WINDOWS, ensure_ascii=False),
             "silence_threshold_minutes": "10",
+            "public_auth_mode": "observe",
         }
         for key, value in defaults.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)", (key, value, _now()))
@@ -212,7 +216,7 @@ def _cors_headers() -> dict[str, str]:
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, X-Nexus-Bizon-Key",
         "Access-Control-Max-Age": "86400",
     }
 
@@ -236,6 +240,42 @@ async def _settings_raw() -> dict[str, str]:
     async with aiosqlite.connect(_must_db()) as db:
         cur = await db.execute("SELECT key,value FROM settings")
         return {key: value for key, value in await cur.fetchall()}
+
+
+def _public_auth_mode(raw: dict[str, str]) -> str:
+    mode = (_env_value("BIZON_PUBLIC_AUTH_MODE") or raw.get("public_auth_mode") or "observe").strip().lower()
+    return mode if mode in {"observe", "enforce"} else "observe"
+
+
+def _public_auth_log(endpoint: str, reason: str) -> None:
+    key = f"{endpoint}:{reason}"
+    now = time.monotonic()
+    if now - _public_auth_log_last.get(key, 0.0) < 60:
+        return
+    _public_auth_log_last[key] = now
+    _log("warning", "bizon public auth %s endpoint=%s", reason, endpoint)
+
+
+async def _public_key_allowed(
+    request: Request,
+    *,
+    supplied: str | None = None,
+    endpoint: str,
+    allow_legacy: bool = True,
+) -> bool:
+    raw = await _settings_raw()
+    expected = str(raw.get("sec_key") or DEFAULT_SEC_KEY).strip()
+    received = str(request.headers.get("X-Nexus-Bizon-Key") or supplied or "").strip()
+    if received and expected and secrets.compare_digest(received, expected):
+        return True
+    if received:
+        _public_auth_log(endpoint, "invalid-key-rejected")
+        return False
+    if allow_legacy and _public_auth_mode(raw) == "observe":
+        _public_auth_log(endpoint, "legacy-missing-key-allowed")
+        return True
+    _public_auth_log(endpoint, "missing-key-rejected")
+    return False
 
 
 def _parse_json_list(value: Any, fallback: list[Any]) -> list[Any]:
@@ -265,6 +305,7 @@ def _settings_public(raw: dict[str, str]) -> dict[str, Any]:
         "silence_windows": windows,
         "silence_windows_text": "\n".join(f"{w.get('start','')}-{w.get('end','')}" for w in windows if isinstance(w, dict)),
         "silence_threshold_minutes": int(raw.get("silence_threshold_minutes") or "10"),
+        "public_auth_mode": _public_auth_mode(raw),
         "has_login": bool(raw.get("login") or _env_value("BIZON365_LOGIN")),
         "has_password": bool(raw.get("password") or _env_value("BIZON365_PASS")),
         "has_telegram_bot_token": bool(raw.get("telegram_bot_token") or _env_value("TELEGRAM_BOT_TOKEN") or _env_value("TELEGRAM_BOT_TOKEN_ERROR_ALERT")),
@@ -705,7 +746,7 @@ async def _script_room_rows() -> dict[str, dict[str, Any]]:
 
 def _script_urls() -> dict[str, str]:
     public_api = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/api/public"
-    script_src = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/static/moderator_openrouter_pm.js?v=1.1.21"
+    script_src = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/static/moderator_openrouter_pm.js?v=1.1.22"
     return {"public_api": public_api, "script_src": script_src}
 
 
@@ -988,6 +1029,8 @@ async def public_options(path: str):
 
 @router.post("/public/process2")
 async def public_process2(data: ProcessIn, request: Request):
+    if not await _public_key_allowed(request, supplied=data.sec_key, endpoint="process2"):
+        return _cors_json({"detail": "unauthorized"}, status_code=401)
     user_id = str(data.userId or "").strip()
     client_id = str(data.clientId or "").strip()
     prompt_path = _normalize_prompt_path(data.assistant_id)
@@ -1084,6 +1127,8 @@ async def public_user_lookup(
     message: str | None = None,
     sec_key: str | None = None,
 ):
+    if not await _public_key_allowed(request, supplied=sec_key, endpoint="user_lookup"):
+        return _cors_json({"detail": "unauthorized"}, status_code=401)
     clean_user_id = str(user_id or "").strip()
     if not clean_user_id:
         return _cors_json({"error": "user_id is required"}, status_code=400)
@@ -1115,9 +1160,7 @@ async def public_user_lookup(
             )
             row = await cur.fetchone()
     if row is None and message:
-        expected_key = (await _settings_raw()).get("sec_key") or DEFAULT_SEC_KEY
-        if sec_key and str(sec_key).strip() == expected_key:
-            row = await _recover_mapping_from_message(clean_user_id, resolved_room_key, message)
+        row = await _recover_mapping_from_message(clean_user_id, resolved_room_key, message)
     if row:
         return _cors_json({
             "client_id": row[0],
@@ -1134,7 +1177,9 @@ async def public_user_lookup(
 
 
 @router.get("/public/room-config")
-async def public_room_config(room: str, request: Request):
+async def public_room_config(room: str, request: Request, sec_key: str | None = None):
+    if not await _public_key_allowed(request, supplied=sec_key, endpoint="room-config"):
+        return _cors_json({"detail": "unauthorized"}, status_code=401)
     clean_room = str(room or "").strip().strip("/")
     settings = _settings_public(await _settings_raw())
     valid_rooms = {str(item) for item in settings["rooms"]}
@@ -1153,8 +1198,7 @@ async def public_room_config(room: str, request: Request):
 
 @router.get("/public/room_mappings")
 async def public_room_mappings(request: Request, room_key: str | None = None, sec_key: str | None = None):
-    expected_key = (await _settings_raw()).get("sec_key") or DEFAULT_SEC_KEY
-    if not sec_key or str(sec_key).strip() != expected_key:
+    if not await _public_key_allowed(request, supplied=sec_key, endpoint="room_mappings", allow_legacy=False):
         return _cors_json({"detail": "unauthorized"}, status_code=401)
     resolved_room_key = _resolve_room_key(room_key or "", request)
     if not resolved_room_key:
@@ -1191,8 +1235,7 @@ async def public_room_mappings(request: Request, room_key: str | None = None, se
 
 @router.post("/public/chat")
 async def public_chat(data: PublicChatIn, request: Request):
-    expected_key = (await _settings_raw()).get("sec_key") or DEFAULT_SEC_KEY
-    if not data.sec_key or str(data.sec_key).strip() != expected_key:
+    if not await _public_key_allowed(request, supplied=data.sec_key, endpoint="chat", allow_legacy=False):
         return _cors_json({"detail": "unauthorized"}, status_code=401)
     user_id = str(data.user_id or "").strip()
     message = str(data.message or "").strip()

@@ -417,6 +417,16 @@ async def run_once(cfg: dict[str, Any]) -> int:
         )
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
+        cache_page = await context.new_page()
+        try:
+            cdp = await context.new_cdp_session(cache_page)
+            await cdp.send("Network.clearBrowserCache")
+            log.info("browser cache cleared before room startup")
+        except Exception as exc:
+            log.warning("browser cache cleanup failed: %s", exc)
+        finally:
+            await cache_page.close()
+
         if not await ensure_logged_in(context, cfg["login"], cfg["password"]):
             log.error("could not authenticate, exiting run")
             await context.close()

@@ -6,9 +6,15 @@
 
     const parts = window.location.pathname.split('/').filter(Boolean);
     const room = decodeURIComponent(parts[parts.length - 1] || '').trim();
+    const secKey = new URLSearchParams(window.location.search).get('sec') || '';
     const configUrl = `https://junior.sobakovod.pro/nexus/bizon/api/public/room-config?room=${encodeURIComponent(room)}`;
 
-    fetch(configUrl, { method: 'GET', mode: 'cors', credentials: 'omit' })
+    fetch(configUrl, {
+        method: 'GET',
+        mode: 'cors',
+        credentials: 'omit',
+        headers: { 'X-Nexus-Bizon-Key': secKey }
+    })
         .then(async response => {
             let data = null;
             try { data = await response.json(); } catch (_) {}
