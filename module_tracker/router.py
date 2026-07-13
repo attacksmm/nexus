@@ -1810,12 +1810,22 @@ CONSENT_GATE_SCRIPT = r"""
     var doc;
     try { doc = frame && frame.contentDocument; } catch (_) { doc = null; }
     if (!doc || !doc.querySelectorAll) return;
-    var scripts = doc.querySelectorAll('script[data-nexus-frame-consent="' + category + '"]');
-    for (var i = 0; i < scripts.length; i += 1) {
-      var source = scripts[i], script = doc.createElement("script"), attributes = source.attributes || [];
+    var nodes = doc.querySelectorAll('[data-nexus-frame-consent="' + category + '"]');
+    for (var i = 0; i < nodes.length; i += 1) {
+      var source = nodes[i];
+      if (clean(source.tagName) !== "script") {
+        var urlAttribute = source.getAttribute("data-nexus-frame-attribute") || "src";
+        var heldUrl = source.getAttribute("data-nexus-frame-url") || "";
+        source.removeAttribute("data-nexus-frame-consent");
+        source.removeAttribute("data-nexus-frame-attribute");
+        source.removeAttribute("data-nexus-frame-url");
+        if (heldUrl) try { source.setAttribute(urlAttribute, heldUrl); } catch (_) {}
+        continue;
+      }
+      var script = doc.createElement("script"), attributes = source.attributes || [];
       for (var j = 0; j < attributes.length; j += 1) {
         var name = attributes[j].name;
-        if (name === "type" || name === "src" || name === "data-src" || name === "data-nexus-frame-consent" || name === "data-nexus-frame-type") continue;
+        if (name === "type" || name === "src" || name === "data-src" || name === "data-nexus-frame-consent" || name === "data-nexus-frame-type" || name === "data-nexus-frame-attribute" || name === "data-nexus-frame-url") continue;
         try { script.setAttribute(name, attributes[j].value); } catch (_) {}
       }
       var originalType = source.getAttribute("data-nexus-frame-type") || "";
@@ -1859,6 +1869,19 @@ CONSENT_GATE_SCRIPT = r"""
         source.removeAttribute("src");
       }
       source.setAttribute("type", "text/plain");
+    }
+    var transports = parsed.querySelectorAll("img[src],iframe[src],source[src],link[href]");
+    for (var j = 0; j < transports.length; j += 1) {
+      var transport = transports[j];
+      var attribute = transport.hasAttribute("src") ? "src" : "href";
+      var heldUrl = transport.getAttribute(attribute) || "";
+      var transportCategory = categoryForUrl(heldUrl);
+      if (!shouldHold(transportCategory)) continue;
+      changed = true;
+      transport.setAttribute("data-nexus-frame-consent", transportCategory);
+      transport.setAttribute("data-nexus-frame-attribute", attribute);
+      transport.setAttribute("data-nexus-frame-url", heldUrl);
+      transport.removeAttribute(attribute);
     }
     if (!changed) return raw;
     frame.__nexusMetricSrcdocSanitized = true;

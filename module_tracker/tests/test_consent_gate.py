@@ -92,7 +92,7 @@ setTimeout(function(){{window.__analyticsTimer=true;}},5);
 window.fetch('/functional-widget-submit').then(function(){{window.__functionalWidgetSubmitted=true;}});
 window.fetch('https://junior.sobakovod.pro/nexus/senler/api/track');
 var metricFrame=document.createElement('iframe');
-metricFrame.srcdoc='<script>parent.__frameMetricRan=true;window.__metricEndpoint="https://mc.yandex.ru/watch/test";<\\/script>';
+metricFrame.srcdoc='<script>parent.__frameMetricRan=true;window.__metricEndpoint="https://mc.yandex.ru/watch/test";<\\/script><noscript><img src="/nexus/tracker/api/pixel-test"></noscript>';
 document.documentElement.appendChild(metricFrame);
 </script>
 <script>
@@ -116,6 +116,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
     advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
     frameMetric:window.__frameMetricRan===true,
+    framePixel:!!(metricFrame.contentDocument&&metricFrame.contentDocument.querySelector('img[src*="/nexus/tracker/api/"]')),
     tracker:typeof window.NexusTracker,
     state:localStorage.getItem('nexus_tracker_state_v1'),
     preferences:window.NexusMetricGate.getPreferences(),
@@ -132,6 +133,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
     advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
     frameMetric:window.__frameMetricRan===true,
+    framePixel:!!(metricFrame.contentDocument&&metricFrame.contentDocument.querySelector('img[src*="/nexus/tracker/api/"]')),
     tracker:typeof window.NexusTracker,
     preferences:window.NexusMetricGate.getPreferences(),
     manageExists:!!document.getElementById('nexus-consent-manage')
@@ -150,6 +152,7 @@ document.addEventListener('DOMContentLoaded',function(){{
       analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
       advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
       frameMetric:window.__frameMetricRan===true,
+      framePixel:!!(metricFrame.contentDocument&&metricFrame.contentDocument.querySelector('img[src*="/nexus/tracker/api/"]')),
       tracker:typeof window.NexusTracker,
       state:!!localStorage.getItem('nexus_tracker_state_v1'),
       consent:window.NexusTracker && window.NexusTracker.hasConsent(),
@@ -220,6 +223,7 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertFalse(payload["before"]["analyticsCookie"])
         self.assertFalse(payload["before"]["advertisingCookie"])
         self.assertFalse(payload["before"]["frameMetric"])
+        self.assertFalse(payload["before"]["framePixel"])
         self.assertEqual(payload["before"]["tracker"], "undefined")
         self.assertIsNone(payload["before"]["state"])
         self.assertIsNone(payload["before"]["preferences"])
@@ -234,6 +238,7 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertFalse(payload["rejected"]["analyticsCookie"])
         self.assertFalse(payload["rejected"]["advertisingCookie"])
         self.assertFalse(payload["rejected"]["frameMetric"])
+        self.assertFalse(payload["rejected"]["framePixel"])
         self.assertEqual(payload["rejected"]["tracker"], "undefined")
         self.assertEqual(payload["rejected"]["preferences"], {"analytics": False, "advertising": False})
         self.assertFalse(payload["rejected"]["manageExists"])
@@ -247,6 +252,7 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertTrue(payload["analyticsOnly"]["analyticsCookie"])
         self.assertFalse(payload["analyticsOnly"]["advertisingCookie"])
         self.assertTrue(payload["analyticsOnly"]["frameMetric"])
+        self.assertTrue(payload["analyticsOnly"]["framePixel"])
         self.assertEqual(payload["analyticsOnly"]["tracker"], "object")
         self.assertTrue(payload["analyticsOnly"]["state"])
         self.assertTrue(payload["analyticsOnly"]["consent"])
