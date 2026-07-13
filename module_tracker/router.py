@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import html as html_lib
 import ipaddress
 import json
 import logging
@@ -1234,19 +1235,21 @@ async def snippet(
         prefix = "" if root_path and base.endswith(root_path) else root_path
         url = f"{base}{prefix}/tracker/api/script.js"
     provider_clean = _clean_text(provider, 32).lower()
-    if provider_clean in {"tilda", "t972"}:
+    if provider_clean in {"tilda", "standalone", "inline"}:
+        site_clean = _clean_text(site, 80)
+        policy_clean = _clean_text(policy_url, 500) or "https://sobakovod.pro/popd"
         attrs = [
             f'data-src="{url}"',
-            'data-tilda-cookie-type="analytics"',
-            f'data-site="{_clean_text(site, 80)}"',
+            'type="text/plain"',
+            'data-nexus-consent="analytics"',
+            f'data-site="{html_lib.escape(site_clean, quote=True)}"',
             'data-consent="managed"',
         ]
         html = "\n".join([
-            "<!-- Put this inline gate first in Tilda HEAD. Add T972 to every page. -->",
-            f"<script>\n{CONSENT_GATE_SCRIPT}\n</script>",
-            '<script type="text/plain" data-tilda-cookie-type="analytics" data-nexus-consent-release="analytics">window.NexusMetricGate&&window.NexusMetricGate.release("analytics");</script>',
-            '<script type="text/plain" data-tilda-cookie-type="advertising" data-nexus-consent-release="advertising">window.NexusMetricGate&&window.NexusMetricGate.release("advertising");</script>',
+            "<!-- One site-wide Tilda Head snippet. T972 is not required. -->",
+            f'<script data-policy-url="{html_lib.escape(policy_clean, quote=True)}">\n{CONSENT_GATE_SCRIPT}\n</script>',
             f'<script {" ".join(attrs)}></script>',
+            SOBAKOVOD_CONSENT_SCRIPTS if site_clean.lower() == "sobakovod" else "",
         ])
         return PlainTextResponse(html, media_type="text/plain; charset=utf-8")
 
@@ -1630,8 +1633,15 @@ CONSENT_GATE_SCRIPT = r"""
   "use strict";
   if (window.NexusMetricGate) return;
 
+  var bootScript = document.currentScript;
+  var bootData = bootScript && bootScript.dataset || {};
+  var PREF_KEY = "nexus_consent_preferences_v1";
+  var PREF_COOKIE = "nexus_consent_preferences";
+  var PREF_VERSION = 1;
+  var policyUrl = bootData.policyUrl || "https://sobakovod.pro/popd";
   var released = { necessary: true, analytics: false, advertising: false, custom: false };
   var pending = [];
+  var decision = null;
   var patterns = {
     analytics: [
       /(?:^|\/\/|\.)mc\.yandex\./i,
@@ -1656,6 +1666,38 @@ CONSENT_GATE_SCRIPT = r"""
   };
 
   function clean(value) { return String(value == null ? "" : value).trim().toLowerCase(); }
+  function parseJson(value) { try { return JSON.parse(value || ""); } catch (_) { return null; } }
+  function cookie(name) {
+    try {
+      var match = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "=([^;]*)"));
+      return match ? decodeURIComponent(match[1]) : "";
+    } catch (_) { return ""; }
+  }
+  function validPreferences(value) {
+    return !!(value && Number(value.version) === PREF_VERSION && typeof value.analytics === "boolean" && typeof value.advertising === "boolean");
+  }
+  function readPreferences() {
+    var value = null;
+    try { value = parseJson(localStorage.getItem(PREF_KEY)); } catch (_) {}
+    if (!validPreferences(value)) value = parseJson(cookie(PREF_COOKIE));
+    return validPreferences(value) ? value : null;
+  }
+  function writePreferences(value) {
+    var stored = {
+      version: PREF_VERSION,
+      analytics: value.analytics === true,
+      advertising: value.advertising === true,
+      updated_at: new Date().toISOString()
+    };
+    var raw = JSON.stringify(stored);
+    try { localStorage.setItem(PREF_KEY, raw); } catch (_) {}
+    try {
+      var secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = PREF_COOKIE + "=" + encodeURIComponent(raw) + "; Max-Age=31536000; Path=/; SameSite=Lax" + secure;
+    } catch (_) {}
+    decision = stored;
+    return stored;
+  }
   function categoryForUrl(value) {
     var url = clean(value);
     if (!url) return "";
@@ -1669,7 +1711,7 @@ CONSENT_GATE_SCRIPT = r"""
   function declaredCategory(node) {
     if (!node || !node.getAttribute) return "";
     if (node.getAttribute("data-nexus-consent-release")) return "";
-    var value = clean(node.getAttribute("data-tilda-cookie-type") || node.getAttribute("data-nexus-consent"));
+    var value = clean(node.getAttribute("data-nexus-consent") || node.getAttribute("data-tilda-cookie-type"));
     return Object.prototype.hasOwnProperty.call(released, value) ? value : "";
   }
   function nodeUrl(node) {
@@ -1678,19 +1720,43 @@ CONSENT_GATE_SCRIPT = r"""
   }
   function nodeCategory(node) { return declaredCategory(node) || categoryForUrl(nodeUrl(node)); }
   function shouldHold(category) { return !!category && released[category] !== true; }
-  function hold(category, run) {
-    pending.push({ category: category, run: run });
-  }
+  function hold(category, run) { pending.push({ category: category, run: run }); }
   function emit(category) {
     try {
       var event;
-      if (typeof window.CustomEvent === "function") event = new CustomEvent("nexus:consent", { detail: { category: category, granted: true } });
+      var detail = { category: category, granted: true, preferences: decision };
+      if (typeof window.CustomEvent === "function") event = new CustomEvent("nexus:consent", { detail: detail });
       else {
         event = document.createEvent("CustomEvent");
-        event.initCustomEvent("nexus:consent", false, false, { category: category, granted: true });
+        event.initCustomEvent("nexus:consent", false, false, detail);
       }
       window.dispatchEvent(event);
     } catch (_) {}
+  }
+  function activateMarked(category) {
+    if (!document.querySelectorAll) return;
+    var scripts = document.querySelectorAll("script[data-nexus-consent],script[data-tilda-cookie-type]");
+    for (var i = 0; i < scripts.length; i += 1) {
+      var source = scripts[i];
+      if (source.getAttribute("data-nexus-activated") === "1" || declaredCategory(source) !== category) continue;
+      var type = clean(source.getAttribute("type"));
+      var dataSrc = source.getAttribute("data-src") || "";
+      if (type !== "text/plain" && !dataSrc) continue;
+      source.setAttribute("data-nexus-activated", "1");
+      var script = document.createElement("script");
+      var attributes = source.attributes || [];
+      for (var j = 0; j < attributes.length; j += 1) {
+        var name = attributes[j].name;
+        if (name === "type" || name === "src" || name === "data-src" || name === "data-nexus-consent" || name === "data-tilda-cookie-type" || name === "data-nexus-activated") continue;
+        try { script.setAttribute(name, attributes[j].value); } catch (_) {}
+      }
+      if (dataSrc) script.src = dataSrc;
+      else script.text = source.text || source.textContent || "";
+      try {
+        if (source.parentNode) nativeInsert.call(source.parentNode, script, source.nextSibling);
+        else nativeAppend.call(document.head || document.documentElement, script);
+      } catch (_) {}
+    }
   }
   function drain(category) {
     var rest = [], ready = [];
@@ -1705,9 +1771,13 @@ CONSENT_GATE_SCRIPT = r"""
   }
   function release(category) {
     var value = clean(category);
-    if (!Object.prototype.hasOwnProperty.call(released, value) || released[value]) return false;
+    if (!Object.prototype.hasOwnProperty.call(released, value) || released[value]) {
+      if (released[value]) activateMarked(value);
+      return false;
+    }
     released[value] = true;
     drain(value);
+    activateMarked(value);
     emit(value);
     return true;
   }
@@ -1762,6 +1832,20 @@ CONSENT_GATE_SCRIPT = r"""
   guardUrlProperty(window.HTMLImageElement && HTMLImageElement.prototype, "src");
   guardUrlProperty(window.HTMLIFrameElement && HTMLIFrameElement.prototype, "src");
 
+  var nativeSetTimeout = window.setTimeout;
+  var nativeSetInterval = window.setInterval;
+  function guardedTimer(nativeTimer) {
+    return function (callback) {
+      var args = Array.prototype.slice.call(arguments);
+      var category = declaredCategory(document.currentScript);
+      if (!shouldHold(category) || typeof callback !== "function") return nativeTimer.apply(window, args);
+      hold(category, function () { nativeTimer.apply(window, args); });
+      return 0;
+    };
+  }
+  window.setTimeout = guardedTimer(nativeSetTimeout);
+  window.setInterval = guardedTimer(nativeSetInterval);
+
   if (typeof window.fetch === "function") {
     var nativeFetch = window.fetch;
     window.fetch = function (input) {
@@ -1796,13 +1880,206 @@ CONSENT_GATE_SCRIPT = r"""
     };
   }
 
+  function styleUi() {
+    if (document.getElementById("nexus-consent-ui-style")) return;
+    var style = document.createElement("style");
+    style.id = "nexus-consent-ui-style";
+    style.textContent = [
+      "#nexus-consent-banner,#nexus-consent-modal,#nexus-consent-manage{box-sizing:border-box;font-family:Circe,Arial,sans-serif;color:#30363a}",
+      "#nexus-consent-banner * ,#nexus-consent-modal *{box-sizing:border-box}",
+      "#nexus-consent-banner{position:fixed;z-index:2147483000;left:50%;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(-50%);width:min(920px,calc(100vw - 24px));padding:17px 18px;background:#fff;border:1px solid rgba(90,172,236,.38);border-radius:14px;box-shadow:0 18px 55px rgba(18,38,52,.24);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center}",
+      ".nxc-copy{min-width:0}.nxc-title{margin:0 0 5px;font-size:16px;line-height:1.2;font-weight:700;color:#252b2f}.nxc-text{margin:0;font-size:13px;line-height:1.42;color:#59636a}.nxc-text a{color:#2787cf;text-decoration:underline;text-underline-offset:2px}",
+      ".nxc-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.nxc-button{appearance:none;border:1px solid #cbd4d9;border-radius:9px;min-height:40px;padding:0 14px;background:#fff;color:#374047;font:700 13px/1 Circe,Arial,sans-serif;cursor:pointer;white-space:nowrap}.nxc-button:hover{border-color:#8da1ad}.nxc-button-primary{background:#5aacec;border-color:#5aacec;color:#fff}.nxc-button-primary:hover{background:#419ce2;border-color:#419ce2}.nxc-button-link{border-color:transparent;padding-left:6px;padding-right:6px;color:#397ea8}",
+      "#nexus-consent-modal{position:fixed;z-index:2147483100;inset:0;background:rgba(18,28,34,.48);display:flex;align-items:center;justify-content:center;padding:16px}#nexus-consent-modal[hidden],#nexus-consent-banner[hidden],#nexus-consent-manage[hidden]{display:none!important}",
+      ".nxc-dialog{width:min(560px,100%);max-height:calc(100vh - 32px);overflow:auto;background:#fff;border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.3);padding:22px}.nxc-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.nxc-dialog h2{margin:0;font-size:20px;line-height:1.25}.nxc-close{appearance:none;border:0;background:transparent;color:#65717a;font-size:26px;line-height:1;cursor:pointer;padding:0 2px}",
+      ".nxc-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:14px 0;border-top:1px solid #e6ecef}.nxc-option b{display:block;margin-bottom:3px;font-size:14px}.nxc-option span{display:block;color:#68747b;font-size:12px;line-height:1.4}.nxc-switch{width:20px;height:20px;accent-color:#5aacec}.nxc-required{color:#33885b;font-size:12px;font-weight:700}.nxc-dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:16px;border-top:1px solid #e6ecef}",
+      "#nexus-consent-manage{position:fixed;z-index:2147482900;left:12px;bottom:max(12px,env(safe-area-inset-bottom));border:1px solid #cdd7dc;border-radius:999px;background:#fff;color:#445159;box-shadow:0 6px 20px rgba(18,38,52,.15);height:36px;padding:0 12px;font:700 12px/1 Circe,Arial,sans-serif;cursor:pointer}",
+      "@media(max-width:720px){#nexus-consent-banner{grid-template-columns:1fr;gap:12px;padding:15px}.nxc-actions{justify-content:stretch}.nxc-button{flex:1 1 auto}.nxc-button-link{flex-basis:100%;order:3}.nxc-dialog{padding:18px}}",
+      "@media(max-width:420px){#nexus-consent-banner{width:calc(100vw - 16px);bottom:8px}.nxc-title{font-size:15px}.nxc-text{font-size:12px}.nxc-button{padding:0 10px;font-size:12px}}"
+    ].join("");
+    nativeAppend.call(document.head || document.documentElement, style);
+  }
+  function hideUi() {
+    var banner = document.getElementById("nexus-consent-banner");
+    var modal = document.getElementById("nexus-consent-modal");
+    if (banner) banner.hidden = true;
+    if (modal) modal.hidden = true;
+  }
+  function showManageButton() {
+    var button = document.getElementById("nexus-consent-manage");
+    if (button) button.hidden = false;
+  }
+  function applyPreferences(value) {
+    if (value.analytics) {
+      release("analytics");
+      release("custom");
+    }
+    if (value.advertising) release("advertising");
+  }
+  function saveChoice(value) {
+    var turningOff = (released.analytics && value.analytics !== true) || (released.advertising && value.advertising !== true);
+    var stored = writePreferences(value);
+    hideUi();
+    showManageButton();
+    if (turningOff) {
+      try { location.reload(); } catch (_) {}
+      return stored;
+    }
+    applyPreferences(stored);
+    return stored;
+  }
+  function buildUi() {
+    if (!document.body || document.getElementById("nexus-consent-banner")) return;
+    styleUi();
+    var banner = document.createElement("section");
+    banner.id = "nexus-consent-banner";
+    banner.setAttribute("role", "region");
+    banner.setAttribute("aria-label", "Настройки cookie");
+    banner.innerHTML = '<div class="nxc-copy"><p class="nxc-title">Cookie и аналитика</p><p class="nxc-text">Мы используем необязательные cookie, аналитику и рекламные сервисы только с вашего разрешения. Подробнее — в <a href="' + policyUrl.replace(/"/g, "&quot;") + '" target="_blank" rel="noopener">политике обработки данных</a>.</p></div><div class="nxc-actions"><button id="nexus-consent-settings" class="nxc-button nxc-button-link" type="button">Настроить</button><button id="nexus-consent-reject" class="nxc-button" type="button">Только необходимые</button><button id="nexus-consent-accept" class="nxc-button nxc-button-primary" type="button">Принять все</button></div>';
+    var modal = document.createElement("div");
+    modal.id = "nexus-consent-modal";
+    modal.hidden = true;
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-labelledby", "nexus-consent-modal-title");
+    modal.innerHTML = '<div class="nxc-dialog"><div class="nxc-dialog-head"><div><h2 id="nexus-consent-modal-title">Настройки cookie</h2><p class="nxc-text">Выберите, какие необязательные сервисы можно включить.</p></div><button id="nexus-consent-close" class="nxc-close" type="button" aria-label="Закрыть">×</button></div><div class="nxc-option"><div><b>Необходимые</b><span>Сохраняют ваш выбор и обеспечивают работу сайта.</span></div><span class="nxc-required">Всегда включены</span></div><label class="nxc-option"><div><b>Аналитика</b><span>Nexus Tracker, Senler, Метрика, Mail.ru и внутренняя статистика Tilda.</span></div><input id="nexus-consent-analytics" class="nxc-switch" type="checkbox"></label><label class="nxc-option"><div><b>Реклама</b><span>Ретаргетинг VK и другие рекламные пиксели.</span></div><input id="nexus-consent-advertising" class="nxc-switch" type="checkbox"></label><div class="nxc-dialog-actions"><button id="nexus-consent-modal-reject" class="nxc-button" type="button">Только необходимые</button><button id="nexus-consent-save" class="nxc-button nxc-button-primary" type="button">Сохранить выбор</button></div></div>';
+    var manage = document.createElement("button");
+    manage.id = "nexus-consent-manage";
+    manage.type = "button";
+    manage.textContent = "Настройки cookie";
+    manage.hidden = true;
+    nativeAppend.call(document.body, banner);
+    nativeAppend.call(document.body, modal);
+    nativeAppend.call(document.body, manage);
+
+    function openPreferences() {
+      var current = decision || { analytics: false, advertising: false };
+      document.getElementById("nexus-consent-analytics").checked = current.analytics === true;
+      document.getElementById("nexus-consent-advertising").checked = current.advertising === true;
+      banner.hidden = true;
+      modal.hidden = false;
+      manage.hidden = true;
+    }
+    function closePreferences() {
+      modal.hidden = true;
+      if (decision) manage.hidden = false;
+      else banner.hidden = false;
+    }
+    document.getElementById("nexus-consent-settings").onclick = openPreferences;
+    document.getElementById("nexus-consent-accept").onclick = function () { saveChoice({ analytics: true, advertising: true }); };
+    document.getElementById("nexus-consent-reject").onclick = function () { saveChoice({ analytics: false, advertising: false }); };
+    document.getElementById("nexus-consent-close").onclick = closePreferences;
+    document.getElementById("nexus-consent-modal-reject").onclick = function () { saveChoice({ analytics: false, advertising: false }); };
+    document.getElementById("nexus-consent-save").onclick = function () {
+      saveChoice({
+        analytics: document.getElementById("nexus-consent-analytics").checked,
+        advertising: document.getElementById("nexus-consent-advertising").checked
+      });
+    };
+    manage.onclick = openPreferences;
+    window.NexusMetricGate.openPreferences = openPreferences;
+    if (decision) {
+      banner.hidden = true;
+      manage.hidden = false;
+    }
+  }
+  function ready(callback) {
+    if (document.body) callback();
+    else document.addEventListener("DOMContentLoaded", callback, { once: true });
+  }
+
   window.NexusMetricGate = {
     release: release,
     isReleased: function (category) { return released[clean(category)] === true; },
     pendingCount: function () { return pending.length; },
-    categoryForUrl: categoryForUrl
+    categoryForUrl: categoryForUrl,
+    getPreferences: function () { return decision ? { analytics: decision.analytics, advertising: decision.advertising } : null; },
+    acceptAll: function () { return saveChoice({ analytics: true, advertising: true }); },
+    rejectOptional: function () { return saveChoice({ analytics: false, advertising: false }); },
+    savePreferences: function (value) { return saveChoice(value || {}); },
+    openPreferences: function () {
+      ready(function () {
+        buildUi();
+        var trigger = document.getElementById(decision ? "nexus-consent-manage" : "nexus-consent-settings");
+        if (trigger && typeof trigger.click === "function") trigger.click();
+      });
+    },
+    reset: function () {
+      try { localStorage.removeItem(PREF_KEY); } catch (_) {}
+      try { document.cookie = PREF_COOKIE + "=; Max-Age=0; Path=/; SameSite=Lax"; } catch (_) {}
+      try { location.reload(); } catch (_) {}
+    }
   };
+
+  decision = readPreferences();
+  if (decision) applyPreferences(decision);
+  ready(function () {
+    buildUi();
+    if (decision) applyPreferences(decision);
+    else {
+      var banner = document.getElementById("nexus-consent-banner");
+      if (banner) banner.hidden = false;
+    }
+  });
+  try {
+    var observer = new MutationObserver(function () {
+      if (released.analytics) activateMarked("analytics");
+      if (released.advertising) activateMarked("advertising");
+      if (released.custom) activateMarked("custom");
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_) {}
 })(window, document);
+""".strip()
+
+
+SOBAKOVOD_CONSENT_SCRIPTS = r"""
+<script type="text/plain" data-nexus-consent="analytics">
+(function(m,e,t,r,i,k,a){
+  m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+  m[i].l=1*new Date();k=e.createElement(t);a=e.getElementsByTagName(t)[0];
+  k.async=1;k.src=r;a.parentNode.insertBefore(k,a);
+})(window,document,"script","https://mc.yandex.ru/metrika/tag.js","ym");
+window.mainMetrikaId="96682515";
+ym(window.mainMetrikaId,"init",{clickmap:true,trackLinks:true,accurateTrackBounce:true,webvisor:true,ecommerce:"dataLayer"});
+</script>
+
+<script type="text/plain" data-nexus-consent="analytics">
+window._tmr=window._tmr||[];
+window._tmr.push({id:"3565736",type:"pageView",start:(new Date()).getTime()});
+(function(d,w,id){
+  if(d.getElementById(id))return;
+  var s=d.createElement("script");s.type="text/javascript";s.async=true;s.id=id;
+  s.src="https://top-fwz1.mail.ru/js/code.js";
+  var first=d.getElementsByTagName("script")[0];first.parentNode.insertBefore(s,first);
+})(document,window,"nexus-mailru-code");
+</script>
+
+<script type="text/plain" data-nexus-consent="advertising">
+!function(){
+  var t=document.createElement("script");t.type="text/javascript";t.async=true;
+  t.src="https://vk.com/js/api/openapi.js?173";
+  t.onload=function(){VK.Retargeting.Init("VK-RTRG-1970487-gNb2D");VK.Retargeting.Hit()};
+  document.head.appendChild(t);
+}();
+</script>
+
+<script type="text/plain" data-nexus-consent="analytics">
+(function(){
+  if(window.__nxt)return;window.__nxt=1;
+  try{
+    var u=location.origin+location.pathname,p={},q=location.search.slice(1);
+    if(q)q.split("&").forEach(function(s){
+      var i=s.indexOf("=");if(i<1)return;
+      try{p[decodeURIComponent(s.slice(0,i))]=decodeURIComponent(s.slice(i+1))}catch(e){}
+    });
+    if(typeof fetch==="function")fetch("https://junior.sobakovod.pro/nexus/senler/api/track",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url:u,params:p}),keepalive:true,mode:"cors"
+    }).catch(function(){});
+  }catch(e){}
+})();
+</script>
 """.strip()
 
 

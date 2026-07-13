@@ -14,59 +14,36 @@
   <h1>Трекер</h1>
   <p>Модуль собирает визиты, UTM, click id, IP/Geo, устройство и подтвержденные формы. Скрипт не меняет страницу: не правит URL, DOM, стили, формы и не блокирует отправку.</p>
 
-  <h2>Tilda: строгая установка через T972</h2>
+  <h2>Tilda: один автономный код в Head</h2>
   <ol>
-    <li>Добавьте блок <code>T972</code> на каждую страницу, включите «Принять все», «Отклонить все», настройки категорий и ссылку повторного открытия <code>#opencookiebanner</code>.</li>
-    <li>Метрику/GA/GTM подключайте только через «Настройки сайта → Аналитика», чтобы ими управлял T972. Удалите дубли этих счетчиков из Head.</li>
-    <li>Во вкладке «Скрипт» оставьте режим «Tilda T972 · строгий», скопируйте snippet и поставьте его самым первым кодом в Head.</li>
-    <li>Любой свой inline-код аналитики делайте неисполняемым до согласия: <code>type="text/plain" data-tilda-cookie-type="analytics"</code>. Рекламные пиксели используют категорию <code>advertising</code>.</li>
-    <li>У внешнего файла заменяйте <code>src</code> на <code>data-src</code>. Удалите metric-pixel из <code>noscript</code>: при отключенном JavaScript получить согласие невозможно.</li>
+    <li>Отключите Яндекс.Метрику и Mail.ru в «Настройки сайта → Аналитика». Их загрузит готовый Nexus-код после согласия. Это также удалит созданные Tilda <code>noscript</code>-пиксели, которые JavaScript физически не может остановить.</li>
+    <li>Удалите из Head старые блоки VK, Mail.ru, Senler и старый тег Nexus вместе со всеми их <code>noscript</code>.</li>
+    <li>Во вкладке «Скрипт» включите «свой баннер · без блоков Tilda», скопируйте весь код и вставьте один раз в глобальный Head сайта.</li>
+    <li>Сохраните настройки и выполните «Опубликовать все страницы». Добавлять T972 или любой другой блок на страницы не нужно.</li>
   </ol>
-  <pre><code>&lt;!-- Аналитика / POST-трекинг --&gt;
-&lt;script type="text/plain" data-tilda-cookie-type="analytics"&gt;
-  // fetch(...) или inline-код счетчика
-&lt;/script&gt;
+  <p>Плашка и настройки встроены прямо в скопированный Head-код, поэтому они показываются даже при блокировке домена <code>junior.sobakovod.pro</code>. До выбора не загружаются Nexus Tracker, Senler, Яндекс.Метрика, Mail.ru, VK и внутренняя статистика Tilda. После выбора остается кнопка «Настройки cookie», через которую разрешение можно изменить или отозвать.</p>
 
-&lt;!-- Рекламный пиксель VK --&gt;
-&lt;script type="text/plain" data-tilda-cookie-type="advertising"&gt;
-  // загрузка openapi.js и VK.Retargeting.Hit()
-&lt;/script&gt;
-
-&lt;!-- Внешний Nexus tracker --&gt;
-&lt;script data-src="https://junior.sobakovod.pro/nexus/tracker/api/script.js"
-  data-tilda-cookie-type="analytics" data-site="sobakovod"
-  data-consent="managed"&gt;&lt;/script&gt;</code></pre>
-  <p>Inline gate не обращается к Nexus и не записывает cookie: он запускается с самой страницы Tilda, поэтому T972 и выбор категорий остаются доступны даже при блокировке <code>junior.sobakovod.pro</code>. До разрешения он дополнительно удерживает внутренний <code>tilda-stat</code> и известные прямые транспорты Метрики, Mail.ru, Senler и рекламных пикселей. Это закрывает отличие T972: штатная внутренняя статистика Tilda до выбора считает обезличенный переход без cookie.</p>
-
-  <h2>Sobakovod: замена текущего Head</h2>
-  <p>Текущий ручной Mail.ru-блок удалите целиком вместе с <code>noscript</code>: этот же счетчик уже подключен через настройки Tilda, иначе после согласия получится двойной просмотр. После strict snippet оставьте только размеченные VK и Senler:</p>
-  <pre><code>&lt;script type="text/plain" data-tilda-cookie-type="advertising"&gt;
-!function(){var t=document.createElement("script");t.async=true;
-t.src="https://vk.com/js/api/openapi.js?173";
-t.onload=function(){VK.Retargeting.Init("VK-RTRG-1970487-gNb2D");VK.Retargeting.Hit()};
-document.head.appendChild(t)}();
-&lt;/script&gt;
-
-&lt;script type="text/plain" data-tilda-cookie-type="analytics"&gt;
-(function(){if(window.__nxt)return;window.__nxt=1;try{
-var u=location.origin+location.pathname,p={},q=location.search.slice(1);
-if(q)q.split('&amp;').forEach(function(s){var i=s.indexOf('=');if(i&lt;1)return;
-try{p[decodeURIComponent(s.slice(0,i))]=decodeURIComponent(s.slice(i+1))}catch(e){}});
-if(typeof fetch==='function')fetch('https://junior.sobakovod.pro/nexus/senler/api/track',{
-method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u,params:p}),
-keepalive:true,mode:'cors'}).catch(function(){})}catch(e){}})();
-&lt;/script&gt;</code></pre>
-  <p>У VK и Mail.ru не должно остаться <code>noscript img</code>. Встроенные Яндекс.Метрика и Mail.ru остаются в настройках сайта и будут управляться T972; Nexus Tracker уже включен в strict snippet.</p>
+  <h2>Категории готового кода Sobakovod</h2>
+  <table>
+    <tr><th>Выбор</th><th>Что запускается</th></tr>
+    <tr><td>Только необходимые</td><td>Ни один счетчик, аналитический запрос или рекламный пиксель.</td></tr>
+    <tr><td>Аналитика</td><td>Nexus Tracker, Senler, Яндекс.Метрика, Mail.ru и внутренняя статистика Tilda.</td></tr>
+    <tr><td>Реклама</td><td>VK Ретаргетинг и другие размеченные рекламные пиксели.</td></tr>
+  </table>
 
   <h2>Защита от случайной ранней загрузки</h2>
-  <p><code>data-consent="managed"</code> запрещает Nexus Tracker создавать visitor/visit cookie, localStorage и сетевые события, пока inline gate не получил от T972 разрешение категории analytics. Даже ошибочный обычный <code>src</code> не включает сбор. Новые сторонние скрипты всё равно нужно явно относить к <code>analytics</code>, <code>advertising</code> или <code>custom</code>: автоматически и безошибочно определить назначение произвольного будущего кода невозможно.</p>
+  <p><code>data-consent="managed"</code> запрещает Nexus Tracker создавать visitor/visit cookie, localStorage и сетевые события до разрешения аналитики. Gate также удерживает известные URL Метрики, Mail.ru, Nexus, Senler, Tilda Stat и рекламных пикселей. Новые сторонние скрипты всё равно нужно явно относить к <code>analytics</code>, <code>advertising</code> или <code>custom</code>: назначение произвольного будущего кода нельзя определить безошибочно.</p>
   <p><code>data-site</code> нужен только для группировки сайтов в панели. После согласия скрипт читает first-party <code>_ym_uid</code>, если его уже поставила Метрика.</p>
 
-  <h2>Обычный сайт без T972</h2>
-  <p>Для не-Tilda сайта остается автономный режим <code>data-consent="required" data-banner="1"</code>. В строгой конфигурации не используйте <code>data-auto-consent</code>: скролл или продолжение просмотра не заменяют явный выбор.</p>
-  <pre><code>window.NexusTracker.grantConsent("site_banner");
-window.NexusTracker.revokeConsent();
-window.NexusTracker.hasConsent();</code></pre>
+  <h2>Как разметить новый скрипт</h2>
+  <p>Inline-код храните как <code>type="text/plain"</code>, а внешний URL — в <code>data-src</code>. Gate сам превратит его в исполняемый скрипт после разрешения категории:</p>
+  <pre><code>&lt;script type="text/plain" data-nexus-consent="analytics"&gt;
+  // код аналитики
+&lt;/script&gt;
+
+&lt;script type="text/plain" data-src="https://example.test/pixel.js"
+  data-nexus-consent="advertising"&gt;&lt;/script&gt;</code></pre>
+  <p>Не добавляйте аналитические <code>noscript img</code>: без JavaScript запрос согласия не работает, поэтому такой пиксель нарушит принцип «сначала выбор — потом загрузка». Не используйте автоматическое согласие по скроллу или продолжению просмотра.</p>
 
   <h2>Что собирается</h2>
   <table>
@@ -91,7 +68,8 @@ window.NexusTracker.hasConsent();</code></pre>
   <table>
     <tr><th>Метод</th><th>Endpoint</th><th>Назначение</th></tr>
     <tr><td>GET</td><td><code>/tracker/api/script.js</code></td><td>Клиентский скрипт.</td></tr>
-    <tr><td>GET</td><td><code>/tracker/api/consent-gate.js</code></td><td>Исходник inline gate; в Tilda вставляется содержимое, а не внешний <code>src</code>.</td></tr>
+    <tr><td>GET</td><td><code>/tracker/api/consent-gate.js</code></td><td>Исходник автономного inline gate.</td></tr>
+    <tr><td>GET</td><td><code>/tracker/api/snippet?provider=standalone&amp;site=sobakovod</code></td><td>Полный глобальный Head-код с плашкой и счетчиками Sobakovod.</td></tr>
     <tr><td>POST/GET</td><td><code>/tracker/api/collect</code></td><td>Прием событий. Всегда безопасен для браузера.</td></tr>
     <tr><td>GET</td><td><code>/tracker/api/pixel.gif</code></td><td>1x1 fallback pixel.</td></tr>
   </table>
