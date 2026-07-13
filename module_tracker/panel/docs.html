@@ -14,12 +14,56 @@
   <h1>Трекер</h1>
   <p>Модуль собирает визиты, UTM, click id, IP/Geo, устройство и подтвержденные формы. Скрипт не меняет страницу: не правит URL, DOM, стили, формы и не блокирует отправку.</p>
 
-  <h2>Установка скрипта</h2>
-  <pre><code>&lt;script src="https://junior.sobakovod.pro/nexus/tracker/api/script.js" async data-site="sobakovod" data-consent="required" data-banner="1" data-policy-url="https://sobakovod.pro/popd" data-auto-consent="continue"&gt;&lt;/script&gt;</code></pre>
-  <p><code>data-site</code> нужен только для группировки сайтов в панели. Если не задан, используется host страницы.</p>
+  <h2>Tilda: строгая установка через T972</h2>
+  <ol>
+    <li>Добавьте блок <code>T972</code> на каждую страницу, включите «Принять все», «Отклонить все», настройки категорий и ссылку повторного открытия <code>#opencookiebanner</code>.</li>
+    <li>Метрику/GA/GTM подключайте только через «Настройки сайта → Аналитика», чтобы ими управлял T972. Удалите дубли этих счетчиков из Head.</li>
+    <li>Во вкладке «Скрипт» оставьте режим «Tilda T972 · строгий», скопируйте snippet и поставьте его самым первым кодом в Head.</li>
+    <li>Любой свой inline-код аналитики делайте неисполняемым до согласия: <code>type="text/plain" data-tilda-cookie-type="analytics"</code>. Рекламные пиксели используют категорию <code>advertising</code>.</li>
+    <li>У внешнего файла заменяйте <code>src</code> на <code>data-src</code>. Удалите metric-pixel из <code>noscript</code>: при отключенном JavaScript получить согласие невозможно.</li>
+  </ol>
+  <pre><code>&lt;!-- Аналитика / POST-трекинг --&gt;
+&lt;script type="text/plain" data-tilda-cookie-type="analytics"&gt;
+  // fetch(...) или inline-код счетчика
+&lt;/script&gt;
 
-  <h2>Согласие и баннер</h2>
-  <p><code>data-consent="required"</code> включает режим, при котором скрипт до согласия не ставит visitor cookie/localStorage и не отправляет визиты/формы. <code>data-banner="1"</code> показывает стандартный нижний cookie-баннер в стиле сайта: читаемый текст, ссылка на политику и кнопка принятия. <code>data-auto-consent="continue"</code> считает согласием продолжение пользования после небольшой задержки: скролл, клик по сайту, касание или клавишу. Для более строгого режима уберите <code>data-auto-consent</code> и принимайте согласие только кнопкой баннера или вызовом API.</p>
+&lt;!-- Рекламный пиксель VK --&gt;
+&lt;script type="text/plain" data-tilda-cookie-type="advertising"&gt;
+  // загрузка openapi.js и VK.Retargeting.Hit()
+&lt;/script&gt;
+
+&lt;!-- Внешний Nexus tracker --&gt;
+&lt;script data-src="https://junior.sobakovod.pro/nexus/tracker/api/script.js"
+  data-tilda-cookie-type="analytics" data-site="sobakovod"
+  data-consent="managed"&gt;&lt;/script&gt;</code></pre>
+  <p>Inline gate не обращается к Nexus и не записывает cookie: он запускается с самой страницы Tilda, поэтому T972 и выбор категорий остаются доступны даже при блокировке <code>junior.sobakovod.pro</code>. До разрешения он дополнительно удерживает внутренний <code>tilda-stat</code> и известные прямые транспорты Метрики, Mail.ru, Senler и рекламных пикселей. Это закрывает отличие T972: штатная внутренняя статистика Tilda до выбора считает обезличенный переход без cookie.</p>
+
+  <h2>Sobakovod: замена текущего Head</h2>
+  <p>Текущий ручной Mail.ru-блок удалите целиком вместе с <code>noscript</code>: этот же счетчик уже подключен через настройки Tilda, иначе после согласия получится двойной просмотр. После strict snippet оставьте только размеченные VK и Senler:</p>
+  <pre><code>&lt;script type="text/plain" data-tilda-cookie-type="advertising"&gt;
+!function(){var t=document.createElement("script");t.async=true;
+t.src="https://vk.com/js/api/openapi.js?173";
+t.onload=function(){VK.Retargeting.Init("VK-RTRG-1970487-gNb2D");VK.Retargeting.Hit()};
+document.head.appendChild(t)}();
+&lt;/script&gt;
+
+&lt;script type="text/plain" data-tilda-cookie-type="analytics"&gt;
+(function(){if(window.__nxt)return;window.__nxt=1;try{
+var u=location.origin+location.pathname,p={},q=location.search.slice(1);
+if(q)q.split('&amp;').forEach(function(s){var i=s.indexOf('=');if(i&lt;1)return;
+try{p[decodeURIComponent(s.slice(0,i))]=decodeURIComponent(s.slice(i+1))}catch(e){}});
+if(typeof fetch==='function')fetch('https://junior.sobakovod.pro/nexus/senler/api/track',{
+method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u,params:p}),
+keepalive:true,mode:'cors'}).catch(function(){})}catch(e){}})();
+&lt;/script&gt;</code></pre>
+  <p>У VK и Mail.ru не должно остаться <code>noscript img</code>. Встроенные Яндекс.Метрика и Mail.ru остаются в настройках сайта и будут управляться T972; Nexus Tracker уже включен в strict snippet.</p>
+
+  <h2>Защита от случайной ранней загрузки</h2>
+  <p><code>data-consent="managed"</code> запрещает Nexus Tracker создавать visitor/visit cookie, localStorage и сетевые события, пока inline gate не получил от T972 разрешение категории analytics. Даже ошибочный обычный <code>src</code> не включает сбор. Новые сторонние скрипты всё равно нужно явно относить к <code>analytics</code>, <code>advertising</code> или <code>custom</code>: автоматически и безошибочно определить назначение произвольного будущего кода невозможно.</p>
+  <p><code>data-site</code> нужен только для группировки сайтов в панели. После согласия скрипт читает first-party <code>_ym_uid</code>, если его уже поставила Метрика.</p>
+
+  <h2>Обычный сайт без T972</h2>
+  <p>Для не-Tilda сайта остается автономный режим <code>data-consent="required" data-banner="1"</code>. В строгой конфигурации не используйте <code>data-auto-consent</code>: скролл или продолжение просмотра не заменяют явный выбор.</p>
   <pre><code>window.NexusTracker.grantConsent("site_banner");
 window.NexusTracker.revokeConsent();
 window.NexusTracker.hasConsent();</code></pre>
@@ -27,11 +71,17 @@ window.NexusTracker.hasConsent();</code></pre>
   <h2>Что собирается</h2>
   <table>
     <tr><th>Группа</th><th>Поля</th></tr>
-    <tr><td>Визит</td><td>URL, referrer, title, host, UTM, yclid/gclid/fbclid/ttclid/msclkid/roistat/_ym_uid, browser context.</td></tr>
+    <tr><td>Визит</td><td>URL, referrer, title, host, UTM, yclid/gclid/fbclid/ttclid/msclkid/roistat/_ym_uid из URL и _ym_uid из first-party cookie после consent, browser context.</td></tr>
     <tr><td>Идентификация</td><td>visitor_id, visit_id, email, phone, name, utm_term, fingerprint, marketing ids.</td></tr>
     <tr><td>Сервер</td><td>IP, User-Agent, browser/device, GeoIP country/city при наличии GeoLite2-City.mmdb.</td></tr>
     <tr><td>Формы</td><td>Только подтвержденные формы. Пароли, токены, hidden, file, captcha/OTP/CSRF и карточные поля исключаются.</td></tr>
   </table>
+
+  <h2>Диагностика UTM</h2>
+  <p>Вкладка <code>UTM</code> показывает, почему в источниках много <code>(none)</code>: события без <code>utm_source</code>, страницы без разметки, click id без source и вероятные перестановки UTM-полей. Колонка «Оригинал» всегда показывает фактические значения, которые пришли в событии.</p>
+
+  <h2>Поиск профилей</h2>
+  <p>Поиск во вкладке «Люди» проверяет контакты, имя, visit/visitor id, IP, GeoIP город/страну, browser/device, fingerprint, host/referrer/URL, все UTM-поля, внешние id вроде <code>_ym_uid</code>/<code>yclid</code> и сохраненные значения форм/сырых событий.</p>
 
   <h2>Подтверждение формы</h2>
   <p>Автоматически срабатывают success URL и видимые success-блоки Tilda/GetCourse-подобных форм. Для SPA можно вызвать:</p>
@@ -41,6 +91,7 @@ window.NexusTracker.hasConsent();</code></pre>
   <table>
     <tr><th>Метод</th><th>Endpoint</th><th>Назначение</th></tr>
     <tr><td>GET</td><td><code>/tracker/api/script.js</code></td><td>Клиентский скрипт.</td></tr>
+    <tr><td>GET</td><td><code>/tracker/api/consent-gate.js</code></td><td>Исходник inline gate; в Tilda вставляется содержимое, а не внешний <code>src</code>.</td></tr>
     <tr><td>POST/GET</td><td><code>/tracker/api/collect</code></td><td>Прием событий. Всегда безопасен для браузера.</td></tr>
     <tr><td>GET</td><td><code>/tracker/api/pixel.gif</code></td><td>1x1 fallback pixel.</td></tr>
   </table>

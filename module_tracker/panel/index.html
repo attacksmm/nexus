@@ -21,7 +21,9 @@
     .table-wrap{min-height:0;overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px}th{position:sticky;top:0;background:#141414;color:var(--muted);z-index:2}tr:hover td{background:#111}.row{cursor:pointer}.badge{display:inline-flex;border:1px solid var(--line2);padding:1px 6px;color:var(--soft);background:#121212}.badge.ok{color:var(--ok);border-color:#365f3d;background:#102015}.badge.warn{color:var(--warn);border-color:#65541a;background:#1c1706}.badge.bad{color:var(--bad);border-color:#6b3038;background:#241114}
     .detail{position:absolute;right:0;top:42px;bottom:0;width:min(620px,100%);background:#0d0d0d;border-left:1px solid var(--line2);display:grid;grid-template-rows:auto minmax(0,1fr);box-shadow:-18px 0 35px rgba(0,0,0,.25);z-index:5}.detail[hidden]{display:none}.detail-head{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)}.detail-body{min-height:0;overflow:auto;padding:12px;display:grid;gap:12px}.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:5px 10px}.k{color:var(--muted)}.v{min-width:0;word-break:break-word}.pre{margin:0;padding:10px;border:1px solid var(--line);background:#050505;color:#cfcfcf;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:220px;overflow:auto}
     .chart{display:grid;gap:5px}.bar{display:grid;grid-template-columns:92px minmax(0,1fr) 46px;gap:7px;align-items:center}.bar-line{height:8px;background:#202020}.bar-fill{height:8px;background:#dcdcdc}.script-box{margin:0;padding:12px;border:1px solid var(--line);background:#030303;color:#9fe0aa;white-space:pre-wrap;word-break:break-all;font-size:12px}
+    .stack{min-height:0;overflow:auto;padding:12px;display:grid;gap:14px;align-content:start}.block-title{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:6px}.block-title h2{margin:0}.utm-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:7px}.muted-cell{color:var(--muted)}.wrap-cell{white-space:normal;word-break:break-word}
     @media(max-width:980px){.main{grid-template-columns:1fr}.side{border-right:0;border-bottom:1px solid var(--line);max-height:42vh}.top{height:auto;min-height:42px;flex-wrap:wrap}.tabs{order:3;width:100%;height:36px;overflow:auto}.detail{top:78px}.metrics{grid-template-columns:repeat(4,minmax(110px,1fr));overflow:auto}.toolbar .field,.toolbar .field.search{min-width:100%;flex:1}}
+    @media(max-width:980px){.utm-grid{grid-template-columns:repeat(2,minmax(130px,1fr))}}
   </style>
 </head>
 <body>
@@ -34,6 +36,7 @@
       <button class="tab" data-view="events" type="button">События</button>
       <button class="tab" data-view="forms" type="button">Формы</button>
       <button class="tab" data-view="sites" type="button">Сайты</button>
+      <button class="tab" data-view="utm" type="button">UTM</button>
       <button class="tab" data-view="script" type="button">Скрипт</button>
       <button class="tab" data-view="settings" type="button">Настройки</button>
     </div>
@@ -57,7 +60,7 @@
       </div>
       <div class="section">
         <h2>Быстрый поиск</h2>
-        <input id="quickSearch" class="input" placeholder="email, телефон, visit_id, utm_term">
+        <input id="quickSearch" class="input" placeholder="email, телефон, имя, IP, город, visit_id, UTM, _ym_uid, поля форм">
         <div class="actions" style="margin-top:8px">
           <button id="quickSearchBtn" class="btn primary" type="button">Найти</button>
           <button id="clearSearchBtn" class="btn" type="button">Сброс</button>
@@ -71,7 +74,7 @@
       </section>
       <section id="view-people" class="view">
         <div class="toolbar">
-          <div class="field search"><label>Поиск</label><input id="peopleQuery" class="input" placeholder="email, телефон, имя, visit_id, utm_term"></div>
+          <div class="field search"><label>Поиск</label><input id="peopleQuery" class="input" placeholder="email, телефон, имя, IP, город, visit_id, UTM, _ym_uid, поля форм"></div>
           <button id="peopleSearchBtn" class="btn primary" type="button">Поиск</button>
         </div>
         <div class="table-wrap"><table><thead><tr><th>Последний визит</th><th>Человек</th><th>Контакты</th><th>Источник</th><th>Страница</th><th>Событий</th></tr></thead><tbody id="peopleRows"></tbody></table></div>
@@ -92,19 +95,41 @@
         <div class="toolbar"><div class="field search"><label>Сайты</label><div class="sub">Host появляется после первого события со страницы.</div></div></div>
         <div class="table-wrap"><table><thead><tr><th>Host</th><th>Событий</th><th>Людей</th><th>Первый визит</th><th>Последний визит</th></tr></thead><tbody id="siteRows"></tbody></table></div>
       </section>
+      <section id="view-utm" class="view">
+        <div class="toolbar">
+          <div class="field search"><label>Диагностика UTM</label><div class="sub">Пустой source, частичная разметка и вероятные перестановки меток.</div></div>
+          <button id="utmRefreshBtn" class="btn primary" type="button">Обновить</button>
+        </div>
+        <div class="stack">
+          <div id="utmSummary" class="utm-grid"></div>
+          <div>
+            <div class="block-title"><h2>Страницы с source = none</h2><span id="utmNoneCount" class="sub"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>Host</th><th>Страница</th><th>Referrer</th><th>Событий</th><th>Людей</th><th>Последнее</th></tr></thead><tbody id="utmNoneRows"></tbody></table></div>
+          </div>
+          <div>
+            <div class="block-title"><h2>Есть метки, но нет source</h2><span id="utmPartialCount" class="sub"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>Время</th><th>Host</th><th>Страница</th><th>Оригинал</th><th>Click ids</th></tr></thead><tbody id="utmPartialRows"></tbody></table></div>
+          </div>
+          <div>
+            <div class="block-title"><h2>Вероятно перепутаны</h2><span id="utmSuspiciousCount" class="sub"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>Время</th><th>Host</th><th>Страница</th><th>Причина</th><th>Оригинал</th><th>Предложение</th></tr></thead><tbody id="utmSuspiciousRows"></tbody></table></div>
+          </div>
+        </div>
+      </section>
       <section id="view-script" class="view">
         <div class="toolbar">
           <div class="field"><label>Site key</label><input id="siteKey" class="input" value="sobakovod"></div>
           <div class="field"><label>Политика</label><input id="policyUrl" class="input" value="https://sobakovod.pro/popd"></div>
+          <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="tildaConsent" type="checkbox" checked> Tilda T972 · строгий режим</label>
           <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="consentRequired" type="checkbox" checked> баннер согласия</label>
-          <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="autoConsent" type="checkbox" checked> продолжение = согласие</label>
+          <label style="display:flex;gap:8px;align-items:center;margin:0 0 4px;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px"><input id="autoConsent" type="checkbox"> продолжение = согласие</label>
           <button id="buildSnippetBtn" class="btn primary" type="button">Собрать</button>
           <button id="copySnippetBtn" class="btn" type="button">Копировать</button>
         </div>
         <div class="section">
           <h2>Snippet</h2>
           <pre id="snippetBox" class="script-box"></pre>
-          <p class="sub">Баннер занимает нижнюю тонкую полосу, не блокирует страницу и не меняет формы. До согласия скрипт не ставит visitor cookie и не отправляет формы; формы с отмеченной галочкой ПДн могут подтвердить consent автоматически.</p>
+          <p class="sub">Для Tilda добавьте блок T972 на каждую страницу и вставьте strict snippet самым первым кодом в Head. Баннер T972 останется first-party и появится даже при блокировке junior.sobakovod.pro. До разрешения аналитики gate удерживает Nexus, Senler, Метрику, Mail.ru и внутренний tilda-stat; рекламная категория отдельно удерживает VK-пиксель. Не оставляйте metric-pixel в noscript.</p>
         </div>
       </section>
       <section id="view-settings" class="view">
@@ -132,7 +157,8 @@ const API = modBase + '/api';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = s => s ? String(s).replace('T',' ').replace('Z','') : '';
-let state = {stats:null, people:[], events:[], forms:[], sites:[], settings:null};
+let state = {stats:null, people:[], events:[], forms:[], sites:[], utm:null, settings:null};
+let consentGateCode = '';
 
 async function req(path, opts){
   const res = await fetch(API + path, opts);
@@ -174,6 +200,37 @@ function renderForms(){
 function renderSites(){
   $('siteRows').innerHTML = state.sites.map(s => `<tr><td>${esc(s.site_host)}</td><td>${Number(s.events||0)}</td><td>${Number(s.people||0)}</td><td>${fmt(s.first_seen)}</td><td>${fmt(s.last_seen)}</td></tr>`).join('') || '<tr><td colspan="5" class="sub">Нет сайтов</td></tr>';
 }
+function utmPairs(data){
+  const src = data || {};
+  return ['utm_source','utm_medium','utm_campaign','utm_content','utm_term']
+    .map(k => src[k] ? `${k.replace('utm_','')}=${src[k]}` : '')
+    .filter(Boolean)
+    .join(' · ');
+}
+function externalPairs(e){
+  const ids = e.external_ids || {};
+  return Object.keys(ids).map(k => `${k}=${ids[k]}`).join(' · ');
+}
+function renderUtm(){
+  const data = state.utm || {};
+  const s = data.summary || {};
+  $('utmSummary').innerHTML = [
+    ['Всего событий', Number(s.total_events||0).toLocaleString('ru-RU')],
+    ['source = none', `${Number(s.none_source_events||0).toLocaleString('ru-RU')} · ${Number(s.none_source_percent||0)}%`],
+    ['вообще без UTM', Number(s.no_utm_events||0).toLocaleString('ru-RU')],
+    ['click id без source', Number(s.click_without_source_events||0).toLocaleString('ru-RU')]
+  ].map(x => `<div class="metric"><b>${esc(x[1])}</b><span>${esc(x[0])}</span></div>`).join('');
+  const none = data.unmarked_pages || [];
+  const partial = data.partial_without_source || [];
+  const suspicious = data.suspicious || [];
+  $('utmNoneCount').textContent = `${none.length} строк`;
+  $('utmPartialCount').textContent = `${partial.length} событий`;
+  $('utmSuspiciousCount').textContent = `${suspicious.length} событий`;
+  $('utmNoneRows').innerHTML = none.map(r => `<tr><td>${esc(r.site_host)}</td><td class="wrap-cell" title="${esc(r.page_url)}">${esc(r.page_url)}</td><td class="wrap-cell" title="${esc(r.sample_referrer)}">${esc(r.sample_referrer)}</td><td>${Number(r.events||0)}</td><td>${Number(r.people||0)}</td><td>${fmt(r.last_seen)}</td></tr>`).join('') || '<tr><td colspan="6" class="sub">Нет страниц</td></tr>';
+  $('utmPartialRows').innerHTML = partial.map(e => `<tr class="row" data-event='${esc(JSON.stringify(e))}'><td>${fmt(e.created_at)}</td><td>${esc(e.site_host)}</td><td class="wrap-cell" title="${esc(e.page_url)}">${esc(e.page_url)}</td><td class="wrap-cell mono">${esc(utmPairs(e) || '(none)')}</td><td class="wrap-cell mono">${esc(externalPairs(e))}</td></tr>`).join('') || '<tr><td colspan="5" class="sub">Нет событий</td></tr>';
+  $('utmSuspiciousRows').innerHTML = suspicious.map(e => `<tr class="row" data-event='${esc(JSON.stringify(e))}'><td>${fmt(e.created_at)}</td><td>${esc(e.site_host)}</td><td class="wrap-cell" title="${esc(e.page_url)}">${esc(e.page_url)}</td><td class="wrap-cell">${esc((e.suspect_reasons||[]).join(' · '))}</td><td class="wrap-cell mono">${esc(utmPairs(e.original_utm))}</td><td class="wrap-cell mono">${esc(utmPairs(e.suggested_utm))}</td></tr>`).join('') || '<tr><td colspan="6" class="sub">Нет подозрительных событий</td></tr>';
+  document.querySelectorAll('#utmPartialRows [data-event], #utmSuspiciousRows [data-event]').forEach(row => row.onclick = () => openEvent(JSON.parse(row.dataset.event)));
+}
 function renderSettings(){
   const s = state.settings || {};
   $('retentionMonths').value = s.retention_months || 6;
@@ -183,6 +240,17 @@ function renderSettings(){
 function renderSnippet(){
   const site = $('siteKey').value.trim() || 'sobakovod';
   const src = location.origin + modBase + '/api/script.js';
+  if ($('tildaConsent').checked) {
+    const safeSite = site.replace(/"/g,'&quot;');
+    $('snippetBox').textContent = [
+      '<!-- Этот код должен быть самым первым в Tilda Head. На каждой странице нужен блок T972. -->',
+      `<script>\n${consentGateCode || '/* consent gate loading */'}\n<\/script>`,
+      '<script type="text/plain" data-tilda-cookie-type="analytics" data-nexus-consent-release="analytics">window.NexusMetricGate&&window.NexusMetricGate.release("analytics");<\/script>',
+      '<script type="text/plain" data-tilda-cookie-type="advertising" data-nexus-consent-release="advertising">window.NexusMetricGate&&window.NexusMetricGate.release("advertising");<\/script>',
+      `<script data-src="${src}" data-tilda-cookie-type="analytics" data-site="${safeSite}" data-consent="managed"><\/script>`
+    ].join('\n');
+    return;
+  }
   const attrs = [
     `src="${src}"`,
     'async',
@@ -201,8 +269,10 @@ async function loadPeople(){const q = $('peopleQuery').value.trim(); const data 
 async function loadEvents(){const qs = new URLSearchParams(); if($('eventType').value)qs.set('event_type',$('eventType').value); if($('eventHost').value.trim())qs.set('site_host',$('eventHost').value.trim()); const data = await req('/events?' + qs); state.events = data.items || []; renderEvents()}
 async function loadForms(){const data = await req('/forms'); state.forms = data.items || []; renderForms()}
 async function loadSites(){const data = await req('/sites'); state.sites = data.items || []; renderSites()}
+async function loadUtm(){state.utm = await req('/utm-diagnostics'); renderUtm()}
 async function loadSettings(){state.settings = await req('/settings'); renderSettings()}
-async function loadAll(){try{await Promise.all([loadStats(),loadPeople(),loadEvents(),loadForms(),loadSites(),loadSettings()]); renderSnippet()}catch(e){$('topStatus').textContent = e.message}}
+async function loadConsentGate(){const res=await fetch(API+'/consent-gate.js'); if(!res.ok)throw new Error('consent gate '+res.status); consentGateCode=await res.text()}
+async function loadAll(){try{await Promise.all([loadStats(),loadPeople(),loadEvents(),loadForms(),loadSites(),loadUtm(),loadSettings(),loadConsentGate()]); renderSnippet()}catch(e){$('topStatus').textContent = e.message}}
 async function openProfile(visitId){
   const data = await req('/profiles/' + encodeURIComponent(visitId));
   const p = data.profile;
@@ -232,11 +302,13 @@ $('detailClose').onclick = () => $('detail').hidden = true;
 $('refreshBtn').onclick = loadAll;
 $('peopleSearchBtn').onclick = loadPeople;
 $('eventsSearchBtn').onclick = loadEvents;
+$('utmRefreshBtn').onclick = loadUtm;
 $('quickSearchBtn').onclick = () => { $('peopleQuery').value = $('quickSearch').value; switchView('people'); loadPeople(); };
 $('clearSearchBtn').onclick = () => { $('quickSearch').value=''; $('peopleQuery').value=''; loadPeople(); };
 $('buildSnippetBtn').onclick = renderSnippet;
 $('siteKey').addEventListener('input', renderSnippet);
 $('policyUrl').addEventListener('input', renderSnippet);
+$('tildaConsent').addEventListener('change', renderSnippet);
 $('consentRequired').addEventListener('change', renderSnippet);
 $('autoConsent').addEventListener('change', renderSnippet);
 $('copySnippetBtn').onclick = () => navigator.clipboard && navigator.clipboard.writeText($('snippetBox').textContent);

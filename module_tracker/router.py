@@ -31,6 +31,128 @@ MAX_PROFILE_LIMIT = 200
 MAX_PAYLOAD_BYTES = 220_000
 UTM_FIELDS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
 CLICK_ID_KEYS = ("yclid", "gclid", "fbclid", "ttclid", "msclkid", "roistat", "_openstat", "_ym_uid")
+PROFILE_SEARCH_EXACT_COLUMNS = (
+    "visit_id",
+    "first_visitor_id",
+    "last_visitor_id",
+    "first_email",
+    "last_email",
+    "first_phone",
+    "last_phone",
+    "first_fingerprint",
+    "last_fingerprint",
+    "first_ip",
+    "last_ip",
+    "first_utm_term",
+    "last_utm_term",
+)
+PROFILE_SEARCH_LIKE_COLUMNS = (
+    "first_site_host",
+    "last_site_host",
+    "first_page_url",
+    "last_page_url",
+    "first_referrer",
+    "last_referrer",
+    "first_name",
+    "last_name",
+    "first_country",
+    "last_country",
+    "first_city",
+    "last_city",
+    "first_browser",
+    "last_browser",
+    "first_device",
+    "last_device",
+    "first_utm_source",
+    "first_utm_medium",
+    "first_utm_campaign",
+    "first_utm_content",
+    "first_utm_term",
+    "last_utm_source",
+    "last_utm_medium",
+    "last_utm_campaign",
+    "last_utm_content",
+    "last_utm_term",
+    "attributes_json",
+)
+EVENT_SEARCH_EXACT_COLUMNS = (
+    "visit_id",
+    "visitor_id",
+    "ip",
+    "fingerprint",
+    "email",
+    "phone",
+    "utm_term",
+)
+EVENT_SEARCH_LIKE_COLUMNS = (
+    "site_key",
+    "site_host",
+    "page_url",
+    "referrer",
+    "page_title",
+    "country",
+    "city",
+    "user_agent",
+    "browser",
+    "device",
+    "name",
+    "email",
+    "phone",
+    "fingerprint",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "external_ids_json",
+    "form_fields_json",
+    "form_meta_json",
+    "payload_json",
+)
+SOURCE_HINTS = {
+    "vk",
+    "vkontakte",
+    "vkads",
+    "vk_ads",
+    "senler",
+    "telegram",
+    "tg",
+    "yandex",
+    "ya",
+    "direct",
+    "google",
+    "googleads",
+    "google_ads",
+    "facebook",
+    "fb",
+    "instagram",
+    "ig",
+    "tiktok",
+    "mytarget",
+    "email",
+    "sms",
+    "youtube",
+    "getcourse",
+    "bizon",
+    "tilda",
+}
+MEDIUM_HINTS = {
+    "cpc",
+    "cpm",
+    "cpa",
+    "paid",
+    "social",
+    "organic",
+    "referral",
+    "email",
+    "sms",
+    "post",
+    "story",
+    "banner",
+    "retargeting",
+    "remarketing",
+    "newsletter",
+}
 SENSITIVE_FIELD_RE = re.compile(
     r"(password|passwd|pwd|token|secret|captcha|otp|sms[_-]?code|verification|confirm[_-]?code|csrf|card|cvv|cvc)",
     re.IGNORECASE,
@@ -293,6 +415,65 @@ def _normalize_name(value: Any) -> str:
     text = re.sub(r"[<>{}\[\]`|\\/]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" .,:;\"'")
     return text[:255]
+
+
+def _search_terms(query: str) -> list[str]:
+    terms: list[str] = []
+
+    def add(value: str) -> None:
+        clean = _clean_text(value, 500)
+        if clean and clean not in terms:
+            terms.append(clean)
+
+    add(query)
+    add(query.lower())
+    add(_normalize_phone(query))
+    add(_normalize_email(query))
+    return terms
+
+
+def _sql_like(value: str) -> str:
+    escaped = _clean_text(value, 500).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _profile_search_where(query: str) -> tuple[str, list[Any]]:
+    terms = _search_terms(query)
+    like = _sql_like(query)
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    for column in PROFILE_SEARCH_EXACT_COLUMNS:
+        placeholders = ",".join("?" for _ in terms)
+        conditions.append(f"{column} IN ({placeholders})")
+        params.extend(terms)
+
+    for column in PROFILE_SEARCH_LIKE_COLUMNS:
+        conditions.append(f"{column} LIKE ? ESCAPE '\\'")
+        params.append(like)
+
+    placeholders = ",".join("?" for _ in terms)
+    conditions.append(
+        "visit_id IN ("
+        "SELECT visit_id FROM profile_keys "
+        f"WHERE key_value IN ({placeholders}) OR key_value LIKE ? ESCAPE '\\'"
+        ")"
+    )
+    params.extend(terms)
+    params.append(like)
+
+    event_conditions: list[str] = []
+    event_params: list[Any] = []
+    for column in EVENT_SEARCH_EXACT_COLUMNS:
+        event_conditions.append(f"{column} IN ({placeholders})")
+        event_params.extend(terms)
+    for column in EVENT_SEARCH_LIKE_COLUMNS:
+        event_conditions.append(f"{column} LIKE ? ESCAPE '\\'")
+        event_params.append(like)
+    conditions.append("visit_id IN (SELECT visit_id FROM events WHERE " + " OR ".join(event_conditions) + ")")
+    params.extend(event_params)
+
+    return "WHERE " + " OR ".join(conditions), params
 
 
 def _event_type(value: Any) -> str:
@@ -1030,6 +1211,11 @@ async def script_js():
     return PlainTextResponse(TRACKER_SCRIPT, media_type="application/javascript; charset=utf-8", headers={**_cors_headers(), "Cache-Control": "public, max-age=300"})
 
 
+@router.get("/consent-gate.js")
+async def consent_gate_js():
+    return PlainTextResponse(CONSENT_GATE_SCRIPT, media_type="application/javascript; charset=utf-8", headers={**_cors_headers(), "Cache-Control": "public, max-age=300"})
+
+
 @router.get("/snippet")
 async def snippet(
     request: Request,
@@ -1038,6 +1224,7 @@ async def snippet(
     banner: str = "0",
     auto_consent: str = "",
     policy_url: str = "",
+    provider: str = "",
 ):
     try:
         url = str(request.url_for("script_js"))
@@ -1046,11 +1233,24 @@ async def snippet(
         root_path = _clean_text(request.scope.get("root_path", ""), 80).rstrip("/")
         prefix = "" if root_path and base.endswith(root_path) else root_path
         url = f"{base}{prefix}/tracker/api/script.js"
-    attrs = [
-        f'src="{url}"',
-        "async",
-        f'data-site="{_clean_text(site, 80)}"',
-    ]
+    provider_clean = _clean_text(provider, 32).lower()
+    if provider_clean in {"tilda", "t972"}:
+        attrs = [
+            f'data-src="{url}"',
+            'data-tilda-cookie-type="analytics"',
+            f'data-site="{_clean_text(site, 80)}"',
+            'data-consent="managed"',
+        ]
+        html = "\n".join([
+            "<!-- Put this inline gate first in Tilda HEAD. Add T972 to every page. -->",
+            f"<script>\n{CONSENT_GATE_SCRIPT}\n</script>",
+            '<script type="text/plain" data-tilda-cookie-type="analytics" data-nexus-consent-release="analytics">window.NexusMetricGate&&window.NexusMetricGate.release("analytics");</script>',
+            '<script type="text/plain" data-tilda-cookie-type="advertising" data-nexus-consent-release="advertising">window.NexusMetricGate&&window.NexusMetricGate.release("advertising");</script>',
+            f'<script {" ".join(attrs)}></script>',
+        ])
+        return PlainTextResponse(html, media_type="text/plain; charset=utf-8")
+
+    attrs = [f'src="{url}"', "async", f'data-site="{_clean_text(site, 80)}"']
     consent_clean = _clean_text(consent, 32).lower()
     if consent_clean and consent_clean != "off":
         attrs.append(f'data-consent="{consent_clean}"')
@@ -1135,6 +1335,77 @@ async def stats(request: Request):
     }
 
 
+@router.get("/utm-diagnostics")
+async def utm_diagnostics(request: Request, limit: int = 80):
+    await _require_user(request)
+    limit = max(10, min(int(limit), 200))
+    async with _connect() as db:
+        summary_row = await (await db.execute(
+            """
+            SELECT
+                COUNT(*) AS total_events,
+                SUM(CASE WHEN utm_source='' THEN 1 ELSE 0 END) AS none_source_events,
+                SUM(CASE WHEN utm_source='' AND utm_medium='' AND utm_campaign='' AND utm_content='' AND utm_term='' THEN 1 ELSE 0 END) AS no_utm_events,
+                SUM(CASE WHEN utm_source='' AND external_ids_json!='{}' THEN 1 ELSE 0 END) AS click_without_source_events,
+                SUM(CASE WHEN utm_source='' AND (utm_medium!='' OR utm_campaign!='' OR utm_content!='' OR utm_term!='') THEN 1 ELSE 0 END) AS partial_without_source_events,
+                COUNT(DISTINCT CASE WHEN utm_source='' THEN page_url END) AS none_source_pages
+            FROM events
+            """
+        )).fetchone()
+        unmarked_pages = await (await db.execute(
+            """
+            SELECT site_host, page_url, COUNT(*) AS events, COUNT(DISTINCT visit_id) AS people,
+                   MAX(created_at) AS last_seen, MAX(referrer) AS sample_referrer
+            FROM events
+            WHERE utm_source=''
+            GROUP BY site_host, page_url
+            ORDER BY events DESC, last_seen DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )).fetchall()
+        partial_rows = await (await db.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE utm_source='' AND (
+                utm_medium!='' OR utm_campaign!='' OR utm_content!='' OR utm_term!='' OR external_ids_json!='{}'
+            )
+            ORDER BY created_ts DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )).fetchall()
+        candidate_rows = await (await db.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE utm_source!='' OR utm_medium!='' OR utm_campaign!='' OR utm_content!='' OR utm_term!=''
+            ORDER BY created_ts DESC
+            LIMIT 5000
+            """
+        )).fetchall()
+
+    summary = {key: int(summary_row[key] or 0) for key in summary_row.keys()}
+    total = max(1, summary["total_events"])
+    summary["none_source_percent"] = round(summary["none_source_events"] * 100 / total, 1)
+
+    suspicious: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        item = _utm_suspect_payload(dict(row))
+        if item:
+            suspicious.append(item)
+        if len(suspicious) >= limit:
+            break
+
+    return {
+        "summary": summary,
+        "unmarked_pages": [dict(row) for row in unmarked_pages],
+        "partial_without_source": [_event_payload(dict(row)) for row in partial_rows],
+        "suspicious": suspicious,
+    }
+
+
 @router.get("/profiles")
 async def profiles(request: Request, q: str = "", limit: int = 80, offset: int = 0):
     await _require_user(request)
@@ -1144,13 +1415,7 @@ async def profiles(request: Request, q: str = "", limit: int = 80, offset: int =
     where = ""
     params: list[Any] = []
     if query:
-        like = f"%{query}%"
-        where = """
-        WHERE visit_id=? OR last_visitor_id=? OR last_email=? OR first_email=? OR last_phone=? OR first_phone=?
-           OR last_name LIKE ? OR first_name LIKE ? OR last_utm_term=? OR first_utm_term=?
-           OR last_page_url LIKE ? OR first_page_url LIKE ?
-        """
-        params = [query, query, query.lower(), query.lower(), _normalize_phone(query), _normalize_phone(query), like, like, query, query, like, like]
+        where, params = _profile_search_where(query)
     async with _connect() as db:
         total_row = await (await db.execute(f"SELECT COUNT(*) AS c FROM profiles {where}", params)).fetchone()
         rows = await (await db.execute(
@@ -1285,6 +1550,262 @@ def _event_payload(row: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _utm_value_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _clean_text(value, 200).lower())
+
+
+def _looks_like_source(value: str) -> bool:
+    raw = _clean_text(value, 200).lower()
+    slug = _utm_value_slug(raw)
+    if not slug:
+        return False
+    if slug in SOURCE_HINTS:
+        return True
+    return any(hint in slug for hint in SOURCE_HINTS if len(hint) >= 3) or bool(re.search(r"\.(ru|com|pro|org|net)\b", raw))
+
+
+def _looks_like_medium(value: str) -> bool:
+    slug = _utm_value_slug(value)
+    return bool(slug and (slug in MEDIUM_HINTS or any(slug == hint for hint in MEDIUM_HINTS)))
+
+
+def _looks_like_campaign(value: str) -> bool:
+    raw = _clean_text(value, 240)
+    if not raw:
+        return False
+    if _looks_like_source(raw) or _looks_like_medium(raw):
+        return False
+    return len(raw) >= 18 or " " in raw or "-" in raw or "_" in raw or bool(re.search(r"[А-Яа-яЁё]", raw))
+
+
+def _utm_original(row: dict[str, Any]) -> dict[str, str]:
+    return {field: _clean_text(row.get(field), 500) for field in UTM_FIELDS}
+
+
+def _utm_suspect_payload(row: dict[str, Any]) -> dict[str, Any] | None:
+    original = _utm_original(row)
+    source = original["utm_source"]
+    medium = original["utm_medium"]
+    campaign = original["utm_campaign"]
+    content = original["utm_content"]
+    term = original["utm_term"]
+    reasons: list[str] = []
+    suggested = dict(original)
+
+    source_candidates = [("utm_medium", medium), ("utm_campaign", campaign), ("utm_content", content), ("utm_term", term)]
+    found_source = next(((field, value) for field, value in source_candidates if _looks_like_source(value)), None)
+
+    if not source and any(original.values()):
+        reasons.append("нет utm_source, но есть другие UTM")
+        if found_source:
+            suggested["utm_source"] = found_source[1]
+            if found_source[0] != "utm_source":
+                suggested[found_source[0]] = ""
+                reasons.append(f"источник похож на {found_source[0]}")
+    if source and _looks_like_medium(source) and not _looks_like_medium(medium):
+        reasons.append("utm_source похож на medium")
+        if not medium:
+            suggested["utm_medium"] = source
+            suggested["utm_source"] = found_source[1] if found_source else ""
+    if source and campaign and _looks_like_campaign(source) and _looks_like_source(campaign):
+        reasons.append("utm_source и utm_campaign похожи на переставленные")
+        suggested["utm_source"] = campaign
+        suggested["utm_campaign"] = source
+    elif campaign and _looks_like_source(campaign) and source and not _looks_like_source(source):
+        reasons.append("utm_campaign похож на источник")
+    if term and _looks_like_source(term) and not source:
+        reasons.append("utm_term похож на источник при пустом utm_source")
+
+    if not reasons:
+        return None
+    payload = _event_payload(row)
+    payload["original_utm"] = original
+    payload["suggested_utm"] = suggested
+    payload["suspect_reasons"] = reasons
+    return payload
+
+
+CONSENT_GATE_SCRIPT = r"""
+(function (window, document) {
+  "use strict";
+  if (window.NexusMetricGate) return;
+
+  var released = { necessary: true, analytics: false, advertising: false, custom: false };
+  var pending = [];
+  var patterns = {
+    analytics: [
+      /(?:^|\/\/|\.)mc\.yandex\./i,
+      /(?:^|\/\/|\.)metrika\.yandex\./i,
+      /top-fwz\d*\.mail\.ru/i,
+      /(?:^|\/\/|\.)top\.mail\.ru/i,
+      /google-analytics\.com/i,
+      /googletagmanager\.com/i,
+      /tilda-stat(?:-|\.)/i,
+      /\/nexus\/tracker\/api\//i,
+      /\/nexus\/senler\/api\/track/i
+    ],
+    advertising: [
+      /(?:^|\/\/)vk\.com\/js\/api\/openapi/i,
+      /(?:^|\/\/)vk\.ru\/js\/api\/openapi/i,
+      /(?:^|\/\/)vk\.com\/rtrg/i,
+      /(?:^|\/\/)vk\.ru\/rtrg/i,
+      /connect\.facebook\.net/i,
+      /facebook\.com\/tr/i,
+      /mytarget\.my\.com/i
+    ]
+  };
+
+  function clean(value) { return String(value == null ? "" : value).trim().toLowerCase(); }
+  function categoryForUrl(value) {
+    var url = clean(value);
+    if (!url) return "";
+    var categories = ["analytics", "advertising"];
+    for (var i = 0; i < categories.length; i += 1) {
+      var category = categories[i], rules = patterns[category] || [];
+      for (var j = 0; j < rules.length; j += 1) if (rules[j].test(url)) return category;
+    }
+    return "";
+  }
+  function declaredCategory(node) {
+    if (!node || !node.getAttribute) return "";
+    if (node.getAttribute("data-nexus-consent-release")) return "";
+    var value = clean(node.getAttribute("data-tilda-cookie-type") || node.getAttribute("data-nexus-consent"));
+    return Object.prototype.hasOwnProperty.call(released, value) ? value : "";
+  }
+  function nodeUrl(node) {
+    if (!node || !node.getAttribute) return "";
+    return node.getAttribute("src") || node.getAttribute("href") || node.getAttribute("data-src") || "";
+  }
+  function nodeCategory(node) { return declaredCategory(node) || categoryForUrl(nodeUrl(node)); }
+  function shouldHold(category) { return !!category && released[category] !== true; }
+  function hold(category, run) {
+    pending.push({ category: category, run: run });
+  }
+  function emit(category) {
+    try {
+      var event;
+      if (typeof window.CustomEvent === "function") event = new CustomEvent("nexus:consent", { detail: { category: category, granted: true } });
+      else {
+        event = document.createEvent("CustomEvent");
+        event.initCustomEvent("nexus:consent", false, false, { category: category, granted: true });
+      }
+      window.dispatchEvent(event);
+    } catch (_) {}
+  }
+  function drain(category) {
+    var rest = [], ready = [];
+    for (var i = 0; i < pending.length; i += 1) {
+      if (pending[i].category === category || released[pending[i].category] === true) ready.push(pending[i]);
+      else rest.push(pending[i]);
+    }
+    pending = rest;
+    for (var j = 0; j < ready.length; j += 1) {
+      try { ready[j].run(); } catch (_) {}
+    }
+  }
+  function release(category) {
+    var value = clean(category);
+    if (!Object.prototype.hasOwnProperty.call(released, value) || released[value]) return false;
+    released[value] = true;
+    drain(value);
+    emit(value);
+    return true;
+  }
+
+  var nativeAppend = Node.prototype.appendChild;
+  var nativeInsert = Node.prototype.insertBefore;
+  var nativeReplace = Node.prototype.replaceChild;
+  function guardedInsert(nativeMethod) {
+    return function () {
+      var parent = this, args = Array.prototype.slice.call(arguments), node = args[0];
+      var category = nodeCategory(node);
+      if (!shouldHold(category)) return nativeMethod.apply(parent, args);
+      hold(category, function () {
+        try { nativeMethod.apply(parent, args); }
+        catch (_) { try { nativeAppend.call(parent, node); } catch (_) {} }
+      });
+      return node;
+    };
+  }
+  Node.prototype.appendChild = guardedInsert(nativeAppend);
+  Node.prototype.insertBefore = guardedInsert(nativeInsert);
+  Node.prototype.replaceChild = guardedInsert(nativeReplace);
+
+  var nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function (name, value) {
+    var attr = clean(name);
+    var category = (attr === "src" || attr === "href") ? (declaredCategory(this) || categoryForUrl(value)) : "";
+    if (!shouldHold(category)) return nativeSetAttribute.apply(this, arguments);
+    var node = this, args = Array.prototype.slice.call(arguments);
+    hold(category, function () { nativeSetAttribute.apply(node, args); });
+  };
+
+  function guardUrlProperty(proto, property) {
+    if (!proto) return;
+    var descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(proto, property); } catch (_) { descriptor = null; }
+    if (!descriptor || !descriptor.get || !descriptor.set || descriptor.configurable === false) return;
+    try {
+      Object.defineProperty(proto, property, {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set: function (value) {
+          var node = this, category = declaredCategory(node) || categoryForUrl(value);
+          if (!shouldHold(category)) return descriptor.set.call(node, value);
+          hold(category, function () { descriptor.set.call(node, value); });
+        }
+      });
+    } catch (_) {}
+  }
+  guardUrlProperty(window.HTMLScriptElement && HTMLScriptElement.prototype, "src");
+  guardUrlProperty(window.HTMLImageElement && HTMLImageElement.prototype, "src");
+  guardUrlProperty(window.HTMLIFrameElement && HTMLIFrameElement.prototype, "src");
+
+  if (typeof window.fetch === "function") {
+    var nativeFetch = window.fetch;
+    window.fetch = function (input) {
+      var context = this, args = Array.prototype.slice.call(arguments);
+      var category = categoryForUrl(input && input.url ? input.url : input);
+      if (!shouldHold(category)) return nativeFetch.apply(context, args);
+      return new Promise(function (resolve, reject) {
+        hold(category, function () { nativeFetch.apply(context, args).then(resolve, reject); });
+      });
+    };
+  }
+  if (window.XMLHttpRequest && XMLHttpRequest.prototype) {
+    var nativeOpen = XMLHttpRequest.prototype.open;
+    var nativeSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__nexusMetricCategory = categoryForUrl(url);
+      return nativeOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function () {
+      var xhr = this, args = Array.prototype.slice.call(arguments), category = xhr.__nexusMetricCategory || "";
+      if (!shouldHold(category)) return nativeSend.apply(xhr, args);
+      hold(category, function () { nativeSend.apply(xhr, args); });
+    };
+  }
+  if (window.navigator && typeof navigator.sendBeacon === "function") {
+    var nativeBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function (url, data) {
+      var category = categoryForUrl(url);
+      if (!shouldHold(category)) return nativeBeacon(url, data);
+      hold(category, function () { nativeBeacon(url, data); });
+      return true;
+    };
+  }
+
+  window.NexusMetricGate = {
+    release: release,
+    isReleased: function (category) { return released[clean(category)] === true; },
+    pendingCount: function () { return pending.length; },
+    categoryForUrl: categoryForUrl
+  };
+})(window, document);
+""".strip()
+
+
 TRACKER_SCRIPT = r"""
 (function () {
   "use strict";
@@ -1340,6 +1861,10 @@ TRACKER_SCRIPT = r"""
     Object.keys(urlParams || {}).forEach(function (key) {
       if (CLICK_KEYS.indexOf(key) >= 0 || /clid$/i.test(key)) result[key] = urlParams[key];
     });
+    if (!result._ym_uid) {
+      var ymUid = clean(cookie("_ym_uid"));
+      if (ymUid) result._ym_uid = ymUid;
+    }
     return result;
   }
   function hash32(input) {
@@ -1379,7 +1904,8 @@ TRACKER_SCRIPT = r"""
     var ds = currentScript && currentScript.dataset || {};
     var consent = clean(ds.consent || ds.trackingConsent || "off").toLowerCase();
     if (consent === "1" || consent === "true" || consent === "yes") consent = "required";
-    if (consent !== "required") consent = "off";
+    if (consent === "tilda" || consent === "t972" || consent === "external") consent = "managed";
+    if (consent !== "required" && consent !== "managed") consent = "off";
     var autoConsent = clean(ds.autoConsent || ds.consentAuto || "").toLowerCase();
     var defaultConsentText = autoConsent === "continue" || autoConsent === "time"
       ? "На сайте используются файлы cookie и сервисы аналитики. Продолжая пользоваться сайтом, вы соглашаетесь с"
@@ -1413,6 +1939,10 @@ TRACKER_SCRIPT = r"""
   var CONSENT_COOKIE = "nexus_tracking_consent";
   var CONSENT_KEY = "nexus_tracker_consent_v1";
   function readConsent() {
+    if (cfg && cfg.consent === "managed") {
+      try { return !!(window.NexusMetricGate && window.NexusMetricGate.isReleased("analytics")); }
+      catch (_) { return false; }
+    }
     var raw = cookie(CONSENT_COOKIE);
     if (raw === "1" || raw === "yes" || raw === "true") return true;
     try {
@@ -1432,7 +1962,7 @@ TRACKER_SCRIPT = r"""
     } catch (_) {}
     try { localStorage.setItem(CONSENT_KEY, JSON.stringify(data)); } catch (_) {}
   }
-  function needsConsent() { return cfg.consent === "required" && !readConsent(); }
+  function needsConsent() { return cfg.consent !== "off" && !readConsent(); }
   function state() {
     var s = readLocal();
     s.visitorId = s.visitorId || cookie(COOKIE_VISITOR) || randomId("vid_");
@@ -1729,6 +2259,7 @@ TRACKER_SCRIPT = r"""
     post(cfg.endpoint, basePayload("pageview"), function (data) { syncState(appState, data); });
   }
   function grantConsent(reason) {
+    if (cfg.consent === "managed" && !readConsent()) return false;
     if (!readConsent()) writeConsent(reason || "manual");
     removeBanner();
     initTracking(reason || "manual");
@@ -1739,6 +2270,7 @@ TRACKER_SCRIPT = r"""
       initTracking();
       return true;
     }
+    if (cfg.consent === "managed") return false;
     if (form && cfg.formConsent && hasFormConsent(form)) return grantConsent(reason || "form_checkbox");
     showBanner();
     return false;
@@ -1769,8 +2301,14 @@ TRACKER_SCRIPT = r"""
 
   var cfg = config();
   if (needsConsent()) {
-    showBanner();
-    bindAutoConsent();
+    if (cfg.consent === "required") {
+      showBanner();
+      bindAutoConsent();
+    } else {
+      window.addEventListener("nexus:consent", function (event) {
+        if (event && event.detail && event.detail.category === "analytics" && readConsent()) initTracking("managed_consent");
+      });
+    }
   } else {
     initTracking();
   }
@@ -1799,6 +2337,7 @@ TRACKER_SCRIPT = r"""
     hasConsent: function () { return !needsConsent(); },
     grantConsent: function (reason) { return grantConsent(reason || "manual_api"); },
     revokeConsent: function () {
+      if (cfg.consent === "managed") return false;
       removeBanner();
       clearCookie(CONSENT_COOKIE);
       clearCookie(COOKIE_VISITOR);
