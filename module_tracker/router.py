@@ -1641,6 +1641,7 @@ CONSENT_GATE_SCRIPT = r"""
   var released = { necessary: true, analytics: false, advertising: false, custom: false };
   var pending = [];
   var decision = null;
+  var preferencesOpener = null;
   var patterns = {
     analytics: [
       /(?:^|\/\/|\.)mc\.yandex\./i,
@@ -1929,11 +1930,11 @@ CONSENT_GATE_SCRIPT = r"""
       "#nexus-consent-banner * ,#nexus-consent-modal *{box-sizing:border-box}",
       "#nexus-consent-banner{position:fixed;z-index:2147483000;left:50%;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(-50%);width:min(920px,calc(100vw - 24px));padding:17px 18px;background:#fff;border:1px solid rgba(90,172,236,.38);border-radius:14px;box-shadow:0 18px 55px rgba(18,38,52,.24);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center}",
       ".nxc-copy{min-width:0}.nxc-title{margin:0 0 5px;font-size:16px;line-height:1.2;font-weight:700;color:#252b2f}.nxc-text{margin:0;font-size:13px;line-height:1.42;color:#59636a}.nxc-text a{color:#2787cf;text-decoration:underline;text-underline-offset:2px}",
-      ".nxc-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.nxc-button{appearance:none;border:1px solid #cbd4d9;border-radius:9px;min-height:40px;padding:0 14px;background:#fff;color:#374047;font:700 13px/1 Circe,Arial,sans-serif;cursor:pointer;white-space:nowrap}.nxc-button:hover{border-color:#8da1ad}.nxc-button-primary{background:#5aacec;border-color:#5aacec;color:#fff}.nxc-button-primary:hover{background:#419ce2;border-color:#419ce2}.nxc-button-link{border-color:transparent;padding-left:6px;padding-right:6px;color:#397ea8}",
+      ".nxc-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.nxc-button{appearance:none;border:1px solid #cbd4d9;border-radius:9px;min-height:40px;padding:0 14px;background:#fff;color:#374047;font:700 13px/1 Circe,Arial,sans-serif;cursor:pointer;white-space:nowrap}.nxc-button:hover{border-color:#8da1ad}.nxc-button-primary{background:#5aacec;border-color:#5aacec;color:#fff}.nxc-button-primary:hover{background:#419ce2;border-color:#419ce2}",
       "#nexus-consent-modal{position:fixed;z-index:2147483100;inset:0;background:rgba(18,28,34,.48);display:flex;align-items:center;justify-content:center;padding:16px}#nexus-consent-modal[hidden],#nexus-consent-banner[hidden]{display:none!important}",
       ".nxc-dialog{width:min(560px,100%);max-height:calc(100vh - 32px);overflow:auto;background:#fff;border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.3);padding:22px}.nxc-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.nxc-dialog h2{margin:0;font-size:20px;line-height:1.25}.nxc-close{appearance:none;border:0;background:transparent;color:#65717a;font-size:26px;line-height:1;cursor:pointer;padding:0 2px}",
       ".nxc-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:14px 0;border-top:1px solid #e6ecef}.nxc-option b{display:block;margin-bottom:3px;font-size:14px}.nxc-option span{display:block;color:#68747b;font-size:12px;line-height:1.4}.nxc-switch{width:20px;height:20px;accent-color:#5aacec}.nxc-required{color:#33885b;font-size:12px;font-weight:700}.nxc-dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:16px;border-top:1px solid #e6ecef}",
-      "@media(max-width:720px){#nexus-consent-banner{grid-template-columns:1fr;gap:12px;padding:15px}.nxc-actions{justify-content:stretch}.nxc-button{flex:1 1 auto}.nxc-button-link{flex-basis:100%;order:3}.nxc-dialog{padding:18px}}",
+      "@media(max-width:720px){#nexus-consent-banner{grid-template-columns:1fr;gap:12px;padding:15px}.nxc-actions{justify-content:stretch}.nxc-button{flex:1 1 auto}.nxc-dialog{padding:18px}}",
       "@media(max-width:420px){#nexus-consent-banner{width:calc(100vw - 16px);bottom:8px}.nxc-title{font-size:15px}.nxc-text{font-size:12px}.nxc-button{padding:0 10px;font-size:12px}}"
     ].join("");
     nativeAppend.call(document.head || document.documentElement, style);
@@ -1969,7 +1970,7 @@ CONSENT_GATE_SCRIPT = r"""
     banner.id = "nexus-consent-banner";
     banner.setAttribute("role", "region");
     banner.setAttribute("aria-label", "Настройки cookie");
-    banner.innerHTML = '<div class="nxc-copy"><p class="nxc-title">Cookie и аналитика</p><p class="nxc-text">Мы используем необязательные cookie, аналитику и рекламные сервисы только с вашего разрешения. Подробнее — в <a href="' + policyUrl.replace(/"/g, "&quot;") + '" target="_blank" rel="noopener">политике обработки данных</a>.</p></div><div class="nxc-actions"><button id="nexus-consent-settings" class="nxc-button nxc-button-link" type="button">Настроить</button><button id="nexus-consent-reject" class="nxc-button" type="button">Отклонить</button><button id="nexus-consent-accept" class="nxc-button nxc-button-primary" type="button">Принять</button></div>';
+    banner.innerHTML = '<div class="nxc-copy"><p class="nxc-title">Cookie и аналитика</p><p class="nxc-text">Мы используем необязательные cookie, аналитику и рекламные сервисы только с вашего разрешения. Подробнее — в <a href="' + policyUrl.replace(/"/g, "&quot;") + '" target="_blank" rel="noopener">политике обработки данных</a>.</p></div><div class="nxc-actions"><button id="nexus-consent-reject" class="nxc-button" type="button">Отклонить</button><button id="nexus-consent-accept" class="nxc-button nxc-button-primary" type="button">Принять</button></div>';
     var modal = document.createElement("div");
     modal.id = "nexus-consent-modal";
     modal.hidden = true;
@@ -1991,7 +1992,6 @@ CONSENT_GATE_SCRIPT = r"""
       modal.hidden = true;
       if (!decision) banner.hidden = false;
     }
-    document.getElementById("nexus-consent-settings").onclick = openPreferences;
     document.getElementById("nexus-consent-accept").onclick = function () { saveChoice({ analytics: true, advertising: true }); };
     document.getElementById("nexus-consent-reject").onclick = function () { saveChoice({ analytics: false, advertising: false }); };
     document.getElementById("nexus-consent-close").onclick = closePreferences;
@@ -2002,7 +2002,7 @@ CONSENT_GATE_SCRIPT = r"""
         advertising: document.getElementById("nexus-consent-advertising").checked
       });
     };
-    window.NexusMetricGate.openPreferences = openPreferences;
+    preferencesOpener = openPreferences;
     if (decision) {
       banner.hidden = true;
     }
@@ -2024,8 +2024,7 @@ CONSENT_GATE_SCRIPT = r"""
     openPreferences: function () {
       ready(function () {
         buildUi();
-        var trigger = document.getElementById("nexus-consent-settings");
-        if (trigger && typeof trigger.click === "function") trigger.click();
+        if (preferencesOpener) preferencesOpener();
       });
     },
     reset: function () {

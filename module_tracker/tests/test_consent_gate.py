@@ -112,7 +112,8 @@ document.addEventListener('DOMContentLoaded',function(){{
     tracker:typeof window.NexusTracker,
     state:localStorage.getItem('nexus_tracker_state_v1'),
     preferences:window.NexusMetricGate.getPreferences(),
-    banner:!document.getElementById('nexus-consent-banner').hidden
+    banner:!document.getElementById('nexus-consent-banner').hidden,
+    settingsButtonExists:!!document.getElementById('nexus-consent-settings')
   }};
   document.getElementById('nexus-consent-reject').click();
   var rejected={{
@@ -212,6 +213,7 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertIsNone(payload["before"]["state"])
         self.assertIsNone(payload["before"]["preferences"])
         self.assertTrue(payload["before"]["banner"])
+        self.assertFalse(payload["before"]["settingsButtonExists"])
 
         self.assertEqual(payload["rejected"]["calls"], 0)
         self.assertFalse(payload["rejected"]["analyticsTimer"])
