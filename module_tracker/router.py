@@ -1246,10 +1246,9 @@ async def snippet(
             'data-consent="managed"',
         ]
         html = "\n".join([
-            "<!-- One site-wide Tilda Head snippet. T972 is not required. -->",
+            "<!-- Put this gate FIRST in the site-wide Tilda Head. Keep metric scripts after it. T972 is not required. -->",
             f'<script data-policy-url="{html_lib.escape(policy_clean, quote=True)}">\n{CONSENT_GATE_SCRIPT}\n</script>',
             f'<script {" ".join(attrs)}></script>',
-            SOBAKOVOD_CONSENT_SCRIPTS if site_clean.lower() == "sobakovod" else "",
         ])
         return PlainTextResponse(html, media_type="text/plain; charset=utf-8")
 
@@ -1718,7 +1717,14 @@ CONSENT_GATE_SCRIPT = r"""
     if (!node || !node.getAttribute) return "";
     return node.getAttribute("src") || node.getAttribute("href") || node.getAttribute("data-src") || "";
   }
-  function nodeCategory(node) { return declaredCategory(node) || categoryForUrl(nodeUrl(node)); }
+  function inlineCategory(node) {
+    if (!node || clean(node.tagName) !== "script") return "";
+    var source = "";
+    try { source = node.text || node.textContent || node.innerHTML || ""; } catch (_) {}
+    return categoryForUrl(source);
+  }
+  function nodeCategory(node) { return declaredCategory(node) || categoryForUrl(nodeUrl(node)) || inlineCategory(node); }
+  function currentScriptCategory() { return nodeCategory(document.currentScript); }
   function shouldHold(category) { return !!category && released[category] !== true; }
   function hold(category, run) { pending.push({ category: category, run: run }); }
   function emit(category) {
@@ -1837,7 +1843,7 @@ CONSENT_GATE_SCRIPT = r"""
   function guardedTimer(nativeTimer) {
     return function (callback) {
       var args = Array.prototype.slice.call(arguments);
-      var category = declaredCategory(document.currentScript);
+      var category = currentScriptCategory();
       if (!shouldHold(category) || typeof callback !== "function") return nativeTimer.apply(window, args);
       hold(category, function () { nativeTimer.apply(window, args); });
       return 0;
@@ -1845,6 +1851,40 @@ CONSENT_GATE_SCRIPT = r"""
   }
   window.setTimeout = guardedTimer(nativeSetTimeout);
   window.setInterval = guardedTimer(nativeSetInterval);
+
+  function guardStorage(storage) {
+    if (!storage) return;
+    ["setItem", "removeItem", "clear"].forEach(function (method) {
+      var nativeMethod;
+      try { nativeMethod = storage[method]; } catch (_) { nativeMethod = null; }
+      if (typeof nativeMethod !== "function") return;
+      try {
+        storage[method] = function () {
+          var context = this, args = Array.prototype.slice.call(arguments), category = currentScriptCategory();
+          if (!shouldHold(category)) return nativeMethod.apply(context, args);
+          hold(category, function () { nativeMethod.apply(context, args); });
+        };
+      } catch (_) {}
+    });
+  }
+  try { guardStorage(window.localStorage); } catch (_) {}
+  try { guardStorage(window.sessionStorage); } catch (_) {}
+
+  try {
+    var cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
+    if (cookieDescriptor && cookieDescriptor.get && cookieDescriptor.set && cookieDescriptor.configurable !== false) {
+      Object.defineProperty(Document.prototype, "cookie", {
+        configurable: cookieDescriptor.configurable,
+        enumerable: cookieDescriptor.enumerable,
+        get: cookieDescriptor.get,
+        set: function (value) {
+          var target = this, category = currentScriptCategory();
+          if (!shouldHold(category)) return cookieDescriptor.set.call(target, value);
+          hold(category, function () { cookieDescriptor.set.call(target, value); });
+        }
+      });
+    }
+  } catch (_) {}
 
   if (typeof window.fetch === "function") {
     var nativeFetch = window.fetch;
@@ -2030,56 +2070,6 @@ CONSENT_GATE_SCRIPT = r"""
     observer.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
 })(window, document);
-""".strip()
-
-
-SOBAKOVOD_CONSENT_SCRIPTS = r"""
-<script type="text/plain" data-nexus-consent="analytics">
-(function(m,e,t,r,i,k,a){
-  m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
-  m[i].l=1*new Date();k=e.createElement(t);a=e.getElementsByTagName(t)[0];
-  k.async=1;k.src=r;a.parentNode.insertBefore(k,a);
-})(window,document,"script","https://mc.yandex.ru/metrika/tag.js","ym");
-window.mainMetrikaId="96682515";
-ym(window.mainMetrikaId,"init",{clickmap:true,trackLinks:true,accurateTrackBounce:true,webvisor:true,ecommerce:"dataLayer"});
-</script>
-
-<script type="text/plain" data-nexus-consent="analytics">
-window._tmr=window._tmr||[];
-window._tmr.push({id:"3565736",type:"pageView",start:(new Date()).getTime()});
-(function(d,w,id){
-  if(d.getElementById(id))return;
-  var s=d.createElement("script");s.type="text/javascript";s.async=true;s.id=id;
-  s.src="https://top-fwz1.mail.ru/js/code.js";
-  var first=d.getElementsByTagName("script")[0];first.parentNode.insertBefore(s,first);
-})(document,window,"nexus-mailru-code");
-</script>
-
-<script type="text/plain" data-nexus-consent="advertising">
-!function(){
-  var t=document.createElement("script");t.type="text/javascript";t.async=true;
-  t.src="https://vk.com/js/api/openapi.js?173";
-  t.onload=function(){VK.Retargeting.Init("VK-RTRG-1970487-gNb2D");VK.Retargeting.Hit()};
-  document.head.appendChild(t);
-}();
-</script>
-
-<script type="text/plain" data-nexus-consent="analytics">
-(function(){
-  if(window.__nxt)return;window.__nxt=1;
-  try{
-    var u=location.origin+location.pathname,p={},q=location.search.slice(1);
-    if(q)q.split("&").forEach(function(s){
-      var i=s.indexOf("=");if(i<1)return;
-      try{p[decodeURIComponent(s.slice(0,i))]=decodeURIComponent(s.slice(i+1))}catch(e){}
-    });
-    if(typeof fetch==="function")fetch("https://junior.sobakovod.pro/nexus/senler/api/track",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({url:u,params:p}),keepalive:true,mode:"cors"
-    }).catch(function(){});
-  }catch(e){}
-})();
-</script>
 """.strip()
 
 

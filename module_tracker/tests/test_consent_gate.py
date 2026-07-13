@@ -36,6 +36,22 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
 
 
 class ConsentGateTests(unittest.TestCase):
+    def test_standalone_snippet_does_not_bundle_third_party_metrics(self):
+        source = ROUTER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(item for item in tree.body if isinstance(item, ast.AsyncFunctionDef) and item.name == "snippet")
+        snippet_source = ast.get_source_segment(source, function) or ""
+        for forbidden in (
+            "SOBAKOVOD_CONSENT_SCRIPTS",
+            "96682515",
+            "3565736",
+            "VK-RTRG-1970487-gNb2D",
+            "nexus/senler/api/track",
+        ):
+            self.assertNotIn(forbidden, snippet_source)
+        self.assertIn("CONSENT_GATE_SCRIPT", snippet_source)
+        self.assertIn('data-consent="managed"', snippet_source)
+
     def test_scripts_are_valid_javascript(self):
         node = shutil.which("node")
         if not node:
@@ -44,20 +60,6 @@ class ConsentGateTests(unittest.TestCase):
             result = subprocess.run(
                 [node, "--check", "-"],
                 input=source_constant(name),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-        sobakovod = source_constant("SOBAKOVOD_CONSENT_SCRIPTS")
-        self.assertNotIn("<noscript", sobakovod.lower())
-        embedded = re.findall(r'<script\b[^>]*>(.*?)</script>', sobakovod, re.DOTALL | re.IGNORECASE)
-        self.assertEqual(len(embedded), 4)
-        for script in embedded:
-            result = subprocess.run(
-                [node, "--check", "-"],
-                input=script,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -81,17 +83,32 @@ window.fetch=function(url, options){{
 </script>
 <script data-policy-url=\"https://example.test/policy\">{gate}</script>
 <script type=\"text/plain\" data-nexus-consent=\"analytics\" data-site=\"test\" data-consent=\"managed\">{tracker}</script>
-<script type=\"text/plain\" data-nexus-consent=\"analytics\">
-window.__analyticsRan=true;
+<script>
+window.__analyticsBootstrap=true;
+localStorage.setItem('metric_analytics_storage','1');
+document.cookie='metric_analytics_cookie=1; Path=/';
+setTimeout(function(){{window.__analyticsTimer=true;}},5);
 window.fetch('https://junior.sobakovod.pro/nexus/senler/api/track');
 </script>
-<script type=\"text/plain\" data-nexus-consent=\"advertising\">window.__advertisingRan=true;</script>
+<script>
+window.__advertisingBootstrap=true;
+localStorage.setItem('metric_advertising_storage','1');
+document.cookie='metric_advertising_cookie=1; Path=/';
+setTimeout(function(){{window.__advertisingTimer=true;}},5);
+window.__advertisingEndpoint='https://vk.com/rtrg?p=test';
+</script>
 </head><body><pre id=\"result\"></pre><script>
 document.addEventListener('DOMContentLoaded',function(){{
   var before={{
     calls:window.__metricCalls.length,
-    analytics:window.__analyticsRan===true,
-    advertising:window.__advertisingRan===true,
+    analyticsBootstrap:window.__analyticsBootstrap===true,
+    advertisingBootstrap:window.__advertisingBootstrap===true,
+    analyticsTimer:window.__analyticsTimer===true,
+    advertisingTimer:window.__advertisingTimer===true,
+    analyticsStorage:localStorage.getItem('metric_analytics_storage'),
+    advertisingStorage:localStorage.getItem('metric_advertising_storage'),
+    analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
+    advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
     tracker:typeof window.NexusTracker,
     state:localStorage.getItem('nexus_tracker_state_v1'),
     preferences:window.NexusMetricGate.getPreferences(),
@@ -100,8 +117,12 @@ document.addEventListener('DOMContentLoaded',function(){{
   document.getElementById('nexus-consent-reject').click();
   var rejected={{
     calls:window.__metricCalls.length,
-    analytics:window.__analyticsRan===true,
-    advertising:window.__advertisingRan===true,
+    analyticsTimer:window.__analyticsTimer===true,
+    advertisingTimer:window.__advertisingTimer===true,
+    analyticsStorage:localStorage.getItem('metric_analytics_storage'),
+    advertisingStorage:localStorage.getItem('metric_advertising_storage'),
+    analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
+    advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
     tracker:typeof window.NexusTracker,
     preferences:window.NexusMetricGate.getPreferences(),
     manage:!document.getElementById('nexus-consent-manage').hidden
@@ -110,8 +131,12 @@ document.addEventListener('DOMContentLoaded',function(){{
   setTimeout(function(){{
     var analyticsOnly={{
       calls:window.__metricCalls.length,
-      analytics:window.__analyticsRan===true,
-      advertising:window.__advertisingRan===true,
+      analyticsTimer:window.__analyticsTimer===true,
+      advertisingTimer:window.__advertisingTimer===true,
+      analyticsStorage:localStorage.getItem('metric_analytics_storage'),
+      advertisingStorage:localStorage.getItem('metric_advertising_storage'),
+      analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
+      advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
       tracker:typeof window.NexusTracker,
       state:!!localStorage.getItem('nexus_tracker_state_v1'),
       consent:window.NexusTracker && window.NexusTracker.hasConsent(),
@@ -124,7 +149,9 @@ document.addEventListener('DOMContentLoaded',function(){{
         rejected:rejected,
         analyticsOnly:analyticsOnly,
         afterAll:{{
-          advertising:window.__advertisingRan===true,
+          advertisingTimer:window.__advertisingTimer===true,
+          advertisingStorage:localStorage.getItem('metric_advertising_storage'),
+          advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
           preferences:window.NexusMetricGate.getPreferences()
         }},
         pending:window.NexusMetricGate.pendingCount()
@@ -170,28 +197,44 @@ document.addEventListener('DOMContentLoaded',function(){{
         payload = __import__("json").loads(html.unescape(match.group(1)))
 
         self.assertEqual(payload["before"]["calls"], 0)
-        self.assertFalse(payload["before"]["analytics"])
-        self.assertFalse(payload["before"]["advertising"])
+        self.assertTrue(payload["before"]["analyticsBootstrap"])
+        self.assertTrue(payload["before"]["advertisingBootstrap"])
+        self.assertFalse(payload["before"]["analyticsTimer"])
+        self.assertFalse(payload["before"]["advertisingTimer"])
+        self.assertIsNone(payload["before"]["analyticsStorage"])
+        self.assertIsNone(payload["before"]["advertisingStorage"])
+        self.assertFalse(payload["before"]["analyticsCookie"])
+        self.assertFalse(payload["before"]["advertisingCookie"])
         self.assertEqual(payload["before"]["tracker"], "undefined")
         self.assertIsNone(payload["before"]["state"])
         self.assertIsNone(payload["before"]["preferences"])
         self.assertTrue(payload["before"]["banner"])
 
         self.assertEqual(payload["rejected"]["calls"], 0)
-        self.assertFalse(payload["rejected"]["analytics"])
-        self.assertFalse(payload["rejected"]["advertising"])
+        self.assertFalse(payload["rejected"]["analyticsTimer"])
+        self.assertFalse(payload["rejected"]["advertisingTimer"])
+        self.assertIsNone(payload["rejected"]["analyticsStorage"])
+        self.assertIsNone(payload["rejected"]["advertisingStorage"])
+        self.assertFalse(payload["rejected"]["analyticsCookie"])
+        self.assertFalse(payload["rejected"]["advertisingCookie"])
         self.assertEqual(payload["rejected"]["tracker"], "undefined")
         self.assertEqual(payload["rejected"]["preferences"], {"analytics": False, "advertising": False})
         self.assertTrue(payload["rejected"]["manage"])
 
         self.assertGreaterEqual(payload["analyticsOnly"]["calls"], 2)
-        self.assertTrue(payload["analyticsOnly"]["analytics"])
-        self.assertFalse(payload["analyticsOnly"]["advertising"])
+        self.assertTrue(payload["analyticsOnly"]["analyticsTimer"])
+        self.assertFalse(payload["analyticsOnly"]["advertisingTimer"])
+        self.assertEqual(payload["analyticsOnly"]["analyticsStorage"], "1")
+        self.assertIsNone(payload["analyticsOnly"]["advertisingStorage"])
+        self.assertTrue(payload["analyticsOnly"]["analyticsCookie"])
+        self.assertFalse(payload["analyticsOnly"]["advertisingCookie"])
         self.assertEqual(payload["analyticsOnly"]["tracker"], "object")
         self.assertTrue(payload["analyticsOnly"]["state"])
         self.assertTrue(payload["analyticsOnly"]["consent"])
         self.assertEqual(payload["analyticsOnly"]["preferences"], {"analytics": True, "advertising": False})
-        self.assertTrue(payload["afterAll"]["advertising"])
+        self.assertTrue(payload["afterAll"]["advertisingTimer"])
+        self.assertEqual(payload["afterAll"]["advertisingStorage"], "1")
+        self.assertTrue(payload["afterAll"]["advertisingCookie"])
         self.assertEqual(payload["afterAll"]["preferences"], {"analytics": True, "advertising": True})
         self.assertEqual(payload["pending"], 0)
 
