@@ -1245,9 +1245,12 @@ async def snippet(
             f'data-site="{html_lib.escape(site_clean, quote=True)}"',
             'data-consent="managed"',
         ]
+        gate_attrs = [f'data-policy-url="{html_lib.escape(policy_clean, quote=True)}"']
+        if site_clean.lower() == "sobakovod":
+            gate_attrs.append('data-consent-domain=".sobakovod.pro"')
         html = "\n".join([
             "<!-- Put this gate FIRST in the site-wide Tilda Head. Keep metric scripts after it. T972 is not required. -->",
-            f'<script data-policy-url="{html_lib.escape(policy_clean, quote=True)}">\n{CONSENT_GATE_SCRIPT}\n</script>',
+            f'<script {" ".join(gate_attrs)}>\n{CONSENT_GATE_SCRIPT}\n</script>',
             f'<script {" ".join(attrs)}></script>',
         ])
         return PlainTextResponse(html, media_type="text/plain; charset=utf-8")
@@ -1638,6 +1641,12 @@ CONSENT_GATE_SCRIPT = r"""
   var PREF_COOKIE = "nexus_consent_preferences";
   var PREF_VERSION = 1;
   var policyUrl = bootData.policyUrl || "https://sobakovod.pro/popd";
+  var consentDomain = (function (value) {
+    var candidate = String(value || "").trim().toLowerCase().replace(/^\.+/, "");
+    var host = String(location.hostname || "").toLowerCase();
+    if (!candidate || !/^[a-z0-9.-]+$/.test(candidate)) return "";
+    return host === candidate || host.slice(-(candidate.length + 1)) === "." + candidate ? "." + candidate : "";
+  })(bootData.consentDomain);
   var released = { necessary: true, analytics: false, advertising: false, custom: false };
   var pending = [];
   var decision = null;
@@ -1677,10 +1686,13 @@ CONSENT_GATE_SCRIPT = r"""
     return !!(value && Number(value.version) === PREF_VERSION && typeof value.analytics === "boolean" && typeof value.advertising === "boolean");
   }
   function readPreferences() {
-    var value = null;
-    try { value = parseJson(localStorage.getItem(PREF_KEY)); } catch (_) {}
-    if (!validPreferences(value)) value = parseJson(cookie(PREF_COOKIE));
-    return validPreferences(value) ? value : null;
+    var localValue = null, cookieValue = parseJson(cookie(PREF_COOKIE));
+    try { localValue = parseJson(localStorage.getItem(PREF_KEY)); } catch (_) {}
+    if (!validPreferences(localValue)) localValue = null;
+    if (!validPreferences(cookieValue)) cookieValue = null;
+    if (!localValue) return cookieValue;
+    if (!cookieValue) return localValue;
+    return String(cookieValue.updated_at || "") > String(localValue.updated_at || "") ? cookieValue : localValue;
   }
   function writePreferences(value) {
     var stored = {
@@ -1693,7 +1705,8 @@ CONSENT_GATE_SCRIPT = r"""
     try { localStorage.setItem(PREF_KEY, raw); } catch (_) {}
     try {
       var secure = location.protocol === "https:" ? "; Secure" : "";
-      document.cookie = PREF_COOKIE + "=" + encodeURIComponent(raw) + "; Max-Age=31536000; Path=/; SameSite=Lax" + secure;
+      if (consentDomain) document.cookie = PREF_COOKIE + "=; Max-Age=0; Path=/; SameSite=Lax" + secure;
+      document.cookie = PREF_COOKIE + "=" + encodeURIComponent(raw) + "; Max-Age=31536000; Path=/; SameSite=Lax" + secure + (consentDomain ? "; Domain=" + consentDomain : "");
     } catch (_) {}
     decision = stored;
     return stored;
@@ -1716,7 +1729,7 @@ CONSENT_GATE_SCRIPT = r"""
   }
   function nodeUrl(node) {
     if (!node || !node.getAttribute) return "";
-    return node.getAttribute("src") || node.getAttribute("href") || node.getAttribute("data-src") || "";
+    return node.getAttribute("src") || node.getAttribute("href") || node.getAttribute("data-src") || (node.__nexusMetricSrcdocSanitized ? "" : node.getAttribute("srcdoc")) || "";
   }
   function inlineCategory(node) {
     if (!node || clean(node.tagName) !== "script") return "";
@@ -1785,6 +1798,7 @@ CONSENT_GATE_SCRIPT = r"""
     released[value] = true;
     drain(value);
     activateMarked(value);
+    activateAllFrameMetrics(value);
     emit(value);
     return true;
   }
@@ -1792,6 +1806,65 @@ CONSENT_GATE_SCRIPT = r"""
   var nativeAppend = Node.prototype.appendChild;
   var nativeInsert = Node.prototype.insertBefore;
   var nativeReplace = Node.prototype.replaceChild;
+  function activateFrameMetrics(frame, category) {
+    var doc;
+    try { doc = frame && frame.contentDocument; } catch (_) { doc = null; }
+    if (!doc || !doc.querySelectorAll) return;
+    var scripts = doc.querySelectorAll('script[data-nexus-frame-consent="' + category + '"]');
+    for (var i = 0; i < scripts.length; i += 1) {
+      var source = scripts[i], script = doc.createElement("script"), attributes = source.attributes || [];
+      for (var j = 0; j < attributes.length; j += 1) {
+        var name = attributes[j].name;
+        if (name === "type" || name === "src" || name === "data-src" || name === "data-nexus-frame-consent" || name === "data-nexus-frame-type") continue;
+        try { script.setAttribute(name, attributes[j].value); } catch (_) {}
+      }
+      var originalType = source.getAttribute("data-nexus-frame-type") || "";
+      if (originalType) script.type = originalType;
+      var dataSrc = source.getAttribute("data-src") || "";
+      if (dataSrc) script.src = dataSrc;
+      else script.text = source.text || source.textContent || "";
+      try { source.parentNode.insertBefore(script, source.nextSibling); source.parentNode.removeChild(source); } catch (_) {}
+    }
+  }
+  function activateAllFrameMetrics(category) {
+    if (!document.querySelectorAll) return;
+    var frames = document.querySelectorAll("iframe");
+    for (var i = 0; i < frames.length; i += 1) activateFrameMetrics(frames[i], category);
+  }
+  function bindFrameActivation(frame) {
+    if (!frame || frame.__nexusMetricFrameBound) return;
+    frame.__nexusMetricFrameBound = true;
+    try {
+      frame.addEventListener("load", function () {
+        if (released.analytics) activateFrameMetrics(frame, "analytics");
+        if (released.advertising) activateFrameMetrics(frame, "advertising");
+        if (released.custom) activateFrameMetrics(frame, "custom");
+      });
+    } catch (_) {}
+  }
+  function sanitizeFrameSrcdoc(frame, value) {
+    var raw = String(value == null ? "" : value), parsed;
+    try { parsed = new DOMParser().parseFromString(raw, "text/html"); } catch (_) { parsed = null; }
+    if (!parsed || !parsed.querySelectorAll) return raw;
+    var scripts = parsed.querySelectorAll("script"), changed = false;
+    for (var i = 0; i < scripts.length; i += 1) {
+      var source = scripts[i];
+      var category = categoryForUrl(source.getAttribute("src") || source.text || source.textContent || "");
+      if (!shouldHold(category)) continue;
+      changed = true;
+      source.setAttribute("data-nexus-frame-consent", category);
+      source.setAttribute("data-nexus-frame-type", source.getAttribute("type") || "");
+      if (source.getAttribute("src")) {
+        source.setAttribute("data-src", source.getAttribute("src"));
+        source.removeAttribute("src");
+      }
+      source.setAttribute("type", "text/plain");
+    }
+    if (!changed) return raw;
+    frame.__nexusMetricSrcdocSanitized = true;
+    bindFrameActivation(frame);
+    return "<!doctype html>" + parsed.documentElement.outerHTML;
+  }
   function guardedInsert(nativeMethod) {
     return function () {
       var parent = this, args = Array.prototype.slice.call(arguments), node = args[0];
@@ -1811,6 +1884,9 @@ CONSENT_GATE_SCRIPT = r"""
   var nativeSetAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function (name, value) {
     var attr = clean(name);
+    if (attr === "srcdoc" && clean(this.tagName) === "iframe") {
+      return nativeSetAttribute.call(this, name, sanitizeFrameSrcdoc(this, value));
+    }
     var category = (attr === "src" || attr === "href") ? (declaredCategory(this) || categoryForUrl(value)) : "";
     if (!shouldHold(category)) return nativeSetAttribute.apply(this, arguments);
     var node = this, args = Array.prototype.slice.call(arguments);
@@ -1838,6 +1914,19 @@ CONSENT_GATE_SCRIPT = r"""
   guardUrlProperty(window.HTMLScriptElement && HTMLScriptElement.prototype, "src");
   guardUrlProperty(window.HTMLImageElement && HTMLImageElement.prototype, "src");
   guardUrlProperty(window.HTMLIFrameElement && HTMLIFrameElement.prototype, "src");
+  (function guardSrcdocProperty() {
+    var proto = window.HTMLIFrameElement && HTMLIFrameElement.prototype, descriptor;
+    try { descriptor = proto && Object.getOwnPropertyDescriptor(proto, "srcdoc"); } catch (_) { descriptor = null; }
+    if (!descriptor || !descriptor.get || !descriptor.set || descriptor.configurable === false) return;
+    try {
+      Object.defineProperty(proto, "srcdoc", {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        get: descriptor.get,
+        set: function (value) { return descriptor.set.call(this, sanitizeFrameSrcdoc(this, value)); }
+      });
+    } catch (_) {}
+  })();
 
   var nativeSetTimeout = window.setTimeout;
   var nativeSetInterval = window.setInterval;
@@ -2030,11 +2119,13 @@ CONSENT_GATE_SCRIPT = r"""
     reset: function () {
       try { localStorage.removeItem(PREF_KEY); } catch (_) {}
       try { document.cookie = PREF_COOKIE + "=; Max-Age=0; Path=/; SameSite=Lax"; } catch (_) {}
+      if (consentDomain) try { document.cookie = PREF_COOKIE + "=; Max-Age=0; Path=/; SameSite=Lax; Domain=" + consentDomain; } catch (_) {}
       try { location.reload(); } catch (_) {}
     }
   };
 
   decision = readPreferences();
+  if (decision && consentDomain) decision = writePreferences(decision);
   if (decision) applyPreferences(decision);
   ready(function () {
     buildUi();

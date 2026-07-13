@@ -51,6 +51,7 @@ class ConsentGateTests(unittest.TestCase):
             self.assertNotIn(forbidden, snippet_source)
         self.assertIn("CONSENT_GATE_SCRIPT", snippet_source)
         self.assertIn('data-consent="managed"', snippet_source)
+        self.assertIn('data-consent-domain=".sobakovod.pro"', snippet_source)
 
     def test_scripts_are_valid_javascript(self):
         node = shutil.which("node")
@@ -88,7 +89,11 @@ window.__analyticsBootstrap=true;
 localStorage.setItem('metric_analytics_storage','1');
 document.cookie='metric_analytics_cookie=1; Path=/';
 setTimeout(function(){{window.__analyticsTimer=true;}},5);
+window.fetch('/functional-widget-submit').then(function(){{window.__functionalWidgetSubmitted=true;}});
 window.fetch('https://junior.sobakovod.pro/nexus/senler/api/track');
+var metricFrame=document.createElement('iframe');
+metricFrame.srcdoc='<script>parent.__frameMetricRan=true;window.__metricEndpoint="https://mc.yandex.ru/watch/test";<\\/script>';
+document.documentElement.appendChild(metricFrame);
 </script>
 <script>
 window.__advertisingBootstrap=true;
@@ -101,6 +106,7 @@ window.__advertisingEndpoint='https://vk.com/rtrg?p=test';
 document.addEventListener('DOMContentLoaded',function(){{
   var before={{
     calls:window.__metricCalls.length,
+    functionalWidget:window.__functionalWidgetSubmitted===true,
     analyticsBootstrap:window.__analyticsBootstrap===true,
     advertisingBootstrap:window.__advertisingBootstrap===true,
     analyticsTimer:window.__analyticsTimer===true,
@@ -109,6 +115,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     advertisingStorage:localStorage.getItem('metric_advertising_storage'),
     analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
     advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
+    frameMetric:window.__frameMetricRan===true,
     tracker:typeof window.NexusTracker,
     state:localStorage.getItem('nexus_tracker_state_v1'),
     preferences:window.NexusMetricGate.getPreferences(),
@@ -124,6 +131,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     advertisingStorage:localStorage.getItem('metric_advertising_storage'),
     analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
     advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
+    frameMetric:window.__frameMetricRan===true,
     tracker:typeof window.NexusTracker,
     preferences:window.NexusMetricGate.getPreferences(),
     manageExists:!!document.getElementById('nexus-consent-manage')
@@ -141,6 +149,7 @@ document.addEventListener('DOMContentLoaded',function(){{
       advertisingStorage:localStorage.getItem('metric_advertising_storage'),
       analyticsCookie:document.cookie.indexOf('metric_analytics_cookie=1')>=0,
       advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
+      frameMetric:window.__frameMetricRan===true,
       tracker:typeof window.NexusTracker,
       state:!!localStorage.getItem('nexus_tracker_state_v1'),
       consent:window.NexusTracker && window.NexusTracker.hasConsent(),
@@ -200,7 +209,8 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertIsNotNone(match, result.stdout)
         payload = __import__("json").loads(html.unescape(match.group(1)))
 
-        self.assertEqual(payload["before"]["calls"], 0)
+        self.assertEqual(payload["before"]["calls"], 1)
+        self.assertTrue(payload["before"]["functionalWidget"])
         self.assertTrue(payload["before"]["analyticsBootstrap"])
         self.assertTrue(payload["before"]["advertisingBootstrap"])
         self.assertFalse(payload["before"]["analyticsTimer"])
@@ -209,31 +219,34 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertIsNone(payload["before"]["advertisingStorage"])
         self.assertFalse(payload["before"]["analyticsCookie"])
         self.assertFalse(payload["before"]["advertisingCookie"])
+        self.assertFalse(payload["before"]["frameMetric"])
         self.assertEqual(payload["before"]["tracker"], "undefined")
         self.assertIsNone(payload["before"]["state"])
         self.assertIsNone(payload["before"]["preferences"])
         self.assertTrue(payload["before"]["banner"])
         self.assertFalse(payload["before"]["settingsButtonExists"])
 
-        self.assertEqual(payload["rejected"]["calls"], 0)
+        self.assertEqual(payload["rejected"]["calls"], 1)
         self.assertFalse(payload["rejected"]["analyticsTimer"])
         self.assertFalse(payload["rejected"]["advertisingTimer"])
         self.assertIsNone(payload["rejected"]["analyticsStorage"])
         self.assertIsNone(payload["rejected"]["advertisingStorage"])
         self.assertFalse(payload["rejected"]["analyticsCookie"])
         self.assertFalse(payload["rejected"]["advertisingCookie"])
+        self.assertFalse(payload["rejected"]["frameMetric"])
         self.assertEqual(payload["rejected"]["tracker"], "undefined")
         self.assertEqual(payload["rejected"]["preferences"], {"analytics": False, "advertising": False})
         self.assertFalse(payload["rejected"]["manageExists"])
         self.assertTrue(payload["rejected"]["settingsOpened"])
 
-        self.assertGreaterEqual(payload["analyticsOnly"]["calls"], 2)
+        self.assertGreaterEqual(payload["analyticsOnly"]["calls"], 3)
         self.assertTrue(payload["analyticsOnly"]["analyticsTimer"])
         self.assertFalse(payload["analyticsOnly"]["advertisingTimer"])
         self.assertEqual(payload["analyticsOnly"]["analyticsStorage"], "1")
         self.assertIsNone(payload["analyticsOnly"]["advertisingStorage"])
         self.assertTrue(payload["analyticsOnly"]["analyticsCookie"])
         self.assertFalse(payload["analyticsOnly"]["advertisingCookie"])
+        self.assertTrue(payload["analyticsOnly"]["frameMetric"])
         self.assertEqual(payload["analyticsOnly"]["tracker"], "object")
         self.assertTrue(payload["analyticsOnly"]["state"])
         self.assertTrue(payload["analyticsOnly"]["consent"])
@@ -243,7 +256,6 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertTrue(payload["afterAll"]["advertisingCookie"])
         self.assertEqual(payload["afterAll"]["preferences"], {"analytics": True, "advertising": True})
         self.assertEqual(payload["pending"], 0)
-
 
 if __name__ == "__main__":
     unittest.main()
