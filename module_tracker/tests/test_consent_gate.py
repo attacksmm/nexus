@@ -97,7 +97,7 @@ document.cookie='metric_advertising_cookie=1; Path=/';
 setTimeout(function(){{window.__advertisingTimer=true;}},5);
 window.__advertisingEndpoint='https://vk.com/rtrg?p=test';
 </script>
-</head><body><pre id=\"result\"></pre><script>
+</head><body><a id=\"cookie-settings-link\" href=\"#cookie-settings\">Cookie</a><pre id=\"result\"></pre><script>
 document.addEventListener('DOMContentLoaded',function(){{
   var before={{
     calls:window.__metricCalls.length,
@@ -125,8 +125,11 @@ document.addEventListener('DOMContentLoaded',function(){{
     advertisingCookie:document.cookie.indexOf('metric_advertising_cookie=1')>=0,
     tracker:typeof window.NexusTracker,
     preferences:window.NexusMetricGate.getPreferences(),
-    manage:!document.getElementById('nexus-consent-manage').hidden
+    manageExists:!!document.getElementById('nexus-consent-manage')
   }};
+  document.getElementById('cookie-settings-link').click();
+  rejected.settingsOpened=!document.getElementById('nexus-consent-modal').hidden;
+  document.getElementById('nexus-consent-close').click();
   window.NexusMetricGate.savePreferences({{analytics:true,advertising:false}});
   setTimeout(function(){{
     var analyticsOnly={{
@@ -219,7 +222,8 @@ document.addEventListener('DOMContentLoaded',function(){{
         self.assertFalse(payload["rejected"]["advertisingCookie"])
         self.assertEqual(payload["rejected"]["tracker"], "undefined")
         self.assertEqual(payload["rejected"]["preferences"], {"analytics": False, "advertising": False})
-        self.assertTrue(payload["rejected"]["manage"])
+        self.assertFalse(payload["rejected"]["manageExists"])
+        self.assertTrue(payload["rejected"]["settingsOpened"])
 
         self.assertGreaterEqual(payload["analyticsOnly"]["calls"], 2)
         self.assertTrue(payload["analyticsOnly"]["analyticsTimer"])
