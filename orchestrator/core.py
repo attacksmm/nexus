@@ -159,9 +159,21 @@ class ModuleManager:
             else:
                 await update_module_status(row["id"], "error")
 
-    async def shutdown_all(self, app: FastAPI) -> None:
-        for module_id in reversed(list(self._loaded)):
-            await self._unmount_module(module_id, app)
+    async def shutdown_all(self, app: FastAPI, timeout: float = 10.0) -> None:
+        module_ids = reversed(list(self._loaded))
+
+        async def stop_modules() -> None:
+            for module_id in module_ids:
+                await self._unmount_module(module_id, app)
+
+        try:
+            await asyncio.wait_for(stop_modules(), timeout=max(0.1, timeout))
+        except TimeoutError:
+            remaining = sorted(self._loaded)
+            logging.getLogger("nexus.core").error(
+                "Global module shutdown deadline exceeded remaining=%s",
+                remaining,
+            )
 
     # ── Internals ──────────────────────────────────────────────────────────────
 

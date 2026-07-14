@@ -42,10 +42,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         try:
-            await manager.shutdown_all(app)
+            await shared_vk_poll_hub.shutdown(stop_timeout=2)
         finally:
-            await shared_vk_poll_hub.shutdown()
-            manager.uninstall_lifecycle_tracking()
+            try:
+                await manager.shutdown_all(app, timeout=10)
+            finally:
+                manager.uninstall_lifecycle_tracking()
 
 
 app = FastAPI(lifespan=lifespan, title="Nexus Orchestrator")

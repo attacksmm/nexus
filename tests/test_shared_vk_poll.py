@@ -12,6 +12,7 @@ class FakeWorker:
         self.own_id = 0
         self.running = False
         self.stopped = False
+        self.stop_timeout: float | None = None
         self.subscriptions: dict[str, VkPollSubscription] = {}
 
     @property
@@ -36,9 +37,10 @@ class FakeWorker:
     def start(self) -> None:
         self.running = True
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 30.0) -> None:
         self.running = False
         self.stopped = True
+        self.stop_timeout = timeout
 
     def _subscriber_snapshot(self) -> list[VkPollSubscription]:
         return list(self.subscriptions.values())
@@ -142,6 +144,7 @@ def test_different_tokens_use_different_connections() -> None:
         assert hub.snapshot()["connections"] == 2
         await hub.shutdown()
         assert all(worker.stopped for worker in workers)
+        assert all(worker.stop_timeout == 2 for worker in workers)
 
     asyncio.run(scenario())
 
