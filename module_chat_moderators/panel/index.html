@@ -434,7 +434,7 @@
     }
     function pill(value) {
       const text = String(value || "—");
-      const cls = text === "ok" || text === "running" ? "ok" : (text === "error" || text === "blocked" ? "error" : "warn");
+      const cls = text === "ok" || text === "running" ? "ok" : (["error", "blocked", "invalid"].includes(text) ? "error" : "warn");
       return `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
     }
     function badge(id, ok, text, warn = false) {
@@ -464,13 +464,14 @@
       $("metricErrors").textContent = data.stats?.recent_errors_24h ?? "0";
       const secrets = data.secrets || [];
       const byKey = Object.fromEntries(secrets.map(item => [item.key, item]));
+      const vkReady = !!byKey.vk_user_token?.ready && byKey.vk_user_token?.validation_status !== "invalid";
       const runtimeRows = data.runtime_state || [];
       const anyRunning = runtimeRows.some(row => row.status === "running");
       const allStopped = runtimeRows.every(row => row.status === "stopped");
       badge("readyChip", allStopped && !anyRunning, anyRunning ? "работает" : "готов", anyRunning);
       badge("openrouterChip", !!byKey.openrouter_api_key?.ready, "OpenRouter");
       badge("telegramChip", !!byKey.telegram_bot_token_moderator?.ready, "Telegram");
-      badge("vkChip", !!byKey.vk_user_token?.ready, "VK");
+      badge("vkChip", vkReady, "VK");
       badge("dryRunChip", yes(state.settings.dry_run), yes(state.settings.dry_run) ? "dry-run" : "live", !yes(state.settings.dry_run));
       $("runtimeRows").innerHTML = (data.runtime_state || []).map(row => `
         <tr>
@@ -489,10 +490,12 @@
         <thead><tr><th>Ключ</th><th>Источник</th><th>Статус</th><th>Новое значение</th><th></th></tr></thead>
         <tbody>${(secrets || []).map(item => {
         const placeholder = item.ready ? `${item.source}: ${item.masked || "задано"}` : "не задано";
+        const status = item.validation_status === "invalid" ? "invalid" : (item.ready ? "ok" : "missing");
+        const error = item.validation_error ? `<br><span class="hint">${escapeHtml(item.validation_error)}</span>` : "";
         return `<tr>
           <td><strong>${escapeHtml(item.label || item.key)}</strong><br><span class="hint">${escapeHtml(item.env || "")}${item.env_wins ? " · ENV главнее" : ""}</span></td>
           <td>${escapeHtml(item.source || "missing")}</td>
-          <td>${pill(item.ready ? "ok" : "missing")}</td>
+          <td>${pill(status)}${error}</td>
           <td><input data-secret-key="${escapeHtml(item.key)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"></td>
           <td><button class="ghost" data-clear-secret="${escapeHtml(item.key)}">Очистить</button></td>
         </tr>`;
