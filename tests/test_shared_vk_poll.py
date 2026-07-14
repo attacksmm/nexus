@@ -37,7 +37,7 @@ class FakeWorker:
     def start(self) -> None:
         self.running = True
 
-    def stop(self, timeout: float = 30.0) -> None:
+    def stop(self, timeout: float = 30.0, *, warn_if_alive: bool = True) -> None:
         self.running = False
         self.stopped = True
         self.stop_timeout = timeout

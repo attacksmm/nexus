@@ -48,3 +48,43 @@ def test_club_moderator_shared_vk_dispatch() -> None:
 
 def test_course_curator_shared_vk_dispatch() -> None:
     _exercise_module("module_chat_moderators.router")
+
+
+def _exercise_idempotent_telegram_stop(module_name: str) -> None:
+    module = importlib.import_module(module_name)
+    calls: list[str] = []
+
+    class FakeUpdater:
+        running = False
+
+        async def stop(self) -> None:
+            raise AssertionError("stopped updater must not be stopped twice")
+
+    class FakeApplication:
+        updater = FakeUpdater()
+        running = True
+        _initialized = True
+
+        async def stop(self) -> None:
+            calls.append("application.stop")
+            self.running = False
+
+        async def shutdown(self) -> None:
+            calls.append("application.shutdown")
+            self._initialized = False
+
+    runtime = module.TelegramModeratorRuntime(analyzer=None)
+    runtime.app = FakeApplication()
+    runtime.running = True
+    asyncio.run(runtime.stop())
+    assert calls == ["application.stop", "application.shutdown"]
+    assert runtime.app is None
+    assert runtime.running is False
+
+
+def test_club_moderator_telegram_stop_is_idempotent() -> None:
+    _exercise_idempotent_telegram_stop("module_chat_moderator.router")
+
+
+def test_course_curator_telegram_stop_is_idempotent() -> None:
+    _exercise_idempotent_telegram_stop("module_chat_moderators.router")

@@ -2278,16 +2278,21 @@ class TelegramModeratorRuntime:
         self.running = True
 
     async def stop(self) -> None:
-        if not self.app:
-            self.running = False
+        app, self.app = self.app, None
+        self.running = False
+        if not app:
             return
         try:
-            await self.app.updater.stop()
-            await self.app.stop()
-            await self.app.shutdown()
+            updater = getattr(app, "updater", None)
+            if updater is not None and bool(getattr(updater, "running", False)):
+                await updater.stop()
         finally:
-            self.app = None
-            self.running = False
+            try:
+                if bool(getattr(app, "running", False)):
+                    await app.stop()
+            finally:
+                if bool(getattr(app, "_initialized", False)):
+                    await app.shutdown()
 
 
 class VKModeratorRuntime:

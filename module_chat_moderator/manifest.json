@@ -1,7 +1,7 @@
 {
   "id": "chat-moderator",
   "name": "Модератор чатов",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "VK/TG модератор клубных чатов Sobakovod: удаление негатива и скама, история действий и безопасно выключенный runtime по умолчанию.",
   "env_required": [],
   "env_vars": {

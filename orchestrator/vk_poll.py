@@ -260,14 +260,14 @@ class _VkPollWorker:
         )
         self._thread.start()
 
-    def stop(self, timeout: float = 30.0) -> None:
+    def stop(self, timeout: float = 30.0, *, warn_if_alive: bool = True) -> None:
         self._stop_event.set()
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(max(0.0, timeout))
-        if thread and thread.is_alive():
+        if thread and thread.is_alive() and warn_if_alive:
             _logger.warning("VK poll thread did not stop before timeout token=%s", self.token_key[:10])
-        else:
+        if not thread or not thread.is_alive():
             self._thread = None
 
     def _subscriber_snapshot(self) -> list[VkPollSubscription]:
@@ -442,7 +442,14 @@ class SharedVkPollHub:
             subscription._closed = True
         if workers:
             await asyncio.gather(
-                *(asyncio.to_thread(worker.stop, stop_timeout) for worker in workers)
+                *(
+                    asyncio.to_thread(
+                        worker.stop,
+                        stop_timeout,
+                        warn_if_alive=False,
+                    )
+                    for worker in workers
+                )
             )
         if subscriptions:
             for subscription in subscriptions:
