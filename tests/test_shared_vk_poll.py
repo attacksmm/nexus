@@ -43,6 +43,24 @@ class FakeWorker:
     def _subscriber_snapshot(self) -> list[VkPollSubscription]:
         return list(self.subscriptions.values())
 
+    def snapshot(self) -> dict[str, Any]:
+        subscribers = self._subscriber_snapshot()
+        return {
+            "token": self.token_key[:10],
+            "running": self.running,
+            "thread_alive": self.running,
+            "own_id": self.own_id,
+            "subscribers": [subscription.subscriber_id for subscription in subscribers],
+            "subscriber_metrics": [subscription.snapshot() for subscription in subscribers],
+            "started_at": "",
+            "last_event_at": "",
+            "last_error_at": "",
+            "last_reconnect_at": "",
+            "events_dispatched": 0,
+            "poll_errors": 0,
+            "reconnections": 0,
+        }
+
     def emit(self, value: Any) -> None:
         for subscription in self._subscriber_snapshot():
             subscription.enqueue_event(value)
@@ -88,6 +106,10 @@ def test_same_token_uses_one_connection_and_preserves_each_subscriber_order() ->
         assert second_events == ["one", "two"]
         assert hub.snapshot()["connections"] == 1
         assert hub.snapshot()["subscribers"] == 2
+        metrics = hub.snapshot()["workers"][0]["subscriber_metrics"]
+        assert {row["events_processed"] for row in metrics} == {2}
+        assert {row["queue_depth"] for row in metrics} == {0}
+        assert {row["handler_failures"] for row in metrics} == {0}
 
         await first_sub.close()
         assert workers[0].running is True
@@ -159,6 +181,8 @@ def test_transport_errors_are_fanned_out_without_stopping_other_subscribers() ->
         )
         assert errors == {"one": ["temporary failure"], "two": ["temporary failure"]}
         assert workers[0].running is True
+        metrics = hub.snapshot()["workers"][0]["subscriber_metrics"]
+        assert {row["errors_processed"] for row in metrics} == {1}
         await hub.shutdown()
 
     asyncio.run(scenario())

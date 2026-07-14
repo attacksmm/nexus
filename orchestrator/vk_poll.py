@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -21,6 +22,10 @@ ErrorHandler = Callable[[Exception], Awaitable[None]]
 WorkerFactory = Callable[[str, str], "_VkPollWorker"]
 
 _logger = logging.getLogger("nexus.vk-poll")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _token_key(token: str) -> str:
@@ -63,6 +68,16 @@ class VkPollSubscription:
         self._queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self._active = asyncio.Event()
         self._closed = False
+        self._started_at = _now()
+        self._last_enqueued_at = ""
+        self._last_processed_at = ""
+        self._events_enqueued = 0
+        self._errors_enqueued = 0
+        self._events_processed = 0
+        self._errors_processed = 0
+        self._handler_failures = 0
+        self._peak_queue_depth = 0
+        self._processing = False
         self._consumer_task = asyncio.create_task(
             self._consume(), name=f"vk-poll-consumer:{subscriber_id}"
         )
@@ -95,9 +110,20 @@ class VkPollSubscription:
         if self._closed or self._loop.is_closed():
             return
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, (kind, value))
+            self._loop.call_soon_threadsafe(self._enqueue_nowait, kind, value)
         except RuntimeError:
             return
+
+    def _enqueue_nowait(self, kind: str, value: Any) -> None:
+        if self._closed:
+            return
+        self._queue.put_nowait((kind, value))
+        self._last_enqueued_at = _now()
+        if kind == "event":
+            self._events_enqueued += 1
+        elif kind == "error":
+            self._errors_enqueued += 1
+        self._peak_queue_depth = max(self._peak_queue_depth, self._queue.qsize())
 
     async def _consume(self) -> None:
         while True:
@@ -106,20 +132,43 @@ class VkPollSubscription:
                 if kind == "close":
                     return
                 await self._active.wait()
+                self._processing = True
                 if kind == "event":
                     await asyncio.to_thread(_run_handler, self._on_event, value)
+                    self._events_processed += 1
                 elif kind == "error" and self._on_error is not None:
                     await asyncio.to_thread(_run_handler, self._on_error, value)
+                    self._errors_processed += 1
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._handler_failures += 1
                 _logger.exception(
                     "VK poll subscriber failed subscriber=%s kind=%s",
                     self.subscriber_id,
                     kind,
                 )
             finally:
+                self._processing = False
+                self._last_processed_at = _now()
                 self._queue.task_done()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "subscriber_id": self.subscriber_id,
+            "running": self.running,
+            "started_at": self._started_at,
+            "queue_depth": self._queue.qsize(),
+            "peak_queue_depth": self._peak_queue_depth,
+            "processing": self._processing,
+            "events_enqueued": self._events_enqueued,
+            "events_processed": self._events_processed,
+            "errors_enqueued": self._errors_enqueued,
+            "errors_processed": self._errors_processed,
+            "handler_failures": self._handler_failures,
+            "last_enqueued_at": self._last_enqueued_at,
+            "last_processed_at": self._last_processed_at,
+        }
 
     async def close(self) -> None:
         if self._closed:
@@ -149,6 +198,14 @@ class _VkPollWorker:
         self._longpoll: Any | None = None
         self.vk: Any | None = None
         self.own_id = 0
+        self._metrics_lock = threading.Lock()
+        self._started_at = ""
+        self._last_event_at = ""
+        self._last_error_at = ""
+        self._last_reconnect_at = ""
+        self._events_dispatched = 0
+        self._poll_errors = 0
+        self._reconnections = 0
 
     @property
     def running(self) -> bool:
@@ -194,6 +251,8 @@ class _VkPollWorker:
         if self._longpoll is None or self.vk is None:
             raise RuntimeError("VK poll worker is not initialized")
         self._stop_event.clear()
+        with self._metrics_lock:
+            self._started_at = _now()
         self._thread = threading.Thread(
             target=self._run,
             name=f"nexus-vk-poll-{self.token_key[:10]}",
@@ -208,13 +267,17 @@ class _VkPollWorker:
             thread.join(30)
         if thread and thread.is_alive():
             _logger.warning("VK poll thread did not stop before timeout token=%s", self.token_key[:10])
-        self._thread = None
+        else:
+            self._thread = None
 
     def _subscriber_snapshot(self) -> list[VkPollSubscription]:
         with self._subscribers_lock:
             return list(self._subscribers.values())
 
     def _dispatch_event(self, event: Any) -> None:
+        with self._metrics_lock:
+            self._events_dispatched += 1
+            self._last_event_at = _now()
         for subscriber in self._subscriber_snapshot():
             subscriber.enqueue_event(event)
 
@@ -243,12 +306,18 @@ class _VkPollWorker:
             except Exception as error:
                 if self._stop_event.is_set():
                     break
+                with self._metrics_lock:
+                    self._poll_errors += 1
+                    self._last_error_at = _now()
                 _logger.warning("VK poll error token=%s: %s", self.token_key[:10], error)
                 self._dispatch_error(error)
                 if self._stop_event.wait(5):
                     break
                 try:
                     self._recreate_longpoll()
+                    with self._metrics_lock:
+                        self._reconnections += 1
+                        self._last_reconnect_at = _now()
                 except Exception as recreate_error:
                     _logger.warning(
                         "VK poll reconnect failed token=%s: %s",
@@ -257,6 +326,28 @@ class _VkPollWorker:
                     )
                     self._dispatch_error(recreate_error)
         _logger.info("VK poll stopped token=%s", self.token_key[:10])
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._metrics_lock:
+            metrics = {
+                "started_at": self._started_at,
+                "last_event_at": self._last_event_at,
+                "last_error_at": self._last_error_at,
+                "last_reconnect_at": self._last_reconnect_at,
+                "events_dispatched": self._events_dispatched,
+                "poll_errors": self._poll_errors,
+                "reconnections": self._reconnections,
+            }
+        subscribers = self._subscriber_snapshot()
+        return {
+            "token": self.token_key[:10],
+            "running": self.running,
+            "thread_alive": bool(self._thread and self._thread.is_alive()),
+            "own_id": self.own_id,
+            "subscribers": [subscriber.subscriber_id for subscriber in subscribers],
+            "subscriber_metrics": [subscriber.snapshot() for subscriber in subscribers],
+            **metrics,
+        }
 
 
 class SharedVkPollHub:
@@ -361,12 +452,7 @@ class SharedVkPollHub:
             "connections": len(self._workers),
             "subscribers": sum(worker.subscriber_count for worker in self._workers.values()),
             "workers": [
-                {
-                    "token": worker.token_key[:10],
-                    "running": worker.running,
-                    "own_id": worker.own_id,
-                    "subscribers": [sub.subscriber_id for sub in worker._subscriber_snapshot()],
-                }
+                worker.snapshot()
                 for worker in self._workers.values()
             ],
         }

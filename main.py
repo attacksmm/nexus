@@ -34,13 +34,18 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
-    await ensure_default_users()
-    await manager.restore_active_modules(app)
+    manager.install_lifecycle_tracking()
     try:
+        await init_db()
+        await ensure_default_users()
+        await manager.restore_active_modules(app)
         yield
     finally:
-        await shared_vk_poll_hub.shutdown()
+        try:
+            await manager.shutdown_all(app)
+        finally:
+            await shared_vk_poll_hub.shutdown()
+            manager.uninstall_lifecycle_tracking()
 
 
 app = FastAPI(lifespan=lifespan, title="Nexus Orchestrator")
@@ -94,6 +99,20 @@ def _can_manage_module(user: dict | None, module_id: str) -> bool:
     if not user or user["role"] not in ("admin", "editor"):
         return False
     return can_access_module(user, module_id)
+
+
+@app.middleware("http")
+async def module_lifecycle_scope_middleware(request: Request, call_next):
+    request_path = request.scope.get("path", "")
+    root_path = request.scope.get("root_path", "") or ""
+    if root_path and request_path.startswith(root_path):
+        request_path = request_path[len(root_path):] or "/"
+    parts = [part for part in request_path.strip("/").split("/") if part]
+    lifecycle = manager.lifecycle_for(parts[0]) if parts else None
+    if lifecycle is not None:
+        with lifecycle.activate():
+            return await call_next(request)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -177,6 +196,17 @@ async def api_list(request: Request):
     if not user:
         return _unauth_json()
     return await _visible_modules_for(user)
+
+
+@app.get("/api/lifecycle")
+async def api_lifecycle(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    return {
+        "modules": manager.lifecycle_snapshot(),
+        "vk_poll": shared_vk_poll_hub.snapshot(),
+    }
 
 
 @app.post("/api/modules/upload")

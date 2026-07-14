@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import logging
@@ -14,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from orchestrator.db import delete_module, get_modules_by_status, update_module_status, upsert_module
+from orchestrator.lifecycle import LifecycleSupervisor
 
 MODULES_DIR = Path(__file__).parent.parent / "modules"
 UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
@@ -44,12 +46,27 @@ class ModuleContext:
         self.data_dir = module_dir / "data"
         self.data_dir.mkdir(exist_ok=True)
         self.db_path = self.data_dir / f"{module_id}.db"
+        self.lifecycle = None
 
 
 class ModuleManager:
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
         self._loaded: dict[str, ModuleType] = {}
+        self._contexts: dict[str, ModuleContext] = {}
+        self._supervisor = LifecycleSupervisor()
+
+    def install_lifecycle_tracking(self) -> None:
+        self._supervisor.install()
+
+    def uninstall_lifecycle_tracking(self) -> None:
+        self._supervisor.uninstall()
+
+    def lifecycle_snapshot(self) -> list[dict]:
+        return self._supervisor.snapshot()
+
+    def lifecycle_for(self, module_id: str):
+        return self._supervisor.get(module_id)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -142,6 +159,10 @@ class ModuleManager:
             else:
                 await update_module_status(row["id"], "error")
 
+    async def shutdown_all(self, app: FastAPI) -> None:
+        for module_id in reversed(list(self._loaded)):
+            await self._unmount_module(module_id, app)
+
     # ── Internals ──────────────────────────────────────────────────────────────
 
     def _extract_zip_to_staging(self, zip_path: Path) -> tuple[dict, Path]:
@@ -201,13 +222,18 @@ class ModuleManager:
             mod = self._import_module_file(module_id, router_file)
             ctx = ModuleContext(module_id, module_dir)
             ctx.logger = get_module_logger(module_id, module_dir / "data" / "logs")
+            lifecycle = self._supervisor.register(module_id, ctx.logger)
+            ctx.lifecycle = lifecycle
             ctx.logger.info(f"Module {module_id} mounting")
             try:
                 self._loaded[module_id] = mod
-                if hasattr(mod, "setup"):
-                    result = mod.setup(ctx)
-                    if hasattr(result, "__await__"):
-                        await result
+                self._contexts[module_id] = ctx
+                with lifecycle.activate():
+                    if hasattr(mod, "setup"):
+                        result = mod.setup(ctx)
+                        if hasattr(result, "__await__"):
+                            await result
+                lifecycle.mark_running()
             except Exception as e:
                 ctx.logger.error(f"setup() failed: {e}", exc_info=True)
                 await self._unmount_module(module_id, app)
@@ -229,13 +255,25 @@ class ModuleManager:
 
     async def _unmount_module(self, module_id: str, app: FastAPI):
         mod = self._loaded.pop(module_id, None)
+        ctx = self._contexts.pop(module_id, None)
+        lifecycle = ctx.lifecycle if ctx is not None else self._supervisor.get(module_id)
         if mod is not None and hasattr(mod, "shutdown"):
             try:
-                result = mod.shutdown()
-                if hasattr(result, "__await__"):
-                    await result
+                if lifecycle is not None:
+                    with lifecycle.activate():
+                        result = mod.shutdown()
+                        if hasattr(result, "__await__"):
+                            await asyncio.wait_for(result, timeout=20)
+                else:
+                    result = mod.shutdown()
+                    if hasattr(result, "__await__"):
+                        await asyncio.wait_for(result, timeout=20)
+            except TimeoutError:
+                logging.getLogger("nexus.core").error("Module %s shutdown() timed out", module_id)
             except Exception:
                 logging.getLogger("nexus.core").exception("Module %s shutdown() failed", module_id)
+        if lifecycle is not None:
+            await self._supervisor.unregister(module_id, lifecycle)
         sys.modules.pop(f"_nexus_mod_{module_id}", None)
 
         prefixes = (f"/{module_id}/api", f"/{module_id}/panel", f"/{module_id}/static")
