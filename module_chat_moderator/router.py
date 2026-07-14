@@ -20,6 +20,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from orchestrator.vk_poll import VkPollSubscription, shared_vk_poll_hub
 
 try:
     from orchestrator.auth import can_access_module, verify_token_from_request
@@ -330,6 +331,13 @@ async def setup(ctx):
             _log("info", "chat-moderator runtime auto-start completed: %s", result)
         except Exception as error:
             _log("error", "chat-moderator runtime auto-start failed: %s", error)
+
+
+async def shutdown() -> None:
+    global _runtime
+    runtime, _runtime = _runtime, None
+    if runtime is not None:
+        await runtime.stop("all")
 
 
 def _log(level: str, message: str, *args: Any, **kwargs: Any) -> None:
@@ -2285,12 +2293,9 @@ class TelegramModeratorRuntime:
 class VKModeratorRuntime:
     def __init__(self, analyzer: ModerationAnalyzer) -> None:
         self.analyzer = analyzer
-        self.thread: threading.Thread | None = None
-        self.stop_event = threading.Event()
-        self.vk_session: Any | None = None
         self.vk: Any | None = None
-        self.longpoll: Any | None = None
         self.own_id = 0
+        self.subscription: VkPollSubscription | None = None
         self.log_chat_id = _safe_int(_secret_value("vk_log_chat_id"), 2000000041)
         self.chat_title_cache: dict[int, dict[str, Any]] = {}
         self.user_admin_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2300,45 +2305,58 @@ class VKModeratorRuntime:
         self.getcourse_pending: dict[tuple[int, int], dict[str, Any]] = {}
         self.getcourse_lock = threading.Lock()
 
-    def start(self, settings: dict[str, str]) -> None:
-        if self.thread and self.thread.is_alive():
+    async def start(self, settings: dict[str, str]) -> None:
+        if self.subscription and self.subscription.running:
             return
         self.settings = settings
         self.log_chat_id = _safe_int(_secret_value("vk_log_chat_id"), 2000000041)
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._run_loop, name="nexus-chat-moderator-vk", daemon=True)
-        self.thread.start()
+        token = str(_secret_value("vk_user_token") or "").strip()
+        if not token:
+            raise RuntimeError("VK_USER_TOKEN is not configured")
+        self.subscription = await shared_vk_poll_hub.subscribe(
+            subscriber_id=MODULE_ID,
+            token=token,
+            on_event=self._handle_shared_event,
+            on_error=self._handle_shared_error,
+        )
+        self.vk = self.subscription.vk
+        self.own_id = self.subscription.own_id
+        self.subscription.activate()
+        _record_action(
+            platform="vk",
+            action="runtime_token_selected",
+            status="ok",
+            request_json={"source": "shared_vk_poll", "own_id": self.own_id},
+        )
+        _record_action(
+            platform="vk",
+            action="runtime_loop_started",
+            status="ok",
+            request_json={"own_id": self.own_id, "transport": "shared_vk_poll"},
+        )
 
     async def stop(self) -> None:
-        self.stop_event.set()
-        if self.thread and self.thread.is_alive():
-            await asyncio.to_thread(self.thread.join, 5)
-        self.thread = None
+        subscription, self.subscription = self.subscription, None
+        if subscription is not None:
+            await subscription.close()
+        self.vk = None
+        self.own_id = 0
 
-    def _run_loop(self) -> None:
+    async def _handle_shared_event(self, event: Any) -> None:
         try:
-            self._create_vk_runtime()
-            _record_action(platform="vk", action="runtime_loop_started", status="ok", request_json={"own_id": self.own_id})
-            while not self.stop_event.is_set():
-                try:
-                    for event in self.longpoll.listen():
-                        if self.stop_event.is_set():
-                            break
-                        event_type = str(getattr(event, "type", ""))
-                        if event_type.endswith("MESSAGE_NEW") or getattr(event, "type", None) == self._vk_event_type("MESSAGE_NEW"):
-                            if not bool(getattr(event, "from_me", False)):
-                                asyncio.run(self.process_message(event))
-                        elif event_type.endswith("CHAT_UPDATE") or getattr(event, "type", None) == self._vk_event_type("CHAT_UPDATE"):
-                            asyncio.run(self.process_chat_update(event))
-                except Exception as error:
-                    _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
-                    _log("warning", "VK longpoll loop error: %s", error)
-                    time.sleep(5)
-                    self._recreate_longpoll()
+            event_type = str(getattr(event, "type", ""))
+            if event_type.endswith("MESSAGE_NEW") or getattr(event, "type", None) == self._vk_event_type("MESSAGE_NEW"):
+                if not bool(getattr(event, "from_me", False)):
+                    await self.process_message(event)
+            elif event_type.endswith("CHAT_UPDATE") or getattr(event, "type", None) == self._vk_event_type("CHAT_UPDATE"):
+                await self.process_chat_update(event)
         except Exception as error:
-            _set_runtime_state("vk", "error", error=str(error))
-            _record_action(platform="vk", action="runtime_start", status="error", error=str(error))
-            _log("error", "VK runtime failed: %s", error)
+            _record_action(platform="vk", action="runtime_event_error", status="error", error=str(error))
+            _log("error", "Shared VK event handler failed: %s", error, exc_info=True)
+
+    async def _handle_shared_error(self, error: Exception) -> None:
+        _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
+        _log("warning", "Shared VK longpoll error: %s", error)
 
     def _vk_event_type(self, name: str) -> Any:
         try:
@@ -2355,41 +2373,6 @@ class VKModeratorRuntime:
             return getattr(VkChatEventType, name)
         except Exception:
             return name
-
-    def _create_vk_runtime(self) -> None:
-        try:
-            import vk_api
-            from vk_api.longpoll import VkLongPoll
-        except Exception as error:
-            raise RuntimeError(f"vk_api is not installed: {error}") from error
-        errors: list[str] = []
-        for source, token in (("VK_USER_TOKEN", _secret_value("vk_user_token")),):
-            token = str(token or "").strip()
-            if not token:
-                continue
-            try:
-                self.vk_session = vk_api.VkApi(token=token)
-                self.vk = self.vk_session.get_api()
-                self.longpoll = VkLongPoll(self.vk_session)
-                self.own_id = self._resolve_own_id()
-                _record_action(platform="vk", action="runtime_token_selected", status="ok", request_json={"source": source, "own_id": self.own_id})
-                return
-            except Exception as error:
-                errors.append(f"{source}: {error}")
-        raise RuntimeError("VK runtime cannot start with available tokens. " + " | ".join(errors))
-
-    def _recreate_longpoll(self) -> None:
-        try:
-            if self.longpoll is not None:
-                self.longpoll = self.longpoll.__class__(self.vk_session)
-        except Exception as error:
-            _log("warning", "VK longpoll recreate failed: %s", error)
-
-    def _resolve_own_id(self) -> int:
-        response = self.vk.users.get()
-        if not isinstance(response, list) or not response:
-            raise RuntimeError("users.get returned empty response")
-        return int(response[0]["id"])
 
     def _get_chat_title(self, peer_id: int) -> str:
         now = time.time()
@@ -2920,7 +2903,7 @@ class RuntimeManager:
                     result.setdefault("skipped", []).append({"platform": "vk", "reason": "vk_enabled=false"})
                 else:
                     try:
-                        self.vk.start(settings)
+                        await self.vk.start(settings)
                         _set_runtime_state("vk", "running")
                         _record_action(platform="vk", action="runtime_start", status="ok", request_json={"dry_run": _truthy(settings.get("dry_run"))})
                         result["started"].append("vk")
@@ -2948,7 +2931,7 @@ class RuntimeManager:
     def snapshot(self) -> dict[str, Any]:
         return {
             "telegram_running": bool(self.telegram.running),
-            "vk_running": bool(self.vk.thread and self.vk.thread.is_alive()),
+            "vk_running": bool(self.vk.subscription and self.vk.subscription.running),
         }
 
 
@@ -2984,6 +2967,7 @@ async def status(request: Request):
         "secrets": _secret_status(),
         "prompt": _prompt_status(),
         "runtime": runtime_snapshot,
+        "vk_poll": shared_vk_poll_hub.snapshot(),
         "runtime_state": _runtime_state(),
         "templates": _templates(),
         "stats": {

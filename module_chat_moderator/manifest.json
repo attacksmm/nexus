@@ -1,7 +1,7 @@
 {
   "id": "chat-moderator",
   "name": "Модератор чатов",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "VK/TG модератор клубных чатов Sobakovod: удаление негатива и скама, история действий и безопасно выключенный runtime по умолчанию.",
   "env_required": [],
   "env_vars": {
@@ -16,7 +16,7 @@
     "TELEGRAM_BOT_TOKEN_MODERATOR": "Токен Telegram бота-модератора.",
     "TELEGRAM_LOG_CHAT_ID": "Опционально: Telegram chat_id для уведомлений модератора. По умолчанию -1002852064172.",
     "KURATOR_LOG_CHAT_ID": "Опционально: совместимость со старым именем переменной TG log chat_id.",
-    "VK_USER_TOKEN": "Пользовательский VK token для боевого VK longpoll.",
+    "VK_USER_TOKEN": "Пользовательский VK token; Nexus автоматически использует один общий long-poll для всех модулей с тем же токеном.",
     "VK_LOG_CHAT_ID": "VK peer_id чата логов модератора.",
     "OPENROUTER_API_KEY": "OpenRouter API key для AI-классификации сообщений. Модель берётся из модуля OpenRouter."
   }

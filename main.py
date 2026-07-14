@@ -19,6 +19,7 @@ from orchestrator.auth import (
 )
 from orchestrator.core import ModuleManager, UPLOADS_DIR
 from orchestrator.db import init_db, update_module_status
+from orchestrator.vk_poll import shared_vk_poll_hub
 
 BASE_DIR = Path(__file__).parent
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -36,7 +37,10 @@ async def lifespan(app: FastAPI):
     await init_db()
     await ensure_default_users()
     await manager.restore_active_modules(app)
-    yield
+    try:
+        yield
+    finally:
+        await shared_vk_poll_hub.shutdown()
 
 
 app = FastAPI(lifespan=lifespan, title="Nexus Orchestrator")
