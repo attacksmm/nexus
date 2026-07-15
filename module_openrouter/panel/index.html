@@ -121,6 +121,20 @@
     .pager__page{min-width:92px;text-align:center;color:var(--text);font-variant-numeric:tabular-nums}
     .statusbar__pager .pager__controls{margin-left:auto}
     .statusbar__pager .btn{min-width:28px;min-height:22px;padding:2px 7px}
+    .client-search-intro{display:grid;place-items:center;min-height:100%;padding:40px 18px;text-align:center}
+    .client-search-intro__inner{width:min(660px,100%);display:grid;gap:10px}
+    .client-search-intro h2{margin:0;font-size:1.25rem;font-weight:650}
+    .client-search-results{width:min(1100px,100%);margin:0 auto}
+    .client-search-meta{padding:10px 12px;border-bottom:1px solid var(--border);color:var(--subtle);font-size:.78rem}
+    .client-result{display:grid;grid-template-columns:minmax(170px,240px) minmax(0,1fr) auto;gap:16px;padding:14px 12px;border-bottom:1px solid var(--border);cursor:pointer}
+    .client-result:hover{background:var(--panel-strong)}
+    .client-result__identity,.client-result__summary{min-width:0;display:grid;align-content:start;gap:6px}
+    .client-result__name{font-size:.94rem;font-weight:650;overflow-wrap:anywhere}
+    .client-result__id{color:var(--subtle);font-size:.74rem;overflow-wrap:anywhere}
+    .client-result__summary{color:var(--muted);line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:6;overflow:hidden}
+    .client-result__facts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .client-result__links{display:flex;align-items:flex-start;justify-content:flex-end;gap:6px;flex-wrap:wrap;max-width:270px}
+    .source-pill{display:inline-flex;align-items:center;min-height:20px;padding:1px 6px;border:1px solid var(--border);color:var(--subtle);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em}
 
     @media(max-width:760px){
       .topbar,.toolbar{align-items:stretch;flex-direction:column}
@@ -135,6 +149,8 @@
       .statusbar__pager{gap:6px}
       .statusbar__pager .pager__controls{margin-left:auto}
       .statusbar__pager .btn{min-width:24px;padding:2px 5px}
+      .client-result{grid-template-columns:minmax(0,1fr);gap:10px}
+      .client-result__links{justify-content:flex-start;max-width:none}
     }
   </style>
 </head>
@@ -142,7 +158,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.78</div>
+    <div class="ver">v1.0.79</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -151,6 +167,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="prompts" type="button">Промпты</button>
     <button class="tab" data-tab="contexts" type="button">Контексты</button>
+    <button class="tab" data-tab="client-search" type="button">Поиск клиентов</button>
     <button class="tab" data-tab="test" type="button">Протестировать</button>
     <button class="tab" data-tab="errors" type="button">Ошибки</button>
     <button class="tab" data-tab="settings" type="button">Настройки</button>
@@ -174,6 +191,27 @@
         <tbody id="promptsBody"></tbody>
       </table>
       <div id="promptsEmpty" class="empty" hidden>В file-storage нет .txt промптов</div>
+    </div>
+  </section>
+
+  <section id="view-client-search" class="view">
+    <div class="toolbar">
+      <input id="clientSearchInput" class="input grow no-autofill" placeholder="Кличка, порода, проблема или platform_id..." autocomplete="off" name="openrouter_client_search" autocorrect="off" spellcheck="false" />
+      <button id="runClientSearch" class="btn primary" type="button">Найти клиента</button>
+      <button id="clearClientSearch" class="btn ghost" type="button">Очистить</button>
+    </div>
+    <div class="content">
+      <div id="clientSearchIntro" class="client-search-intro">
+        <div class="client-search-intro__inner">
+          <h2>Поиск по кратким сводкам</h2>
+          <p class="hint">Введите кличку питомца, породу, возраст, проблему или несколько признаков. Поиск проверяет только факты из сохранённых сводок и показывает аккаунты, которые действительно связаны с найденным контекстом.</p>
+        </div>
+      </div>
+      <div id="clientSearchResults" class="client-search-results" hidden>
+        <div id="clientSearchMeta" class="client-search-meta"></div>
+        <div id="clientSearchBody"></div>
+      </div>
+      <div id="clientSearchEmpty" class="empty" hidden>Совпадений в сводках нет</div>
     </div>
   </section>
 
@@ -387,7 +425,7 @@ const API = modBase + '/api';
 const rootBase = modBase.replace(/\/openrouter$/, '');
 const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', errors:[], errorsTotal:0, settings:{}, providerOptions:[], currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
+const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', clientSearch:[], errors:[], errorsTotal:0, settings:{}, providerOptions:[], currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -681,6 +719,60 @@ async function loadUsers(resetPage=false){
   $('usersNext').disabled = $('usersLast').disabled = state.usersPage >= totalPages;
   setLeft(state.usersTotal ? `Страница ${state.usersPage} из ${totalPages}` : 'Контексты не найдены');
 }
+function sourceLabel(source){
+  return ({senler:'VK',salebot:'SaleBot',avito:'Avito',api:'API',manual:'Вручную'})[source] || source;
+}
+function clearClientSearch(){
+  $('clientSearchInput').value='';
+  state.clientSearch=[];
+  $('clientSearchIntro').hidden=false;
+  $('clientSearchResults').hidden=true;
+  $('clientSearchEmpty').hidden=true;
+  $('clientSearchBody').innerHTML='';
+  setLeft('Готово');
+  setMsg('');
+  $('clientSearchInput').focus();
+}
+async function runClientSearch(){
+  const query=$('clientSearchInput').value.trim();
+  if(query.length<2){
+    clearClientSearch();
+    setMsg('Введите минимум 2 символа','error');
+    return;
+  }
+  const button=$('runClientSearch');
+  button.disabled=true;
+  button.textContent='Ищу…';
+  try{
+    const data=await api('/client-search?q='+encodeURIComponent(query)+'&limit=50');
+    state.clientSearch=data.items||[];
+    $('clientSearchIntro').hidden=true;
+    $('clientSearchResults').hidden=state.clientSearch.length===0;
+    $('clientSearchEmpty').hidden=state.clientSearch.length>0;
+    $('clientSearchMeta').textContent=`Найдено: ${data.total||0} · показано: ${state.clientSearch.length} · ${data.elapsed_ms||0} мс`;
+    $('clientSearchBody').innerHTML=state.clientSearch.map(item=>{
+      const name=item.client_name||item.platform_id;
+      const idLine=item.client_name?`<div class="client-result__id mono">${esc(item.platform_id)}</div>`:'';
+      const sources=(item.sources||[]).map(source=>`<span class="source-pill">${esc(sourceLabel(source))}</span>`).join('');
+      const links=(item.accounts||[]).map(link=>`<a class="btn ghost client-account-link" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.label)} ↗</a>`).join('');
+      return `<article class="client-result" data-platform="${esc(item.platform_id)}">
+        <div class="client-result__identity">
+          <button class="link-btn client-result__name" type="button">${esc(name)}</button>
+          ${idLine}
+          <div class="client-result__facts">${sources}<span class="muted">${item.conversations||0} чатов · ${item.messages||0} сообщений</span></div>
+          <div class="muted">Обновлено ${fmtDate(item.updated_at)}</div>
+        </div>
+        <div class="client-result__summary">${esc(item.summary||'')}</div>
+        <div class="client-result__links">${links||'<span class="muted">Связанный внешний аккаунт не определён</span>'}</div>
+      </article>`;
+    }).join('');
+    setLeft(data.total?`Совпадений в сводках: ${data.total}`:'Совпадений нет');
+    setMsg(data.total?'Поиск завершён':'В сохранённых сводках совпадений нет',data.total?'ok':'info');
+  }finally{
+    button.disabled=false;
+    button.textContent='Найти клиента';
+  }
+}
 async function openClient(platformId){
   state.currentPlatform = platformId;
   state.currentConversation = '';
@@ -787,6 +879,10 @@ document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=
   const contextsActive = btn.dataset.tab === 'contexts';
   $('usersPager').hidden = !contextsActive;
   $('statusLeft').hidden = contextsActive;
+  if(btn.dataset.tab === 'client-search'){
+    if(!state.clientSearch.length && !$('clientSearchInput').value.trim()) setLeft('Готово');
+    setTimeout(()=>$('clientSearchInput').focus(),0);
+  }
   if(btn.dataset.tab === 'errors') loadErrors().catch(err=>setMsg(err.message,'error'));
 }));
 $('promptFilter').addEventListener('input', renderPrompts);
@@ -820,6 +916,14 @@ $('rotateModuleToken').addEventListener('click', ()=>rotateModuleToken().catch(e
 $('searchUsers').addEventListener('click', ()=>loadUsers(true).catch(e=>setMsg(e.message,'error')));
 $('refreshUsers').addEventListener('click', ()=>loadUsers().catch(e=>setMsg(e.message,'error')));
 $('userSearch').addEventListener('keydown', e=>{if(e.key==='Enter') loadUsers(true).catch(err=>setMsg(err.message,'error'));});
+$('runClientSearch').addEventListener('click', ()=>runClientSearch().catch(e=>setMsg(e.message,'error')));
+$('clearClientSearch').addEventListener('click', clearClientSearch);
+$('clientSearchInput').addEventListener('keydown', e=>{if(e.key==='Enter') runClientSearch().catch(err=>setMsg(err.message,'error'));});
+$('clientSearchBody').addEventListener('click', e=>{
+  if(e.target.closest('a')) return;
+  const row=e.target.closest('.client-result');
+  if(row) openClient(row.dataset.platform).catch(err=>setMsg(err.message,'error'));
+});
 $('usersFirst').addEventListener('click', ()=>{state.usersPage=1; loadUsers().catch(e=>setMsg(e.message,'error'));});
 $('usersPrev').addEventListener('click', ()=>{if(state.usersPage>1) state.usersPage--; loadUsers().catch(e=>setMsg(e.message,'error'));});
 $('usersNext').addEventListener('click', ()=>{state.usersPage++; loadUsers().catch(e=>setMsg(e.message,'error'));});
@@ -857,6 +961,7 @@ $('savePromptText').addEventListener('click', ()=>savePromptText().catch(e=>setM
     await loadEnv();
     installAntiAutofill($('promptFilter'));
     installAntiAutofill($('userSearch'));
+    installAntiAutofill($('clientSearchInput'));
     installAntiAutofill($('testConversation'));
     await loadMe();
     await loadSettings();

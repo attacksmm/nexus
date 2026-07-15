@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiosqlite
 import httpx
@@ -2066,6 +2067,105 @@ def _safe_json_dict(value: Any) -> dict[str, Any]:
         return {}
 
 
+def _normalize_client_search_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold().replace("ё", "е")
+    return " ".join(text.split())
+
+
+def _client_summary_match(query: str, summary: str, platform_id: str = "") -> int | None:
+    """Return a deterministic relevance score for a Unicode substring search."""
+    needle = _normalize_client_search_text(query)
+    if len(needle) < 2:
+        return None
+    haystack = _normalize_client_search_text(summary)
+    normalized_id = _normalize_client_search_text(platform_id)
+    if needle in normalized_id:
+        return 20_000 - min(normalized_id.find(needle), 1_000)
+
+    def word_start(term: str) -> int:
+        start = 0
+        while True:
+            found = haystack.find(term, start)
+            if found < 0:
+                return -1
+            if found == 0 or not haystack[found - 1].isalnum():
+                return found
+            start = found + 1
+
+    terms = [
+        term
+        for term in re.findall(r"[\w-]+", needle, flags=re.UNICODE)
+        if len(term) >= 2 or term.isdigit()
+    ]
+    positions = [word_start(term) for term in terms]
+    if not terms or any(position < 0 for position in positions):
+        return None
+    phrase_at = haystack.find(needle)
+    score = 10_000 - min(phrase_at, 2_000) if phrase_at >= 0 else 4_000
+    score += 300 * len(positions)
+    return score
+
+
+def _safe_external_url(value: Any) -> str:
+    url = _clean(value, 2000)
+    if not url:
+        return ""
+    if url.startswith("www.") or url.startswith("avito.ru/"):
+        url = "https://" + url
+    return url if url.startswith(("https://", "http://")) else ""
+
+
+def _client_account_links(platform_id: str, sources: list[str], customer: dict[str, Any]) -> list[dict[str, str]]:
+    source_set = {str(source or "").strip().lower() for source in sources}
+    encoded_id = quote(platform_id, safe="")
+    links: list[dict[str, str]] = []
+
+    def add(kind: str, label: str, url: Any) -> None:
+        safe_url = _safe_external_url(url)
+        if safe_url and all(item["url"] != safe_url for item in links):
+            links.append({"kind": kind, "label": label, "url": safe_url})
+
+    if "senler" in source_set and platform_id.isdigit():
+        add("vk_dialog", "Диалог VK", f"https://vk.com/gim225075265/convo/{encoded_id}")
+        add("vk_profile", "Профиль VK", f"https://vk.com/id{encoded_id}")
+    if "salebot" in source_set:
+        add("salebot", "SaleBot", f"https://salebot.pro/projects/397724/clients/{encoded_id}")
+    add("avito", "Диалог Avito", customer.get("avito_url"))
+    add("salebot", "SaleBot", customer.get("salebot_url"))
+    return links
+
+
+def _customer_display_name(fields: dict[str, Any]) -> str:
+    contact = fields.get("contact_fields") if isinstance(fields.get("contact_fields"), dict) else {}
+    first = _clean(fields.get("name") or fields.get("first_name") or contact.get("name"), 120)
+    last = _clean(fields.get("second_name") or fields.get("last_name"), 120)
+    return " ".join(part for part in (first, last) if part)
+
+
+async def _client_customer_records(platform_ids: list[str]) -> dict[str, dict[str, Any]]:
+    path = _customer_db_path()
+    if not platform_ids or not path.exists():
+        return {}
+    placeholders = ",".join("?" for _ in platform_ids)
+    result: dict[str, dict[str, Any]] = {}
+    try:
+        async with aiosqlite.connect(f"file:{path}?mode=ro", uri=True, timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+            db.row_factory = aiosqlite.Row
+            for table in ("cdb_vk_clients", "cdb_avito_clients"):
+                cur = await db.execute(
+                    f"SELECT platform_id, custom_fields FROM {table} WHERE platform_id IN ({placeholders})",
+                    platform_ids,
+                )
+                for row in await cur.fetchall():
+                    platform_id = str(row["platform_id"] or "")
+                    fields = _safe_json_dict(row["custom_fields"])
+                    current = result.setdefault(platform_id, {})
+                    current.update(fields)
+    except Exception as exc:
+        _log("warning", "client search customer lookup failed: %s", exc)
+    return result
+
+
 def _deep_merge_dict(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     result = dict(existing or {})
     for key, value in (incoming or {}).items():
@@ -4107,6 +4207,97 @@ async def list_users(request: Request, q: str = "", limit: int = 100, offset: in
         )
         rows = [dict(r) for r in await cur.fetchall()]
     return {"items": rows, "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+@router.get("/client-search")
+async def client_search(request: Request, q: str = "", limit: int = 40):
+    await _require_panel_user(request)
+    started = time.monotonic()
+    query = _clean(q, 120)
+    if len(_normalize_client_search_text(query)) < 2:
+        return {"items": [], "total": 0, "query": query, "elapsed_ms": 0}
+    limit = max(1, min(100, int(limit or 40)))
+    async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT platform_id, summary, total_tokens_used, created_at, updated_at
+            FROM users
+            WHERE TRIM(COALESCE(summary, '')) <> ''
+            """
+        )
+        matches: list[dict[str, Any]] = []
+        for row in await cur.fetchall():
+            score = _client_summary_match(query, row["summary"], row["platform_id"])
+            if score is not None:
+                item = dict(row)
+                item["score"] = score
+                matches.append(item)
+        matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        matches.sort(key=lambda item: int(item["score"]), reverse=True)
+        total = len(matches)
+        matches = matches[:limit]
+        platform_ids = [str(item["platform_id"]) for item in matches]
+        stats: dict[str, dict[str, Any]] = {}
+        if platform_ids:
+            placeholders = ",".join("?" for _ in platform_ids)
+            cur = await db.execute(
+                f"""
+                SELECT platform_id, COUNT(*) AS conversations
+                FROM conversations
+                WHERE platform_id IN ({placeholders})
+                GROUP BY platform_id
+                """,
+                platform_ids,
+            )
+            for row in await cur.fetchall():
+                stats.setdefault(str(row["platform_id"]), {})["conversations"] = int(row["conversations"] or 0)
+            cur = await db.execute(
+                f"""
+                SELECT platform_id, COUNT(*) AS messages, GROUP_CONCAT(DISTINCT source) AS sources
+                FROM messages
+                WHERE platform_id IN ({placeholders})
+                GROUP BY platform_id
+                """,
+                platform_ids,
+            )
+            for row in await cur.fetchall():
+                item = stats.setdefault(str(row["platform_id"]), {})
+                item["messages"] = int(row["messages"] or 0)
+                item["sources"] = sorted(filter(None, str(row["sources"] or "").split(",")))
+
+    customer_records = await _client_customer_records(platform_ids)
+    normalized_query = _normalize_client_search_text(query)
+    items: list[dict[str, Any]] = []
+    for match in matches:
+        platform_id = str(match["platform_id"])
+        stat = stats.get(platform_id, {})
+        sources = stat.get("sources") or []
+        customer = customer_records.get(platform_id, {})
+        items.append({
+            "platform_id": platform_id,
+            "summary": match["summary"],
+            "total_tokens_used": int(match["total_tokens_used"] or 0),
+            "created_at": match["created_at"],
+            "updated_at": match["updated_at"],
+            "conversations": int(stat.get("conversations") or 0),
+            "messages": int(stat.get("messages") or 0),
+            "sources": sources,
+            "client_name": _customer_display_name(customer),
+            "accounts": _client_account_links(platform_id, sources, customer),
+            "matched_on": (
+                "platform_id"
+                if normalized_query in _normalize_client_search_text(platform_id)
+                else "summary"
+            ),
+        })
+    return {
+        "items": items,
+        "total": total,
+        "query": query,
+        "limit": limit,
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
 
 
 @router.get("/users/{platform_id}/conversations")
