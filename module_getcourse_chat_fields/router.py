@@ -281,6 +281,16 @@ async def _init_db() -> None:
             WHERE status='failed' AND error='course not detected'
             """
         )
+        await db.execute(
+            """
+            UPDATE gc_fields_write_jobs
+            SET status='quarantined',
+                next_run_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE status IN ('pending','failed','failed_exhausted')
+              AND last_error LIKE '%Ошибка обновления заказа%'
+            """
+        )
         await db.commit()
     _log("info", "getcourse-chat-fields DB initialized")
 

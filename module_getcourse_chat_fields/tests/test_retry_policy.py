@@ -89,6 +89,28 @@ def test_exhausted_payload_is_not_requeued_until_payload_changes(tmp_path) -> No
     asyncio.run(scenario())
 
 
+def test_init_quarantines_known_deterministic_deal_failure(tmp_path) -> None:
+    async def scenario() -> None:
+        module._db_path = tmp_path / "getcourse-chat-fields.db"
+        await module._init_db()
+        await module._enqueue_gc_fields_write_items([_candidate()], force=True)
+        with sqlite3.connect(module._db_path) as db:
+            db.execute(
+                """
+                UPDATE gc_fields_write_jobs
+                SET status='failed_exhausted', attempts=3,
+                    last_error='deal: Ошибка обновления заказа'
+                """
+            )
+            db.commit()
+        await module._init_db()
+        with sqlite3.connect(module._db_path) as db:
+            row = db.execute("SELECT status,attempts,last_error FROM gc_fields_write_jobs").fetchone()
+        assert row == ("quarantined", 3, "deal: Ошибка обновления заказа")
+
+    asyncio.run(scenario())
+
+
 def test_new_write_job_is_claimed_before_retry(tmp_path) -> None:
     async def scenario() -> None:
         module._db_path = tmp_path / "getcourse-chat-fields.db"

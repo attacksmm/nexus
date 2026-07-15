@@ -1,7 +1,7 @@
 {
   "id": "getcourse-chat-fields",
   "name": "Поля чатов GetCourse",
-  "version": "1.0.51",
+  "version": "1.0.52",
   "description": "Выдает завершенным заказам GetCourse поля потока и ссылок на актуальные учебные чаты.",
   "env_vars": {
     "GETCOURSE_ACCOUNT_NAME": "Имя аккаунта GetCourse, например sobakovod для https://sobakovod.getcourse.ru",
