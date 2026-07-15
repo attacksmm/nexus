@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>amoCRM → SaleBot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0d10;--panel:#12161b;--panel2:#171c22;--line:#2a313a;--text:#edf1f5;--muted:#8f9aa7;--green:#34c58a;--red:#ff667a;--yellow:#e4b64f;--blue:#58a6ff}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#3b4652 #11151a}
+    *::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-track{background:#11151a}*::-webkit-scrollbar-thumb{background:#3b4652;border-radius:8px}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+    body{padding:18px}.shell{max-width:1180px;margin:0 auto}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:16px}.head h1{font-size:23px;margin:0 0 4px}.sub{color:var(--muted)}
+    .tabs{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 14px}.tab,.btn{border:1px solid var(--line);background:#171c22;color:var(--text);border-radius:7px;padding:8px 12px;cursor:pointer}.tab.active,.btn.primary{background:#243349;border-color:#426690}.btn.good{background:#17362d;border-color:#2d765f}.btn.danger{background:#3a1d24;border-color:#74404b}.btn:disabled{opacity:.45;cursor:wait}
+    .view{display:none}.view.active{display:block}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:15px;margin-bottom:12px}.card h2{font-size:16px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wide{grid-column:1/-1}
+    label{display:block;color:#aab3bd;font-size:12px;margin:0 0 5px}.input,select,textarea{width:100%;border:1px solid var(--line);background:#0d1116;color:var(--text);border-radius:7px;padding:9px 10px;min-height:38px}textarea{min-height:160px;resize:vertical}.check{display:flex;gap:8px;align-items:center;color:var(--text);font-size:14px}.check input{width:17px;height:17px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.urlbox{display:flex;gap:8px}.urlbox input{min-width:0}.status{display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#0e1217}.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}.dot.ok{background:var(--green)}.dot.bad{background:var(--red)}
+    .hint{color:var(--muted);font-size:12px;margin-top:5px}.notice{border-left:3px solid var(--yellow);background:#191710;padding:10px 12px;border-radius:6px;color:#d9d2bf}.table-wrap{overflow:auto;max-height:580px;border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:960px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #232a32;vertical-align:top}th{position:sticky;top:0;background:#171c22;color:#aab3bd;font-weight:600}.badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#29313a;font-size:12px}.badge.success{background:#173b30;color:#78ddb7}.badge.failed{background:#431f29;color:#ff9aaa}.badge.retry,.badge.pending,.badge.processing{background:#443718;color:#f1d078}.badge.ignored,.badge.deduped{background:#28303a;color:#aeb8c3}.err{max-width:320px;color:#ff9aaa;overflow-wrap:anywhere}.small{font-size:12px;color:var(--muted)}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:500px;overflow:auto;background:#090c10;border:1px solid var(--line);padding:12px;border-radius:8px}.toast{position:fixed;right:18px;bottom:18px;max-width:420px;background:#1d2630;border:1px solid #486078;padding:10px 13px;border-radius:8px;display:none;z-index:9}.toast.bad{border-color:#8b4451;background:#321b21}
+    @media(max-width:720px){body{padding:11px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.head{display:block}.head .status{margin-top:10px}.urlbox{display:block}.urlbox .btn{margin-top:7px;width:100%}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="head">
+    <div><h1>amoCRM → SaleBot</h1><div class="sub">Переменные сделки и callback при изменениях в amoCRM</div></div>
+    <div class="status"><span id="readyDot" class="dot"></span><span id="readyText">Проверка…</span></div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-view="settings">Настройки</button>
+    <button class="tab" data-view="events">Журнал</button>
+    <button class="tab" data-view="test">Проверка сделки</button>
+  </div>
+
+  <section id="view-settings" class="view active">
+    <div class="card">
+      <h2>Webhook amoCRM</h2>
+      <div class="urlbox"><input id="webhookUrl" class="input mono" readonly><button id="copyUrl" class="btn">Копировать</button><button id="registerHook" class="btn">Зарегистрировать в amoCRM</button></div>
+      <div class="hint">Отслеживаются создание, обычное изменение, смена статуса и ответственного. amoCRM получает HTTP 200 даже при внутренней ошибке, поэтому webhook не отключится.</div>
+    </div>
+    <div class="card">
+      <h2>Логика отправки</h2>
+      <div class="grid">
+        <div><label>Поле с SaleBot ID</label><input id="utmField" class="input" value="utm_term"></div>
+        <div><label>Текст callback</label><input id="callbackMessage" class="input mono" value="callback_amoCRM"></div>
+        <div><label>Проверка принадлежности ID</label><select id="identityMode"><option value="strict">Только подтверждённый Nexus SaleBot ID</option><option value="verify_api">Nexus или существующий client ID SaleBot</option><option value="trust_utm_term">Доверять любому числовому utm_term</option></select><div class="hint">Строгий режим не перепутает SaleBot ID с VK ID. Проверка только через API слабее: числовые пространства могут пересекаться.</div></div>
+        <div><label>Задержка объединения webhook, сек.</label><input id="debounceSeconds" class="input" type="number" min="0" max="30" step="0.5" value="3"></div>
+        <div><label>Таймаут запросов, сек.</label><input id="requestTimeout" class="input" type="number" min="5" max="60" value="20"></div>
+        <div><label>Секрет webhook</label><input id="webhookSecret" class="input mono"></div>
+        <label class="check"><input id="sendInfo" type="checkbox" checked>Отправлять сводную переменную <span class="mono">amo_deal_info</span></label>
+        <label class="check"><input id="sendCustom" type="checkbox" checked>Отправлять все поля сделки как <span class="mono">amo_*</span></label>
+        <label class="check wide"><input id="enabled" type="checkbox">Модуль включён и может отправлять данные клиентам SaleBot</label>
+      </div>
+      <div class="notice" style="margin-top:13px">Защита от дублей включена всегда: одинаковый снимок сделки повторно не вызывает callback. Ошибки повторяются автоматически до 5 раз и остаются в журнале.</div>
+      <div class="actions"><button id="save" class="btn primary">Сохранить</button></div>
+    </div>
+  </section>
+
+  <section id="view-events" class="view">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center"><h2 style="margin:0">Последние события</h2><button id="refreshEvents" class="btn">Обновить</button></div>
+      <div id="eventCounts" class="small" style="margin:8px 0"></div>
+      <div class="table-wrap"><table><thead><tr><th>ID / время</th><th>Сделка</th><th>SaleBot</th><th>Событие</th><th>Статус</th><th>Ошибка</th><th></th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+    </div>
+  </section>
+
+  <section id="view-test" class="view">
+    <div class="card">
+      <h2>Предпросмотр без отправки</h2>
+      <div class="grid"><div><label>ID сделки amoCRM</label><input id="dealId" class="input mono" placeholder="17974383"></div></div>
+      <div class="actions"><button id="preview" class="btn primary">Проверить</button><button id="sendNow" class="btn danger">Отправить принудительно</button></div>
+      <div class="hint">Предпросмотр покажет найденный SaleBot ID и полный набор переменных. Принудительная отправка обходит только дедупликацию, но не проверку принадлежности ID.</div>
+    </div>
+    <div class="card"><pre id="previewBox">Результат появится здесь.</pre></div>
+  </section>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+const API = location.pathname.replace(/\/panel\/.*/, '/api');
+const $ = id => document.getElementById(id);
+function toast(text,bad=false){const el=$('toast');el.textContent=text;el.className='toast'+(bad?' bad':'');el.style.display='block';setTimeout(()=>el.style.display='none',4200)}
+async function req(path,opt={}){const r=await fetch(API+path,{credentials:'same-origin',...opt});let body={};try{body=await r.json()}catch(e){}if(!r.ok)throw new Error(body.detail||body.error||('HTTP '+r.status));return body}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));btn.classList.add('active');$('view-'+btn.dataset.view).classList.add('active');if(btn.dataset.view==='events')loadEvents()});
+async function load(){try{const [cfg,env]=await Promise.all([req('/settings'),req('/env-status')]);const s=cfg.settings;$('webhookUrl').value=cfg.webhook_url||'';$('utmField').value=s.utm_field||'utm_term';$('callbackMessage').value=s.callback_message||'callback_amoCRM';$('identityMode').value=s.identity_mode||'strict';$('debounceSeconds').value=s.debounce_seconds||'3';$('requestTimeout').value=s.request_timeout||'20';$('webhookSecret').value=s.webhook_secret||'';$('sendInfo').checked=s.send_human_readable==='1';$('sendCustom').checked=s.send_custom_fields==='1';$('enabled').checked=s.enabled==='1';$('readyDot').className='dot '+(env.ready?'ok':'bad');$('readyText').textContent=env.ready?'ENV готов':'Не хватает ENV';}catch(e){toast(e.message,true)}}
+$('save').onclick=async()=>{try{const body={enabled:$('enabled').checked,utm_field:$('utmField').value,callback_message:$('callbackMessage').value,identity_mode:$('identityMode').value,debounce_seconds:$('debounceSeconds').value,request_timeout:$('requestTimeout').value,webhook_secret:$('webhookSecret').value,send_human_readable:$('sendInfo').checked,send_custom_fields:$('sendCustom').checked};const r=await req('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('webhookUrl').value=r.webhook_url||'';toast('Настройки сохранены')}catch(e){toast(e.message,true)}};
+$('copyUrl').onclick=async()=>{try{await navigator.clipboard.writeText($('webhookUrl').value);toast('Webhook скопирован')}catch(e){$('webhookUrl').select();document.execCommand('copy');toast('Webhook скопирован')}};
+$('registerHook').onclick=async()=>{if(!confirm('Зарегистрировать этот webhook в amoCRM?'))return;try{const r=await req('/webhook/register',{method:'POST'});toast(r.already_registered?'Webhook уже зарегистрирован':'Webhook зарегистрирован')}catch(e){toast(e.message,true)}};
+async function loadEvents(){try{const r=await req('/events?limit=150');$('eventCounts').textContent=Object.entries(r.counts||{}).map(([k,v])=>k+': '+v).join(' · ')||'Событий нет';$('eventsBody').innerHTML=(r.items||[]).map(x=>`<tr><td><b>#${x.id}</b><div class="small">${esc(x.received_at)}</div><div class="small">попыток: ${x.attempts}</div></td><td class="mono">${esc(x.deal_id)}</td><td class="mono">${esc(x.salebot_id)}<div class="small">${esc(x.identity_source)}</div></td><td>${esc(x.action)}</td><td><span class="badge ${esc(x.status)}">${esc(x.status)}</span></td><td class="err">${esc(x.error)}</td><td>${['failed','ignored'].includes(x.status)?`<button class="btn retry" data-id="${x.id}">Повторить</button>`:''}</td></tr>`).join('')||'<tr><td colspan="7">Нет событий</td></tr>';document.querySelectorAll('button.retry').forEach(b=>b.onclick=async()=>{try{await req('/events/'+b.dataset.id+'/retry',{method:'POST'});toast('Событие возвращено в очередь');loadEvents()}catch(e){toast(e.message,true)}})}catch(e){toast(e.message,true)}}
+$('refreshEvents').onclick=loadEvents;
+$('preview').onclick=async()=>{const id=$('dealId').value.trim();if(!id)return toast('Укажите ID сделки',true);try{$('previewBox').textContent='Загрузка…';const r=await req('/preview/'+encodeURIComponent(id));$('previewBox').textContent=JSON.stringify(r,null,2)}catch(e){$('previewBox').textContent=e.message;toast(e.message,true)}};
+$('sendNow').onclick=async()=>{const id=$('dealId').value.trim();if(!id)return toast('Укажите ID сделки',true);if(!confirm('Отправить переменные и callback клиенту этой сделки?'))return;try{const r=await req('/send/'+encodeURIComponent(id),{method:'POST'});toast('Поставлено в очередь, событие #'+r.event_id)}catch(e){toast(e.message,true)}};
+load();
+</script>
+</body>
+</html>

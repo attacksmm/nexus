@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>amoCRM → SaleBot — документация</title><style>:root{color-scheme:dark}*{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#3c4652 #101419}body{margin:0;padding:22px;background:#0b0d10;color:#e9edf2;font:15px/1.58 system-ui,-apple-system,"Segoe UI",sans-serif}main{max-width:900px;margin:auto}h1{font-size:25px}h2{font-size:18px;margin-top:28px}code,pre{font-family:ui-monospace,Consolas,monospace;background:#11161c;border:1px solid #2b333d;border-radius:6px}code{padding:2px 5px}pre{padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden}li{margin:5px 0}.note{border-left:3px solid #d5aa4a;background:#17150e;padding:10px 13px;border-radius:5px}</style></head>
+<body><main>
+  <h1>amoCRM → SaleBot</h1>
+  <p>Модуль принимает webhook amoCRM при создании или изменении сделки. Если поле <code>utm_term</code> содержит подтверждённый <code>salebot_id</code>, модуль записывает переменные клиенту SaleBot и вызывает callback <code>callback_amoCRM</code>.</p>
+  <h2>Что отправляется</h2>
+  <ul>
+    <li><code>amo_deal_info</code> — читаемая сводка сделки.</li>
+    <li><code>amo_deal_id</code>, <code>amo_deal_name</code>, <code>amo_price</code>, <code>amo_responsible</code>, <code>amo_pipeline</code>, <code>amo_status</code>, даты, компания и контакты.</li>
+    <li>Каждое заполненное поле сделки — как <code>amo_{field_code}</code>; если кода нет, используется нормализованное название поля.</li>
+  </ul>
+  <p>Сначала вызывается SaleBot <code>save_variables</code>, только после успешной записи — <code>callback</code>.</p>
+  <h2>Безопасное определение SaleBot ID</h2>
+  <p>В строгом режиме числовое значение само по себе не считается SaleBot ID. Модуль требует подтверждение источника в истории OpenRouter или явном поле <code>salebot_id</code> Customer DB. Это защищает от отправки VK/Senler ID в SaleBot.</p>
+  <div class="note">Успешный <code>get_variables</code> сам по себе не является строгим доказательством: VK ID может совпасть с существующим client ID другого клиента SaleBot. Поэтому режим «Nexus или SaleBot API» и полное доверие <code>utm_term</code> включаются только явно.</div>
+  <h2>Дедупликация и ошибки</h2>
+  <p>Несколько webhook одного изменения объединяются по снимку сделки. Если набор переменных и callback не изменился, повторная отправка получает статус <code>deduped</code>. Сетевые и API-ошибки повторяются до пяти раз с увеличивающейся задержкой. После перезапуска Nexus очередь продолжается из SQLite.</p>
+  <h2>Подключение</h2>
+  <ol>
+    <li>Проверьте готовность ENV в панели.</li>
+    <li>Оставьте строгую проверку ID и сохраните настройки.</li>
+    <li>Введите тестовую сделку во вкладке «Проверка сделки» и выполните предпросмотр.</li>
+    <li>Включите модуль и нажмите «Зарегистрировать в amoCRM» либо добавьте показанный URL вручную.</li>
+  </ol>
+  <h2>Webhook</h2>
+  <pre>POST https://junior.sobakovod.pro/nexus/amocrm-salebot/api/webhook?secret=...</pre>
+  <p>Поддерживаются события amoCRM <code>add_lead</code>, <code>update_lead</code>, <code>status_lead</code> и <code>responsible_lead</code>. Endpoint всегда отвечает amoCRM кодом HTTP 200, а реальный результат виден в журнале модуля.</p>
+</main></body></html>
