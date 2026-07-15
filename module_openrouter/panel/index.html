@@ -70,6 +70,14 @@
     .provider-name{display:grid;gap:2px;min-width:0}
     .provider-name strong{font-weight:600;overflow:hidden;text-overflow:ellipsis}
     .provider-name span{color:var(--subtle);font-family:"IBM Plex Mono","Consolas",monospace;font-size:.72rem;overflow:hidden;text-overflow:ellipsis}
+    .error-table{table-layout:auto}
+    .error-table th,.error-table td{height:auto;vertical-align:top;white-space:normal;line-height:1.4}
+    .error-table th:nth-child(1){width:72px}.error-table th:nth-child(2){width:92px}.error-table th:nth-child(3){width:92px}.error-table th:nth-child(4){width:62px}
+    .error-table th:nth-child(5){width:150px}.error-table th:nth-child(6){width:190px}.error-table th:nth-child(9){width:150px}.error-table th:nth-child(10){width:92px}
+    .error-cell{max-width:360px;white-space:pre-wrap;overflow-wrap:anywhere}
+    .status-pending,.status-running{color:var(--warn)}
+    .status-failed{color:var(--bad)}
+    .status-completed{color:var(--ok)}
 
     table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem}
     th,td{height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -134,7 +142,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.43</div>
+    <div class="ver">v1.0.78</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -144,6 +152,7 @@
     <button class="tab active" data-tab="prompts" type="button">Промпты</button>
     <button class="tab" data-tab="contexts" type="button">Контексты</button>
     <button class="tab" data-tab="test" type="button">Протестировать</button>
+    <button class="tab" data-tab="errors" type="button">Ошибки</button>
     <button class="tab" data-tab="settings" type="button">Настройки</button>
   </div>
 
@@ -211,6 +220,45 @@
     </div>
   </section>
 
+  <section id="view-errors" class="view">
+    <div class="toolbar">
+      <select id="errorStatus" class="select" style="width:170px">
+        <option value="problem">Проблемные</option>
+        <option value="pending">Ожидают</option>
+        <option value="failed">Failed</option>
+        <option value="completed">Completed</option>
+        <option value="all">Все</option>
+      </select>
+      <select id="errorSource" class="select" style="width:170px">
+        <option value="">Все источники</option>
+        <option value="api_failed">Bizon/API</option>
+        <option value="senler_failed">Senler</option>
+        <option value="avito">Avito</option>
+        <option value="salebot">Salebot</option>
+      </select>
+      <button id="refreshErrors" class="btn icon ghost" type="button" title="Обновить">↻</button>
+      <span id="errorsTotal" class="pill">0</span>
+    </div>
+    <div class="content">
+      <table class="error-table">
+        <thead><tr>
+          <th>ID</th>
+          <th>Источник</th>
+          <th>Статус</th>
+          <th>Поп.</th>
+          <th>platform_id</th>
+          <th>Prompt</th>
+          <th>Сообщение</th>
+          <th>Ответ / ошибка</th>
+          <th>Обновлено</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="errorsBody"></tbody>
+      </table>
+      <div id="errorsEmpty" class="empty" hidden>Ошибок нет</div>
+    </div>
+  </section>
+
   <section id="view-settings" class="view">
     <div class="toolbar">
       <button id="saveSettings" class="btn primary" type="button">Сохранить</button>
@@ -240,21 +288,17 @@
           <label>Провайдеры OpenRouter</label>
           <div class="provider-grid">
             <div class="provider-actions">
-              <div class="check-row"><input id="providerAllowFallbacks" type="checkbox" /><span>Разрешить fallback только внутри выбранных провайдеров</span></div>
+              <span class="pill">Fallback авто: если выбрано несколько, порядок по цене</span>
               <select id="providerDataCollection" class="select" style="width:220px">
                 <option value="allow">Разрешить data collection</option>
                 <option value="deny">Запретить data collection</option>
               </select>
             </div>
-            <div class="form-grid" style="padding:0">
-              <div class="field"><label>Max input $ / 1M</label><input id="providerMaxPrompt" class="input" type="number" min="0" max="100" step="0.001" /></div>
-              <div class="field"><label>Max output $ / 1M</label><input id="providerMaxCompletion" class="input" type="number" min="0" max="100" step="0.001" /></div>
-            </div>
             <table class="provider-table">
               <thead><tr><th></th><th>Провайдер</th><th>Input / 1M</th><th>Output / 1M</th><th>Cache / 1M</th><th>Комментарий</th></tr></thead>
               <tbody id="providerBody"></tbody>
             </table>
-            <p class="hint">Для моделей <code>deepseek/*</code> в OpenRouter уходит <code>provider.only</code> по выбранным чекбоксам и <code>max_price</code>. Для остальных моделей чекбоксы DeepSeek-провайдеров не применяются, но ценовой потолок сохраняется. Если снять все галочки, модуль сохранит безопасный минимум: только официальный DeepSeek. Запрет data collection может отключить официальный DeepSeek, если в аккаунте OpenRouter разрешены paid endpoints that may train.</p>
+            <p class="hint">Для моделей <code>deepseek/*</code> в OpenRouter уходит строгий <code>provider.only</code> только по выбранным чекбоксам. Порядок считается автоматически по цене: дешевле → дороже. Если выбран один провайдер, fallback выключен; если несколько — fallback разрешён только внутри выбранных. Если снять все галочки, модуль сохранит безопасный минимум: только официальный DeepSeek.</p>
           </div>
         </div>
         <div class="field" style="grid-column:1/-1"><label>Промпт сводки</label><textarea id="summaryPrompt" class="textarea"></textarea></div>
@@ -343,7 +387,7 @@ const API = modBase + '/api';
 const rootBase = modBase.replace(/\/openrouter$/, '');
 const FS_API = rootBase + '/file-storage/api';
 const $ = id => document.getElementById(id);
-const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', settings:{}, providerOptions:[], currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
+const state = {prompts:[], models:[], users:[], usersTotal:0, usersPage:1, usersPageSize:100, usersQuery:'', errors:[], errorsTotal:0, settings:{}, providerOptions:[], currentPlatform:'', currentConversation:'', conversations:[], editingPrompt:null, me:null};
 
 function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -439,10 +483,7 @@ async function loadSettings(){
   $('summaryPrompt').value = state.settings.summary_prompt || '';
   $('moduleApiToken').value = state.settings.module_api_token || '';
   $('openrouterKey').value = '';
-  $('providerAllowFallbacks').checked = ['1','true','yes','on'].includes(String(state.settings.provider_allow_fallbacks||'').toLowerCase());
   $('providerDataCollection').value = state.settings.provider_data_collection || 'allow';
-  $('providerMaxPrompt').value = state.settings.provider_max_prompt_per_m || '0.5';
-  $('providerMaxCompletion').value = state.settings.provider_max_completion_per_m || '1';
   renderProviders();
   if(state.me && !$('testPlatform').value.trim()) $('testPlatform').value = state.me.username || '';
 }
@@ -474,10 +515,7 @@ async function saveSettings(){
     history_limit:Number($('historyLimit').value||80),
     summary_prompt:$('summaryPrompt').value,
     provider_enabled_tags:selectedProviderTags(),
-    provider_allow_fallbacks:$('providerAllowFallbacks').checked,
-    provider_data_collection:$('providerDataCollection').value || 'deny',
-    provider_max_prompt_per_m:Number($('providerMaxPrompt').value||0.5),
-    provider_max_completion_per_m:Number($('providerMaxCompletion').value||1)
+    provider_data_collection:$('providerDataCollection').value || 'deny'
   };
   if($('openrouterKey').value.trim()) body.openrouter_api_key = $('openrouterKey').value.trim();
   await api('/settings', jsonPost('PUT', body));
@@ -492,6 +530,43 @@ async function loadModels(refresh=0){
   state.models = data.items || [];
   $('modelsList').innerHTML = state.models.map(m=>`<option value="${esc(m.id)}">${esc(m.name||m.id)}</option>`).join('');
   if(data.fallback) setMsg('OpenRouter models недоступны, показан fallback','error');
+}
+
+async function loadErrors(){
+  const status = encodeURIComponent($('errorStatus').value || 'problem');
+  const source = encodeURIComponent($('errorSource').value || '');
+  const data = await api('/errors?status=' + status + '&source=' + source + '&limit=150');
+  state.errors = data.items || [];
+  state.errorsTotal = data.total || state.errors.length;
+  renderErrors();
+  setLeft(`Ошибки: ${state.errorsTotal}`);
+}
+function renderErrors(){
+  $('errorsTotal').textContent = String(state.errorsTotal || 0);
+  $('errorsEmpty').hidden = state.errors.length > 0;
+  $('errorsBody').innerHTML = state.errors.map(j=>{
+    const detail = j.error_text || j.openrouter_error || j.answer || '';
+    const canRetry = ['api_failed','senler_failed','avito','salebot'].includes(j.source);
+    return `<tr>
+      <td class="mono">#${j.id}</td>
+      <td>${esc(j.source)}</td>
+      <td class="status-${esc(j.status)}">${esc(j.status)}</td>
+      <td>${j.attempts || 0}</td>
+      <td class="mono">${esc(j.platform_id || '')}</td>
+      <td class="mono">${esc(j.prompt || '')}</td>
+      <td class="error-cell">${esc(j.message || '')}</td>
+      <td class="error-cell">${esc(detail || '')}</td>
+      <td>${fmtDate(j.updated_at || j.created_at)}</td>
+      <td><button class="btn primary retry-error" data-id="${j.id}" type="button" ${canRetry?'':'disabled'}>Пуск</button></td>
+    </tr>`;
+  }).join('');
+}
+async function retryErrorJob(id){
+  setMsg(`Перезапуск #${id}...`);
+  const data = await api('/errors/' + encodeURIComponent(id) + '/retry', {method:'POST'});
+  const answer = data.result?.text || data.result?.answer || '';
+  setMsg(answer ? `#${id}: ответ получен` : `#${id}: перезапущено`, 'ok');
+  await loadErrors();
 }
 async function rotateModuleToken(){
   if(!confirm('Старый токен перестанет работать. Создать новый токен модуля?')) return;
@@ -712,10 +787,14 @@ document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=
   const contextsActive = btn.dataset.tab === 'contexts';
   $('usersPager').hidden = !contextsActive;
   $('statusLeft').hidden = contextsActive;
+  if(btn.dataset.tab === 'errors') loadErrors().catch(err=>setMsg(err.message,'error'));
 }));
 $('promptFilter').addEventListener('input', renderPrompts);
 $('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(e.message,'error')));
 $('refreshModels').addEventListener('click', ()=>loadModels(1).catch(e=>setMsg(e.message,'error')));
+$('refreshErrors').addEventListener('click', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
+$('errorStatus').addEventListener('change', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
+$('errorSource').addEventListener('change', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
 $('testPrompt').addEventListener('change', syncTestModelPlaceholder);
 $('sendTest').addEventListener('click', ()=>sendTest().catch(e=>{ $('testStatus').value='Ошибка'; setMsg(e.message,'error'); $('testResponse').textContent=JSON.stringify({error:e.message}, null, 2); }));
 $('showSchema').addEventListener('click', ()=>showSchema().catch(e=>setMsg(e.message,'error')));
@@ -748,6 +827,10 @@ $('usersLast').addEventListener('click', ()=>{state.usersPage=Math.max(1,Math.ce
 $('usersBody').addEventListener('click', e=>{
   const row = e.target.closest('.user-row');
   if(row) openClient(row.dataset.platform).catch(err=>setMsg(err.message,'error'));
+});
+$('errorsBody').addEventListener('click', e=>{
+  const btn = e.target.closest('.retry-error');
+  if(btn) retryErrorJob(btn.dataset.id).catch(err=>setMsg(err.message,'error'));
 });
 $('conversationList').addEventListener('click', e=>{
   const row = e.target.closest('.side-row');

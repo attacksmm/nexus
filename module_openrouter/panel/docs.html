@@ -52,6 +52,8 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
   "prompt": "prompts/senler/dog_gpt3_senler.txt",
   "message": "Вопрос клиента",
   "context": 2,
+  "first_name": "{%first_name%}",
+  "last_name": "{%last_name%}",
   "template_vars": {
     "airtime": "{%airtime%}",
     "web_date": "{%web_date%}",
@@ -74,6 +76,7 @@ Authorization: Bearer &lt;ТОКЕН МОДУЛЯ ИЗ НАСТРОЕК&gt;
   "glob_vars": []
 }</pre>
   <p><code>template_vars</code> нужны потому, что Senler не подставляет переменные внутри значения другой переменной. Модуль сам заменит <code>{%airtime%}</code>, <code>{%web_date%}</code>, <code>{%full_price%}</code> и другие плейсхолдеры в prompt, message и финальном ответе до возврата <code>ai_answer</code>. Те же значения можно отправлять не вложенно, а top-level полями, например <code>"airtime": "{%airtime%}"</code>.</p>
+  <p>Для обращения по имени передавайте достоверные поля <code>client_name</code> или <code>first_name</code>/<code>last_name</code>. Если имя не передано, модуль специально удаляет имя из краткой сводки и запрещает модели обращаться по имени, чтобы не повторять старые ошибочные имена из истории.</p>
   <p>После успешной генерации непустого <code>ai_answer</code> модуль дополнительно вызывает Senler <code>vars/set</code> для <code>ai_answer</code>, затем добавляет VK-подписчика в бота <code>3461217</code> через <code>bots/addSubscriber</code> с <code>enforce=true</code>. Это выполняется только когда <code>platform_id</code> является числовым VK ID; тестовые/preflight-запросы и нечисловые ID безопасно пропускаются.</p>
   <p>Имена переменных можно переопределить полями <code>answer_var</code>, <code>conversation_id_var</code>, <code>platform_id_var</code>, <code>model_var</code>, <code>summary_var</code>, <code>summary_error_var</code>. Пустое имя отключает запись конкретной переменной.</p>
   <p>Для Senler можно отправлять <code>context=4</code>: endpoint вернет ответ по краткой сводке о клиенте, сохранит вопрос/ответ и обновит сводку в фоне, не удерживая webhook ожиданием полной истории.</p>
