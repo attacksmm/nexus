@@ -57,6 +57,14 @@ function applyOrder(list) {
   return [...ordered, ...rest];
 }
 
+function isModuleHiddenFromNavigation(module) {
+  try {
+    return JSON.parse(module?.manifest_json || "{}").ui_hidden === true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Hash routing ──────────────────────────────────────────────────────────────
 
 function getHashRoute() {
@@ -104,8 +112,8 @@ window.addEventListener("message", event => {
 // ── Module list render ────────────────────────────────────────────────────────
 
 function renderModules(list) {
-  modulesCache = {};
-  const ordered = applyOrder(list);
+  modulesCache = Object.fromEntries(list.map(module => [module.id, module]));
+  const ordered = applyOrder(list).filter(module => !isModuleHiddenFromNavigation(module));
   const el = $("moduleList");
   el.innerHTML = "";
 
@@ -115,7 +123,6 @@ function renderModules(list) {
   }
 
   for (const m of ordered) {
-    modulesCache[m.id] = m;
     const btn = document.createElement("button");
     btn.className = "module-item" + (m.id === activeModuleId ? " module-item--active" : "");
     btn.dataset.id = m.id;

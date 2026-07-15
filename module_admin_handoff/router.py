@@ -34,12 +34,15 @@ DEFAULT_RETENTION_DAYS = 7
 DEFAULT_SOURCE_GRACE_SECONDS = 600
 DEFAULT_SALEBOT_LOOKUP_FALLBACK = True
 MAX_PROCESS_LIMIT = 50
+ADMIN_NAME_CACHE_SECONDS = 3600
 
 _db_path: Path | None = None
 _module_dir: Path | None = None
 _logger: Any = None
 _worker_task: asyncio.Task | None = None
 _write_lock = asyncio.Lock()
+_admin_name_lock = asyncio.Lock()
+_admin_name_cache: dict[str, tuple[str, float]] = {}
 
 
 def setup(ctx):
@@ -452,22 +455,45 @@ async def _admin_names(admin_ids: list[str]) -> dict[str, str]:
     ids = sorted({admin_id for admin_id in (_numeric(item, 32) for item in admin_ids) if admin_id}, key=int)
     if not ids:
         return {}
-    try:
-        data = await _vk_api_call("users.get", {"user_ids": ",".join(ids)})
-    except Exception as exc:
-        _log("warning", "admin-handoff VK users.get failed: %s", exc)
-        return {admin_id: admin_id for admin_id in ids}
-    response = data.get("response")
-    users = response if isinstance(response, list) else []
-    result: dict[str, str] = {admin_id: admin_id for admin_id in ids}
-    for item in users:
-        if not isinstance(item, dict):
-            continue
-        admin_id = _numeric(item.get("id"), 32)
-        name = " ".join(part for part in [_clean(item.get("first_name"), 80), _clean(item.get("last_name"), 80)] if part).strip()
-        if admin_id and name:
-            result[admin_id] = name
-    return result
+    now = time.monotonic()
+    result = {
+        admin_id: cached[0]
+        for admin_id in ids
+        if (cached := _admin_name_cache.get(admin_id)) and now - cached[1] < ADMIN_NAME_CACHE_SECONDS
+    }
+    missing = [admin_id for admin_id in ids if admin_id not in result]
+    if missing:
+        async with _admin_name_lock:
+            now = time.monotonic()
+            for admin_id in list(missing):
+                cached = _admin_name_cache.get(admin_id)
+                if cached and now - cached[1] < ADMIN_NAME_CACHE_SECONDS:
+                    result[admin_id] = cached[0]
+                    missing.remove(admin_id)
+            if missing:
+                fetched = {admin_id: admin_id for admin_id in missing}
+                try:
+                    data = await _vk_api_call("users.get", {"user_ids": ",".join(missing)})
+                    response = data.get("response")
+                    users = response if isinstance(response, list) else []
+                    for item in users:
+                        if not isinstance(item, dict):
+                            continue
+                        admin_id = _numeric(item.get("id"), 32)
+                        name = " ".join(
+                            part
+                            for part in [_clean(item.get("first_name"), 80), _clean(item.get("last_name"), 80)]
+                            if part
+                        ).strip()
+                        if admin_id in fetched and name:
+                            fetched[admin_id] = name
+                except Exception as exc:
+                    _log("warning", "admin-handoff VK users.get failed: %s", exc)
+                cached_at = time.monotonic()
+                for admin_id, name in fetched.items():
+                    _admin_name_cache[admin_id] = (name, cached_at)
+                    result[admin_id] = name
+    return {admin_id: result.get(admin_id, admin_id) for admin_id in ids}
 
 
 async def _admins_payload(days: int = 90) -> dict[str, Any]:
@@ -540,6 +566,11 @@ def _has_human_admin_author(event: dict[str, Any]) -> bool:
 
 
 async def _seed_memberships_from_actions(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("SELECT value FROM settings WHERE key='memberships_seed_version'")
+    seed_version = await cur.fetchone()
+    if seed_version and str(seed_version["value"] or "") == "2":
+        return
+
     now = _now()
     cur = await db.execute(
         """
@@ -551,7 +582,28 @@ async def _seed_memberships_from_actions(db: aiosqlite.Connection) -> None:
         """
     )
     rows = await cur.fetchall()
+    cur = await db.execute("SELECT member_key FROM memberships")
+    existing_keys = {str(row["member_key"] or "") for row in await cur.fetchall()}
+
+    # Keep only the latest successful action for a membership. Backfill is a
+    # one-time compatibility migration: existing rows are authoritative and
+    # must never be reactivated after expiry or an explicit removal.
+    latest_by_key: dict[str, aiosqlite.Row] = {}
     for row in rows:
+        key = _membership_key(
+            str(row["source"] or ""),
+            str(row["target_type"] or ""),
+            str(row["target_id"] or ""),
+            str(row["external_client_id"] or ""),
+            str(row["vk_user_id"] or ""),
+        )
+        if key.strip(":"):
+            latest_by_key[key] = row
+
+    seeded = 0
+    for key, row in latest_by_key.items():
+        if key in existing_keys:
+            continue
         await _upsert_membership(
             db,
             scanner_event_id=int(row["scanner_event_id"] or 0),
@@ -563,6 +615,16 @@ async def _seed_memberships_from_actions(db: aiosqlite.Connection) -> None:
             admin_message_at=str(row["admin_message_at"] or now),
             now=now,
         )
+        existing_keys.add(key)
+        seeded += 1
+
+    await db.execute(
+        """
+        INSERT INTO settings(key,value) VALUES('memberships_seed_version','2')
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """
+    )
+    _log("info", "admin-handoff membership backfill v2 completed seeded=%s", seeded)
 
 
 async def _upsert_membership(
@@ -1511,6 +1573,173 @@ async def _memberships_payload(limit: int = 100, status: str = "", source: str =
     return {"items": rows, "counts": counts, "limit": limit}
 
 
+async def _workspace_payload(limit: int = 500) -> dict[str, Any]:
+    """Return person-centric protection state plus current Scanner counters."""
+    limit = max(1, min(500, int(limit or 500)))
+    async with _connect() as db:
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM memberships
+            WHERE status='active'
+            ORDER BY expires_at ASC,id DESC
+            """
+        )
+        active_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute("SELECT status,COUNT(*) AS total FROM actions GROUP BY status")
+        action_counts = {str(row["status"]): int(row["total"] or 0) for row in await cur.fetchall()}
+
+    now_utc = datetime.now(timezone.utc)
+    moscow = timezone(timedelta(hours=3))
+    now_moscow = now_utc.astimezone(moscow)
+    today_start = now_moscow.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    today_end = today_start + timedelta(days=1)
+
+    people_by_id: dict[str, dict[str, Any]] = {}
+    expiring_today_people: set[str] = set()
+    expiring_today_stops = 0
+    service_counts = {"senler": 0, "salebot": 0}
+    for row in active_rows:
+        vk_user_id = _clean(row.get("vk_user_id"), 80)
+        if not vk_user_id:
+            continue
+        target_type = _clean(row.get("target_type"), 80)
+        service = "senler" if target_type == "senler_subscription" else "salebot" if target_type == "salebot_list" else _clean(row.get("source"), 40)
+        if service in service_counts:
+            service_counts[service] += 1
+        expires = _parse_utc(row.get("expires_at"))
+        if expires and today_start <= expires < today_end:
+            expiring_today_stops += 1
+            expiring_today_people.add(vk_user_id)
+
+        person = people_by_id.setdefault(
+            vk_user_id,
+            {
+                "vk_user_id": vk_user_id,
+                "vk_url": _vk_dialog_url(vk_user_id),
+                "profile_name": "",
+                "services": [],
+                "memberships": [],
+                "active_stops": 0,
+                "expires_at": "",
+                "last_admin_message_at": "",
+                "admin_author_id": "",
+                "admin_name": "",
+                "scanner_event": None,
+            },
+        )
+        membership = {
+            "id": int(row.get("id") or 0),
+            "service": service,
+            "source": _clean(row.get("source"), 40),
+            "target_type": target_type,
+            "target_id": _clean(row.get("target_id"), 80),
+            "external_client_id": _clean(row.get("external_client_id"), 120),
+            "expires_at": _clean(row.get("expires_at"), 80),
+            "last_admin_message_at": _clean(row.get("last_admin_message_at"), 80),
+            "last_scanner_event_id": int(row.get("last_scanner_event_id") or 0),
+        }
+        person["memberships"].append(membership)
+        person["active_stops"] += 1
+        if service and service not in person["services"]:
+            person["services"].append(service)
+        expiry_text = membership["expires_at"]
+        if expiry_text and (not person["expires_at"] or _epoch(expiry_text) < _epoch(person["expires_at"])):
+            person["expires_at"] = expiry_text
+        admin_at = membership["last_admin_message_at"]
+        if admin_at and _epoch(admin_at) >= _epoch(person["last_admin_message_at"]):
+            person["last_admin_message_at"] = admin_at
+
+    scanner_counts: dict[str, dict[str, int]] = {}
+    latest_by_user: dict[str, dict[str, Any]] = {}
+    scanner_db = _scanner_db_path()
+    if scanner_db.exists():
+        async with _connect(scanner_db) as db:
+            cur = await db.execute(
+                """
+                SELECT status,
+                       COUNT(DISTINCT NULLIF(vk_user_id,'')) AS total,
+                       COUNT(DISTINCT CASE WHEN read_at='' THEN NULLIF(vk_user_id,'') END) AS unread
+                FROM scan_events
+                WHERE status IN ('missing_webhook','missing_human_reply','admin_conversation')
+                GROUP BY status
+                """
+            )
+            scanner_counts = {
+                str(row["status"]): {"total": int(row["total"] or 0), "unread": int(row["unread"] or 0)}
+                for row in await cur.fetchall()
+            }
+            vk_ids = sorted(people_by_id)
+            for chunk_start in range(0, len(vk_ids), 400):
+                chunk = vk_ids[chunk_start : chunk_start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = await db.execute(
+                    f"""
+                    SELECT id,vk_user_id,peer_id,profile_name,message_at,message_text_preview,status,reason,
+                           admin_before_at,admin_before_author_id,admin_after_at,admin_after_author_id,
+                           read_at,opened_at,updated_at
+                    FROM scan_events
+                    WHERE vk_user_id IN ({placeholders})
+                    ORDER BY message_at DESC,id DESC
+                    """,
+                    chunk,
+                )
+                for event in await cur.fetchall():
+                    item = dict(event)
+                    vk_user_id = _clean(item.get("vk_user_id"), 80)
+                    if vk_user_id and vk_user_id not in latest_by_user:
+                        latest_by_user[vk_user_id] = item
+
+    event_admin_ids: dict[int, str] = {}
+    for vk_user_id, person in people_by_id.items():
+        event = latest_by_user.get(vk_user_id)
+        if not event:
+            continue
+        event["vk_url"] = _vk_dialog_url(event.get("peer_id") or vk_user_id)
+        person["scanner_event"] = event
+        person["profile_name"] = _clean(event.get("profile_name"), 300)
+        admin_id = _admin_author_id(event)
+        if admin_id:
+            event_admin_ids[int(event.get("id") or 0)] = admin_id
+            person["admin_author_id"] = admin_id
+
+    admin_names = await _admin_names(list(event_admin_ids.values()))
+    for person in people_by_id.values():
+        admin_id = str(person.get("admin_author_id") or "")
+        person["admin_name"] = admin_names.get(admin_id) or admin_id
+        person["services"].sort()
+
+    people = sorted(
+        people_by_id.values(),
+        key=lambda item: (_epoch(item.get("expires_at")) or float("inf"), str(item.get("vk_user_id") or "")),
+    )
+    admin_count = scanner_counts.get("admin_conversation", {})
+    missing_webhook = scanner_counts.get("missing_webhook", {})
+    missing_reply = scanner_counts.get("missing_human_reply", {})
+    return {
+        "ok": True,
+        "scanner_ready": scanner_db.exists(),
+        "generated_at": _now(),
+        "counts": {
+            "waiting_admin_people": int(admin_count.get("total", 0)),
+            "waiting_admin_unread": int(admin_count.get("unread", 0)),
+            "problem_people": int(missing_webhook.get("total", 0)) + int(missing_reply.get("total", 0)),
+            "problem_unread": int(missing_webhook.get("unread", 0)) + int(missing_reply.get("unread", 0)),
+            "protected_people": len(people_by_id),
+            "active_stops": len(active_rows),
+            "expiring_today_people": len(expiring_today_people),
+            "expiring_today_stops": expiring_today_stops,
+            "senler_stops": service_counts["senler"],
+            "salebot_stops": service_counts["salebot"],
+        },
+        "action_counts": action_counts,
+        "scanner_counts": scanner_counts,
+        "people": people[:limit],
+        "total_people": len(people_by_id),
+        "limit": limit,
+    }
+
+
 @router.get("/health")
 async def health():
     return {"ok": True, "module": MODULE_ID}
@@ -1586,6 +1815,12 @@ async def actions(request: Request, limit: int = 100, status: str = "", source: 
 async def memberships(request: Request, limit: int = 100, status: str = "", source: str = ""):
     await _require_user(request)
     return await _memberships_payload(limit=limit, status=_clean(status, 40), source=_clean(source, 40))
+
+
+@router.get("/workspace")
+async def workspace(request: Request, limit: int = 500):
+    await _require_user(request)
+    return await _workspace_payload(limit=limit)
 
 
 @router.post("/process")

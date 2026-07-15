@@ -11,7 +11,14 @@
 </head>
 <body><main>
   <h1>Общение с администрацией</h1>
-  <p>Модуль работает поверх <code>scanner</code>. Он берёт события VK, где найдено исходящее сообщение админа, определяет источник клиента по истории <code>openrouter.db</code> и выполняет нужное действие.</p>
+  <p>Это единое рабочее место для Scanner и защиты диалогов. Scanner по-прежнему отвечает только за обнаружение и классификацию VK-очереди, а Admin Handoff определяет источник клиента по истории <code>openrouter.db</code> и управляет защитой во внешних сервисах.</p>
+  <h2>Что показывает панель</h2>
+  <ul>
+    <li><code>Ждут ответа администратора</code> — люди в текущей VK-очереди, а не количество внешних записей.</li>
+    <li><code>Людей под защитой</code> — уникальные VK ID, одна строка на человека.</li>
+    <li><code>Активных блокировок</code> — отдельные memberships Senler и Salebot. У одного человека их может быть две.</li>
+    <li>Вкладка <code>Очередь</code> использует API Scanner и сохраняет его действия «Проверить VK» и «Открыть VK».</li>
+  </ul>
   <h2>Правила</h2>
   <ul>
     <li><code>source=senler</code> — добавить VK ID в Senler список <code>3748755</code> через <code>subscribers/add</code>.</li>
@@ -20,7 +27,7 @@
     <li>Каждое новое сообщение админа продлевает участие на <code>7</code> дней. После истечения срока модуль удаляет человека из этого же списка через <code>subscribers/del</code> или <code>remove_from_list</code>.</li>
     <li>Если источник не найден, событие записывается как <code>skipped</code>, чтобы модуль не дёргал API вслепую.</li>
   </ul>
-  <p>Повторная обработка защищена уникальным <code>scanner_event_id</code>. Активные участия хранятся отдельно в таблице <code>memberships</code>, чтобы срок можно было продлевать и безопасно удалять просроченных.</p>
+  <p>Повторная обработка защищена уникальным <code>scanner_event_id</code>. Активные участия хранятся отдельно в таблице <code>memberships</code>, чтобы срок можно было продлевать и безопасно удалять просроченных. Миграция исторических действий создаёт только отсутствующие memberships и не может повторно активировать уже снятую запись.</p>
   <h2>ENV</h2>
   <pre>ADMIN_HANDOFF_ENABLED=1
 ADMIN_HANDOFF_PROCESS_EXISTING=0
@@ -34,6 +41,7 @@ SALEBOT_API_KEY=...</pre>
   <p><code>ADMIN_HANDOFF_SCANNER_DB_PATH</code> и <code>ADMIN_HANDOFF_OPENROUTER_DB_PATH</code> нужны только если автоопределение путей не подходит. Для поиска Salebot <code>client_id</code> по VK/platform ID можно указать <code>SALEBOT_GROUP_ID</code>.</p>
   <h2>API</h2>
   <pre>GET /nexus/admin-handoff/api/env-status
+GET /nexus/admin-handoff/api/workspace
 GET /nexus/admin-handoff/api/actions?limit=100
 GET /nexus/admin-handoff/api/memberships?status=active
 POST /nexus/admin-handoff/api/process
