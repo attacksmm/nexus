@@ -13,7 +13,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +96,9 @@ DEFAULT_SETTINGS = {
     "gc_fields_write_enabled": "0",
     "gc_fields_write_worker_interval_seconds": "60",
     "gc_fields_write_job_max_attempts": "3",
+    "gc_fields_write_retry_base_seconds": "300",
+    "gc_fields_write_retry_max_seconds": "21600",
+    "gc_api_new_job_reserve_requests": "10",
     **DEFAULT_USER_FIELD_IDS,
     **DEFAULT_FIELD_NAMES,
 }
@@ -271,6 +274,13 @@ async def _init_db() -> None:
             WHERE status='running'
             """
         )
+        await db.execute(
+            """
+            UPDATE processed_orders
+            SET status='quarantined', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE status='failed' AND error='course not detected'
+            """
+        )
         await db.commit()
     _log("info", "getcourse-chat-fields DB initialized")
 
@@ -359,6 +369,12 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, str]:
                 value = str(_bounded_int(value, 10, 3600, 60))
             if key == "gc_fields_write_job_max_attempts":
                 value = str(_bounded_int(value, 1, 10, 3))
+            if key == "gc_fields_write_retry_base_seconds":
+                value = str(_bounded_int(value, 60, 3600, 300))
+            if key == "gc_fields_write_retry_max_seconds":
+                value = str(_bounded_int(value, 300, 86400, 21600))
+            if key == "gc_api_new_job_reserve_requests":
+                value = str(_bounded_int(value, 0, 50, 10))
             if key == "start_date" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
                 value = _today()
             if key == "curator_cell":
@@ -905,6 +921,78 @@ async def _gc_export_budget_left(settings: dict[str, str]) -> int:
     return max(0, limit - used)
 
 
+def _gc_new_job_reserve(settings: dict[str, str]) -> int:
+    limit = _bounded_int(settings.get("gc_export_lookup_max_requests_2h"), 0, 100, 80)
+    configured = _bounded_int(settings.get("gc_api_new_job_reserve_requests"), 0, 50, 10)
+    return min(configured, max(0, limit - 2))
+
+
+def _gc_error_classification(error: Any) -> str:
+    """Classify an import failure without depending on GetCourse response shape."""
+
+    text = _norm(error)
+    if not text:
+        return "transient"
+    if "лимит getcourse api" in text or "api budget" in text or "quota" in text:
+        return "quota"
+    if re.search(r"\bhttp\s+(408|425|429|5\d\d)\b", text):
+        return "transient"
+    if any(
+        marker in text
+        for marker in (
+            "timed out",
+            "timeout",
+            "bad gateway",
+            "connection reset",
+            "connection refused",
+            "connection aborted",
+            "network is unreachable",
+            "temporarily unavailable",
+        )
+    ):
+        return "transient"
+    if re.search(r"\bhttp\s+(400|401|403|404|405|409|410|422)\b", text):
+        return "terminal"
+    if any(
+        marker in text
+        for marker in (
+            "ошибка обновления заказа",
+            "course not detected",
+            "gc_user_id отсутствует",
+            "deal_number отсутствует",
+            "не настроены",
+            "required non-empty fields are missing",
+        )
+    ):
+        return "terminal"
+    return "transient"
+
+
+def _gc_retry_delay_seconds(settings: dict[str, str], attempt: int, classification: str) -> int:
+    if classification == "quota":
+        return 900
+    base = _bounded_int(settings.get("gc_fields_write_retry_base_seconds"), 60, 3600, 300)
+    maximum = _bounded_int(settings.get("gc_fields_write_retry_max_seconds"), 300, 86400, 21600)
+    return min(maximum, base * (2 ** max(0, int(attempt or 1) - 1)))
+
+
+def _gc_retry_metadata(error: str, state: dict[str, Any] | None, settings: dict[str, str]) -> dict[str, Any]:
+    previous = _json_dict(_json_dict((state or {}).get("details_json", "{}")).get("retry"))
+    attempts = int(previous.get("attempts") or 0) + 1
+    classification = _gc_error_classification(error)
+    delay = 0 if classification == "terminal" else _gc_retry_delay_seconds(settings, attempts, classification)
+    next_retry_at = ""
+    if delay:
+        next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "classification": classification,
+        "attempts": attempts,
+        "delay_seconds": delay,
+        "next_retry_at": next_retry_at,
+        "last_error": _clean(error, 2000),
+    }
+
+
 async def _gc_export_next_budget_at(settings: dict[str, str], needed: int = 4) -> str:
     limit = _bounded_int(settings.get("gc_export_lookup_max_requests_2h"), 0, 100, 80)
     used = await _gc_export_calls_used()
@@ -1289,12 +1377,21 @@ async def _auto_enqueue_gc_lookup_jobs(settings: dict[str, str]) -> dict[str, An
     if await _open_gc_lookup_jobs_count(settings) > 0:
         return {"queued": 0, "emails": [], "reason": "queue_not_empty"}
     budget_left = await _gc_export_budget_left(settings)
-    if budget_left < 4:
-        return {"queued": 0, "emails": [], "reason": "budget_low", "requests_left_2h": budget_left}
+    reserve = _gc_new_job_reserve(settings)
+    usable_budget = max(0, budget_left - reserve)
+    if usable_budget < 4:
+        return {
+            "queued": 0,
+            "emails": [],
+            "reason": "budget_reserved_for_new_jobs",
+            "requests_left_2h": budget_left,
+            "reserved_requests": reserve,
+        }
     configured_batch = _bounded_int(settings.get("gc_export_lookup_auto_enqueue_batch_size"), 1, 100, 20)
-    batch = max(1, min(configured_batch, budget_left // 4))
+    batch = max(1, min(configured_batch, usable_budget // 4))
     result = await _enqueue_missing_from_students_cache(settings, limit=batch, skip_existing=True)
     result["requests_left_2h"] = budget_left
+    result["reserved_requests"] = reserve
     result["auto"] = True
     return result
 
@@ -1349,7 +1446,6 @@ async def _existing_gc_write_job_keys() -> set[tuple[str, str]]:
             """
             SELECT email, order_id
             FROM gc_fields_write_jobs
-            WHERE status IN ('completed','pending','running')
             """
         )
         rows = await cur.fetchall()
@@ -3081,8 +3177,24 @@ def _should_skip_state(state: dict[str, Any] | None, source_hash: str, settings:
         return True
     if not gc_ready and status in {"customer_only", "dry_run"}:
         return True
-    if status == "skipped":
+    if status in {"skipped", "quarantined"}:
         return True
+    error = _clean(state.get("error"), 2000)
+    if status == "failed" and _gc_error_classification(error) == "terminal":
+        return True
+    if status == "customer_only":
+        details = _json_dict(state.get("details_json", "{}"))
+        retry = _json_dict(details.get("retry"))
+        classification = _clean(retry.get("classification"), 50) or _gc_error_classification(error)
+        if classification == "terminal":
+            return True
+        next_retry_at = _iso_epoch(retry.get("next_retry_at"))
+        if next_retry_at:
+            return next_retry_at > time.time()
+        legacy_updated_at = _iso_epoch(state.get("updated_at"))
+        if legacy_updated_at:
+            delay = _gc_retry_delay_seconds(settings, 1, classification)
+            return legacy_updated_at + delay > time.time()
     return False
 
 
@@ -3204,7 +3316,11 @@ async def _enqueue_gc_fields_write_items(candidates: list[dict[str, Any]], force
     if not candidates:
         return {"queued": 0, "candidates": 0, "items": []}
     queued = 0
-    conflict_where = "gc_fields_write_jobs.status <> 'running'" if force else "gc_fields_write_jobs.status NOT IN ('completed','pending','running')"
+    conflict_where = (
+        "gc_fields_write_jobs.status <> 'running' AND gc_fields_write_jobs.payload_json <> excluded.payload_json"
+        if force
+        else "gc_fields_write_jobs.status NOT IN ('completed','pending','running') AND gc_fields_write_jobs.payload_json <> excluded.payload_json"
+    )
     assert _db_path is not None
     async with _db_connect(_db_path) as db:
         for item in candidates:
@@ -3288,6 +3404,7 @@ async def _gc_fields_write_status(settings: dict[str, str] | None = None) -> dic
         "requests_used_2h": await _gc_export_calls_used(),
         "requests_left_2h": await _gc_export_budget_left(active_settings),
         "limit_2h": _bounded_int(active_settings.get("gc_export_lookup_max_requests_2h"), 0, 100, 80),
+        "reserved_requests": _gc_new_job_reserve(active_settings),
         "next_budget_at": await _gc_export_next_budget_at(active_settings, needed=2),
     }
 
@@ -3305,6 +3422,10 @@ async def _claim_gc_fields_write_job(settings: dict[str, str]) -> dict[str, Any]
               AND attempts < ?
               AND datetime(next_run_at) <= datetime('now')
             ORDER BY CASE
+                       WHEN attempts=0 THEN 0
+                       ELSE 1
+                     END,
+                     CASE
                        WHEN payload_json LIKE '%field_write_reconciliation%' THEN 0
                        WHEN payload_json LIKE '%curator_changed_from_sheets%' THEN 0
                        ELSE 1
@@ -3353,7 +3474,8 @@ async def _finish_gc_fields_write_job(job_id: int, status: str, error: str = "",
             cur = await db_read.execute("SELECT attempts FROM gc_fields_write_jobs WHERE id=?", (int(job_id),))
             row = await cur.fetchone()
         attempts = int((row or [1])[0] or 1)
-        delay_seconds = min(3600, 60 * attempts * attempts)
+        settings = await _settings_map()
+        delay_seconds = _gc_retry_delay_seconds(settings, attempts, "transient")
     next_run_expr = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     if delay_seconds:
         next_run_expr = f"strftime('%Y-%m-%dT%H:%M:%SZ','now','+{int(delay_seconds)} seconds')"
@@ -3392,8 +3514,15 @@ async def _defer_gc_fields_write_job(job_id: int, error: str = "", delay_seconds
 
 
 async def _process_gc_fields_write_job(job: dict[str, Any], settings: dict[str, str]) -> None:
-    if await _gc_export_budget_left(settings) < 2:
-        await _defer_gc_fields_write_job(int(job["id"]), "GetCourse API budget low; deferred", delay_seconds=600)
+    budget_left = await _gc_export_budget_left(settings)
+    is_retry = int(job.get("attempts") or 0) > 0
+    reserve = _gc_new_job_reserve(settings) if is_retry else 0
+    if budget_left < 2 + reserve:
+        await _defer_gc_fields_write_job(
+            int(job["id"]),
+            "GetCourse API budget reserved for new jobs; deferred" if reserve else "GetCourse API budget low; deferred",
+            delay_seconds=900,
+        )
         return
     payload = _json_dict(job.get("payload_json"))
     fields = {key: value for key, value in _json_dict(payload.get("fields")).items() if _clean(value)}
@@ -3415,11 +3544,22 @@ async def _process_gc_fields_write_job(job: dict[str, Any], settings: dict[str, 
         return
     ok = bool(user_ok and deal_ok)
     error = "; ".join(part for part in [user_error and f"user: {user_error}", deal_error and f"deal: {deal_error}"] if part)
+    classification = _gc_error_classification(error)
+    result = {
+        "user": user_details,
+        "deal": deal_details,
+        "fields": fields,
+        "user_fields": user_fields,
+        "retry": {
+            "classification": classification,
+            "reserved_requests": _gc_new_job_reserve(settings),
+        },
+    }
     await _finish_gc_fields_write_job(
         int(job["id"]),
-        "completed" if ok else "failed",
+        "completed" if ok else ("quarantined" if classification == "terminal" else "failed"),
         error,
-        {"user": user_details, "deal": deal_details, "fields": fields, "user_fields": user_fields},
+        result,
     )
 
 
@@ -3534,8 +3674,23 @@ async def _process_row(
     course_key = _classify_course(fields)
     tariff = _classify_tariff(fields)
     if not course_key:
-        await _mark_processed({**base, "status": "failed", "error": "course not detected", "details": {"title": fields.get("title")}})
-        return {"action": "failed"}
+        await _mark_processed({
+            **base,
+            "status": "quarantined",
+            "error": "course not detected",
+            "details": {
+                "title": fields.get("title"),
+                "retry": {
+                    "classification": "terminal",
+                    "attempts": 1,
+                    "delay_seconds": 0,
+                    "next_retry_at": "",
+                    "last_error": "course not detected",
+                    "retry_when": "source_hash_changed",
+                },
+            },
+        })
+        return {"action": "quarantined"}
     student_match = _student_flow_match(student_snapshot, row, fields, course_key)
     student_flow: dict[str, Any] | None = student_match.get("flow") if student_match else None
     student_item: dict[str, Any] = student_match.get("student") if student_match else {}
@@ -3692,28 +3847,46 @@ async def _process_row(
         )
         details["dry_run"] = True
     else:
-        user_ok, user_error, user_details = await _write_getcourse_user(
-            base["gc_user_id"],
-            _getcourse_user_addfields(output_fields, settings),
-            settings,
-            email=_clean(fields.get("email") or fields.get("user_email"), 300),
-            phone=_clean(fields.get("phone") or fields.get("user_phone"), 100),
+        is_retry = bool(
+            state
+            and state.get("source_hash") == source_hash
+            and state.get("status") == "customer_only"
         )
-        deal_ok, deal_error, deal_details = await _write_getcourse_deal(
-            base["gc_user_id"],
-            deal_number,
-            output_fields,
-            settings,
-            email=_clean(fields.get("email") or fields.get("user_email"), 300),
-            phone=_clean(fields.get("phone") or fields.get("user_phone"), 100),
-        )
+        reserve = _gc_new_job_reserve(settings) if is_retry else 0
+        budget_left = await _gc_export_budget_left(settings)
+        if budget_left < 2 + reserve:
+            budget_error = (
+                "GetCourse API budget reserved for new jobs; deferred"
+                if reserve
+                else "лимит GetCourse API для модуля исчерпан"
+            )
+            user_ok, user_error, user_details = False, budget_error, {}
+            deal_ok, deal_error, deal_details = False, budget_error, {}
+        else:
+            user_ok, user_error, user_details = await _write_getcourse_user(
+                base["gc_user_id"],
+                _getcourse_user_addfields(output_fields, settings),
+                settings,
+                email=_clean(fields.get("email") or fields.get("user_email"), 300),
+                phone=_clean(fields.get("phone") or fields.get("user_phone"), 100),
+            )
+            deal_ok, deal_error, deal_details = await _write_getcourse_deal(
+                base["gc_user_id"],
+                deal_number,
+                output_fields,
+                settings,
+                email=_clean(fields.get("email") or fields.get("user_email"), 300),
+                phone=_clean(fields.get("phone") or fields.get("user_phone"), 100),
+            )
         getcourse_ok = bool(user_ok and deal_ok)
         error = "; ".join(part for part in [user_error and f"user: {user_error}", deal_error and f"deal: {deal_error}"] if part)
         details["getcourse_user"] = user_details
         details["getcourse_deal"] = deal_details
         details["deal_number"] = deal_number
         if not getcourse_ok:
-            status = "customer_only"
+            retry_state = state if state and state.get("source_hash") == source_hash else None
+            details["retry"] = _gc_retry_metadata(error, retry_state, settings)
+            status = "quarantined" if details["retry"]["classification"] == "terminal" else "customer_only"
     await _mark_processed({
         **base,
         "status": status,
@@ -3752,7 +3925,7 @@ async def _scan_once(*, force_failed: bool = False, limit: int = 200) -> dict[st
                     summary["processed"] += 1
                 elif action in {"skipped", "skipped_state", "pending_curator", "pending_chat_links"}:
                     summary["skipped"] += 1
-                elif action == "failed":
+                elif action in {"failed", "quarantined"}:
                     summary["failed"] += 1
             await _finish_scan_run(run_id, summary)
             return summary

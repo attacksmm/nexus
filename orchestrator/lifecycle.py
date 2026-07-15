@@ -25,6 +25,31 @@ def _safe_error(error: BaseException) -> str:
     return f"{type(error).__name__}: {message}"[:500]
 
 
+def _is_recoverable_error(error: BaseException) -> bool:
+    """Return true for short-lived transport failures that a worker can replace."""
+
+    error_name = type(error).__name__.casefold()
+    if error_name in {"timeouterror", "timedout", "networkerror", "connecterror"}:
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "bad gateway",
+            "connection reset",
+            "connection refused",
+            "connection aborted",
+            "network is unreachable",
+            "temporarily unavailable",
+            "timed out",
+            "timeout",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+    )
+
+
 class ModuleLifecycle:
     """Tracks tasks owned by one loaded instance of a dynamic module."""
 
@@ -41,6 +66,11 @@ class ModuleLifecycle:
         self._total_completed = 0
         self._total_cancelled = 0
         self._total_failed = 0
+        self._recovered_failures = 0
+        self._recoverable_failures_pending = 0
+        self._unrecoverable_failures = 0
+        self._last_recoverable_failure_started = 0.0
+        self._last_recovered_at = ""
         self._shutdown_timeouts = 0
 
     @contextmanager
@@ -86,7 +116,7 @@ class ModuleLifecycle:
         return task
 
     def _task_done(self, task: asyncio.Task[Any]) -> None:
-        self._tasks.pop(task, None)
+        started = self._tasks.pop(task, None) or 0.0
         self._last_activity_at = _now()
         if task.cancelled():
             self._total_cancelled += 1
@@ -98,9 +128,23 @@ class ModuleLifecycle:
             return
         if error is None:
             self._total_completed += 1
+            if (
+                self._recoverable_failures_pending
+                and started >= self._last_recoverable_failure_started
+            ):
+                self._recovered_failures += self._recoverable_failures_pending
+                self._recoverable_failures_pending = 0
+                self._last_recovered_at = self._last_activity_at
+                if not self._unrecoverable_failures:
+                    self._last_error = ""
             return
         self._total_failed += 1
         self._last_error = _safe_error(error)
+        if _is_recoverable_error(error):
+            self._recoverable_failures_pending += 1
+            self._last_recoverable_failure_started = time.monotonic()
+        else:
+            self._unrecoverable_failures += 1
         self._logger.error(
             "Background task failed module=%s task=%s error=%s",
             self.module_id,
@@ -150,7 +194,11 @@ class ModuleLifecycle:
         return {
             "module_id": self.module_id,
             "state": self._state,
-            "health": "degraded" if self._total_failed or self._shutdown_timeouts else "ok",
+            "health": "degraded" if (
+                self._recoverable_failures_pending
+                or self._unrecoverable_failures
+                or self._shutdown_timeouts
+            ) else "ok",
             "started_at": self._started_at,
             "stopped_at": self._stopped_at,
             "last_activity_at": self._last_activity_at,
@@ -161,8 +209,11 @@ class ModuleLifecycle:
             "total_completed": self._total_completed,
             "total_cancelled": self._total_cancelled,
             "total_failed": self._total_failed,
+            "recovered_failures": self._recovered_failures,
+            "unrecovered_failures": self._recoverable_failures_pending + self._unrecoverable_failures,
             "shutdown_timeouts": self._shutdown_timeouts,
             "last_error": self._last_error,
+            "last_recovered_at": self._last_recovered_at,
         }
 
 
