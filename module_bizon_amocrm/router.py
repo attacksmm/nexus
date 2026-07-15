@@ -45,6 +45,7 @@ BIZON_FIELD_DEFINITIONS = [
     ("country_code", "Код страны", "text", "Контакт", "Двухбуквенный код страны"),
     ("webinarId", "ID вебинара", "text", "Вебинар", "Полный идентификатор отчёта Bizon"),
     ("roomid", "Комната", "text", "Вебинар", "Идентификатор комнаты Bizon"),
+    ("room_slug", "Код комнаты", "text", "Вебинар", "Часть идентификатора комнаты после двоеточия: 97242:lay → lay"),
     ("room_title", "Название комнаты", "text", "Вебинар", "Человекочитаемое название комнаты"),
     ("webinar_at", "Дата и время вебинара", "date_time", "Вебинар", "Время, извлечённое из webinarId"),
     ("webinar_date", "Дата вебинара ДД.ММ.ГГГГ", "text", "Вебинар", "Вычисленная дата по Москве для шаблонов"),
@@ -816,6 +817,7 @@ def _ensure_contact_identity_fields(
 def _template_values(attendance: dict[str, Any]) -> dict[str, str]:
     values = {key: _clean(value, 1000) for key, value in attendance.items() if not isinstance(value, (dict, list))}
     values.setdefault("name", values.get("username", ""))
+    values["room_slug"] = _room_slug(attendance)
     minutes = attendance.get("watch_minutes")
     if isinstance(minutes, (int, float)):
         values["watch_minutes_round"] = str(int(round(float(minutes))))
@@ -861,6 +863,39 @@ def _template_values(attendance: dict[str, Any]) -> dict[str, str]:
         values["webinar_date"] = parsed.strftime("%d.%m.%Y")
         values["webinar_time"] = parsed.strftime("%H:%M")
     return values
+
+
+def _room_slug(attendance: dict[str, Any]) -> str:
+    """Return the Bizon room code without the account/group prefix."""
+    candidates = (
+        attendance.get("roomid"),
+        attendance.get("room_id"),
+        str(attendance.get("webinarId") or "").split("*", 1)[0],
+    )
+    for candidate in candidates:
+        room_id = _clean(candidate, 1000)
+        if ":" not in room_id:
+            continue
+        slug = _clean(room_id.rsplit(":", 1)[1], 200)
+        if slug:
+            return slug
+    return ""
+
+
+def _lead_tags(attendance: dict[str, Any], binding: dict[str, Any]) -> list[dict[str, str]]:
+    """Resolve tag templates and discard empty, unresolved, or duplicate tags."""
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for template in binding.get("tags") or []:
+        tag = _clean(_format(str(template or ""), attendance), 200)
+        if not tag or re.search(r"\{[A-Za-z0-9_]+\}", tag):
+            continue
+        normalized = tag.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append({"name": tag})
+    return result
 
 
 def _format(template: str, attendance: dict[str, Any]) -> str:
@@ -987,7 +1022,7 @@ async def _create_lead(attendance: dict[str, Any], binding: dict[str, Any], resp
         "status_id": _int(binding.get("status_id")),
         "responsible_user_id": _int(responsible),
         "custom_fields_values": await _mapped_field_values(attendance, binding, "leads"),
-        "_embedded": {"contacts": [contact], "tags": [{"name": _clean(tag, 200)} for tag in binding.get("tags") or [] if _clean(tag, 200)]},
+        "_embedded": {"contacts": [contact], "tags": _lead_tags(attendance, binding)},
     }
     lead = {key: value for key, value in lead.items() if value not in (None, "", [])}
     body, error, _ = await _amo_request("POST", "/api/v4/leads/complex", [lead])
@@ -999,7 +1034,7 @@ async def _update_lead(lead_id: str, attendance: dict[str, Any], binding: dict[s
     payload = {
         "name": _mapped_entity_name(attendance, binding, "leads") or _lead_name(attendance, binding),
         "custom_fields_values": await _mapped_field_values(attendance, binding, "leads"),
-        "_embedded": {"tags": [{"name": _clean(tag, 200)} for tag in binding.get("tags") or [] if _clean(tag, 200)]},
+        "_embedded": {"tags": _lead_tags(attendance, binding)},
     }
     payload = {key: value for key, value in payload.items() if value not in (None, "", [])}
     body, error, _ = await _amo_request("PATCH", f"/api/v4/leads/{lead_id}", payload)

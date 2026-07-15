@@ -179,6 +179,21 @@ class BizonAmoRulesTest(unittest.TestCase):
         binding = {"lead_name_template": "{webinar_date} | {webinar_time} | {watch_minutes_round}м | {username}"}
         self.assertEqual(router._lead_name(attendance, binding), "14.07.2026 | 09:24 | 7м | Никита")
 
+    def test_room_slug_is_extracted_from_room_or_webinar_id(self):
+        self.assertEqual(router._room_slug({"roomid": "97242:lay"}), "lay")
+        self.assertEqual(
+            router._room_slug({"webinarId": "97242:puppy*2026-07-15T12:00:00"}),
+            "puppy",
+        )
+        self.assertEqual(router._room_slug({"roomid": "invalid-room"}), "")
+
+    def test_tag_templates_add_room_slug_and_skip_unresolved_values(self):
+        tags = router._lead_tags(
+            {"roomid": "97242:lay"},
+            {"tags": ["Bizon365", "{room_slug}", "LAY", "{missing}", ""]},
+        )
+        self.assertEqual(tags, [{"name": "Bizon365"}, {"name": "lay"}])
+
     def test_tracking_identifiers_use_bizon_and_ym_fallbacks(self):
         attendance = {
             "person_key": "chatUserId:fallback-person",
@@ -393,6 +408,31 @@ class BizonAmoRulesTest(unittest.TestCase):
         self.assertEqual(lead["custom_fields_values"][0]["values"][0]["value"], 61)
         contact_fields = {item["field_id"] for item in lead["_embedded"]["contacts"][0]["custom_fields_values"]}
         self.assertEqual(contact_fields, {100, 200})
+
+    def test_create_payload_resolves_room_tag_template(self):
+        calls = []
+
+        async def fake_catalog(_entity):
+            return [], ""
+
+        async def fake_request(method, path, payload=None):
+            calls.append((method, path, payload))
+            return [{"id": 778}], "", 200
+
+        original_catalog, original_request = router._catalog, router._amo_request
+        router._catalog, router._amo_request = fake_catalog, fake_request
+        try:
+            asyncio.run(router._create_lead(
+                {"username": "Наталия", "roomid": "97242:lay"},
+                {"pipeline_id": "10", "status_id": "20", "tags": ["Bizon365", "{room_slug}"]},
+                "30",
+            ))
+        finally:
+            router._catalog, router._amo_request = original_catalog, original_request
+        self.assertEqual(
+            calls[0][2][0]["_embedded"]["tags"],
+            [{"name": "Bizon365"}, {"name": "lay"}],
+        )
 
     def test_threshold_edges_and_missing_contact(self):
         base = {"watch_valid": True, "phone": "79990000000"}
