@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Общение с администрацией</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--panel:#101010;--panel2:#171717;--line:#2d2d2d;--line2:#444;--text:#f2f2f2;--muted:#aaa;--subtle:#777;--ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}button,input,select{font:inherit}
+    *{scrollbar-color:#555 #080808;scrollbar-width:thin}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:#555;border:2px solid #080808}
+    .shell{width:100vw;height:100vh;display:grid;grid-template-rows:auto auto auto auto minmax(0,1fr) auto;overflow:hidden}
+    .top,.filters,.admins{display:flex;align-items:center;gap:8px;min-width:0;padding:9px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+    .top{background:#0d0d0d}.filters{background:#090909;overflow:auto}.title{font-weight:650;font-size:.98rem;white-space:nowrap}.spacer{flex:1}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px;border:1px solid var(--line2);background:var(--panel2);color:var(--text);padding:5px 10px;cursor:pointer;white-space:nowrap}.btn.primary{background:#f4f4f4;color:#080808;border-color:#f4f4f4}.btn.ghost{background:transparent;color:var(--muted);border-color:var(--line)}.btn:disabled{opacity:.45;cursor:default}
+    .field{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:var(--muted);font-size:.82rem}.field input,.field select{height:30px;border:1px solid var(--line2);background:#0b0b0b;color:var(--text);padding:4px 8px;min-width:86px}.field input{width:72px;text-align:right}.field input[type="checkbox"]{width:auto;min-width:0;height:auto;padding:0;text-align:left}.field select{min-width:126px}
+    .metrics{display:flex;gap:6px;min-width:0;overflow:auto;padding:8px 10px;border-bottom:1px solid var(--line);background:#090909}.pill{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border:1px solid var(--line);background:#0b0b0b;color:var(--muted);font-size:.78rem;white-space:nowrap}.pill.bad{color:var(--bad);border-color:#69323a;background:#231013}.pill.ok{color:var(--ok);border-color:#2e6040;background:#102116}.pill.warn{color:var(--warn);border-color:#665524;background:#211c0b}
+    .admins{background:#080808;overflow:auto}.admin-list{display:flex;align-items:center;gap:6px;min-width:0;overflow:auto}.check-pill{display:inline-flex;align-items:center;gap:5px;min-height:26px;padding:3px 8px;border:1px solid var(--line);background:#0b0b0b;color:var(--muted);font-size:.78rem;white-space:nowrap}.check-pill input{margin:0}.check-pill strong{color:var(--text);font-weight:500}.check-pill small{color:var(--subtle)}
+    .content{min-height:0;overflow:auto}.empty{height:100%;display:grid;place-items:center;color:var(--subtle);padding:28px;text-align:center}
+    table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem}th,td{height:38px;padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}th{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--subtle);font-weight:500}tr:hover td{background:var(--panel2)}
+    .c-status{width:104px}.c-source{width:92px}.c-id{width:118px}.c-target{width:170px}.c-date{width:150px}.c-actions{width:142px;text-align:right}.mono{font-family:"IBM Plex Mono","Consolas",monospace}.error{color:var(--bad)}.row-actions{display:flex;justify-content:flex-end;gap:6px}.row-actions .btn{min-height:26px;padding:3px 8px}
+    .status{height:30px;display:flex;align-items:center;gap:10px;padding:0 10px;border-top:1px solid var(--line);background:var(--panel);color:var(--subtle);font-size:.78rem;min-width:0}.status span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    @media(max-width:880px){.top{flex-wrap:wrap}.filters{align-items:flex-start}.field select{min-width:112px}.c-target{display:none}th.c-target,td.c-target{display:none}.c-date{width:126px}.c-status{width:92px}.c-actions{width:104px}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div class="title">Общение с администрацией</div>
+    <span id="ready" class="pill">—</span>
+    <label class="field">держать, дней <input id="retentionDays" type="number" min="1" max="90" step="1" value="7"></label>
+    <button id="saveSettingsBtn" class="btn ghost" type="button">Сохранить</button>
+    <div class="spacer"></div>
+    <button id="refreshBtn" class="btn ghost" type="button">Обновить</button>
+    <button id="processBtn" class="btn primary" type="button">Обработать сейчас</button>
+  </div>
+  <div class="filters">
+    <label class="field">таблица
+      <select id="viewFilter">
+        <option value="memberships">Кого держим</option>
+        <option value="actions">Журнал действий</option>
+      </select>
+    </label>
+    <label class="field">источник
+      <select id="sourceFilter">
+        <option value="">Все</option>
+        <option value="senler">Senler</option>
+        <option value="salebot">Salebot</option>
+        <option value="salebot+senler">Senler + Salebot</option>
+        <option value="unknown">Unknown</option>
+        <option value="admin_filtered">Админ не выбран</option>
+        <option value="group_message">Сообщение группы</option>
+        <option value="error">Ошибка кода</option>
+      </select>
+    </label>
+    <label class="field">статус
+      <select id="statusFilter">
+        <option value="">Все</option>
+        <option value="active">Активные</option>
+        <option value="expired">Истекшие</option>
+        <option value="success">Успешные</option>
+        <option value="partial">Частично</option>
+        <option value="failed">Ошибки</option>
+        <option value="skipped">Пропущенные</option>
+      </select>
+    </label>
+    <label class="field">строк
+      <select id="limitFilter">
+        <option value="100">100</option>
+        <option value="250">250</option>
+        <option value="500">500</option>
+      </select>
+    </label>
+  </div>
+  <div class="admins">
+    <label class="field"><input id="adminFilterEnabled" type="checkbox"> только выбранные админы</label>
+    <button id="cleanupExcludedBtn" class="btn ghost" type="button">Снять по выключенным</button>
+    <div id="adminList" class="admin-list"></div>
+  </div>
+  <div class="metrics">
+    <span id="metricSuccess" class="pill ok">успешно 0</span>
+    <span id="metricActive" class="pill ok">активно 0</span>
+    <span id="metricFailed" class="pill bad">ошибки 0</span>
+    <span id="metricSkipped" class="pill warn">пропущено 0</span>
+    <span id="targets" class="pill">—</span>
+  </div>
+  <div class="content">
+    <table>
+      <thead id="head"></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden>Строк нет под выбранные фильтры</div>
+  </div>
+  <div class="status"><span id="left">Готово</span><span id="msg" style="margin-left:auto"></span></div>
+</div>
+<script>
+const API = location.pathname.replace(/\/panel\/.*$/, '/api');
+let state = {env:null, settings:null, admins:{items:[]}, actions:{items:[],counts:{}}, memberships:{items:[],counts:{}}};
+const $ = id => document.getElementById(id);
+function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function fmtDate(s){if(!s)return '—';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function setMsg(text, kind='info'){$('msg').textContent=text||'';$('msg').style.color=kind==='error'?'var(--bad)':kind==='ok'?'var(--ok)':'var(--subtle)';}
+async function api(path, opts={}){
+  const res = await fetch(API + path, opts);
+  if(!res.ok){let data={};try{data=await res.json()}catch{};throw new Error(data.detail||data.error||`HTTP ${res.status}`)}
+  return await res.json();
+}
+function query(){
+  const params = new URLSearchParams();
+  params.set('limit', $('limitFilter').value || '100');
+  if($('statusFilter').value) params.set('status', $('statusFilter').value);
+  if($('sourceFilter').value) params.set('source', $('sourceFilter').value);
+  return '?' + params.toString();
+}
+function statusClass(s){
+  if(s==='success' || s==='active') return 'ok';
+  if(s==='failed') return 'bad';
+  return 'warn';
+}
+function actionButtons(row){
+  const vk = row.vk_url ? `<button class="btn ghost open-dialog" data-url="${esc(row.vk_url)}" type="button">VK</button>` : '';
+  const retry = row.status === 'failed' ? `<button class="btn ghost retry" data-id="${esc(row.id)}" type="button">Повтор</button>` : '';
+  return `<div class="row-actions">${vk}${retry}</div>`;
+}
+function renderMetrics(){
+  const env = state.env || {};
+  const settings = state.settings || {};
+  const actions = state.actions || {counts:{}};
+  const memberships = state.memberships || {counts:{}};
+  $('ready').className = 'pill ' + (env.ready ? 'ok' : 'bad');
+  $('ready').textContent = env.ready ? `готово · ${settings.retention_days || env.retention_days || 7} дней · проверка ${env.poll_seconds || 0}с` : 'нужны настройки';
+  $('retentionDays').value = settings.retention_days || env.retention_days || 7;
+  $('metricSuccess').textContent = `успешно ${actions.counts?.success || 0}`;
+  $('metricActive').textContent = `активно ${memberships.counts?.active || 0}`;
+  $('metricFailed').textContent = `ошибки ${actions.counts?.failed || 0}`;
+  $('metricSkipped').textContent = `пропущено ${actions.counts?.skipped || 0}`;
+  $('targets').textContent = `Senler ${env.senler_subscription_id || '—'} · Salebot ${env.salebot_list_id || '—'} · VK ${settings.vk_group_id || '—'}`;
+}
+function renderAdmins(){
+  const settings = state.settings || {};
+  const admins = state.admins?.items || [];
+  const filter = !!settings.admin_filter_enabled;
+  const allowed = new Set((settings.allowed_admin_ids || []).map(String));
+  $('adminFilterEnabled').checked = filter;
+  if(!admins.length){
+    $('adminList').innerHTML = '<span class="pill">админы пока не найдены</span>';
+    return;
+  }
+  $('adminList').innerHTML = admins.map(admin => {
+    const checked = filter ? allowed.has(String(admin.id)) : true;
+    return `<label class="check-pill" title="ID ${esc(admin.id)} · последний ответ ${esc(fmtDate(admin.last_seen))}">
+      <input class="admin-check" type="checkbox" value="${esc(admin.id)}" ${checked?'checked':''}>
+      <strong>${esc(admin.name || admin.id)}</strong><small>${esc(admin.count || 0)}</small>
+    </label>`;
+  }).join('');
+}
+function renderMemberships(){
+  const rows = state.memberships.items || [];
+  $('head').innerHTML = `<tr>
+    <th class="c-status">Статус</th><th class="c-source">Источник</th><th class="c-id">VK ID</th>
+    <th class="c-target">Цель</th><th class="c-date">Истекает</th><th class="c-date">Админ писал</th>
+    <th>Ошибка снятия</th><th class="c-actions"></th>
+  </tr>`;
+  $('rows').innerHTML = rows.map(row => `<tr title="${esc(row.remove_error || '')}">
+    <td class="c-status"><span class="pill ${statusClass(row.status)}">${esc(row.status || '—')}</span></td>
+    <td class="c-source">${esc(row.source || '—')}</td>
+    <td class="c-id mono">${esc(row.vk_user_id || '—')}</td>
+    <td class="c-target">${esc(row.target_type || '—')} ${esc(row.target_id || '')}</td>
+    <td class="c-date">${esc(fmtDate(row.expires_at))}</td>
+    <td class="c-date" title="${esc(row.admin_author_id || '')}">${esc(row.admin_name || '—')} · ${esc(fmtDate(row.last_admin_message_at))}</td>
+    <td class="${row.remove_error?'error':''}">${esc(row.remove_error || '—')}</td>
+    <td class="c-actions">${actionButtons(row)}</td>
+  </tr>`).join('');
+  $('empty').hidden = rows.length > 0;
+  $('left').textContent = `Кого держим · показано ${rows.length}`;
+}
+function renderActions(){
+  const rows = state.actions.items || [];
+  $('head').innerHTML = `<tr>
+    <th class="c-status">Статус</th><th class="c-source">Источник</th><th class="c-id">VK ID</th>
+    <th class="c-target">Цель</th><th>Ошибка</th><th class="c-date">Обновлено</th><th class="c-actions"></th>
+  </tr>`;
+  $('rows').innerHTML = rows.map(row => `<tr title="${esc(row.error || '')}">
+    <td class="c-status"><span class="pill ${statusClass(row.status)}">${esc(row.status || '—')}</span></td>
+    <td class="c-source">${esc(row.source || '—')}</td>
+    <td class="c-id mono">${esc(row.vk_user_id || '—')}</td>
+    <td class="c-target">${esc(row.target_type || '—')} ${esc(row.target_id || '')}</td>
+    <td class="${row.status==='failed'?'error':''}">${esc(row.error || '—')}</td>
+    <td class="c-date">${esc(fmtDate(row.updated_at))}</td>
+    <td class="c-actions">${actionButtons(row)}</td>
+  </tr>`).join('');
+  $('empty').hidden = rows.length > 0;
+  $('left').textContent = `Журнал действий · показано ${rows.length}`;
+}
+function render(){
+  renderMetrics();
+  renderAdmins();
+  if($('viewFilter').value === 'actions') renderActions(); else renderMemberships();
+}
+async function load(){
+  const q = query();
+  const [env, settings, admins, actions, memberships] = await Promise.all([
+    api('/env-status'),
+    api('/settings'),
+    api('/admins?days=90'),
+    api('/actions' + q),
+    api('/memberships' + q)
+  ]);
+  state = {env, settings, admins, actions, memberships};
+  render();
+}
+async function saveSettings(){
+  $('saveSettingsBtn').disabled = true;
+  try{
+    const days = Number($('retentionDays').value || 7);
+    const allowed = [...document.querySelectorAll('.admin-check:checked')].map(input => input.value);
+    const data = await api('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({retention_days:days, admin_filter_enabled:$('adminFilterEnabled').checked, allowed_admin_ids:allowed})});
+    state.settings = data.settings;
+    setMsg(`Срок сохранен: ${data.settings.retention_days} дней, пересчитано ${data.recomputed || 0}, снято ${data.expired || 0}`, data.expire_failed ? 'error' : 'ok');
+    await load();
+  }finally{
+    $('saveSettingsBtn').disabled = false;
+  }
+}
+async function processNow(){
+  $('processBtn').disabled = true;
+  try{
+    const data = await api('/process?limit=50', {method:'POST'});
+    await load();
+    setMsg(`Обработано ${data.processed || 0}, снято ${data.expired || 0}, пропущено ${data.skipped || 0}, ошибок ${data.failed || 0}`, (data.failed || data.expire_failed) ? 'error' : 'ok');
+  }finally{
+    $('processBtn').disabled = false;
+  }
+}
+async function cleanupExcluded(){
+  if(!$('adminFilterEnabled').checked){
+    setMsg('Сначала включи фильтр выбранных админов и сохрани настройки', 'error');
+    return;
+  }
+  if(!confirm('Снять из Senler/Salebot людей, которых добавил выключенный админ?')) return;
+  $('cleanupExcludedBtn').disabled = true;
+  try{
+    const data = await api('/admins/cleanup-excluded?limit=1000', {method:'POST'});
+    await load();
+    setMsg(`Снято ${data.removed || 0}, ошибок ${data.failed || 0}`, data.failed ? 'error' : 'ok');
+  }finally{
+    $('cleanupExcludedBtn').disabled = false;
+  }
+}
+['viewFilter','sourceFilter','statusFilter','limitFilter'].forEach(id => $(id).addEventListener('change',()=>load().catch(e=>setMsg(e.message,'error'))));
+$('refreshBtn').addEventListener('click',()=>load().catch(e=>setMsg(e.message,'error')));
+$('saveSettingsBtn').addEventListener('click',()=>saveSettings().catch(e=>setMsg(e.message,'error')));
+$('processBtn').addEventListener('click',()=>processNow().catch(e=>setMsg(e.message,'error')));
+$('cleanupExcludedBtn').addEventListener('click',()=>cleanupExcluded().catch(e=>setMsg(e.message,'error')));
+$('rows').addEventListener('click',async e=>{
+  const open = e.target.closest('.open-dialog');
+  if(open && open.dataset.url){window.open(open.dataset.url, '_blank', 'noopener');return;}
+  const btn = e.target.closest('.retry');
+  if(!btn)return;
+  btn.disabled = true;
+  try{
+    await api(`/actions/${encodeURIComponent(btn.dataset.id)}/retry`, {method:'POST'});
+    await load();
+    setMsg('Повтор выполнен', 'ok');
+  }catch(err){
+    setMsg(err.message, 'error');
+  }finally{
+    btn.disabled = false;
+  }
+});
+load().catch(e=>setMsg(e.message,'error'));
+</script>
+</body>
+</html>

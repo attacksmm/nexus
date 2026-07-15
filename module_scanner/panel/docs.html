@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Сканер — документация</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--text:#f2f2f2;--muted:#bababa;--border:#2d2d2d;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text)}body{padding:22px;line-height:1.55}main{max-width:920px}p,li{color:var(--muted)}code,pre{font-family:"IBM Plex Mono","Consolas",monospace;background:#030303;border:1px solid var(--border)}code{padding:1px 5px}pre{padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+  </style>
+</head>
+<body><main>
+  <h1>Сканер</h1>
+  <p>Модуль проверяет VK <code>messages.getConversations</code> с фильтром <code>unanswered</code>, сохраняет события локально и показывает до 20 клиентов во вкладках панели.</p>
+  <h2>Очереди</h2>
+  <ul>
+    <li><code>Не отвечено</code> — входящие, где после SLA не найден OpenRouter/Senler-ответ или ручной ответ ОП.</li>
+    <li><code>Общение с админом</code> — входящие из VK unanswered, перед которыми в этот же московский день уже было исходящее сообщение админа.</li>
+  </ul>
+  <p>При открытии клиента кнопкой VK модуль помечает все активные события этого VK ID прочитанными. VK-алерты в чаты не отправляются.</p>
+  <h2>API</h2>
+  <pre>GET /nexus/scanner/api/events?tab=problems&amp;unread=1&amp;limit=20
+POST /nexus/scanner/api/scan
+POST /nexus/scanner/api/events/{id}/open
+GET /nexus/scanner/api/env-status</pre>
+</main></body></html>
