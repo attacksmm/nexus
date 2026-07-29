@@ -144,6 +144,14 @@ SALEBOT_FUNNEL_STAGES = {
     "puppy_gpt5.txt": "Эфир уже завершён. Это этап общения после эфира.",
     "puppy_gpt6.txt": "Это дополнительный этап продаж после эфира в воронке щенка.",
 }
+REPLAY_BONUS_FORMAT_PROMPTS = frozenset(
+    {
+        "prompts/puppy_gpt5.txt",
+        "prompts/senler/puppy_gpt5_senler.txt",
+    }
+)
+REPLAY_LABEL_RE = re.compile(r"(?iu)запись\s*:")
+BONUS_LABEL_RE = re.compile(r"(?iu)бонусы\s*:")
 _URL_PATTERN = re.compile(r"(https?://\S+)", re.IGNORECASE)
 _LINK_CHUNK_PATTERN = re.compile(r"((?:✅\s*)?(?:https?://\S+|#\{[^{}]+\})(?:\s*✅)?)", re.IGNORECASE)
 LEGACY_SUMMARY_PROMPT = (
@@ -365,6 +373,29 @@ def _render_senler_template_text(text: str, values: dict[str, str]) -> str:
         return values.get(key, match.group(0))
 
     return SENLER_TEMPLATE_TOKEN_RE.sub(repl, text)
+
+
+def _format_replay_bonus_blocks(answer: str, prompt_path: str) -> str:
+    """Normalize only the replay/bonus separators for two explicitly scoped prompts."""
+    if prompt_path not in REPLAY_BONUS_FORMAT_PROMPTS or not answer:
+        return answer
+
+    bonus_matches = list(BONUS_LABEL_RE.finditer(answer))
+    if not bonus_matches:
+        return answer
+    bonus_match = bonus_matches[-1]
+    replay_matches = [match for match in REPLAY_LABEL_RE.finditer(answer) if match.start() < bonus_match.start()]
+    if not replay_matches:
+        return answer
+    replay_match = replay_matches[-1]
+
+    main_text = answer[: replay_match.start()].rstrip(" \t\r\n")
+    replay_text = answer[replay_match.end() : bonus_match.start()].strip(" \t\r\n")
+    bonus_text = answer[bonus_match.end() :].strip(" \t\r\n")
+    if not main_text or not replay_text or not bonus_text:
+        return answer
+
+    return f"{main_text}\n\nЗапись:\n{replay_text}\n\nБонусы:\n{bonus_text}"
 
 
 CLIENT_NAME_LINE_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:клиент|имя клиента|имя пользователя|пользователь)(?:\*\*)?\s*[:—-]\s*.+(?:\n|$)")
@@ -2933,6 +2964,7 @@ async def _run_chat(
     if senler_template_vars:
         answer = _render_senler_template_text(answer, senler_template_vars)
     answer = _rewrite_direct_client_address(answer, trusted_client_name)
+    answer = _format_replay_bonus_blocks(answer, prompt_path)
     summary_result = None
     summary_error = ""
     if allow_write and mode in (2, 3, 4):

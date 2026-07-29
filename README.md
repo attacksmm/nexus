@@ -7,7 +7,7 @@ Nexus — компактный FastAPI-оркестратор для серви�
 ## Возможности
 
 - установка и обновление модулей через ZIP;
-- запуск, пауза, возобновление и выгрузка модулей;
+- запуск, пауза и возобновление модулей;
 - роли пользователей: `admin`, `editor`, `viewer`;
 - ограничение доступа пользователей к отдельным модулям;
 - единый shell-интерфейс с iframe-панелями модулей;
@@ -21,13 +21,12 @@ Nexus — компактный FastAPI-оркестратор для серви�
 nexus/
 ├── main.py                  # FastAPI-приложение оркестратора
 ├── orchestrator/
-│   ├── core.py              # ModuleManager: install/load/unload/pause/resume
+│   ├── core.py              # ModuleManager: install/load/pause/resume
 │   ├── auth.py              # JWT cookie-аутентификация и пользователи
 │   └── db.py                # SQLite: modules, users, meta
 ├── templates/               # Jinja2-страницы shell/login/settings
 ├── static/                  # глобальные CSS/JS Nexus shell
 ├── module_*                 # исходники модулей в репозитории
-├── *.zip                    # installable ZIP-архивы модулей
 ├── modules/                 # runtime-распаковка модулей, не хранится в git
 ├── uploads/                 # временные ZIP при установке, не хранится в git
 └── data/nexus.db            # runtime-БД оркестратора, не хранится в git
@@ -269,6 +268,25 @@ Legacy endpoint `/webhook` остаётся для status-based обработк
 
 Интеграция amoCRM и Senler. Обрабатывает webhook-события сделок, поддерживает привязки статусов, exclusive-группы, запись переменных Senler и заметки в amoCRM.
 
+### Vakas replacement: Bizon365 и amoCRM
+
+- `bizon-reports` — принимает webhook Bizon365, работает с API v2, объединяет повторные входы, рассчитывает длительность по `vi`, пишет `bizon365_clients` и `bizon365_attendance` в `customer-db` и публикует защищённый attendance-feed.
+- `bizon-amocrm` — читает feed, применяет пороги по вебинарам, гибкие правила дублей в выбранных воронках, обновляет активную сделку или создаёт новую и распределяет новых лидов round-robin. По умолчанию работает в dry-run.
+- `bizon-google-sheets` — выгружает все посещения в новую вкладку существующей Google-таблицы; повторная ревизия обновляет строку по `attendance_key`. По умолчанию работает в dry-run.
+- `getcourse-amocrm` — читает новые заказы `getcourse_orders` из `customer-db` либо отдельные GetCourse webhook-и и создаёт/обновляет сделки автооплат.
+
+Основные внутренние контракты:
+
+```text
+GET  /nexus/bizon-reports/api/attendance-feed?after=0&limit=200
+POST /nexus/bizon-amocrm/api/sync/run
+POST /nexus/bizon-google-sheets/api/sync/run
+```
+
+Feed требует Bearer token, который генерирует `bizon-reports`. Для записи в Sheets используется `GOOGLE_APPLICATION_CREDENTIALS`; JSON-ключ не хранится в модуле.
+
+Пошаговая установка, теневой период, переключение и rollback описаны в [VAKAS_CUTOVER.md](VAKAS_CUTOVER.md).
+
 ### Прочие модули
 
 - `senler` — списки Senler и клиентские трекинг-сценарии;
@@ -382,6 +400,28 @@ sudo systemctl enable --now nexus
 
 Сервис слушает `0.0.0.0:8080`. Для production он должен работать за nginx и TLS.
 
+## Git и автоматическая проверка
+
+Git хранит код, панели, манифесты и тесты. Runtime `data/`, `.env`, SQLite и собранные ZIP в Git не попадают: данные и секреты восстанавливаются отдельно из защищённой резервной копии.
+
+Перед коммитом выполнить:
+
+```bash
+python scripts/validate_repository.py
+python -m pytest -q tests --import-mode=importlib --ignore=tests/test_chat_shared_vk_dispatch.py
+```
+
+GitHub Actions запускает эти же проверки для каждого push и pull request. Чистое восстановление кода:
+
+```bash
+git clone https://github.com/attacksmm/nexus.git
+cd nexus
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+После этого отдельно вернуть production `.env` и каталоги `modules/*/data/`, затем запустить сервис.
+
 ## Безопасность и эксплуатация
 
 - `.env`, `data/`, `modules/`, `uploads/`, SQLite-БД и runtime-файлы не коммитятся.
@@ -396,7 +436,6 @@ sudo systemctl enable --now nexus
 - `active` — модуль смонтирован и обрабатывает запросы;
 - `paused` — файлы модуля есть на диске, но маршруты не смонтированы;
 - `error` — модуль не удалось загрузить;
-- `unloaded` — модуль выгружен и удалён из БД.
 
 ## Рабочие соглашения
 

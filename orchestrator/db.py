@@ -86,12 +86,6 @@ async def update_module_status(module_id: str, status: str):
         await db.commit()
 
 
-async def delete_module(module_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM modules WHERE id = ?", (module_id,))
-        await db.commit()
-
-
 # ── Users ─────────────────────────────────────────────────────────────────────
 
 async def get_all_users() -> list[dict]:

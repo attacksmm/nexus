@@ -464,7 +464,7 @@
       $("metricErrors").textContent = data.stats?.recent_errors_24h ?? "0";
       const secrets = data.secrets || [];
       const byKey = Object.fromEntries(secrets.map(item => [item.key, item]));
-      const vkReady = !!byKey.vk_user_token?.ready && byKey.vk_user_token?.validation_status !== "invalid";
+      const vkReady = !!byKey.vk_group_token?.ready && byKey.vk_group_token?.validation_status !== "invalid" && !!byKey.vk_group_id?.ready;
       const runtimeRows = data.runtime_state || [];
       const anyRunning = runtimeRows.some(row => row.status === "running");
       const allStopped = runtimeRows.every(row => row.status === "stopped");

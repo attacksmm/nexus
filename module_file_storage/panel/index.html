@@ -96,11 +96,33 @@
     .preview-text{width:100%;height:58vh;margin:0;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-muted);font-family:"IBM Plex Mono","Fira Code",monospace;font-size:.78rem;line-height:1.5;}
 
     @media (max-width:720px){
-      .toolbar{align-items:stretch;flex-direction:column;}
+      .toolbar{align-items:stretch;flex-direction:column;padding:8px;}
+      .crumb{min-height:40px;}
       .actions{width:100%;overflow-x:auto;padding-bottom:1px;}
-      .c-date{width:132px}.c-type{display:none}.c-size{width:82px}.c-actions{width:104px}
-      th.c-type,td.c-type{display:none}
-      .btn{padding-inline:8px;}
+      .btn{min-height:40px;padding-inline:10px;}
+      .btn--icon{width:40px;}
+      .file-body{padding:8px;}
+      table,tbody,tr,td{display:block;width:100%;}
+      thead{display:none;}
+      tbody{display:grid;gap:8px;}
+      tr.item-row{padding:10px;border:1px solid var(--border);background:var(--panel);}
+      tr.item-row:hover td{background:transparent;}
+      tr.item-row--active{border-color:var(--border-strong);background:var(--panel-strong);}
+      td{height:auto;padding:0;border:0;white-space:normal;overflow:visible;}
+      .c-name{width:100%;padding-bottom:8px;}
+      .c-date,.c-type,.c-size{display:inline;width:auto;color:var(--text-subtle);font-size:.76rem;}
+      .c-date::before{content:"Изменён: ";}
+      .c-type::before{content:" · ";}
+      .c-size::before{content:" · ";}
+      .c-actions{width:100%;padding-top:10px;text-align:left;}
+      .row-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;width:100%;}
+      .row-actions .btn{width:100%;min-height:40px;padding:4px 8px;}
+      .row-actions .btn[data-mobile-label]::after{content:attr(data-mobile-label);}
+      .statusbar{min-height:36px;height:auto;padding-block:6px;flex-wrap:wrap;}
+      .dialog__head{min-height:48px;}
+      .dialog__foot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));}
+      .dialog__foot .btn{width:100%;}
+      .overlay{padding:8px;}
     }
   </style>
 </head>
@@ -379,14 +401,20 @@ function renderItems(){
       <td class="c-type">${esc(typeLabel(item))}</td>
       <td class="c-size">${item.kind === 'folder' ? '—' : esc(fmtSize(item.size))}</td>
       <td class="c-actions"><span class="row-actions">
-        ${item.kind === 'file' ? '<button class="btn btn--ghost" data-act="preview" title="Открыть" type="button">□</button><button class="btn btn--ghost" data-act="copy" title="Копировать ссылку" type="button">⛓</button>' : ''}
-        ${item.is_text_editable ? '<button class="btn btn--ghost" data-act="edit" title="Редактировать" type="button">T</button>' : ''}
-        <button class="btn btn--ghost" data-act="rename" title="Переименовать" type="button">A</button>
-        <button class="btn btn--danger" data-act="delete" title="Удалить" type="button">×</button>
+        <button class="btn btn--ghost" data-act="open" data-mobile-label="Открыть" title="Открыть" aria-label="Открыть" type="button">↗</button>
+        ${item.kind === 'file' ? '<button class="btn btn--ghost" data-act="copy" data-mobile-label="Копировать" title="Копировать ссылку" aria-label="Копировать ссылку" type="button">⛓</button>' : ''}
+        ${item.is_text_editable ? '<button class="btn btn--ghost" data-act="edit" data-mobile-label="Редактировать" title="Редактировать" aria-label="Редактировать" type="button">T</button>' : ''}
+        <button class="btn btn--ghost" data-act="rename" data-mobile-label="Переименовать" title="Переименовать" aria-label="Переименовать" type="button">A</button>
+        <button class="btn btn--danger" data-act="delete" data-mobile-label="Удалить" title="Удалить" aria-label="Удалить" type="button">×</button>
       </span></td>`;
     tr.addEventListener('click', () => { state.selectedId = item.id; document.querySelectorAll('.item-row').forEach(r=>r.classList.remove('item-row--active')); tr.classList.add('item-row--active'); });
     tr.addEventListener('dblclick', () => item.kind === 'folder' ? loadFolder(item.id) : previewItem(item));
-    tr.querySelectorAll('button[data-act]').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); handleAction(btn.dataset.act, item); }));
+    tr.querySelectorAll('button[data-act]').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      btn.disabled = true;
+      try{ await handleAction(btn.dataset.act, item); }
+      finally{ btn.disabled = false; }
+    }));
     $('itemsBody').appendChild(tr);
   }
 }
@@ -398,12 +426,12 @@ function sortItems(a,b){
   if(av > bv) return 1 * state.sortDir;
   return a.name.localeCompare(b.name, 'ru');
 }
-function handleAction(act, item){
-  if(act === 'preview') previewItem(item);
-  if(act === 'copy') copyLink(item);
-  if(act === 'edit') editText(item);
-  if(act === 'rename') renameItem(item);
-  if(act === 'delete') deleteItem(item);
+async function handleAction(act, item){
+  if(act === 'open') return item.kind === 'folder' ? loadFolder(item.id) : previewItem(item);
+  if(act === 'copy') return copyLink(item);
+  if(act === 'edit') return editText(item);
+  if(act === 'rename') return renameItem(item);
+  if(act === 'delete') return deleteItem(item);
 }
 
 async function createFolder(name){
@@ -663,8 +691,22 @@ $('refreshBtn').addEventListener('click', () => loadFolder(state.folderId));
 $('upBtn').addEventListener('click', () => {const parent = state.path.length > 1 ? state.path[state.path.length - 2].id : null;if(parent) loadFolder(parent);});
 $('chooseUploadBtn').addEventListener('click', () => chooseUploadFiles().catch(err=>setMsg(err.message,'error')));
 $('uploadInput').addEventListener('change', e => { if(e.target.files.length) uploadFiles(e.target.files).catch(err=>setMsg(err.message,'error')); e.target.value=''; });
-$('folderForm').addEventListener('submit', async e => {e.preventDefault();try{await createFolder($('folderName').value);closeDialog('folderDialog');}catch(err){$('folderError').textContent=err.message;$('folderError').hidden=false;}});
-$('textForm').addEventListener('submit', async e => {e.preventDefault();try{await saveText();}catch(err){$('textError').textContent=err.message;$('textError').hidden=false;}});
+$('folderForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const submit=e.submitter;
+  if(submit)submit.disabled=true;
+  try{await createFolder($('folderName').value);closeDialog('folderDialog');setMsg('Папка создана','ok');}
+  catch(err){$('folderError').textContent=err.message;$('folderError').hidden=false;}
+  finally{if(submit)submit.disabled=false;}
+});
+$('textForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const submit=e.submitter;
+  if(submit)submit.disabled=true;
+  try{await saveText();setMsg('Файл сохранён','ok');}
+  catch(err){$('textError').textContent=err.message;$('textError').hidden=false;}
+  finally{if(submit)submit.disabled=false;}
+});
 $('copyPreviewBtn').addEventListener('click', async () => {await navigator.clipboard.writeText($('previewUrl').value);setMsg('Ссылка скопирована','ok');});
 $('previewAuthToggle').addEventListener('change', async e => {
   const itemId = Number(e.target.dataset.itemId || 0);

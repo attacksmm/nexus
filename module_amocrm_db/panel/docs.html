@@ -11,8 +11,8 @@
   </style>
 </head>
 <body>
-<h1>amoCRM → DB v1.0.0</h1>
-<p>Модуль принимает webhook amoCRM по сделкам, догружает актуальные данные сделки через amoCRM API и сохраняет snapshot в customer-db таблицу <code>amo_deals</code> с названием «Сделки amoCRM».</p>
+<h1>amoCRM → DB v1.0.3</h1>
+<p>Модуль принимает webhook amoCRM по сделкам, догружает актуальные данные сделки через amoCRM API и сохраняет snapshot в customer-db таблицу <code>amo_deals</code> с названием «Сделки amoCRM». Дополнительно модуль регулярно сверяет последние дни amoCRM с локальной БД и подтягивает сделки, если webhook был пропущен.</p>
 
 <h2>ENV</h2>
 <table>
@@ -31,6 +31,12 @@ leads[status][0][pipeline_id]=111
 leads[status][0][status_id]=142</code></pre>
 <p>Ответ для amoCRM всегда HTTP 200, чтобы amoCRM не отключала webhook при временной ошибке обработки. Ошибки фиксируются во вкладке «События».</p>
 
+<h2>Reconcile</h2>
+<p>Автосверка включена по умолчанию. Она периодически читает сделки amoCRM по <code>created_at</code> за последние дни, сравнивает <code>deal_id</code> с <code>cdb_amo_deals.platform_id</code> и синхронизирует отсутствующие записи. Параметры доступны во вкладке «Настройки»: включение, lookback в днях, интервал и задержка между синхронизациями. Ручной запуск выполняется кнопкой «Сверить сейчас».</p>
+
+<h2>Защита от 429 и потери webhook</h2>
+<p>Webhook сначала фиксируется в SQLite-очереди и только затем обрабатывается одним последовательным worker. Все запросы этого модуля к amoCRM проходят через общий ограничитель частоты. При HTTP 429 учитывается заголовок <code>Retry-After</code>, выполняются быстрые повторы, а если лимит сохраняется — событие остаётся в надёжной очереди с увеличивающейся задержкой и восстанавливается после перезапуска Nexus. Более новый webhook одной сделки заменяет только ещё не начатый старый webhook; актуальный snapshot не теряется.</p>
+
 <h2>Что сохраняется</h2>
 <p>Ключ записи в Базе клиентов: <code>platform_id = deal_id</code>. В <code>custom_fields</code> сохраняются сумма, воронка, статус, ответственный, даты, теги, контакты, телефоны, email, UTM, <code>yclid</code>, <code>ym_uid</code>, кастомные поля, raw snapshot сделки, ссылка на amoCRM и служебные поля синхронизации.</p>
 
@@ -46,6 +52,9 @@ leads[status][0][status_id]=142</code></pre>
   <tr><td>GET</td><td><code>/deals/{deal_id}</code></td><td>Полная запись сделки.</td></tr>
   <tr><td>POST</td><td><code>/deals/{deal_id}/sync</code></td><td>Ручная синхронизация сделки из amoCRM.</td></tr>
   <tr><td>GET</td><td><code>/events</code></td><td>Журнал webhook/sync событий.</td></tr>
+  <tr><td>GET</td><td><code>/queue/status</code></td><td>Состояние worker, очереди и повторов amoCRM.</td></tr>
+  <tr><td>GET</td><td><code>/reconcile/status</code></td><td>Состояние последней сверки amoCRM ↔ DB.</td></tr>
+  <tr><td>POST</td><td><code>/reconcile/run</code></td><td>Ручная сверка и синхронизация отсутствующих сделок.</td></tr>
 </table>
 </body>
 </html>

@@ -35,6 +35,16 @@ DEFAULT_DUPLICATE_RULES = [
     {"entity": "contacts", "field_code": "PHONE", "source": "phone"},
     {"entity": "contacts", "field_code": "EMAIL", "source": "email"},
 ]
+EXCLUDE_OPERATORS = {
+    "equals",
+    "not_equals",
+    "contains",
+    "not_contains",
+    "starts_with",
+    "ends_with",
+    "is_empty",
+    "is_not_empty",
+}
 DEFAULT_LEAD_NAME_TEMPLATE = "{webinar_date} | {webinar_time} | {watch_minutes_round}м | {username}"
 BIZON_FIELD_DEFINITIONS = [
     ("username", "Имя участника", "text", "Контакт", "Имя из анкеты/чата Bizon"),
@@ -107,6 +117,7 @@ _logger: logging.Logger | None = None
 _poll_task: asyncio.Task | None = None
 _process_lock = asyncio.Lock()
 _field_cache: dict[str, list[dict[str, Any]]] = {}
+_pipeline_cache: list[dict[str, Any]] = []
 
 
 class SettingsIn(BaseModel):
@@ -129,10 +140,12 @@ class BindingIn(BaseModel):
     max_minutes: float | None = None
     pipeline_id: str = ""
     status_id: str = ""
+    click_status_id: str = ""
     pipeline_scope: list[str] = []
     status_scope: list[str] = []
     duplicate_action: str = "merge_empty"
     duplicate_rules: list[dict[str, Any]] = []
+    exclude_conditions: list[dict[str, Any]] = []
     note_only_status_ids: list[str] = []
     responsible_user_ids: list[str] = []
     tags: list[str] = []
@@ -291,10 +304,12 @@ async def _init_db() -> None:
                 max_minutes REAL,
                 pipeline_id TEXT NOT NULL DEFAULT '',
                 status_id TEXT NOT NULL DEFAULT '',
+                click_status_id TEXT NOT NULL DEFAULT '',
                 pipeline_scope_json TEXT NOT NULL DEFAULT '[]',
                 status_scope_json TEXT NOT NULL DEFAULT '[]',
                 duplicate_action TEXT NOT NULL DEFAULT 'merge_empty',
                 duplicate_rules_json TEXT NOT NULL DEFAULT '[]',
+                exclude_conditions_json TEXT NOT NULL DEFAULT '[]',
                 note_only_status_ids_json TEXT NOT NULL DEFAULT '[]',
                 responsible_user_ids_json TEXT NOT NULL DEFAULT '[]',
                 tags_json TEXT NOT NULL DEFAULT '[]',
@@ -338,8 +353,12 @@ async def _init_db() -> None:
             await db.execute("UPDATE bindings SET min_minutes=threshold_minutes WHERE min_minutes IS NULL")
         if "max_minutes" not in columns:
             await db.execute("ALTER TABLE bindings ADD COLUMN max_minutes REAL")
+        if "click_status_id" not in columns:
+            await db.execute("ALTER TABLE bindings ADD COLUMN click_status_id TEXT NOT NULL DEFAULT ''")
         if "note_only_status_ids_json" not in columns:
             await db.execute("ALTER TABLE bindings ADD COLUMN note_only_status_ids_json TEXT NOT NULL DEFAULT '[]'")
+        if "exclude_conditions_json" not in columns:
+            await db.execute("ALTER TABLE bindings ADD COLUMN exclude_conditions_json TEXT NOT NULL DEFAULT '[]'")
         if "lead_name_template" not in columns:
             await db.execute("ALTER TABLE bindings ADD COLUMN lead_name_template TEXT NOT NULL DEFAULT ''")
         for key, value in DEFAULT_SETTINGS.items():
@@ -410,12 +429,54 @@ async def _catalog(entity: str) -> tuple[list[dict[str, Any]], str]:
     return result, error
 
 
+async def _pipeline_catalog(force: bool = False) -> tuple[list[dict[str, Any]], str]:
+    global _pipeline_cache
+    if _pipeline_cache and not force:
+        return _pipeline_cache, ""
+    body, error, _ = await _amo_request("GET", "/api/v4/leads/pipelines")
+    rows = (((body or {}).get("_embedded") or {}).get("pipelines") or []) if not error else []
+    result = [row for row in rows if isinstance(row, dict)]
+    if not error:
+        _pipeline_cache = result
+    return result, error
+
+
+def _lead_unsorted_from_pipelines(
+    lead: dict[str, Any], pipelines: list[dict[str, Any]]
+) -> bool | None:
+    pair = (_clean(lead.get("pipeline_id"), 64), _clean(lead.get("status_id"), 64))
+    for pipeline in pipelines:
+        pipeline_id = _clean(pipeline.get("id"), 64)
+        statuses = (((pipeline.get("_embedded") or {}).get("statuses")) or [])
+        for status in statuses:
+            if pair == (pipeline_id, _clean(status.get("id"), 64)):
+                return _int(status.get("type")) == 1
+    return None
+
+
+async def _lead_unsorted_state(lead: dict[str, Any]) -> tuple[bool | None, str]:
+    pipelines, error = await _pipeline_catalog()
+    if error:
+        return None, error
+    state = _lead_unsorted_from_pipelines(lead, pipelines)
+    if state is not None:
+        return state, ""
+    pipelines, error = await _pipeline_catalog(force=True)
+    if error:
+        return None, error
+    state = _lead_unsorted_from_pipelines(lead, pipelines)
+    if state is None:
+        return None, "Текущий статус сделки не найден в каталоге amoCRM"
+    return state, ""
+
+
 def _binding_dict(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
     for source, target in (
         ("pipeline_scope_json", "pipeline_scope"),
         ("status_scope_json", "status_scope"),
         ("duplicate_rules_json", "duplicate_rules"),
+        ("exclude_conditions_json", "exclude_conditions"),
         ("note_only_status_ids_json", "note_only_status_ids"),
         ("responsible_user_ids_json", "responsible_user_ids"),
         ("tags_json", "tags"),
@@ -471,14 +532,24 @@ def _binding_time_matches(binding: dict[str, Any], attendance: dict[str, Any]) -
         return True
     minimum = float(binding.get("min_minutes") if binding.get("min_minutes") is not None else binding.get("threshold_minutes") or 0)
     maximum = binding.get("max_minutes")
-    return float(minutes) >= minimum and (maximum in (None, "") or float(minutes) < float(maximum))
+    above_minimum = float(minutes) >= minimum
+    if _has_webinar_click(attendance) and _int(binding.get("click_status_id")):
+        above_minimum = True
+    return above_minimum and (maximum in (None, "") or float(minutes) < float(maximum))
 
 
-def _qualification_reason(attendance: dict[str, Any], minimum: float, maximum: float | None = None) -> str:
+def _qualification_reason(
+    attendance: dict[str, Any],
+    minimum: float,
+    maximum: float | None = None,
+    click_status_id: Any = None,
+) -> str:
     minutes = attendance.get("watch_minutes")
     if not attendance.get("watch_valid") or not isinstance(minutes, (int, float)):
         return "invalid_duration"
     if float(minutes) < float(minimum):
+        if _has_webinar_click(attendance) and _int(click_status_id):
+            return "eligible"
         return "below_minimum"
     if maximum is not None and float(minutes) >= float(maximum):
         return "at_or_above_maximum"
@@ -516,6 +587,59 @@ def _source_value(attendance: dict[str, Any], source: str) -> Any:
     if key in {"webinar_date", "webinar_time", "watch_minutes_round"}:
         return _template_values(attendance).get(key, "")
     return attendance.get(key, "")
+
+
+def _condition_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return str(value).strip()
+
+
+def _exclude_condition_matches(attendance: dict[str, Any], condition: dict[str, Any]) -> bool:
+    source = _clean(condition.get("source"), 100)
+    operator = _clean(condition.get("operator"), 30)
+    if not source or operator not in EXCLUDE_OPERATORS:
+        return False
+    actual = _condition_text(_source_value(attendance, source)).casefold()
+    expected = _condition_text(condition.get("value")).casefold()
+    if operator == "is_empty":
+        return not actual
+    if operator == "is_not_empty":
+        return bool(actual)
+    if operator == "equals":
+        return actual == expected
+    if operator == "not_equals":
+        return actual != expected
+    if operator == "contains":
+        return expected in actual
+    if operator == "not_contains":
+        return expected not in actual
+    if operator == "starts_with":
+        return actual.startswith(expected)
+    if operator == "ends_with":
+        return actual.endswith(expected)
+    return False
+
+
+def _matching_exclude_conditions(binding: dict[str, Any], attendance: dict[str, Any]) -> list[dict[str, str]]:
+    conditions = binding.get("exclude_conditions") or []
+    if not conditions or not all(
+        isinstance(condition, dict) and _exclude_condition_matches(attendance, condition)
+        for condition in conditions
+    ):
+        return []
+    return [
+        {
+            "source": _clean(condition.get("source"), 100),
+            "operator": _clean(condition.get("operator"), 30),
+            "value": _clean(condition.get("value"), 1000),
+        }
+        for condition in conditions
+    ]
 
 
 def _coerce_amo_field_value(value: Any, field_type: str) -> Any:
@@ -591,6 +715,12 @@ def _phone_identity(value: Any) -> str:
     if len(digits) == 10:
         digits = "7" + digits
     return digits if len(digits) >= 7 else ""
+
+
+def _phone_text(value: Any) -> str:
+    """Return an amoCRM-friendly phone while keeping identity matching digit-based."""
+    digits = _phone_identity(value)
+    return "+" + digits if digits else ""
 
 
 def _email_identity(value: Any) -> str:
@@ -781,7 +911,10 @@ async def _mapped_field_values(
         item: dict[str, Any] = {
             "value": _scalar_for_amo(value, _clean(field.get("type"), 50)),
         }
-        if _clean(field.get("code"), 50).upper() in {"PHONE", "EMAIL"}:
+        field_code = _clean(field.get("code"), 50).upper()
+        if field_code == "PHONE":
+            item["value"] = _phone_text(value)
+        if field_code in {"PHONE", "EMAIL"}:
             item["enum_code"] = "WORK"
         mapped[int(field["id"])] = {"field_id": int(field["id"]), "values": [item]}
     return list(mapped.values())
@@ -807,6 +940,8 @@ def _ensure_contact_identity_fields(
         field = next((item for item in fields if _clean(item.get("code"), 50).upper() == code), None)
         value = _clean(attendance.get(source), 500)
         if field and value and int(field["id"]) not in result:
+            if code == "PHONE":
+                value = _phone_text(value)
             result[int(field["id"])] = {
                 "field_id": int(field["id"]),
                 "values": [{"value": value, "enum_code": "WORK"}],
@@ -1001,6 +1136,34 @@ async def _advance_cursor(binding: dict[str, Any]) -> None:
         await db.commit()
 
 
+def _has_webinar_click(attendance: dict[str, Any]) -> bool:
+    return bool(attendance.get("clicked_button") or attendance.get("clicked_banner"))
+
+
+def _lead_route(attendance: dict[str, Any], binding: dict[str, Any]) -> tuple[int | None, int | None]:
+    pipeline_id = _int(binding.get("pipeline_id"))
+    status_id = _int(binding.get("status_id"))
+    click_status_id = _int(binding.get("click_status_id"))
+    if _has_webinar_click(attendance) and click_status_id:
+        status_id = click_status_id
+    return pipeline_id, status_id
+
+
+async def _preserve_existing_lead_route(
+    existing: dict[str, Any], attendance: dict[str, Any], binding: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """Record click routing without ever moving an existing amoCRM deal."""
+    return {
+        "preserved": True,
+        "reason": "existing lead keeps pipeline and status",
+        "click_detected": _has_webinar_click(attendance),
+        "configured_click_status_id": _clean(binding.get("click_status_id"), 50),
+        "pipeline_id": existing.get("pipeline_id"),
+        "status_id": existing.get("status_id"),
+        "responsible_user_id": existing.get("responsible_user_id"),
+    }, ""
+
+
 async def _create_lead(attendance: dict[str, Any], binding: dict[str, Any], responsible: str) -> tuple[dict[str, Any], str]:
     contact_catalog, error = await _catalog("contacts")
     if error:
@@ -1016,10 +1179,11 @@ async def _create_lead(attendance: dict[str, Any], binding: dict[str, Any], resp
     )
     if contact_custom:
         contact["custom_fields_values"] = contact_custom
+    pipeline_id, status_id = _lead_route(attendance, binding)
     lead = {
         "name": _mapped_entity_name(attendance, binding, "leads") or _lead_name(attendance, binding),
-        "pipeline_id": _int(binding.get("pipeline_id")),
-        "status_id": _int(binding.get("status_id")),
+        "pipeline_id": pipeline_id,
+        "status_id": status_id,
         "responsible_user_id": _int(responsible),
         "custom_fields_values": await _mapped_field_values(attendance, binding, "leads"),
         "_embedded": {"contacts": [contact], "tags": _lead_tags(attendance, binding)},
@@ -1144,19 +1308,52 @@ async def _merge_empty_lead(existing: dict[str, Any], attendance: dict[str, Any]
     return result, ""
 
 
-async def _add_note(lead_id: str, attendance: dict[str, Any], binding: dict[str, Any]) -> tuple[Any, str]:
+def _note_texts(attendance: dict[str, Any], binding: dict[str, Any]) -> list[str]:
     template = binding.get("note_template") or (
         "Посещение Bizon365\nВебинар: {webinarId}\nКомната: {roomid}\n"
         "Время: {watch_minutes} мин.\nТелефон: {phone}\nEmail: {email}\n"
         "Сообщения и ответы в чате: {chat_messages_text}"
     )
-    text = _format_note(template, attendance)
+    main_template = "\n".join(
+        line for line in str(template).replace("\\n", "\n").splitlines()
+        if "{chat_messages_text}" not in line and "{chat_messages}" not in line
+    )
+    texts = [_format_note(main_template, attendance)]
+    messages = attendance.get("chat_messages")
+    rendered: list[str] = []
+    if isinstance(messages, list):
+        for item in messages[:100]:
+            if not isinstance(item, dict):
+                continue
+            message = _clean(item.get("text"), 3000)
+            if not message:
+                continue
+            timestamp = _clean(item.get("time"), 50)
+            rendered.append(f"[{timestamp}] {message}" if timestamp else message)
+    if not rendered:
+        rendered = [
+            _clean(line, 3000)
+            for line in str(attendance.get("chat_messages_text") or "").splitlines()[:100]
+            if _clean(line, 3000)
+        ]
+    if rendered:
+        texts.append("Bizon365 · комментарии с вебинара:\n" + "\n".join(rendered))
+    return list(dict.fromkeys(text for text in texts if text))
+
+
+async def _add_note(lead_id: str, attendance: dict[str, Any], binding: dict[str, Any]) -> tuple[Any, str]:
+    texts = _note_texts(attendance, binding)
     existing, existing_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}/notes?limit=250")
+    existing_texts: set[str] = set()
     if not existing_error:
         for note in (((existing or {}).get("_embedded") or {}).get("notes") or []):
-            if note.get("note_type") == "common" and _clean((note.get("params") or {}).get("text"), 10000) == text:
-                return {"skipped": True, "reason": "identical note already exists"}, ""
-    return (await _amo_request("POST", f"/api/v4/leads/{lead_id}/notes", [{"note_type": "common", "params": {"text": text}}]))[:2]
+            if note.get("note_type") == "common":
+                existing_texts.add(_clean((note.get("params") or {}).get("text"), 10000))
+    missing = [text for text in texts if text not in existing_texts]
+    if not missing:
+        return {"skipped": True, "reason": "all notes already exist"}, ""
+    payload = [{"note_type": "common", "params": {"text": text}} for text in missing]
+    return (await _amo_request("POST", f"/api/v4/leads/{lead_id}/notes", payload))[:2]
 
 
 async def _insert_event(change: dict[str, Any]) -> int:
@@ -1206,10 +1403,24 @@ async def _process_event(event_id: int) -> dict[str, Any]:
         if not binding:
             await _update_event(event_id, status="pending_binding", action="hold", error="Связка вебинара не настроена", attempts=attempts)
             return {"ok": True, "status": "pending_binding"}
+        excluded_by = _matching_exclude_conditions(binding, attendance)
+        if excluded_by:
+            await _update_event(
+                event_id,
+                binding_id=binding["id"],
+                status="skipped",
+                action="excluded",
+                error="",
+                attempts=attempts,
+                details_json=json.dumps({"exclude_conditions": excluded_by}, ensure_ascii=False),
+            )
+            return {"ok": True, "status": "skipped", "reason": "excluded"}
         minimum = float(binding.get("min_minutes") if binding.get("min_minutes") is not None else binding.get("threshold_minutes") or 0)
         maximum = float(binding["max_minutes"]) if binding.get("max_minutes") not in (None, "") else None
         minutes = attendance.get("watch_minutes")
-        qualification = _qualification_reason(attendance, minimum, maximum)
+        qualification = _qualification_reason(
+            attendance, minimum, maximum, binding.get("click_status_id")
+        )
         if qualification == "invalid_duration":
             await _update_event(event_id, binding_id=binding["id"], status="skipped", action="invalid_duration", error=_clean(attendance.get("watch_error")), attempts=attempts)
             return {"ok": True, "status": "skipped", "reason": "invalid_duration"}
@@ -1221,18 +1432,51 @@ async def _process_event(event_id: int) -> dict[str, Any]:
             return {"ok": True, "status": "skipped", "reason": "missing_contact"}
         attendance = await _with_messenger_fields(attendance)
         settings = await _settings()
-        contact_leads, search_error = await _find_all_contact_leads(attendance, binding)
-        existing = contact_leads[0] if contact_leads else None
-        if not search_error and not existing:
-            existing, search_error = await _find_existing(attendance, binding)
+        contact_leads: list[dict[str, Any]] = []
+        waiting_lead_id = _clean(event.get("lead_id"), 50) if event.get("status") == "waiting_unsorted" else ""
+        if waiting_lead_id:
+            existing, search_error, _ = await _amo_request("GET", f"/api/v4/leads/{waiting_lead_id}")
+            if search_error or not isinstance(existing, dict):
+                error = search_error or "Ожидающая сделка не найдена"
+                await _update_event(
+                    event_id, binding_id=binding["id"], status="waiting_unsorted", action="hold",
+                    lead_id=waiting_lead_id, error=error, attempts=attempts,
+                )
+                return {"ok": True, "status": "waiting_unsorted", "error": error}
+            contact_leads = [existing]
+        else:
+            contact_leads, search_error = await _find_all_contact_leads(attendance, binding)
+            existing = contact_leads[0] if contact_leads else None
+            if not search_error and not existing:
+                existing, search_error = await _find_existing(attendance, binding)
         if search_error and not _bool(settings.get("dry_run")):
             await _update_event(event_id, binding_id=binding["id"], status="failed", action="search", error=search_error, attempts=attempts)
             return {"ok": False, "error": search_error}
         # Webinar attendance is enrichment, not a new sales intent. Any exact
         # existing deal wins regardless of pipeline/status/contact duplication.
         # Only a person with no deal at all receives a newly created deal.
-        planned = "merge_empty" if existing else "create"
+        planned = _duplicate_plan(existing, binding)
         responsible = _clean(existing.get("responsible_user_id"), 50) if planned in {"merge_empty", "note_only", "note_all_contact_deals"} else await _responsible(binding)
+        if existing:
+            is_unsorted, unsorted_error = await _lead_unsorted_state(existing)
+            if is_unsorted is not False:
+                lead_id = _clean(existing.get("id"), 50)
+                details = {
+                    "reason": "unsorted" if is_unsorted else "unsorted_check_failed",
+                    "preserved": {
+                        "responsible_user_id": existing.get("responsible_user_id"),
+                        "pipeline_id": existing.get("pipeline_id"),
+                        "status_id": existing.get("status_id"),
+                        "name": existing.get("name"),
+                    },
+                }
+                await _update_event(
+                    event_id, binding_id=binding["id"], status="waiting_unsorted", action="hold",
+                    lead_id=lead_id, responsible_user_id=responsible,
+                    error=unsorted_error, attempts=attempts,
+                    details_json=json.dumps(details, ensure_ascii=False, default=str),
+                )
+                return {"ok": True, "status": "waiting_unsorted", "lead_id": lead_id}
         if planned == "create" and binding.get("responsible_user_ids") and not responsible:
             error = "В связке нет активного ответственного amoCRM"
             await _update_event(event_id, binding_id=binding["id"], status="failed", action=planned, error=error, attempts=attempts)
@@ -1253,6 +1497,12 @@ async def _process_event(event_id: int) -> dict[str, Any]:
         else:
             result, error = await _create_lead(attendance, binding, responsible)
         lead_id = _clean(result.get("lead_id"), 50)
+        if not error and lead_id and planned != "create":
+            route_preservation, route_error = await _preserve_existing_lead_route(
+                existing, attendance, binding
+            )
+            result["route_preservation"] = route_preservation
+            error = route_error
         created_successfully = planned == "create" and not error and bool(lead_id)
         if created_successfully:
             await _advance_cursor(binding)
@@ -1266,12 +1516,44 @@ async def _process_event(event_id: int) -> dict[str, Any]:
         return {"ok": True, "status": "success", "action": planned, "lead_id": lead_id}
 
 
+async def _resume_waiting_unsorted(limit: int = 250) -> dict[str, Any]:
+    async with aiosqlite.connect(_must_db()) as db:
+        cur = await db.execute(
+            "SELECT id,lead_id FROM events WHERE status='waiting_unsorted' ORDER BY id ASC LIMIT ?",
+            (max(1, min(1000, limit)),),
+        )
+        rows = [(int(row[0]), _clean(row[1], 50)) for row in await cur.fetchall()]
+    resumed = 0
+    errors: list[str] = []
+    for event_id, lead_id in rows:
+        if not lead_id:
+            errors.append(f"event {event_id}: lead_id пустой")
+            continue
+        lead, error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}")
+        if error or not isinstance(lead, dict):
+            message = error or "Сделка не найдена"
+            await _update_event(event_id, error=message)
+            errors.append(f"{lead_id}: {message}")
+            continue
+        is_unsorted, catalog_error = await _lead_unsorted_state(lead)
+        if catalog_error:
+            await _update_event(event_id, error=catalog_error)
+            errors.append(f"{lead_id}: {catalog_error}")
+            continue
+        if is_unsorted is not False:
+            continue
+        result = await _process_event(event_id)
+        resumed += int(result.get("status") != "waiting_unsorted")
+    return {"waiting": len(rows), "resumed": resumed, "errors": errors[:5]}
+
+
 async def _poll_once(limit: int = 200) -> dict[str, Any]:
+    waiting = await _resume_waiting_unsorted()
     settings = await _settings()
     feed_url = _clean(settings.get("feed_url"), 2000)
     token = os.environ.get("NEXUS_BIZON_FEED_TOKEN", "").strip() or _clean(settings.get("feed_token"), 1000)
     if not feed_url or not token:
-        return {"ok": False, "error": "feed_url или feed_token не настроены", "processed": 0}
+        return {"ok": False, "error": "feed_url или feed_token не настроены", "processed": 0, **waiting}
     cursor = int(settings.get("feed_cursor") or 0)
     timeout = max(5, min(60, int(settings.get("request_timeout") or 20)))
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1286,7 +1568,7 @@ async def _poll_once(limit: int = 200) -> dict[str, Any]:
             processed += 1
         cursor = max(cursor, int(change.get("id") or 0))
         await _set_settings({"feed_cursor": cursor})
-    return {"ok": True, "processed": processed, "cursor": cursor, "has_more": bool(data.get("has_more"))}
+    return {"ok": True, "processed": processed, "cursor": cursor, "has_more": bool(data.get("has_more")), **waiting}
 
 
 async def _poll_loop() -> None:
@@ -1311,7 +1593,10 @@ async def _poll_loop() -> None:
 @router.get("/health")
 async def health():
     settings = await _settings()
-    return {"ok": True, "module": MODULE_ID, "dry_run": _bool(settings.get("dry_run")), "cursor": int(settings.get("feed_cursor") or 0), **_env_status()}
+    async with aiosqlite.connect(_must_db()) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM events WHERE status='waiting_unsorted'")
+        waiting_unsorted = int((await cur.fetchone())[0])
+    return {"ok": True, "module": MODULE_ID, "dry_run": _bool(settings.get("dry_run")), "cursor": int(settings.get("feed_cursor") or 0), "waiting_unsorted": waiting_unsorted, **_env_status()}
 
 
 @router.get("/settings")
@@ -1368,6 +1653,8 @@ async def save_binding(data: BindingIn, request: Request):
         raise HTTPException(400, "max_minutes должен быть больше min_minutes")
     if not _int(data.pipeline_id) or not _int(data.status_id):
         raise HTTPException(400, "Воронка и статус новой сделки обязательны")
+    if data.click_status_id and not _int(data.click_status_id):
+        raise HTTPException(400, "Некорректный статус для клика")
     if not data.pipeline_scope:
         raise HTTPException(400, "Выберите хотя бы одну воронку поиска дублей")
     if not data.responsible_user_ids:
@@ -1383,6 +1670,22 @@ async def save_binding(data: BindingIn, request: Request):
             raise HTTPException(400, f"Правило дублей #{index + 1}: выберите поле Bizon")
         if not (_int(rule.get("field_id")) or _clean(rule.get("field_code"), 100) or _clean(rule.get("field"), 300)):
             raise HTTPException(400, f"Правило дублей #{index + 1}: выберите поле amoCRM")
+    normalized_exclude_conditions: list[dict[str, str]] = []
+    if len(data.exclude_conditions) > 20:
+        raise HTTPException(400, "Можно настроить не более 20 условий исключения")
+    for index, condition in enumerate(data.exclude_conditions):
+        if not isinstance(condition, dict):
+            raise HTTPException(400, f"Условие исключения #{index + 1} должно быть объектом")
+        source = _clean(condition.get("source"), 100)
+        operator = _clean(condition.get("operator"), 30)
+        value = _clean(condition.get("value"), 1000)
+        if not source:
+            raise HTTPException(400, f"Условие исключения #{index + 1}: выберите поле Bizon")
+        if operator not in EXCLUDE_OPERATORS:
+            raise HTTPException(400, f"Условие исключения #{index + 1}: неизвестный оператор")
+        if operator not in {"is_empty", "is_not_empty"} and not value:
+            raise HTTPException(400, f"Условие исключения #{index + 1}: укажите значение")
+        normalized_exclude_conditions.append({"source": source, "operator": operator, "value": value})
     for index, mapping in enumerate(data.field_mappings):
         if not isinstance(mapping, dict):
             raise HTTPException(400, f"Маппинг #{index + 1} должен быть объектом")
@@ -1396,8 +1699,10 @@ async def save_binding(data: BindingIn, request: Request):
     values = (
         _clean(data.name, 300), data.match_type, _clean(data.match_value, 1000), data.priority,
         min_minutes, min_minutes, max_minutes, _clean(data.pipeline_id, 50), _clean(data.status_id, 50),
+        _clean(data.click_status_id, 50),
         json.dumps(data.pipeline_scope, ensure_ascii=False), json.dumps(data.status_scope, ensure_ascii=False),
         data.duplicate_action, json.dumps(data.duplicate_rules or DEFAULT_DUPLICATE_RULES, ensure_ascii=False),
+        json.dumps(normalized_exclude_conditions, ensure_ascii=False),
         json.dumps(data.note_only_status_ids, ensure_ascii=False),
         json.dumps(data.responsible_user_ids, ensure_ascii=False), json.dumps(data.tags, ensure_ascii=False),
         json.dumps(data.field_mappings, ensure_ascii=False), _clean(data.lead_name_template, 1000) or DEFAULT_LEAD_NAME_TEMPLATE,
@@ -1407,13 +1712,13 @@ async def save_binding(data: BindingIn, request: Request):
     async with aiosqlite.connect(_must_db()) as db:
         if data.id:
             await db.execute(
-                """UPDATE bindings SET name=?,match_type=?,match_value=?,priority=?,threshold_minutes=?,min_minutes=?,max_minutes=?,pipeline_id=?,status_id=?,pipeline_scope_json=?,status_scope_json=?,duplicate_action=?,duplicate_rules_json=?,note_only_status_ids_json=?,responsible_user_ids_json=?,tags_json=?,field_mappings_json=?,lead_name_template=?,note_template=?,active=?,updated_at=? WHERE id=?""",
+                """UPDATE bindings SET name=?,match_type=?,match_value=?,priority=?,threshold_minutes=?,min_minutes=?,max_minutes=?,pipeline_id=?,status_id=?,click_status_id=?,pipeline_scope_json=?,status_scope_json=?,duplicate_action=?,duplicate_rules_json=?,exclude_conditions_json=?,note_only_status_ids_json=?,responsible_user_ids_json=?,tags_json=?,field_mappings_json=?,lead_name_template=?,note_template=?,active=?,updated_at=? WHERE id=?""",
                 values + (data.id,),
             )
             binding_id = data.id
         else:
             cur = await db.execute(
-                """INSERT INTO bindings(name,match_type,match_value,priority,threshold_minutes,min_minutes,max_minutes,pipeline_id,status_id,pipeline_scope_json,status_scope_json,duplicate_action,duplicate_rules_json,note_only_status_ids_json,responsible_user_ids_json,tags_json,field_mappings_json,lead_name_template,note_template,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO bindings(name,match_type,match_value,priority,threshold_minutes,min_minutes,max_minutes,pipeline_id,status_id,click_status_id,pipeline_scope_json,status_scope_json,duplicate_action,duplicate_rules_json,exclude_conditions_json,note_only_status_ids_json,responsible_user_ids_json,tags_json,field_mappings_json,lead_name_template,note_template,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             binding_id = int(cur.lastrowid)

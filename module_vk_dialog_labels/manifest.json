@@ -1,0 +1,19 @@
+{
+  "id": "vk-dialog-labels",
+  "name": "VK метки диалогов",
+  "version": "1.0.0",
+  "description": "Назначает внутренние Nexus-метки VK-диалогам по условиям amoCRM и применяет доступные официальные отметки VK.",
+  "env_vars": {
+    "VK_GROUP_TOKEN": "Токен VK сообщества для управления диалогами. Используется первым.",
+    "VK_USER_TOKEN": "Fallback пользовательский VK token, если VK_GROUP_TOKEN не задан.",
+    "VK_GROUP_ID": "ID VK сообщества для group_id и ссылок, по умолчанию 225075265.",
+    "AMO_BASE_URL": "Базовый URL amoCRM, например https://example.amocrm.ru.",
+    "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с доступом к сделкам и статусам.",
+    "VK_LABELS_WEBHOOK_SECRET": "Необязательный секрет webhook. Можно задать в настройках модуля вместо ENV.",
+    "VK_LABELS_PUBLIC_BASE": "Публичная база Nexus для сборки webhook URL, по умолчанию https://junior.sobakovod.pro/nexus.",
+    "VK_LABELS_WEBHOOK_URL": "Полный публичный URL webhook. Если пусто, собирается из VK_LABELS_PUBLIC_BASE и секрета.",
+    "VK_LABELS_WEBHOOK_WATCHDOG": "1/0: периодически проверять и восстанавливать webhook amoCRM.",
+    "VK_LABELS_WEBHOOK_WATCHDOG_INTERVAL": "Интервал проверки webhook в секундах, минимум 300, по умолчанию 3600."
+  },
+  "env_required": []
+}

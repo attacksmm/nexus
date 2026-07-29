@@ -8,7 +8,7 @@
     :root{--bg:#070707;--panel:#101010;--line:#2d2d2d;--text:#f2f2f2;--muted:#a8a8a8;--ok:#9fe0aa}
     *{box-sizing:border-box}html{scrollbar-color:#555 #090909;scrollbar-width:thin}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,"Segoe UI",sans-serif}
     main{max-width:980px;padding:18px;display:grid;gap:14px}section{border:1px solid var(--line);background:var(--panel);padding:14px;display:grid;gap:10px}
-    h1,h2{margin:0}h1{font-size:21px}h2{font-size:16px}p{margin:0;color:var(--muted)}code{color:var(--ok)}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:#050505;padding:12px;overflow-x:hidden}
+    h1,h2{margin:0}h1{font-size:21px}h2{font-size:16px}p{margin:0;color:var(--muted)}code{color:var(--ok);overflow-wrap:anywhere}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:#050505;padding:12px;overflow-x:hidden}
     ul{margin:0;padding-left:20px;color:var(--muted)}
   </style>
 </head>
@@ -42,42 +42,50 @@ POST /nexus/course-chat-creator/api/chats/create</pre>
       <li><code>course_choice=1</code> и <code>course_type=puppy</code> означают курс щенка.</li>
       <li><code>course_choice=2</code> и <code>course_type=dog</code> означают основной курс собаки.</li>
       <li><code>curator_id</code> выбирает одного куратора из таблицы людей. Если поле не передано, по умолчанию выбирается активная Ирина, затем первый активный куратор.</li>
-      <li><code>test_mode=true</code> создает пустой чат без приглашения людей, бота и назначения админов.</li>
+      <li>Если дата не передана, модуль использует текущую дату Москвы. Панель устанавливает её при каждом открытии.</li>
+      <li>VK: <code>test_mode=true</code> создаёт чат без учеников, приглашает только аккаунт техподдержки и использует тестовый закреп.</li>
+      <li>VK: боевой режим добавляет доступных сотрудников. Покупатели получают ручную ссылку потока после активации пары VK+Telegram.</li>
+      <li>Telegram: <code>test_mode=true</code> создаёт пустой чат без приглашения людей, бота и назначения админов.</li>
     </ul>
   </section>
   <section>
     <h2>ENV</h2>
     <p>Минимально нужны только ключи ниже. Telegram session создаётся во вкладке <code>Telegram</code> внутри панели. Webhook password нужен только для внешних публичных вызовов.</p>
-    <pre>VK_USER_TOKEN=
+    <pre>VK_GROUP_TOKEN=
+VK_GROUP_ID=
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=</pre>
-    <p>Опционально: <code>NEXUS_CHAT_CREATOR_PASSWORD</code> или <code>SBKVD_PROCESS_WEBHOOK_PASSWORD</code> для webhook, <code>VK_GROUP_TOKEN</code>/<code>VK_GROUP_ID</code> для сообщества, <code>VK_TEST_USER_TOKEN</code> для отдельного test token, <code>VK_WEB_PROFILE_DIR</code>/<code>VK_WEB_HEADLESS</code> для серверного VK Web профиля, <code>TELEGRAM_SESSION_FILE</code> только если нужен нестандартный путь, <code>TELEGRAM_MTPROTO_PROXY_URL</code> для Telegram MTProto proxy.</p>
+    <p>Опционально: <code>NEXUS_CHAT_CREATOR_PASSWORD</code> или <code>SBKVD_PROCESS_WEBHOOK_PASSWORD</code> для webhook, <code>VK_TEST_GROUP_TOKEN</code> для тестового сообщества, <code>TELEGRAM_SESSION_FILE</code> и <code>TELEGRAM_MTPROTO_PROXY_URL</code>.</p>
   </section>
   <section>
-    <h2>Авторизация ВКонтакте</h2>
-    <p>Вкладка <code>VK Авторизация</code> открывает серверный Chromium с persistent-профилем <code>data/vk-web-profile</code>. Если VK показывает QR, код или проверку, действуйте прямо по live-скриншоту: клик по изображению отправляет клик в серверный браузер, поле ввода отправляет текст в активное поле VK.</p>
+    <h2>ВКонтакте</h2>
     <ul>
-      <li>Вкладка не назначает админов вручную: она только поддерживает серверную VK Web-сессию.</li>
-      <li>При боевом создании VK-чата модуль сначала создаёт беседу, добавляет всех сотрудников и ждёт, пока <code>messages.getConversationMembers</code> подтвердит состав.</li>
-      <li>Админки выдаются только после наполнения беседы, отправки картинки/приветствия и закрепа: сначала через <code>messages.setMemberRole</code>, затем через VK Web fallback.</li>
-      <li>Кнопка <code>Live</code> обновляет скрин серверного браузера каждые 2 секунды без навигации страницы.</li>
-      <li>VK Web не блокирует создание чата. Если VK требует антибот-проверку на этапе fallback-админок, чат остаётся созданным, запуск получает статус <code>needs_vk_web_admins</code>, а после авторизации панель автоматически пробует довыдачу для последнего такого запуска.</li>
-      <li>Кнопка <code>Довыдать админки</code> во вкладке VK или в истории запусков повторяет проверку участников и выдачу прав для уже созданного чата.</li>
-      <li>Если VK поменял интерфейс, ответ содержит понятную ошибку и последний скриншот доступен через <code>/vk-web/auth/screenshot</code>.</li>
+      <li>VK-чат создаётся официальным токеном сообщества. Право покупателя определяется обработанным заказом GetCourse; ручной лист учеников не блокирует создание и выдачу.</li>
+      <li>Клиентские VK/TG-ссылки берутся из таблицы <code>1zu1__XcKxJH8yC9ForDvibaUnKFCS1pxWHEjLgqlVXA</code>. Nexus добавляет строку потока и Telegram-ссылку, сохраняет заполненные ссылки и оставляет VK-ссылку для ручного создания с показом последних 250 сообщений.</li>
+      <li>До выдачи ссылки модуль отправляет единое учебное сообщение с памяткой и закрепляет его по локальному идентификатору беседы VK.</li>
+      <li>В новых беседах, владельцем которых является сообщество, покупателю с известным VK ID модуль отправляет ручную ссылку потока, когда сообщения разрешены. Для старых бесед отправка от сообщества отключена.</li>
+      <li>Покупатели без VK ID получают ссылку на действующей странице чатов по телефону или ID.</li>
+      <li>Сотрудники открывают ссылку из истории запуска. После входа сотрудник автоматически получает права администратора.</li>
+      <li>Начальные участники получают учебное сообщение после добавления. Вошедшие по ссылке получают отдельное приветствие модератора; массовых приветствий нет.</li>
+      <li>Сотрудникам модуль автоматически выдаёт админку после входа по ссылке и проверяет роль.</li>
+      <li>Закреп обычного участника автоматически заменяется закрепом курса. Закреп администратора сохраняется до действия <code>Вернуть закреп</code>. Для старого раздельного закрепа это действие создаёт единое сообщение с памяткой и текстом.</li>
+      <li>Раздел <code>Участники</code> показывает записанные учебные VK-чаты, открывает их от сообщества, возвращает закреп курса и выполняет dry-run перед массовой выдачей админки, снятием роли или удалением участника.</li>
+      <li>Недоступные токену сообщества старые чаты показываются с ошибкой VK и не изменяются.</li>
+      <li>Пользовательский токен не используется.</li>
     </ul>
   </section>
   <section>
     <h2>Что сохраняется</h2>
     <ul>
-      <li>VK: создание беседы, добавление сотрудников, назначение всем сотрудникам роли admin через API или VK Web, аватар из <code>static/group_photo.jpg</code>, отдельное изображение <code>static/welcome_message_photo.jpg</code> перед приветствием, история для новых участников, приветствие, закреп, invite link.</li>
+      <li>VK: создание беседы от имени сообщества, аватар, приветствие, закреп и invite link.</li>
       <li>Telegram: создание forum supergroup, обязательная проверка тем Инфо/Визитка/Обучение/Болталка, аватар из <code>static/group_photo.jpg</code>, бот, полные права администратора всем сотрудникам без anonymous, приветственные сообщения, закрепы, invite link.</li>
-      <li>Панель: редактирование и удаление людей, курсов, шаблонов, Telegram-авторизация, рассылки по учебным чатам, удаление людей только из учебных чатов и просмотр истории запусков.</li>
+      <li>Панель: редактирование и удаление людей, курсов, шаблонов, Telegram-авторизация, рассылки по учебным чатам, удаление людей только из учебных чатов и переход в созданные VK/Telegram-чаты из истории.</li>
       <li>Шаблоны по умолчанию взяты из Windsurf/Sobakovod endpoint'ов.</li>
     </ul>
   </section>
   <section>
     <h2>Рассылки</h2>
-    <p>Вкладка <code>Рассылки</code> ищет обучающие VK и Telegram чаты по названию вида <code>N. DD.MM.YYYY - ...</code>, объединяя live scan аккаунтов с историей <code>runs</code>. VK отправляет через <code>VK_USER_TOKEN</code>, Telegram — через текущую Telethon session.</p>
+    <p>Вкладка <code>Рассылки</code> ищет обучающие VK и Telegram чаты по названию вида <code>N. DD.MM.YYYY - ...</code>, объединяя live scan с историей <code>runs</code>. VK отправляет через <code>VK_GROUP_TOKEN</code>, Telegram — через текущую Telethon session.</p>
     <ul>
       <li>Можно выбрать конкретные чаты или отправить во все найденные, сняв лишние.</li>
       <li>Telegram-рассылка отправляется в главный чат, не в forum topic.</li>

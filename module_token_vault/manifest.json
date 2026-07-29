@@ -1,0 +1,14 @@
+{
+  "id": "token-vault",
+  "name": "Токены",
+  "version": "1.1.1",
+  "ui_hidden": true,
+  "description": "Подключения Nexus и автоматическое обновление пользовательского токена VK ID.",
+  "env_required": [],
+  "env_vars": {
+    "VK_ID_APP_ID": "ID приложения VK ID.",
+    "VK_ID_CLIENT_SECRET": "Защищённый ключ приложения VK ID.",
+    "VK_ID_SERVICE_TOKEN": "Сервисный ключ для серверного обмена кода и Refresh token.",
+    "VK_ID_SCOPES": "Права VK ID через пробел; должны быть разрешены в приложении."
+  }
+}

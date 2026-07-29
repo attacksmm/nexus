@@ -1,0 +1,15 @@
+{
+  "id": "amocrm-duplicates",
+  "name": "Дубли amoCRM",
+  "version": "1.0.5",
+  "description": "Ищет дубли новых сделок amoCRM, ждёт ручного принятия из Неразобранного и затем добавляет теги, ссылки и при необходимости ответственного.",
+  "env_required": [
+    "AMO_BASE_URL",
+    "AMO_ACCESS_TOKEN"
+  ],
+  "env_vars": {
+    "AMO_BASE_URL": "URL аккаунта amoCRM, например https://example.amocrm.ru",
+    "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с доступом к сделкам, контактам, полям, тегам, пользователям и примечаниям",
+    "AMO_DUPLICATES_WEBHOOK_SECRET": "Необязательный секрет webhook. Если не задан, модуль создаст и сохранит собственный"
+  }
+}

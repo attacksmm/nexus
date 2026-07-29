@@ -50,6 +50,7 @@ _gc_write_lock = asyncio.Lock()
 _chat_flows_cache: dict[str, Any] = {"key": "", "expires": 0.0, "data": None}
 
 MACHINE_PREFIX = "chat_fields_"
+CHAT_ENTITLEMENT_VERSION = 2
 DEFAULT_FIELD_NAMES = {
     "field_stream": "Поток",
     "field_vk": "Ссылка на чат ВК",
@@ -492,7 +493,12 @@ def _source_hash(fields: dict[str, Any], settings: dict[str, str]) -> str:
 
 
 def _classify_course(fields: dict[str, Any]) -> str:
-    text = _norm(" ".join(str(fields.get(key) or "") for key in ("title", "positions", "offers")))
+    text = _norm(
+        " ".join(
+            str(fields.get(key) or "")
+            for key in ("title", "positions", "offer_tags", "offers")
+        )
+    )
     has_puppy = "первые шаги к воспитанию" in text or "щенок" in text
     has_dog = "послушная собака" in text or "современный собаковод" in text
     if has_puppy:
@@ -503,12 +509,25 @@ def _classify_course(fields: dict[str, Any]) -> str:
 
 
 def _classify_tariff(fields: dict[str, Any]) -> str:
-    text = _norm(" ".join(str(fields.get(key) or "") for key in ("title", "positions", "offers")))
+    text = _norm(
+        " ".join(
+            str(fields.get(key) or "")
+            for key in ("title", "positions", "offer_tags", "offers")
+        )
+    )
     if re.search(r"(?:тариф|пакет)\s*[«\"]?\s*стандарт", text):
         return "standard"
     if re.search(r"(?:тариф|пакет)\s*[«\"]?\s*премиум", text):
         return "premium"
-    if re.search(r"(?:тариф|пакет)\s*[«\"]?\s*vip", text):
+    if re.search(r"(?:тариф|пакет)\s*[«\"]?\s*(?:vip|вип)", text):
+        return "vip"
+    tags = _norm(fields.get("offer_tags"))
+    tag_items = {item.strip() for item in tags.split("|") if item.strip()}
+    if "стандарт" in tag_items:
+        return "standard"
+    if "премиум" in tag_items:
+        return "premium"
+    if tag_items & {"vip", "вип"}:
         return "vip"
     return ""
 
@@ -517,6 +536,147 @@ def _is_completed_paid(fields: dict[str, Any]) -> bool:
     status = _norm(fields.get("status"))
     payment = _norm(fields.get("payment_state"))
     return status in {"завершен", "завершён"} and payment == "paid"
+
+
+def _money_value(value: Any) -> float:
+    text = _clean(value, 100).replace("\u00a0", "").replace(" ", "").replace(",", ".")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _chat_product_entitlement(fields: dict[str, Any]) -> dict[str, Any]:
+    """Classify only products that grant an educational chat."""
+
+    text = _norm(
+        " ".join(
+            str(fields.get(key) or "")
+            for key in ("title", "positions", "offer_tags", "offers")
+        )
+    )
+    tariff = _classify_tariff(fields)
+    has_puppy = "первые шаги к воспитанию" in text or "курс щенок" in text
+    has_dog = "послушная собака" in text or "современный собаковод" in text
+    if re.search(r"(?:^|[|\s])щ\s*\+\s*с(?:$|[|\s])", text):
+        has_puppy = True
+        has_dog = True
+    combo = has_puppy and has_dog
+    excluded_marker = next(
+        (
+            marker
+            for marker in (
+                "тестовый период",
+                "тест-драйв",
+                "тест драйв",
+                "мини-курс",
+                "мини курс",
+                "15 минут",
+                "личное наставничество",
+                "доплата",
+                "скидка",
+            )
+            if marker in text
+        ),
+        "",
+    )
+    if excluded_marker:
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": False,
+            "course_key": "puppy" if combo or has_puppy else ("dog" if has_dog else ""),
+            "tariff": tariff,
+            "product_kind": "excluded",
+            "reason": f"excluded_product:{excluded_marker}",
+        }
+    if "модуль" in text:
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": False,
+            "course_key": "puppy" if has_puppy else ("dog" if has_dog else ""),
+            "tariff": tariff,
+            "product_kind": "module",
+            "reason": "excluded_product:module",
+        }
+    if tariff == "standard":
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": False,
+            "course_key": "puppy" if combo or has_puppy else ("dog" if has_dog else ""),
+            "tariff": tariff,
+            "product_kind": "combo" if combo else "single",
+            "reason": "standard_no_chat",
+        }
+    if combo:
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": True,
+            "course_key": "puppy",
+            "tariff": tariff or "combo",
+            "product_kind": "combo",
+            "reason": "combo_puppy_chat",
+        }
+    if has_puppy and tariff in {"premium", "vip"}:
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": True,
+            "course_key": "puppy",
+            "tariff": tariff,
+            "product_kind": "single",
+            "reason": "eligible_product",
+        }
+    if has_dog and tariff in {"premium", "vip"}:
+        return {
+            "version": CHAT_ENTITLEMENT_VERSION,
+            "eligible": True,
+            "course_key": "dog",
+            "tariff": tariff,
+            "product_kind": "single",
+            "reason": "eligible_product",
+        }
+    return {
+        "version": CHAT_ENTITLEMENT_VERSION,
+        "eligible": False,
+        "course_key": "puppy" if has_puppy else ("dog" if has_dog else ""),
+        "tariff": tariff,
+        "product_kind": "unknown",
+        "reason": "product_not_entitled",
+    }
+
+
+def _chat_payment_entitlement(fields: dict[str, Any]) -> dict[str, Any]:
+    status = _norm(fields.get("status"))
+    payment = _norm(fields.get("payment_state"))
+    paid_money = _money_value(fields.get("payed_money"))
+    if status in {"завершен", "завершён"} and payment == "paid":
+        return {"eligible": True, "kind": "paid", "paid_money": paid_money, "reason": "paid"}
+    if payment == "partial" and paid_money > 0:
+        return {
+            "eligible": True,
+            "kind": "partial",
+            "paid_money": paid_money,
+            "reason": "positive_partial_payment",
+        }
+    return {
+        "eligible": False,
+        "kind": payment or "unknown",
+        "paid_money": paid_money,
+        "reason": "payment_not_entitled",
+    }
+
+
+def _chat_entitlement(fields: dict[str, Any]) -> dict[str, Any]:
+    product = _chat_product_entitlement(fields)
+    payment = _chat_payment_entitlement(fields)
+    return {
+        **product,
+        "eligible": bool(product.get("eligible") and payment.get("eligible")),
+        "payment": payment,
+        "reason": product.get("reason") if not product.get("eligible") else payment.get("reason"),
+    }
 
 
 def _stream_number(*values: Any) -> str:
@@ -1689,7 +1849,10 @@ async def _fields_write_reconciliation_candidates(settings: dict[str, str], limi
             output_fields = {key: value for key, value in output_fields.items() if _clean(value)}
             if len(output_fields) != 4:
                 continue
-            expected[(email, order_id)] = {
+            # The same paid order can remain in older flow sheets after a student
+            # is moved. Cache items are ordered newest first, so keep the first
+            # occurrence instead of letting an older duplicate win.
+            expected.setdefault((email, order_id), {
                 "fields": output_fields,
                 "flow": {
                     "course": flow.get("course"),
@@ -1698,7 +1861,7 @@ async def _fields_write_reconciliation_candidates(settings: dict[str, str], limi
                     "sheet_title": flow.get("sheet_title"),
                     "change_reason": "field_write_reconciliation",
                 },
-            }
+            })
     if not expected:
         return []
     assert _db_path is not None
@@ -3036,20 +3199,90 @@ async def _latest_chats() -> dict[str, dict[str, dict[str, Any] | None]]:
     async with _db_connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         for course_key in result:
-            for platform in ("vk", "telegram"):
-                cur = await db.execute(
-                    """
-                    SELECT id,platform,title,stream_number,date_start,course_key,status,link,chat_id,created_at
-                    FROM runs
-                    WHERE course_key=? AND platform=? AND test_mode=0 AND COALESCE(link,'')<>'' AND status<>'error'
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                    """,
-                    (course_key, platform),
-                )
-                row = await cur.fetchone()
-                result[course_key][platform] = dict(row) if row else None
+            cur = await db.execute(
+                """
+                SELECT id,platform,title,stream_number,date_start,course_key,status,link,chat_id,created_at
+                FROM runs
+                WHERE course_key=? AND platform IN ('vk','telegram') AND test_mode=0
+                  AND COALESCE(link,'')<>'' AND status<>'error'
+                ORDER BY created_at, id
+                """,
+                (course_key,),
+            )
+            rows = await cur.fetchall()
+            by_stream: dict[str, dict[str, dict[str, Any]]] = {}
+            for row in rows:
+                item = dict(row)
+                stream_number = _clean(item.get("stream_number"), 100)
+                if stream_number:
+                    by_stream.setdefault(stream_number, {})[item["platform"]] = item
+            complete = [
+                pair for pair in by_stream.values() if pair.get("vk") and pair.get("telegram")
+            ]
+            if not complete:
+                continue
+            pair = max(
+                complete,
+                key=lambda item: max(
+                    (int(item["vk"].get("created_at") or 0), int(item["vk"].get("id") or 0)),
+                    (int(item["telegram"].get("created_at") or 0), int(item["telegram"].get("id") or 0)),
+                ),
+            )
+            result[course_key] = {"vk": pair["vk"], "telegram": pair["telegram"]}
     return result
+
+
+def _active_chats_from_flows(data: dict[str, Any]) -> dict[str, dict[str, dict[str, Any] | None]]:
+    """Return the highest stream whose manual VK and Telegram links are both ready."""
+
+    result: dict[str, dict[str, dict[str, Any] | None]] = {
+        "puppy": {"vk": None, "telegram": None},
+        "dog": {"vk": None, "telegram": None},
+    }
+    ready: dict[str, list[dict[str, Any]]] = {"puppy": [], "dog": []}
+    for flow in data.get("items") or []:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 100)
+        vk_link = _clean(flow.get("vk_link"), 2000)
+        tg_link = _clean(flow.get("tg_link"), 2000)
+        if course_key not in ready or not stream:
+            continue
+        if not re.match(r"^https?://", vk_link, flags=re.IGNORECASE):
+            continue
+        if not re.match(r"^https?://", tg_link, flags=re.IGNORECASE):
+            continue
+        ready[course_key].append(flow)
+    for course_key, items in ready.items():
+        if not items:
+            continue
+        flow = max(items, key=lambda item: (_bounded_int(item.get("stream"), 0, 100000, 0), _clean(item.get("stream"), 100)))
+        stream = _clean(flow.get("stream"), 100)
+        result[course_key] = {
+            "vk": {
+                "platform": "vk",
+                "title": _clean(flow.get("vk_title"), 300),
+                "stream_number": stream,
+                "link": _clean(flow.get("vk_link"), 2000),
+                "course_key": course_key,
+                "source": "chat_links_sheet_active",
+            },
+            "telegram": {
+                "platform": "telegram",
+                "title": _clean(flow.get("tg_title"), 300),
+                "stream_number": stream,
+                "link": _clean(flow.get("tg_link"), 2000),
+                "course_key": course_key,
+                "source": "chat_links_sheet_active",
+            },
+        }
+    return result
+
+
+def _prefer_sheet_chat(
+    sheet_chat: dict[str, Any], created_chat: dict[str, Any] | None, stream: str
+) -> dict[str, Any]:
+    del created_chat, stream
+    return sheet_chat
 
 
 async def _customer_rows(settings: dict[str, str], limit: int) -> list[dict[str, Any]]:
@@ -3090,8 +3323,9 @@ async def _customer_rows(settings: dict[str, str], limit: int) -> list[dict[str,
 
 def _source_order_summary(row: dict[str, Any], state: dict[str, Any] | None) -> dict[str, Any]:
     fields = _json_dict(row.get("custom_fields"))
-    course_key = _classify_course(fields)
-    tariff = _classify_tariff(fields)
+    entitlement = _chat_entitlement(fields)
+    course_key = _clean(entitlement.get("course_key"), 50)
+    tariff = _clean(entitlement.get("tariff"), 50)
     state_details = _json_dict((state or {}).get("details_json", "{}"))
     output_fields = state_details.get("output_fields") if isinstance(state_details.get("output_fields"), dict) else {}
     title = _clean(fields.get("title") or fields.get("positions") or fields.get("offers"), 1000)
@@ -3108,7 +3342,8 @@ def _source_order_summary(row: dict[str, Any], state: dict[str, Any] | None) -> 
         "course_key": course_key,
         "course": "Щенок" if course_key == "puppy" else ("Собака" if course_key == "dog" else ""),
         "tariff": tariff,
-        "eligible": bool(_is_completed_paid(fields) and course_key),
+        "eligible": bool(entitlement.get("eligible")),
+        "entitlement_reason": _clean(entitlement.get("reason"), 200),
         "processed_status": _clean((state or {}).get("status"), 100),
         "processed_error": _clean((state or {}).get("error"), 1000),
         "processed_stream": _clean((state or {}).get("stream") or output_fields.get("Поток"), 100),
@@ -3224,15 +3459,153 @@ async def _update_customer_fields(record_id: int, fields: dict[str, Any], patch:
         await db.commit()
 
 
-def _getcourse_user_payload(gc_user_id: str, fields: dict[str, Any], email: str = "", phone: str = "") -> dict[str, Any]:
-    user = {
-        "id": str(gc_user_id),
-        "addfields": dict(fields),
+async def _sync_gc_fields_write_customer_state(
+    job: dict[str, Any],
+    output_fields: dict[str, Any],
+    flow: dict[str, Any],
+    *,
+    getcourse_ok: bool,
+    error: str = "",
+) -> dict[str, Any]:
+    order_id = _clean(job.get("order_id"), 100)
+    gc_user_id = _clean(job.get("gc_user_id"), 100)
+    email = _norm(job.get("email"))
+    if not output_fields or not (order_id or gc_user_id or email):
+        return {"synced": False, "reason": "missing identity"}
+
+    record_id = 0
+    fields: dict[str, Any] = {}
+    db_path = _customer_db_path()
+    if db_path.exists():
+        async with _db_connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            clauses: list[str] = []
+            args: list[Any] = []
+            if order_id:
+                clauses.extend(["platform_id=?", "custom_fields LIKE ?"])
+                args.extend([order_id, f"%{order_id}%"])
+            if gc_user_id:
+                clauses.append("custom_fields LIKE ?")
+                args.append(f"%{gc_user_id}%")
+            if email:
+                clauses.append("LOWER(custom_fields) LIKE ?")
+                args.append(f"%{email}%")
+            cur = await db.execute(
+                f"""
+                SELECT id, custom_fields
+                FROM cdb_getcourse_orders
+                WHERE {' OR '.join(clauses)}
+                ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+                LIMIT 30
+                """,
+                tuple(args),
+            )
+            rows = [dict(row) for row in await cur.fetchall()]
+        best_score = -1
+        for row in rows:
+            candidate = _json_dict(row.get("custom_fields"))
+            score = 0
+            if order_id and _clean(candidate.get("order_id") or row.get("platform_id"), 100) == order_id:
+                score += 100
+            if gc_user_id and _clean(candidate.get("gc_user_id"), 100) == gc_user_id:
+                score += 40
+            if email and _norm(candidate.get("email") or candidate.get("user_email")) == email:
+                score += 20
+            if score > best_score:
+                best_score = score
+                record_id = int(row.get("id") or 0)
+                fields = candidate
+        if record_id > 0 and best_score > 0:
+            patch = {
+                **output_fields,
+                f"{MACHINE_PREFIX}course_key": _clean(flow.get("course_key"), 50),
+                f"{MACHINE_PREFIX}tariff": _clean(fields.get(f"{MACHINE_PREFIX}tariff") or _classify_tariff(fields), 50),
+                f"{MACHINE_PREFIX}curator_raw": _clean(flow.get("curator_raw"), 300),
+                f"{MACHINE_PREFIX}curator_sheet": _clean(flow.get("sheet_title"), 300),
+                f"{MACHINE_PREFIX}links_source": _clean(flow.get("change_reason") or "field_write_reconciliation", 100),
+                f"{MACHINE_PREFIX}vk_link_title": _clean(flow.get("vk_title"), 300),
+                f"{MACHINE_PREFIX}tg_link_title": _clean(flow.get("tg_title"), 300),
+                f"{MACHINE_PREFIX}source_record_id": record_id,
+                f"{MACHINE_PREFIX}updated_at": _now(),
+            }
+            await _update_customer_fields(record_id, fields, patch)
+
+    assert _db_path is not None
+    updated_processed = 0
+    async with _db_connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        where_parts: list[str] = []
+        args: list[Any] = []
+        if record_id > 0:
+            where_parts.append("source_record_id=?")
+            args.append(record_id)
+        if order_id:
+            where_parts.append("order_id=?")
+            args.append(order_id)
+        if gc_user_id:
+            where_parts.append("gc_user_id=?")
+            args.append(gc_user_id)
+        if where_parts:
+            cur = await db.execute(
+                f"SELECT id, details_json FROM processed_orders WHERE {' OR '.join(where_parts)}",
+                tuple(args),
+            )
+            rows = [dict(row) for row in await cur.fetchall()]
+            for row in rows:
+                details = _json_dict(row.get("details_json"))
+                details["output_fields"] = dict(output_fields)
+                details["field_write_sync"] = {
+                    "job_id": int(job.get("id") or 0),
+                    "email": email,
+                    "flow": flow,
+                    "synced_at": _now(),
+                }
+                await db.execute(
+                    """
+                    UPDATE processed_orders
+                    SET stream=?,
+                        vk_link=?,
+                        tg_link=?,
+                        customer_ok=CASE WHEN ? > 0 THEN 1 ELSE customer_ok END,
+                        getcourse_ok=?,
+                        status=CASE WHEN ? THEN 'processed' ELSE status END,
+                        error=?,
+                        details_json=?,
+                        updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        _clean(output_fields.get(DEFAULT_FIELD_NAMES["field_stream"]) or output_fields.get("Поток"), 100),
+                        _clean(output_fields.get(DEFAULT_FIELD_NAMES["field_vk"]) or output_fields.get("Ссылка на чат ВК"), 2000),
+                        _clean(output_fields.get(DEFAULT_FIELD_NAMES["field_tg"]) or output_fields.get("Ссылка на чат ТГ"), 2000),
+                        record_id,
+                        1 if getcourse_ok else 0,
+                        1 if getcourse_ok else 0,
+                        _clean(error, 2000),
+                        json.dumps(details, ensure_ascii=False),
+                        _now(),
+                        int(row["id"]),
+                    ),
+                )
+                updated_processed += 1
+            await db.commit()
+
+    return {
+        "synced": bool(record_id or updated_processed),
+        "customer_record_id": record_id,
+        "processed_rows": updated_processed,
     }
-    if email:
-        user["email"] = email
-    if phone:
-        user["phone"] = phone
+
+
+def _getcourse_user_payload(gc_user_id: str, fields: dict[str, Any], email: str = "", phone: str = "") -> dict[str, Any]:
+    user = {"id": str(gc_user_id), "addfields": dict(fields)}
+    # GetCourse Import API requires email or phone even when an id is present.
+    # The caller is responsible for resolving a conflicting source email to
+    # the address that actually belongs to gc_user_id before building payload.
+    if _valid_email(email):
+        user["email"] = _clean(email, 300)
+    elif _clean(phone, 100):
+        user["phone"] = _clean(phone, 100)
     return {
         "user": user,
         "system": {"refresh_if_exists": 1},
@@ -3257,10 +3630,10 @@ def _getcourse_user_addfields(output_fields: dict[str, Any], settings: dict[str,
 
 def _getcourse_deal_payload(gc_user_id: str, deal_number: str, fields: dict[str, Any], email: str = "", phone: str = "") -> dict[str, Any]:
     user = {"id": str(gc_user_id)}
-    if email:
-        user["email"] = email
-    if phone:
-        user["phone"] = phone
+    if _valid_email(email):
+        user["email"] = _clean(email, 300)
+    elif _clean(phone, 100):
+        user["phone"] = _clean(phone, 100)
     return {
         "user": user,
         "system": {
@@ -3320,6 +3693,62 @@ async def _write_getcourse_deal(gc_user_id: str, deal_number: str, fields: dict[
     if not deal_number:
         return False, "deal_number отсутствует в заказе", {}
     return await _post_getcourse_import("/pl/api/deals", "add", _getcourse_deal_payload(gc_user_id, deal_number, fields, email, phone), settings, "students-fields:deal")
+
+
+async def _resolve_getcourse_email_for_user(
+    gc_user_id: str,
+    email: str,
+    phone: str,
+    settings: dict[str, str],
+) -> tuple[str, dict[str, Any], str]:
+    """Resolve an Import-API identity without trusting a conflicting order email."""
+    wanted_id = _clean(gc_user_id, 100)
+    filters: list[tuple[str, str]] = []
+    clean_phone = _clean(phone, 100)
+    clean_email = _clean(email, 300)
+    if clean_phone:
+        filters.append(("phone", clean_phone))
+    if _valid_email(clean_email):
+        filters.append(("email", clean_email))
+    checked: list[dict[str, Any]] = []
+    last_error = ""
+    for key, value in filters:
+        rows, error = await _getcourse_export_rows(
+            "/pl/api/account/users",
+            {key: value},
+            settings,
+            f"students-identity-{key}",
+        )
+        last_error = error or last_error
+        for row in rows:
+            row_id = _user_id_from_export_row(row)
+            row_email = _email_from_export_row(row)
+            checked.append({"gc_user_id": row_id, "email": row_email})
+            if row_id == wanted_id and _valid_email(row_email):
+                return row_email, {"filter": key, "matched": True, "candidates": checked}, ""
+    return "", {"matched": False, "candidates": checked}, last_error or "GetCourse user identity not found"
+
+
+async def _gc_fields_source_order(order_id: str) -> dict[str, Any]:
+    clean_order_id = _clean(order_id, 100)
+    if not clean_order_id:
+        return {}
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {}
+    async with _db_connect(db_path) as db:
+        cur = await db.execute(
+            """
+            SELECT custom_fields
+            FROM cdb_getcourse_orders
+            WHERE platform_id=?
+            ORDER BY datetime(COALESCE(updated_at,created_at)) DESC, id DESC
+            LIMIT 1
+            """,
+            (clean_order_id,),
+        )
+        row = await cur.fetchone()
+    return _json_dict((row or [""])[0])
 
 
 async def _enqueue_gc_fields_write_items(candidates: list[dict[str, Any]], force: bool = False) -> dict[str, Any]:
@@ -3541,14 +3970,68 @@ async def _process_gc_fields_write_job(job: dict[str, Any], settings: dict[str, 
     if not required_names.issubset(set(fields)):
         await _finish_gc_fields_write_job(int(job["id"]), "skipped", "required non-empty fields are missing", {"fields": fields})
         return
-    gc_user_id = _clean(job.get("gc_user_id"), 100)
-    deal_number = _clean(job.get("deal_number"), 100)
-    email = _clean(job.get("email"), 300)
-    user_ok, user_error, user_details = await _write_getcourse_user(gc_user_id, user_fields, settings, email=email)
+    source_order = await _gc_fields_source_order(_clean(job.get("order_id"), 100))
+    source_entitlement = _chat_entitlement(source_order) if source_order else {}
+    if source_order and not source_entitlement.get("eligible"):
+        await _finish_gc_fields_write_job(
+            int(job["id"]),
+            "skipped",
+            "source order is not entitled to chat",
+            {
+                "status": _clean(source_order.get("status"), 100),
+                "payment_state": _clean(source_order.get("payment_state"), 100),
+                "order_id": _clean(job.get("order_id"), 100),
+                "entitlement": source_entitlement,
+            },
+        )
+        return
+    gc_user_id = _clean(source_order.get("gc_user_id") or job.get("gc_user_id"), 100)
+    deal_number = _clean(
+        source_order.get("number")
+        or source_order.get("deal_number")
+        or source_order.get("order_number")
+        or job.get("deal_number"),
+        100,
+    )
+    email = _clean(source_order.get("email") or job.get("email"), 300)
+    phone = _clean(source_order.get("phone") or source_order.get("user_phone"), 100)
+    previous_error = _norm(job.get("last_error"))
+    previous_result = _json_dict(job.get("result_json"))
+    previous_user_id = _clean(
+        _json_dict(_json_dict(_json_dict(previous_result.get("user")).get("response")).get("result")).get("user_id"),
+        100,
+    )
+    identity_conflict = bool(
+        (previous_user_id and previous_user_id != gc_user_id)
+        or "обязательные поля email или phone" in previous_error
+        or "ни эл. адрес, ни телефон" in previous_error
+    )
+    identity_resolution: dict[str, Any] = {}
+    if identity_conflict:
+        if await _gc_export_budget_left(settings) < 3 + reserve:
+            await _defer_gc_fields_write_job(
+                int(job["id"]),
+                "GetCourse API budget low; identity resolution deferred",
+                delay_seconds=900,
+            )
+            return
+        resolved_email, identity_resolution, identity_error = await _resolve_getcourse_email_for_user(
+            gc_user_id, email, phone, settings
+        )
+        if not resolved_email:
+            await _defer_gc_fields_write_job(
+                int(job["id"]),
+                f"GetCourse identity resolution failed: {identity_error}",
+                delay_seconds=900,
+                result={"identity_resolution": identity_resolution},
+            )
+            return
+        email = resolved_email
+    user_ok, user_error, user_details = await _write_getcourse_user(gc_user_id, user_fields, settings, email=email, phone=phone)
     if user_error and "лимит GetCourse API" in user_error:
         await _defer_gc_fields_write_job(int(job["id"]), user_error, delay_seconds=600, result={"user": user_details})
         return
-    deal_ok, deal_error, deal_details = await _write_getcourse_deal(gc_user_id, deal_number, fields, settings, email=email)
+    deal_ok, deal_error, deal_details = await _write_getcourse_deal(gc_user_id, deal_number, fields, settings, email=email, phone=phone)
     if deal_error and "лимит GetCourse API" in deal_error:
         await _defer_gc_fields_write_job(int(job["id"]), deal_error, delay_seconds=600, result={"user": user_details, "deal": deal_details})
         return
@@ -3560,11 +4043,19 @@ async def _process_gc_fields_write_job(job: dict[str, Any], settings: dict[str, 
         "deal": deal_details,
         "fields": fields,
         "user_fields": user_fields,
+        "identity_resolution": identity_resolution,
         "retry": {
             "classification": classification,
             "reserved_requests": _gc_new_job_reserve(settings),
         },
     }
+    result["customer_sync"] = await _sync_gc_fields_write_customer_state(
+        job,
+        fields,
+        _json_dict(payload.get("flow")),
+        getcourse_ok=ok,
+        error=error,
+    )
     await _finish_gc_fields_write_job(
         int(job["id"]),
         "completed" if ok else ("quarantined" if classification == "terminal" else "failed"),
@@ -3678,11 +4169,23 @@ async def _process_row(
         "source_hash": source_hash,
     }
     deal_number = _clean(fields.get("number") or fields.get("deal_number") or fields.get("order_number") or base["order_id"], 100)
-    if not _is_completed_paid(fields):
-        await _mark_processed({**base, "status": "skipped", "error": "order is not completed paid", "details": {"status": fields.get("status"), "payment_state": fields.get("payment_state")}})
+    entitlement = _chat_entitlement(fields)
+    course_key = _clean(entitlement.get("course_key"), 50)
+    tariff = _clean(entitlement.get("tariff"), 50)
+    if not entitlement.get("eligible"):
+        await _mark_processed({
+            **base,
+            "status": "skipped",
+            "course_key": course_key,
+            "tariff": tariff,
+            "error": _clean(entitlement.get("reason") or "order is not entitled to chat", 2000),
+            "details": {
+                "entitlement": entitlement,
+                "status": fields.get("status"),
+                "payment_state": fields.get("payment_state"),
+            },
+        })
         return {"action": "skipped"}
-    course_key = _classify_course(fields)
-    tariff = _classify_tariff(fields)
     if not course_key:
         await _mark_processed({
             **base,
@@ -3690,6 +4193,7 @@ async def _process_row(
             "error": "course not detected",
             "details": {
                 "title": fields.get("title"),
+                "entitlement": entitlement,
                 "retry": {
                     "classification": "terminal",
                     "attempts": 1,
@@ -3707,7 +4211,7 @@ async def _process_row(
     course_chats = chats.get(course_key) or {}
     if student_flow:
         stream = _clean(student_flow.get("stream"), 100)
-        vk_chat = {
+        sheet_vk_chat = {
             "platform": "vk",
             "title": _clean(student_flow.get("vk_title"), 300),
             "stream_number": stream,
@@ -3715,7 +4219,7 @@ async def _process_row(
             "course_key": course_key,
             "source": "flow_students_sheet",
         }
-        tg_chat = {
+        sheet_tg_chat = {
             "platform": "telegram",
             "title": _clean(student_flow.get("tg_title"), 300),
             "stream_number": stream,
@@ -3723,12 +4227,21 @@ async def _process_row(
             "course_key": course_key,
             "source": "flow_students_sheet",
         }
+        vk_chat = _prefer_sheet_chat(sheet_vk_chat, course_chats.get("vk"), stream)
+        tg_chat = _prefer_sheet_chat(sheet_tg_chat, course_chats.get("telegram"), stream)
     else:
         vk_chat = course_chats.get("vk")
         tg_chat = course_chats.get("telegram")
         if not vk_chat or not tg_chat:
-            await _mark_processed({**base, "status": "failed", "course_key": course_key, "tariff": tariff, "error": "latest VK/TG chat not found", "details": {"latest_chats": course_chats}})
-            return {"action": "failed"}
+            await _mark_processed({
+                **base,
+                "status": "pending_chat_links",
+                "course_key": course_key,
+                "tariff": tariff,
+                "error": "active VK/TG chat pair not found",
+                "details": {"active_chats": course_chats, "entitlement": entitlement},
+            })
+            return {"action": "pending_chat_links"}
         stream = _stream_number(
             vk_chat.get("stream_number") if vk_chat else "",
             tg_chat.get("stream_number") if tg_chat else "",
@@ -3757,56 +4270,54 @@ async def _process_row(
             "tariff": tariff,
             "stream": stream,
             "error": _clean(curator.get("error") or curator.get("status"), 2000),
-            "details": {"latest_chats": {"vk": vk_chat, "telegram": tg_chat}, "curator": curator, "student_flow_match": student_match or {}},
+            "details": {"latest_chats": {"vk": vk_chat, "telegram": tg_chat}, "curator": curator, "student_flow_match": student_match or {}, "entitlement": entitlement},
         })
         return {"action": "pending_curator", "error": curator.get("error")}
-    is_standard = tariff == "standard"
-    link_result: dict[str, Any] = {"ok": True, "vk": {}, "telegram": {}, "standard_no_links": True}
-    if not is_standard:
-        if student_flow and _clean(student_flow.get("vk_link"), 2000) and _clean(student_flow.get("tg_link"), 2000):
-            link_result = {
-                "ok": True,
-                "status": "ok",
-                "vk": {
-                    "course_key": course_key,
-                    "platform": "vk",
-                    "title": _clean(student_flow.get("vk_title"), 300),
-                    "stream_number": stream,
-                    "link": _clean(student_flow.get("vk_link"), 2000),
-                    "source": "flow_students_sheet",
-                },
-                "telegram": {
-                    "course_key": course_key,
-                    "platform": "telegram",
-                    "title": _clean(student_flow.get("tg_title"), 300),
-                    "stream_number": stream,
-                    "link": _clean(student_flow.get("tg_link"), 2000),
-                    "source": "flow_students_sheet",
-                },
-                "error": "",
-            }
-        else:
-            link_result = await _resolve_chat_links(course_key, stream, settings)
-        if not link_result.get("ok"):
-            await _mark_processed({
-                **base,
-                "status": "pending_chat_links",
+    if _clean((vk_chat or {}).get("link"), 2000) and _clean((tg_chat or {}).get("link"), 2000):
+        link_result: dict[str, Any] = {
+            "ok": True,
+            "status": "ok",
+            "vk": {
                 "course_key": course_key,
-                "tariff": tariff,
-                "stream": stream,
-                "error": _clean(link_result.get("error") or link_result.get("status"), 2000),
-                "details": {
-                    "latest_chats": {"vk": vk_chat, "telegram": tg_chat},
-                    "curator": curator,
-                    "chat_links": link_result,
-                    "student_flow_match": student_match or {},
-                },
-            })
-            return {"action": "pending_chat_links", "error": link_result.get("error")}
+                "platform": "vk",
+                "title": _clean((vk_chat or {}).get("title"), 300),
+                "stream_number": stream,
+                "link": _clean((vk_chat or {}).get("link"), 2000),
+                "source": _clean((vk_chat or {}).get("source"), 100),
+            },
+            "telegram": {
+                "course_key": course_key,
+                "platform": "telegram",
+                "title": _clean((tg_chat or {}).get("title"), 300),
+                "stream_number": stream,
+                "link": _clean((tg_chat or {}).get("link"), 2000),
+                "source": _clean((tg_chat or {}).get("source"), 100),
+            },
+            "error": "",
+        }
+    else:
+        link_result = await _resolve_chat_links(course_key, stream, settings)
+    if not link_result.get("ok"):
+        await _mark_processed({
+            **base,
+            "status": "pending_chat_links",
+            "course_key": course_key,
+            "tariff": tariff,
+            "stream": stream,
+            "error": _clean(link_result.get("error") or link_result.get("status"), 2000),
+            "details": {
+                "latest_chats": {"vk": vk_chat, "telegram": tg_chat},
+                "curator": curator,
+                "chat_links": link_result,
+                "student_flow_match": student_match or {},
+                "entitlement": entitlement,
+            },
+        })
+        return {"action": "pending_chat_links", "error": link_result.get("error")}
     output_fields = {
         settings["field_stream"]: stream,
-        settings["field_vk"]: "" if is_standard else _clean((link_result.get("vk") or {}).get("link"), 2000),
-        settings["field_tg"]: "" if is_standard else _clean((link_result.get("telegram") or {}).get("link"), 2000),
+        settings["field_vk"]: _clean((link_result.get("vk") or {}).get("link"), 2000),
+        settings["field_tg"]: _clean((link_result.get("telegram") or {}).get("link"), 2000),
         settings["field_curator"]: curator["value"],
     }
     patch = {
@@ -3815,10 +4326,18 @@ async def _process_row(
         f"{MACHINE_PREFIX}tariff": tariff,
         f"{MACHINE_PREFIX}curator_raw": _clean(curator.get("raw_value"), 300),
         f"{MACHINE_PREFIX}curator_sheet": _clean(curator.get("worksheet_title"), 300),
-        f"{MACHINE_PREFIX}links_source": "none_standard" if is_standard else "chat_links_sheet",
-        f"{MACHINE_PREFIX}vk_link_title": "" if is_standard else _clean((link_result.get("vk") or {}).get("title"), 300),
-        f"{MACHINE_PREFIX}tg_link_title": "" if is_standard else _clean((link_result.get("telegram") or {}).get("title"), 300),
-        f"{MACHINE_PREFIX}standard_no_links": is_standard,
+        f"{MACHINE_PREFIX}links_source": "+".join(
+            sorted(
+                {
+                    _clean((link_result.get(platform) or {}).get("source"), 100)
+                    for platform in ("vk", "telegram")
+                    if _clean((link_result.get(platform) or {}).get("source"), 100)
+                }
+            )
+        ),
+        f"{MACHINE_PREFIX}vk_link_title": _clean((link_result.get("vk") or {}).get("title"), 300),
+        f"{MACHINE_PREFIX}tg_link_title": _clean((link_result.get("telegram") or {}).get("title"), 300),
+        f"{MACHINE_PREFIX}standard_no_links": False,
         f"{MACHINE_PREFIX}source_record_id": int(row["id"]),
         f"{MACHINE_PREFIX}updated_at": _now(),
     }
@@ -3834,6 +4353,7 @@ async def _process_row(
         "student_flow_match": student_match or {},
         "curator": curator,
         "chat_links": link_result,
+        "entitlement": entitlement,
     }
     await _update_customer_fields(int(row["id"]), fields, patch)
     dry_run = _truthy(settings.get("dry_run"))
@@ -3923,7 +4443,14 @@ async def _scan_once(*, force_failed: bool = False, limit: int = 200) -> dict[st
             rows = await _customer_rows(settings, limit)
             summary["source_rows"] = len(rows)
             states = await _processed_state([int(row["id"]) for row in rows])
-            chats = await _latest_chats()
+            flow_catalog = await _chat_flows(settings) if rows else {"items": [], "errors": [], "ok": True}
+            chats = _active_chats_from_flows(flow_catalog)
+            summary["active_streams"] = {
+                course_key: _clean(((pair or {}).get("vk") or {}).get("stream_number"), 100)
+                for course_key, pair in chats.items()
+            }
+            if flow_catalog.get("errors"):
+                summary["chat_link_errors"] = flow_catalog.get("errors")
             student_snapshot = await _flow_students_for_processing(settings) if rows else None
             if student_snapshot:
                 summary["students_cache_updated_at"] = _clean(student_snapshot.get("cache_updated_at") or student_snapshot.get("updated_at"), 40)

@@ -24,7 +24,7 @@
     ::-webkit-scrollbar-track{background:#080808;}
     ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
 
-    .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;}
+    .shell{height:100vh;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto;overflow:hidden;}
     .toolbar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);background:var(--panel);}
     .toolbar__title{font-weight:600;font-size:.92rem;margin-right:4px;}
     .toolbar__meta{color:var(--text-subtle);font-size:.78rem;margin-right:auto;}
@@ -82,6 +82,11 @@
     .checkline{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:.78rem;}
     .statusbar{display:flex;align-items:center;gap:10px;height:28px;padding:0 10px;border-top:1px solid var(--border);background:var(--panel);color:var(--text-subtle);font-size:.76rem;}
     .statusbar__msg{margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .runner-mobile-nav,.mobile-script-list,.mobile-script-editor-head{display:none;}
+    .mobile-script-room{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;text-align:left;padding:10px;border:0;border-bottom:1px solid var(--border);background:#080808;color:var(--text);cursor:pointer;}
+    .mobile-script-room:last-child{border-bottom:0;}
+    .mobile-script-room__name{font-weight:600;overflow-wrap:anywhere;}
+    .mobile-script-room__meta{grid-column:1/-1;color:var(--text-subtle);font-size:.76rem;overflow-wrap:anywhere;}
 
     @media (max-width:980px){
       html,body{overflow:auto;}
@@ -96,7 +101,43 @@
     @media (max-width:560px){
       .body{padding:8px;}
       .status-grid,.form-row{grid-template-columns:1fr;}
-      .btn{padding-inline:8px;}
+      .toolbar{padding:8px;}
+      .toolbar__title{font-size:1rem;}
+      .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;}
+      .actions .btn{width:100%;}
+      .btn{min-height:40px;padding:7px 9px;}
+      .tabs{overflow-x:auto;scrollbar-width:none;}
+      .tabs::-webkit-scrollbar{display:none;}
+      .tab{height:40px;flex:0 0 auto;}
+      .runner-mobile-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:7px 8px;border-bottom:1px solid var(--border);background:#090909;}
+      .runner-mobile-nav[hidden]{display:none;}
+      .runner-mobile-nav .btn{min-width:0;}
+      #runnerView [data-runner-panel]{display:none;}
+      #runnerView[data-mobile-section="status"] [data-runner-panel="status"],
+      #runnerView[data-mobile-section="settings"] [data-runner-panel="settings"],
+      #runnerView[data-mobile-section="logs"] [data-runner-panel="logs"]{display:block;}
+      #runnerView .section{display:contents;}
+      .panel__head{flex-wrap:wrap;}
+      .panel__head>.btn,.panel__head>.log-tabs{margin-left:auto;}
+      .input,.textarea{min-height:40px;}
+      .log{height:calc(100vh - 320px);min-height:360px;}
+      .statusbar{position:sticky;bottom:0;z-index:4;height:34px;}
+      .statusbar__msg{white-space:normal;line-height:1.2;text-align:right;}
+
+      #scriptsView .panel__body{padding:8px;}
+      #scriptsHint{overflow-wrap:anywhere;}
+      #saveScriptsBtn{display:none;}
+      .mobile-script-list{display:grid;border:1px solid var(--border);}
+      #scriptsView.mobile-script-editing .mobile-script-list{display:none;}
+      #scriptsView:not(.mobile-script-editing) #scriptsTable{display:none;}
+      .mobile-script-editor-head{align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+      #scriptsView.mobile-script-editing .mobile-script-editor-head{display:flex;}
+      #scriptsView.mobile-script-editing #scriptsTable{display:grid;}
+      #scriptsView.mobile-script-editing .script-row{display:none;}
+      #scriptsView.mobile-script-editing .script-row--active{display:grid;}
+      .script-row{padding:10px;}
+      .script-snippet__head{align-items:flex-start;}
+      .snippet{white-space:pre-wrap;overflow-x:hidden;overflow-wrap:anywhere;word-break:break-word;max-height:48vh;}
     }
   </style>
 </head>
@@ -119,9 +160,15 @@
     <button class="tab" data-view="scripts" type="button">Скрипты</button>
   </div>
 
-  <div id="runnerView" class="body">
+  <div id="runnerMobileNav" class="runner-mobile-nav">
+    <button class="btn btn--primary" data-runner-section="status" type="button">Состояние</button>
+    <button class="btn btn--ghost" data-runner-section="settings" type="button">Настройки</button>
+    <button class="btn btn--ghost" data-runner-section="logs" type="button">Логи</button>
+  </div>
+
+  <div id="runnerView" class="body" data-mobile-section="status">
     <div class="section">
-      <div class="panel">
+      <div class="panel" data-runner-panel="status">
         <div class="panel__head">
           <div class="panel__title">Состояние</div>
           <span id="runBadge" class="badge">...</span>
@@ -149,7 +196,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" data-runner-panel="settings">
         <div class="panel__head">
           <div class="panel__title">Настройки</div>
           <button id="saveBtn" class="btn btn--primary" type="button">Сохранить</button>
@@ -198,7 +245,7 @@
     </div>
 
     <div class="section">
-      <div class="panel">
+      <div class="panel" data-runner-panel="logs">
         <div class="panel__head">
           <div class="panel__title">Логи</div>
           <div class="log-tabs">
@@ -225,6 +272,11 @@
         </div>
         <div class="panel__body">
           <p id="scriptsHint" class="hint"></p>
+          <div id="scriptRoomList" class="mobile-script-list"></div>
+          <div class="mobile-script-editor-head">
+            <button id="backToRoomsBtn" class="btn btn--ghost" type="button">← Комнаты</button>
+            <button id="mobileSaveScriptsBtn" class="btn btn--primary" type="button">Сохранить</button>
+          </div>
           <div id="scriptsTable" class="script-list"></div>
         </div>
       </div>
@@ -245,6 +297,9 @@ const state = {
   busy: false,
   view: 'runner',
   scriptRooms: [],
+  scriptsDirty: false,
+  mobileScriptIdx: null,
+  logText: '',
 };
 
 const el = (id) => document.getElementById(id);
@@ -256,7 +311,7 @@ function setFooter(message, tone = '') {
 
 function setBusy(busy) {
   state.busy = busy;
-  ['installBtn','startBtn','stopBtn','restartBtn','saveBtn','refreshBtn','saveScriptsBtn','refreshScriptsBtn'].forEach((id) => {
+  ['installBtn','startBtn','stopBtn','restartBtn','saveBtn','refreshBtn','saveScriptsBtn','mobileSaveScriptsBtn','refreshScriptsBtn'].forEach((id) => {
     el(id).disabled = busy;
   });
 }
@@ -298,12 +353,25 @@ function setView(view) {
   state.view = view;
   el('runnerView').hidden = view !== 'runner';
   el('scriptsView').hidden = view !== 'scripts';
+  el('runnerMobileNav').hidden = view !== 'runner';
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.classList.toggle('tab--active', tab.dataset.view === view);
   });
   if (view === 'scripts') {
-    loadScripts().catch((err) => setFooter(err.message, 'bad'));
+    if (!state.scriptRooms.length) loadScripts().catch((err) => setFooter(err.message, 'bad'));
+    else showScriptRoomList();
   }
+  window.scrollTo({top: 0, behavior: 'auto'});
+}
+
+function setRunnerSection(section) {
+  el('runnerView').dataset.mobileSection = section;
+  document.querySelectorAll('[data-runner-section]').forEach((button) => {
+    const active = button.dataset.runnerSection === section;
+    button.classList.toggle('btn--primary', active);
+    button.classList.toggle('btn--ghost', !active);
+  });
+  window.scrollTo({top: 0, behavior: 'auto'});
 }
 
 function renderStatus(data) {
@@ -338,9 +406,18 @@ function renderStatus(data) {
 }
 
 function renderScripts(data) {
+  const selectedIdx = state.mobileScriptIdx;
   state.scriptRooms = data.rooms || [];
+  state.scriptsDirty = false;
   const urls = data.urls || {};
   el('scriptsHint').textContent = `JS: ${urls.script_src || ''}`;
+  el('scriptRoomList').innerHTML = state.scriptRooms.map((room, idx) => `
+    <button class="mobile-script-room" data-open-room="${idx}" type="button">
+      <span class="mobile-script-room__name">${escapeHtml(room.room)}</span>
+      ${badge(room.enabled ? 'активен' : 'отключён', room.enabled ? 'badge--ok' : '')}
+      <span class="mobile-script-room__meta">${escapeHtml(room.title || room.prompt_path || '')}</span>
+    </button>
+  `).join('');
   el('scriptsTable').innerHTML = state.scriptRooms.map((room, idx) => `
     <section class="script-row" data-idx="${idx}">
       <div class="script-meta">
@@ -382,6 +459,26 @@ function renderScripts(data) {
       </div>
     </section>
   `).join('');
+  if (selectedIdx !== null && selectedIdx < state.scriptRooms.length) openMobileScript(selectedIdx);
+  else showScriptRoomList();
+}
+
+function showScriptRoomList() {
+  state.mobileScriptIdx = null;
+  el('scriptsView').classList.remove('mobile-script-editing');
+  document.querySelectorAll('.script-row--active').forEach((row) => row.classList.remove('script-row--active'));
+  el('scriptsView').scrollTop = 0;
+  window.scrollTo({top: 0, behavior: 'auto'});
+}
+
+function openMobileScript(idx) {
+  state.mobileScriptIdx = Number(idx);
+  el('scriptsView').classList.add('mobile-script-editing');
+  document.querySelectorAll('#scriptsTable .script-row').forEach((row) => {
+    row.classList.toggle('script-row--active', Number(row.dataset.idx) === state.mobileScriptIdx);
+  });
+  el('scriptsView').scrollTop = 0;
+  window.scrollTo({top: 0, behavior: 'auto'});
 }
 
 function scriptsPayload() {
@@ -404,6 +501,11 @@ async function loadScripts() {
   const data = await res.json();
   renderScripts(data);
   return data;
+}
+
+async function reloadScripts() {
+  if (state.scriptsDirty && !confirm('Отменить несохранённые изменения?')) return;
+  return loadScripts();
 }
 
 async function saveScripts() {
@@ -463,8 +565,14 @@ async function loadStatus({fill = false} = {}) {
 async function loadLogs() {
   const path = state.logKind === 'deps' ? '/deps/logs?lines=260' : '/logs?lines=260';
   const res = await api(path, {headers: {}});
-  el('logBox').textContent = await res.text();
-  el('logBox').scrollTop = el('logBox').scrollHeight;
+  const text = await res.text();
+  if (text === state.logText) return;
+  const box = el('logBox');
+  const wasEmpty = !state.logText;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+  state.logText = text;
+  box.textContent = text;
+  if (wasEmpty || nearBottom) box.scrollTop = box.scrollHeight;
 }
 
 async function command(path, success) {
@@ -495,25 +603,40 @@ async function saveSettings() {
   }
 }
 
-async function refresh({fill = false} = {}) {
+async function refresh({fill = false, reloadRoomScripts = false} = {}) {
   try {
     await loadStatus({fill});
     await loadLogs();
-    if (state.view === 'scripts') await loadScripts();
+    if (state.view === 'scripts' && reloadRoomScripts) await reloadScripts();
     if (!state.busy) setFooter(`Обновлено ${new Date().toLocaleTimeString('ru-RU')}`);
   } catch (err) {
     setFooter(err.message, 'bad');
   }
 }
 
-el('refreshBtn').addEventListener('click', () => refresh());
-el('installBtn').addEventListener('click', () => command('/deps/install', 'Установка зависимостей запущена'));
+el('refreshBtn').addEventListener('click', () => refresh({reloadRoomScripts: state.view === 'scripts'}));
+el('installBtn').addEventListener('click', () => {
+  if (confirm('Установить зависимости runner?')) command('/deps/install', 'Установка зависимостей запущена');
+});
 el('startBtn').addEventListener('click', () => command('/start', 'Runner запущен'));
-el('stopBtn').addEventListener('click', () => command('/stop', 'Runner остановлен'));
-el('restartBtn').addEventListener('click', () => command('/restart', 'Runner перезапущен'));
+el('stopBtn').addEventListener('click', () => {
+  if (confirm('Остановить runner?')) command('/stop', 'Runner остановлен');
+});
+el('restartBtn').addEventListener('click', () => {
+  if (confirm('Перезапустить runner?')) command('/restart', 'Runner перезапущен');
+});
 el('saveBtn').addEventListener('click', saveSettings);
 el('saveScriptsBtn').addEventListener('click', saveScripts);
-el('refreshScriptsBtn').addEventListener('click', () => loadScripts().catch((err) => setFooter(err.message, 'bad')));
+el('mobileSaveScriptsBtn').addEventListener('click', saveScripts);
+el('refreshScriptsBtn').addEventListener('click', () => reloadScripts().catch((err) => setFooter(err.message, 'bad')));
+el('backToRoomsBtn').addEventListener('click', () => {
+  if (state.scriptsDirty && !confirm('Вернуться без сохранения?')) return;
+  if (state.scriptsDirty) renderScripts({rooms: state.scriptRooms, urls: {script_src: el('scriptsHint').textContent.replace(/^JS:\s*/, '')}});
+  showScriptRoomList();
+});
+document.querySelectorAll('[data-runner-section]').forEach((button) => {
+  button.addEventListener('click', () => setRunnerSection(button.dataset.runnerSection));
+});
 document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => setView(tab.dataset.view));
 });
@@ -521,12 +644,20 @@ el('scriptsTable').addEventListener('click', (event) => {
   const btn = event.target.closest('[data-copy]');
   if (btn) copySnippet(btn.dataset.copy).catch((err) => setFooter(err.message, 'bad'));
 });
+el('scriptsTable').addEventListener('input', () => { state.scriptsDirty = true; });
+el('scriptsTable').addEventListener('change', () => { state.scriptsDirty = true; });
+el('scriptRoomList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-open-room]');
+  if (button) openMobileScript(button.dataset.openRoom);
+});
 el('moduleLogBtn').addEventListener('click', () => {
   state.logKind = 'module';
+  state.logText = '';
   loadLogs().catch((err) => setFooter(err.message, 'bad'));
 });
 el('depsLogBtn').addEventListener('click', () => {
   state.logKind = 'deps';
+  state.logText = '';
   loadLogs().catch((err) => setFooter(err.message, 'bad'));
 });
 

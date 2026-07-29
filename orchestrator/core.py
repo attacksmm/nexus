@@ -3,6 +3,7 @@ import importlib.util
 import json
 import logging
 import logging.handlers
+import re
 import shutil
 import sys
 import uuid
@@ -14,7 +15,7 @@ from types import ModuleType
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from orchestrator.db import delete_module, get_modules_by_status, update_module_status, upsert_module
+from orchestrator.db import get_modules_by_status, update_module_status, upsert_module
 from orchestrator.lifecycle import LifecycleSupervisor
 
 MODULES_DIR = Path(__file__).parent.parent / "modules"
@@ -23,6 +24,7 @@ UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 REQUIRED_MANIFEST_KEYS = {"id", "name", "version"}
 MAX_ZIP_FILES = 500
 MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def get_module_logger(module_id: str, log_dir: Path) -> logging.Logger:
@@ -47,6 +49,7 @@ class ModuleContext:
         self.data_dir.mkdir(exist_ok=True)
         self.db_path = self.data_dir / f"{module_id}.db"
         self.lifecycle = None
+        self.restart_modules_for_env = None
 
 
 class ModuleManager:
@@ -55,6 +58,7 @@ class ModuleManager:
         self._loaded: dict[str, ModuleType] = {}
         self._contexts: dict[str, ModuleContext] = {}
         self._supervisor = LifecycleSupervisor()
+        self._env_restart_lock = asyncio.Lock()
 
     def install_lifecycle_tracking(self) -> None:
         self._supervisor.install()
@@ -126,13 +130,6 @@ class ModuleManager:
                 shutil.rmtree(rollback_dir, ignore_errors=True)
             return meta
 
-    async def unload(self, module_id: str, app: FastAPI):
-        await self._unmount_module(module_id, app)
-        module_dir = MODULES_DIR / module_id
-        if module_dir.exists():
-            shutil.rmtree(module_dir)
-        await delete_module(module_id)
-
     async def pause(self, module_id: str, app: FastAPI):
         await self._unmount_module(module_id, app)
         await update_module_status(module_id, "paused")
@@ -146,6 +143,81 @@ class ModuleManager:
 
     async def list_modules(self) -> list[dict]:
         return await get_modules_by_status()
+
+    async def restart_modules_for_env(
+        self,
+        key: str,
+        app: FastAPI,
+        *,
+        exclude: set[str] | None = None,
+    ) -> dict:
+        """Restart active modules that declare an ENV dependency.
+
+        Restarts are deliberately sequential so shared transports can detach
+        cleanly before a replacement module instance is mounted. Paused and
+        unloaded modules keep their state.
+        """
+
+        clean_key = str(key or "").strip()
+        if not ENV_KEY_RE.fullmatch(clean_key):
+            raise ValueError("Invalid ENV key")
+        excluded = {str(module_id) for module_id in (exclude or set())}
+        active_rows = await get_modules_by_status("active")
+        targets = []
+        for row in active_rows:
+            if row["id"] in excluded:
+                continue
+            try:
+                manifest = json.loads(row.get("manifest_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                manifest = {}
+            env_vars = manifest.get("env_vars") or {}
+            required = manifest.get("env_required") or []
+            declared = set(env_vars) | (set(required) if isinstance(required, list) else set())
+            if clean_key in declared:
+                targets.append(row)
+
+        results = []
+        async with self._env_restart_lock:
+            for row in targets:
+                module_id = row["id"]
+                started = asyncio.get_running_loop().time()
+                try:
+                    module_dir = MODULES_DIR / module_id
+                    if not module_dir.exists():
+                        raise RuntimeError(f"Module dir not found: {module_dir}")
+                    await self._unmount_module(module_id, app)
+                    await self._mount_module(module_id, module_dir, app)
+                    await update_module_status(module_id, "active")
+                    status = "active"
+                    error = ""
+                except Exception as exc:
+                    await update_module_status(module_id, "error")
+                    status = "error"
+                    error = f"{type(exc).__name__}: {str(exc)[:300]}"
+                    logging.getLogger("nexus.core").exception(
+                        "ENV dependent module restart failed key=%s module=%s",
+                        clean_key,
+                        module_id,
+                    )
+                results.append(
+                    {
+                        "id": module_id,
+                        "name": row.get("name") or module_id,
+                        "status": status,
+                        "duration_ms": round(
+                            (asyncio.get_running_loop().time() - started) * 1000
+                        ),
+                        "error": error,
+                    }
+                )
+        return {
+            "ok": all(item["status"] == "active" for item in results),
+            "key": clean_key,
+            "modules": results,
+            "restarted": sum(item["status"] == "active" for item in results),
+            "failed": sum(item["status"] == "error" for item in results),
+        }
 
     async def restore_active_modules(self, app: FastAPI):
         for row in await get_modules_by_status("active"):
@@ -233,6 +305,11 @@ class ModuleManager:
         if router_file.exists():
             mod = self._import_module_file(module_id, router_file)
             ctx = ModuleContext(module_id, module_dir)
+            ctx.restart_modules_for_env = lambda key: self.restart_modules_for_env(
+                key,
+                app,
+                exclude={module_id},
+            )
             ctx.logger = get_module_logger(module_id, module_dir / "data" / "logs")
             lifecycle = self._supervisor.register(module_id, ctx.logger)
             ctx.lifecycle = lifecycle

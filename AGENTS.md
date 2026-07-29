@@ -4,7 +4,7 @@ These instructions apply to `/home/attack/develop/nexus`.
 
 ## Operating Baseline
 
-- Treat Nexus as a compact production service. Keep changes small, explicit, and easy to unload.
+- Treat Nexus as a compact production service. Keep changes small, explicit, and easy to roll back.
 - Prefer adding or updating a module over changing orchestrator core. Touch `main.py`, `orchestrator/`, shared templates, or global static assets only when the module contract cannot solve the task.
 - Keep modules self-contained: `manifest.json`, `router.py`, `panel/`, and optional `static/`.
 - Do not commit or package secrets. Runtime credentials belong in `.env` and module `env_vars` documentation.
@@ -18,6 +18,15 @@ These instructions apply to `/home/attack/develop/nexus`.
   - `/nexus/{module_id}/panel/...`
   - `/nexus/{module_id}/static/...`
 - Build installable archives from inside the module directory so the ZIP root contains `manifest.json` and `router.py`.
+- Treat `modules/{module_id}/data/` as persistent state independent from the module package. Normal releases must not copy, replace, delete, package, or recreate it.
+- Do not back up a module database for a code-only release. Create a database backup only before a schema migration, data repair, bulk mutation, or another operation that can change stored data.
+
+## Telegram Networking Contract
+
+- Production Telegram access is proxy-only. Never call `api.telegram.org` directly and never create a Telethon client from raw ENV parsing inside a module.
+- Import the shared helpers from `orchestrator.telegram_proxy` for Bot API base/proxy selection, `httpx` client kwargs, MTProto URL parsing, and Telethon proxy configuration.
+- `TELEGRAM_BOT_API_PROXY_URL` is the canonical global Bot API HTTP/SOCKS proxy. `TELEGRAM_MTPROTO_PROXY_URL` is the canonical global MTProto proxy. Legacy module variables are fallback-only and must not override these global values.
+- Global Telegram routes are edited and tested in Nexus Settings → Telegram. A change must apply to every Telegram module; long-lived runtimes should implement `async on_telegram_proxy_changed()` to reconnect safely.
 
 ## Module Panel UX
 
@@ -33,3 +42,4 @@ These instructions apply to `/home/attack/develop/nexus`.
 - Run the narrowest useful checks before upload: at minimum `python -m py_compile module_x/router.py` and inspect the ZIP contents with `unzip -l`.
 - For browser-facing modules, verify the UI with Playwright at a mobile viewport.
 - Upload production modules through the Nexus UI when requested, and verify the public endpoint after installation.
+- After installation, verify that the uploader preserved the existing runtime `data/` directory. Do not use a database copy as part of a routine version update.

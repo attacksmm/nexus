@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Документация — VK метки диалогов</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.5;max-width:980px;margin:32px auto;padding:0 20px;color:#eee;background:#090909}
+    code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#111;border:1px solid #2b2b2b}
+    code{padding:2px 5px}pre{padding:14px;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}
+    table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border:1px solid #2b2b2b;padding:8px;text-align:left;vertical-align:top}
+  </style>
+</head>
+<body>
+<h1>VK метки диалогов v1.0.0</h1>
+<p>Модуль принимает webhook amoCRM по сделкам, выбирает правило по статусу сделки, сохраняет целевую метку диалога во внутренней базе Nexus и применяет доступное официальное действие VK.</p>
+
+<h2>Ограничение VK API</h2>
+<p>В публичной схеме VK API <code>5.199</code> есть методы <code>messages.markAsImportantConversation</code> и <code>messages.markAsAnsweredConversation</code>. Публичного метода для назначения кастомных меток из интерфейса сообщений сообщества не найдено. Поэтому названия вроде <code>Заказ</code>, <code>НА КУРСЕ</code> или <code>после Веба</code> сохраняются в Nexus, а в VK применяются только официальные отметки.</p>
+<p>Источник проверки: <a href="https://github.com/VKCOM/vk-api-schema" target="_blank" rel="noopener">VKCOM/vk-api-schema</a>.</p>
+
+<h2>ENV</h2>
+<table>
+  <tr><th>Ключ</th><th>Назначение</th></tr>
+  <tr><td><code>VK_GROUP_TOKEN</code></td><td>Основной token VK сообщества.</td></tr>
+  <tr><td><code>VK_USER_TOKEN</code></td><td>Fallback token, если <code>VK_GROUP_TOKEN</code> отсутствует.</td></tr>
+  <tr><td><code>VK_GROUP_ID</code></td><td>ID сообщества. Если не задан, используется <code>225075265</code>.</td></tr>
+  <tr><td><code>AMO_BASE_URL</code></td><td>URL amoCRM аккаунта.</td></tr>
+  <tr><td><code>AMO_ACCESS_TOKEN</code></td><td>Token amoCRM для сделок, статусов и webhook.</td></tr>
+  <tr><td><code>VK_LABELS_WEBHOOK_SECRET</code></td><td>Необязательный секрет webhook; имеет приоритет над настройкой панели.</td></tr>
+  <tr><td><code>VK_LABELS_PUBLIC_BASE</code></td><td>Публичная база Nexus для сборки webhook URL.</td></tr>
+  <tr><td><code>VK_LABELS_WEBHOOK_WATCHDOG</code></td><td><code>1</code> включает проверку и восстановление amoCRM webhook.</td></tr>
+</table>
+
+<h2>Правила</h2>
+<p>Правило содержит тип события/статуса amoCRM, выбранные статусы, целевую метку Nexus и официальное действие VK:</p>
+<ul>
+  <li><code>none</code> — только сохранить метку в Nexus;</li>
+  <li><code>important_on</code> / <code>important_off</code> — поставить или снять важность диалога;</li>
+  <li><code>answered_on</code> / <code>answered_off</code> — отметить диалог отвеченным или неотвеченным.</li>
+</ul>
+
+<h2>Тест</h2>
+<p>Тестовый endpoint ограничен одним диалогом:</p>
+<pre><code>https://vk.com/gim225075265/convo/1105209997</code></pre>
+<p>Любой другой <code>peer_id</code> или <code>group_id</code> отклоняется.</p>
+
+<h2>API</h2>
+<table>
+  <tr><th>Метод</th><th>Путь</th><th>Назначение</th></tr>
+  <tr><td>GET</td><td><code>/env-status</code></td><td>Проверка наличия ENV без раскрытия секретов.</td></tr>
+  <tr><td>GET/POST</td><td><code>/settings</code></td><td>Настройки поля VK ID, secret и timeout.</td></tr>
+  <tr><td>GET</td><td><code>/amo/statuses</code></td><td>Воронки и статусы amoCRM для выбора правил.</td></tr>
+  <tr><td>GET/POST</td><td><code>/rules</code></td><td>Список и сохранение правил.</td></tr>
+  <tr><td>PUT</td><td><code>/rules/{id}/toggle</code></td><td>Включить или отключить правило.</td></tr>
+  <tr><td>DELETE</td><td><code>/rules/{id}</code></td><td>Удалить правило.</td></tr>
+  <tr><td>GET</td><td><code>/events</code></td><td>Журнал обработок.</td></tr>
+  <tr><td>GET</td><td><code>/labels</code></td><td>Последние внутренние метки Nexus.</td></tr>
+  <tr><td>POST</td><td><code>/probe/vk</code></td><td>Проверить VK token на тестовом диалоге.</td></tr>
+  <tr><td>POST</td><td><code>/test/dialog</code></td><td>Применить тестовое действие к разрешенному диалогу.</td></tr>
+  <tr><td>POST</td><td><code>/webhook</code></td><td>Webhook amoCRM.</td></tr>
+</table>
+</body>
+</html>

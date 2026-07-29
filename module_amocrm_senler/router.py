@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -22,6 +23,9 @@ router = APIRouter()
 _db_path = None
 _logger: logging.Logger | None = None
 _webhook_watchdog_task: asyncio.Task | None = None
+_startup_task: asyncio.Task | None = None
+_queue_worker_tasks: list[asyncio.Task] = []
+_queue_wakeup = asyncio.Event()
 MODULE_ID = "amocrm-senler"
 
 SENLER_API = "https://senler.ru/api"
@@ -65,19 +69,42 @@ async def _require_panel_user(request: Request) -> dict:
 
 
 def setup(ctx):
-    global _db_path, _logger, _webhook_watchdog_task
+    global _db_path, _logger, _startup_task
     _db_path = ctx.db_path
     _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.amocrm-senler"))
     loop = asyncio.get_event_loop()
     if loop.is_running():
-        loop.create_task(_init_db())
-        if _webhook_watchdog_enabled() and (_webhook_watchdog_task is None or _webhook_watchdog_task.done()):
-            _webhook_watchdog_task = loop.create_task(_webhook_watchdog_loop())
+        if _startup_task is None or _startup_task.done():
+            _startup_task = loop.create_task(_startup())
     else:
         loop.run_until_complete(_init_db())
         if _webhook_watchdog_enabled():
             settings = loop.run_until_complete(_settings_map())
             loop.run_until_complete(_ensure_amo_webhook(settings))
+
+
+async def _startup() -> None:
+    global _webhook_watchdog_task, _queue_worker_tasks
+    await _init_db()
+    if _webhook_watchdog_enabled() and (_webhook_watchdog_task is None or _webhook_watchdog_task.done()):
+        _webhook_watchdog_task = asyncio.create_task(_webhook_watchdog_loop())
+    _queue_worker_tasks = [task for task in _queue_worker_tasks if not task.done()]
+    while len(_queue_worker_tasks) < 4:
+        worker_id = len(_queue_worker_tasks) + 1
+        _queue_worker_tasks.append(asyncio.create_task(_webhook_queue_worker(worker_id)))
+    _queue_wakeup.set()
+
+
+async def shutdown() -> None:
+    global _startup_task, _webhook_watchdog_task, _queue_worker_tasks
+    tasks = [task for task in [_startup_task, _webhook_watchdog_task, *_queue_worker_tasks] if task and not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _startup_task = None
+    _webhook_watchdog_task = None
+    _queue_worker_tasks = []
 
 
 async def _init_db():
@@ -134,6 +161,20 @@ async def _init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_events_deal ON events(deal_id);
             CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
+            CREATE TABLE IF NOT EXISTS webhook_queue (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key      TEXT NOT NULL UNIQUE,
+                event_json     TEXT NOT NULL DEFAULT '{}',
+                raw_payload    TEXT NOT NULL DEFAULT '',
+                status         TEXT NOT NULL DEFAULT 'pending',
+                attempts       INTEGER NOT NULL DEFAULT 0,
+                next_run_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                last_error     TEXT NOT NULL DEFAULT '',
+                result_json    TEXT NOT NULL DEFAULT '{}',
+                created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_webhook_queue_status ON webhook_queue(status,next_run_at,id);
             CREATE INDEX IF NOT EXISTS idx_bindings_status ON status_bindings(category, pipeline_id, status_id, active);
             """
         )
@@ -148,6 +189,9 @@ async def _init_db():
             except Exception:
                 pass
         await _migrate_binding_statuses(db)
+        await db.execute(
+            "UPDATE webhook_queue SET status='pending', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE status='running'"
+        )
         for key, value in DEFAULT_SETTINGS.items():
             await db.execute(
                 "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
@@ -957,6 +1001,132 @@ async def _store_event(row: dict[str, Any]) -> int:
         return int(cur.lastrowid)
 
 
+def _webhook_queue_key(event: dict[str, Any]) -> str:
+    # Collapse amoCRM retries only within the same UTC hour. A later legitimate
+    # event with the same visible fields can still be processed again.
+    hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    normalized = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"{hour_bucket}:{normalized}".encode("utf-8")).hexdigest()
+
+
+async def _enqueue_webhook_events(events: list[dict[str, Any]], raw_payload: str) -> list[dict[str, Any]]:
+    queued: list[dict[str, Any]] = []
+    async with _db_connect(_db_path) as db:
+        for event in events:
+            event_json = json.dumps(event, ensure_ascii=False, sort_keys=True)
+            event_key = _webhook_queue_key(event)
+            cur = await db.execute(
+                """
+                INSERT OR IGNORE INTO webhook_queue(event_key,event_json,raw_payload)
+                VALUES(?,?,?)
+                """,
+                (event_key, event_json, raw_payload),
+            )
+            duplicate = int(cur.rowcount or 0) == 0
+            if duplicate:
+                row = await (await db.execute(
+                    "SELECT id,status FROM webhook_queue WHERE event_key=?",
+                    (event_key,),
+                )).fetchone()
+                queued.append({"queue_id": int(row[0]), "status": str(row[1]), "duplicate": True})
+            else:
+                queued.append({"queue_id": int(cur.lastrowid), "status": "pending", "duplicate": False})
+        await db.commit()
+    _queue_wakeup.set()
+    return queued
+
+
+async def _claim_webhook_queue_item() -> dict[str, Any] | None:
+    async with _db_connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            SELECT * FROM webhook_queue
+            WHERE status IN ('pending','failed')
+              AND attempts < 5
+              AND datetime(next_run_at) <= datetime('now')
+            ORDER BY id
+            LIMIT 1
+            """
+        )
+        row = await cur.fetchone()
+        if not row:
+            await db.commit()
+            return None
+        attempts = int(row["attempts"] or 0) + 1
+        await db.execute(
+            """
+            UPDATE webhook_queue
+            SET status='running', attempts=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id=?
+            """,
+            (attempts, int(row["id"])),
+        )
+        await db.commit()
+        item = dict(row)
+        item["attempts"] = attempts
+        return item
+
+
+async def _finish_webhook_queue_item(queue_id: int, result: dict[str, Any]) -> None:
+    async with _db_connect(_db_path) as db:
+        await db.execute(
+            """
+            UPDATE webhook_queue
+            SET status='completed', last_error='', result_json=?,
+                updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id=?
+            """,
+            (json.dumps(result, ensure_ascii=False), int(queue_id)),
+        )
+        await db.commit()
+
+
+async def _fail_webhook_queue_item(queue_id: int, attempts: int, error: str) -> None:
+    dead = attempts >= 5
+    delay = min(300, 5 * (2 ** max(0, attempts - 1)))
+    async with _db_connect(_db_path) as db:
+        await db.execute(
+            """
+            UPDATE webhook_queue
+            SET status=?, last_error=?,
+                next_run_at=strftime('%Y-%m-%dT%H:%M:%SZ','now',?),
+                updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE id=?
+            """,
+            ("dead" if dead else "failed", _clean(error, 2000), f"+{delay} seconds", int(queue_id)),
+        )
+        await db.commit()
+
+
+async def _webhook_queue_worker(worker_id: int) -> None:
+    while True:
+        item: dict[str, Any] | None = None
+        try:
+            item = await _claim_webhook_queue_item()
+            if not item:
+                try:
+                    await asyncio.wait_for(_queue_wakeup.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+                _queue_wakeup.clear()
+                continue
+            event = json.loads(item.get("event_json") or "{}")
+            if not isinstance(event, dict):
+                raise ValueError("queued event is not an object")
+            settings = await _settings_map()
+            result = await _process_event(event, str(item.get("raw_payload") or ""), settings)
+            await _finish_webhook_queue_item(int(item["id"]), result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if item:
+                await _fail_webhook_queue_item(int(item["id"]), int(item.get("attempts") or 1), str(exc))
+            _log("error", "webhook queue worker %s error: %s", worker_id, exc)
+            await asyncio.sleep(1)
+
+
 async def _process_event(event: dict[str, Any], raw_payload: str, settings: dict[str, str]) -> dict[str, Any]:
     action = _clean(event.get("_action"), 32)
     deal_id = _clean(event.get("id"), 64)
@@ -1337,7 +1507,14 @@ async def stats(request: Request):
         success = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=1")).fetchone())[0]
         ignored = (await (await db.execute("SELECT COUNT(*) FROM events WHERE ignored=1")).fetchone())[0]
         active = (await (await db.execute("SELECT COUNT(*) FROM status_bindings WHERE active=1")).fetchone())[0]
-    return {"events": total, "success": success, "ignored": ignored, "active_bindings": active}
+        queue_rows = await (await db.execute("SELECT status,COUNT(*) FROM webhook_queue GROUP BY status")).fetchall()
+    return {
+        "events": total,
+        "success": success,
+        "ignored": ignored,
+        "active_bindings": active,
+        "queue": {str(status): int(count or 0) for status, count in queue_rows},
+    }
 
 
 @router.post("/webhook")
@@ -1370,10 +1547,11 @@ async def webhook(request: Request):
                 "raw_payload": raw_payload,
             })
             return {"ok": True, "processed": 0, "ignored": True, "error": "lead events not found"}
-        results = [await _process_event(event, raw_payload, settings) for event in events]
+        results = await _enqueue_webhook_events(events, raw_payload)
         return {
-            "ok": all(item.get("ok") for item in results),
-            "processed": len(results),
+            "ok": True,
+            "queued": sum(1 for item in results if not item.get("duplicate")),
+            "duplicates": sum(1 for item in results if item.get("duplicate")),
             "results": results,
         }
     except Exception as exc:

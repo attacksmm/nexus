@@ -1,8 +1,8 @@
 {
   "id": "getcourse-chat-fields",
   "name": "Поля чатов GetCourse",
-  "version": "1.0.52",
-  "description": "Выдает завершенным заказам GetCourse поля потока и ссылок на актуальные учебные чаты.",
+  "version": "1.0.60",
+  "description": "Выдает оплатившим доступ к активным учебным чатам по заказам GetCourse.",
   "env_vars": {
     "GETCOURSE_ACCOUNT_NAME": "Имя аккаунта GetCourse, например sobakovod для https://sobakovod.getcourse.ru",
     "GETCOURSE_API_TOKEN": "API token GetCourse для записи addfields пользователю",

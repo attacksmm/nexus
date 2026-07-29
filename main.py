@@ -1,24 +1,52 @@
+import asyncio
 import json
 import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiofiles
 import psutil
 from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from orchestrator.auth import (
     ENV_PATH, can_access_module, ensure_default_users, require_admin,
-    _read_env_values, enforce_rate_limit,
+    _read_env_values, _write_env_values, enforce_rate_limit,
     router as auth_router, verify_token_from_request,
 )
 from orchestrator.core import ModuleManager, UPLOADS_DIR
-from orchestrator.db import init_db, update_module_status
+from orchestrator.credentials import (
+    ENV_KEY_RE,
+    clean as clean_credential,
+    current_value as current_credential_value,
+    inventory as credential_inventory,
+    now as credentials_now,
+    provider_for_key,
+    save_value as save_credential_value,
+    status_item as credential_status_item,
+    validate_known as validate_credential,
+)
+from orchestrator.db import init_db
+from orchestrator.telegram_proxy import (
+    BOT_API_BASE_KEYS,
+    BOT_API_PROXY_KEYS,
+    MTPROTO_PROXY_KEYS,
+    masked_proxy,
+    telegram_bot_api_base,
+    telegram_bot_api_proxy_url,
+    telegram_mtproto_proxy_url,
+    test_bot_api_route,
+    test_mtproto_route,
+    validate_bot_api_base,
+    validate_bot_api_proxy,
+    validate_mtproto_proxy,
+)
 from orchestrator.vk_poll import shared_vk_poll_hub
 
 BASE_DIR = Path(__file__).parent
@@ -50,7 +78,17 @@ async def lifespan(app: FastAPI):
                 manager.uninstall_lifecycle_tracking()
 
 
-app = FastAPI(lifespan=lifespan, title="Nexus Orchestrator")
+app = FastAPI(
+    lifespan=lifespan,
+    title="Nexus Orchestrator",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["junior.sobakovod.pro", "127.0.0.1", "localhost", "testserver"],
+)
 app.include_router(auth_router)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -75,6 +113,28 @@ def _request_body_limit(path: str) -> int | None:
     if path.startswith("/api/settings/"):
         return ADMIN_BODY_LIMIT_BYTES
     return None
+
+
+def _app_request_path(request: Request) -> str:
+    path = request.scope.get("path", "")
+    root_path = request.scope.get("root_path", "") or ""
+    if root_path and path.startswith(root_path):
+        return path[len(root_path):] or "/"
+    return path
+
+
+def _cross_origin_cookie_request(request: Request) -> bool:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    if not request.cookies.get("nexus_token"):
+        return False
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        return True
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return False
+    parsed = urlsplit(origin)
+    return parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != request.headers.get("host", "").lower()
 
 
 def _cpu_model() -> str:
@@ -104,11 +164,19 @@ def _can_manage_module(user: dict | None, module_id: str) -> bool:
 
 
 @app.middleware("http")
+async def browser_security_middleware(request: Request, call_next):
+    if _cross_origin_cookie_request(request):
+        return JSONResponse({"error": "cross-origin request rejected"}, status_code=403)
+    response = await call_next(request)
+    path = _app_request_path(request)
+    if path in {"/login", "/settings"} or path.startswith("/api/settings/") or path.startswith("/token-vault/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
 async def module_lifecycle_scope_middleware(request: Request, call_next):
-    request_path = request.scope.get("path", "")
-    root_path = request.scope.get("root_path", "") or ""
-    if root_path and request_path.startswith(root_path):
-        request_path = request_path[len(root_path):] or "/"
+    request_path = _app_request_path(request)
     parts = [part for part in request_path.strip("/").split("/") if part]
     lifecycle = manager.lifecycle_for(parts[0]) if parts else None
     if lifecycle is not None:
@@ -119,10 +187,7 @@ async def module_lifecycle_scope_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def module_panel_access_middleware(request: Request, call_next):
-    request_path = request.scope.get("path", "")
-    root_path = request.scope.get("root_path", "") or ""
-    if root_path and request_path.startswith(root_path):
-        request_path = request_path[len(root_path):] or "/"
+    request_path = _app_request_path(request)
     body_limit = _request_body_limit(request_path)
     content_length = request.headers.get("content-length", "").strip()
     if body_limit is not None and content_length:
@@ -254,18 +319,6 @@ async def api_upload(request: Request, file: UploadFile | None = File(None)):
     return meta
 
 
-@app.post("/api/modules/{module_id}/unload")
-async def api_unload(module_id: str, request: Request):
-    user = await verify_token_from_request(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
-    try:
-        await manager.unload(module_id, app)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-    return {"ok": True}
-
-
 @app.post("/api/modules/{module_id}/pause")
 async def api_pause(module_id: str, request: Request):
     user = await verify_token_from_request(request)
@@ -354,6 +407,257 @@ async def api_env_template(request: Request):
         headers={"Content-Disposition": "attachment; filename=\"nexus.env.template\""},
         media_type="text/plain; charset=utf-8",
     )
+
+
+async def _credential_items(*, validate: bool = False) -> list[dict]:
+    rows = await manager.list_modules()
+    items = credential_inventory(rows, read_env=_read_env_values)
+    return [
+        await credential_status_item(
+            item,
+            base_dir=BASE_DIR,
+            validate=validate,
+            read_env=_read_env_values,
+        )
+        for item in items
+    ]
+
+
+@app.get("/api/settings/credentials")
+async def api_credentials(request: Request, validate: int = 0):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    return {
+        "ok": True,
+        "items": await _credential_items(validate=bool(validate)),
+        "env_path": str(ENV_PATH),
+        "updated_at": credentials_now(),
+    }
+
+
+@app.post("/api/settings/credentials/validate")
+async def api_credentials_validate(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    enforce_rate_limit(
+        request,
+        "nexus-credentials-validate",
+        limit=60,
+        window_seconds=3600,
+        subject=user["username"],
+    )
+    data = await request.json()
+    key = clean_credential(data.get("key"), 120)
+    if not ENV_KEY_RE.fullmatch(key):
+        return JSONResponse({"error": "Некорректный ENV ключ"}, status_code=400)
+    value = str(data.get("value") or "").strip() or current_credential_value(
+        key, read_env=_read_env_values
+    )
+    validation = await validate_credential(
+        key,
+        value,
+        base_dir=BASE_DIR,
+        read_env=_read_env_values,
+    )
+    return {"ok": True, "key": key, "validation": validation}
+
+
+@app.post("/api/settings/credentials")
+async def api_credentials_save(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    enforce_rate_limit(
+        request,
+        "nexus-credentials-save",
+        limit=30,
+        window_seconds=3600,
+        subject=user["username"],
+    )
+    data = await request.json()
+    key = clean_credential(data.get("key"), 120)
+    value = str(data.get("value") or "").strip()
+    if not ENV_KEY_RE.fullmatch(key):
+        return JSONResponse({"error": "Некорректный ENV ключ"}, status_code=400)
+    if not value:
+        return JSONResponse({"error": "Значение пустое"}, status_code=400)
+    validation = (
+        await validate_credential(
+            key,
+            value,
+            base_dir=BASE_DIR,
+            read_env=_read_env_values,
+        )
+        if data.get("validate", True)
+        else {"status": "unchecked", "message": "проверка пропущена"}
+    )
+    if validation["status"] in {"invalid", "error"} and not data.get("force"):
+        return {"ok": False, "key": key, "validation": validation, "saved": False}
+
+    result = await save_credential_value(
+        key,
+        value,
+        validation=validation,
+        read_env=_read_env_values,
+        write_env=_write_env_values,
+        restart=lambda changed_key: manager.restart_modules_for_env(changed_key, app),
+    )
+    result["item"] = await credential_status_item(
+        {
+            "key": key,
+            "description": "",
+            "required": False,
+            "modules": [],
+            "provider": provider_for_key(key),
+        },
+        base_dir=BASE_DIR,
+        read_env=_read_env_values,
+    )
+    return result
+
+
+def _telegram_test_token() -> str:
+    for key in (
+        "SBKVD_LETTER_TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_BOT_TOKEN_MODERATOR",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_BOT_TOKEN_ERROR_ALERT",
+    ):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _telegram_settings_status() -> dict:
+    bot_proxy = telegram_bot_api_proxy_url()
+    mtproto_proxy = telegram_mtproto_proxy_url()
+    env = _read_env_values()
+    bot_alias_values = {env.get(key, "") for key in BOT_API_PROXY_KEYS if env.get(key, "")}
+    mt_alias_values = {env.get(key, "") for key in MTPROTO_PROXY_KEYS if env.get(key, "")}
+    return {
+        "bot_api_base": telegram_bot_api_base(),
+        "bot_api_proxy": {
+            "configured": bool(bot_proxy),
+            "masked": masked_proxy(bot_proxy, kind="bot"),
+            "aliases_synced": len(bot_alias_values) <= 1,
+        },
+        "mtproto_proxy": {
+            "configured": bool(mtproto_proxy),
+            "masked": masked_proxy(mtproto_proxy, kind="mtproto"),
+            "aliases_synced": len(mt_alias_values) <= 1,
+        },
+    }
+
+
+async def _telegram_proxy_changed_hooks() -> list[dict]:
+    results: list[dict] = []
+    for module_id, module in list(manager._loaded.items()):
+        hook = getattr(module, "on_telegram_proxy_changed", None)
+        if not callable(hook):
+            continue
+        try:
+            value = hook()
+            if hasattr(value, "__await__"):
+                value = await asyncio.wait_for(value, timeout=30)
+            results.append({"module": module_id, "ok": True, "result": value})
+        except Exception as exc:
+            results.append({"module": module_id, "ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+    return results
+
+
+@app.get("/api/settings/telegram")
+async def api_telegram_settings(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    return {"ok": True, **_telegram_settings_status()}
+
+
+async def _test_telegram_candidates(*, bot_api_base: str, bot_api_proxy: str, mtproto_proxy: str) -> dict:
+    bot_result, mtproto_result = await asyncio.gather(
+        test_bot_api_route(base=bot_api_base, proxy=bot_api_proxy, token=_telegram_test_token()),
+        test_mtproto_route(proxy=mtproto_proxy) if mtproto_proxy else asyncio.sleep(
+            0, result={"ok": True, "duration_ms": 0, "message": "MTProto proxy отключён"}
+        ),
+    )
+    return {"bot_api": bot_result, "mtproto": mtproto_result, "ok": bool(bot_result.get("ok") and mtproto_result.get("ok"))}
+
+
+@app.post("/api/settings/telegram/test")
+async def api_telegram_settings_test(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    enforce_rate_limit(request, "nexus-telegram-proxy-test", limit=30, window_seconds=3600, subject=user["username"])
+    data = await request.json()
+    try:
+        bot_api_base = validate_bot_api_base(data.get("bot_api_base") or telegram_bot_api_base())
+        bot_api_proxy = validate_bot_api_proxy(data.get("bot_api_proxy") or telegram_bot_api_proxy_url())
+        mtproto_proxy = validate_mtproto_proxy(data.get("mtproto_proxy") or telegram_mtproto_proxy_url())
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    tests = await _test_telegram_candidates(
+        bot_api_base=bot_api_base,
+        bot_api_proxy=bot_api_proxy,
+        mtproto_proxy=mtproto_proxy,
+    )
+    return {"ok": tests["ok"], "tests": tests}
+
+
+@app.post("/api/settings/telegram")
+async def api_telegram_settings_save(request: Request):
+    user = await verify_token_from_request(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Недостаточно прав"}, status_code=403)
+    enforce_rate_limit(request, "nexus-telegram-proxy-save", limit=10, window_seconds=3600, subject=user["username"])
+    data = await request.json()
+    current_base = telegram_bot_api_base()
+    current_bot_proxy = telegram_bot_api_proxy_url()
+    current_mtproto = telegram_mtproto_proxy_url()
+    try:
+        bot_api_base = validate_bot_api_base(data.get("bot_api_base") or current_base)
+        bot_api_proxy = validate_bot_api_proxy(data.get("bot_api_proxy") or current_bot_proxy)
+        mtproto_proxy = validate_mtproto_proxy(data.get("mtproto_proxy") or current_mtproto)
+        if not bot_api_proxy or not mtproto_proxy:
+            raise ValueError("Для production Nexus должны быть заданы Bot API и MTProto proxy")
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    tests = await _test_telegram_candidates(
+        bot_api_base=bot_api_base,
+        bot_api_proxy=bot_api_proxy,
+        mtproto_proxy=mtproto_proxy,
+    )
+    if not tests["ok"] and not data.get("force"):
+        return JSONResponse({"error": "Новые маршруты не прошли проверку", "tests": tests}, status_code=422)
+
+    env = _read_env_values()
+    updates: dict[str, str] = {}
+    for key in BOT_API_BASE_KEYS:
+        updates[key] = bot_api_base
+    for key in BOT_API_PROXY_KEYS:
+        updates[key] = bot_api_proxy
+    for key in MTPROTO_PROXY_KEYS:
+        updates[key] = mtproto_proxy
+    changed = [key for key, value in updates.items() if env.get(key, "") != value]
+    for key, value in updates.items():
+        if value:
+            env[key] = value
+            os.environ[key] = value
+        else:
+            env.pop(key, None)
+            os.environ.pop(key, None)
+    _write_env_values(env)
+    hooks = await _telegram_proxy_changed_hooks() if changed else []
+    return {
+        "ok": True,
+        "changed_keys": changed,
+        "tests": tests,
+        "hooks": hooks,
+        **_telegram_settings_status(),
+    }
 
 
 @app.get("/api/server/stats")

@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bizon365 отчеты</title>
+  <style>
+    :root{
+      --bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;
+      --text:#f2f2f2;--muted:#bababa;--subtle:#848484;
+      --border:#2d2d2d;--border-mid:#3a3a3a;--border-strong:#545454;
+      --accent:#f4f4f4;--accent-text:#080808;
+      --ok:#9fe0aa;--ok-bg:#102417;--ok-bd:#315f3a;
+      --bad:#ffc2ca;--bad-bg:#251315;--bad-bd:#5f3137;
+      --warn:#ffe08a;--warn-bg:#1a1500;--warn-bd:#6b5a00;
+      font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px;
+    }
+    *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
+    button,input,textarea,select{font:inherit}button{cursor:pointer}
+    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
+    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    .shell{width:100%;height:100vh;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;background:var(--bg)}
+    .tabs{min-width:0;display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto;overflow-y:hidden}
+    .tab{flex:0 0 auto;height:36px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:.82rem}
+    .tab:hover{color:var(--muted)}.tab.is-active{color:var(--text);border-bottom-color:var(--accent)}
+    .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
+    .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
+    .toolbar{flex-shrink:0;display:grid;grid-template-columns:minmax(170px,.7fr) minmax(170px,.7fr) minmax(110px,.4fr) auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}
+    .form-grid{display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr);gap:10px;align-items:end;min-width:0}
+    .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
+    .f-input{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);outline:none}
+    .f-input:focus{border-color:var(--accent)}textarea.f-input{min-height:82px;resize:vertical}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--danger{background:var(--bad-bg);border-color:var(--bad-bd);color:var(--bad)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
+    .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}
+    .pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:360px;overflow:auto}
+    .hint{padding:9px 10px;border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:.82rem}
+    .reports{overflow:auto;flex:1;padding:12px;display:grid;align-content:start;gap:8px}
+    .report-row{min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--border);background:var(--panel)}
+    .report-row:hover{background:var(--panel-strong);border-color:var(--border-mid)}
+    .report-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.report-meta{margin-top:3px;color:var(--subtle);font-size:.78rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
+    .split{display:grid;grid-template-columns:minmax(0,1fr) 390px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.empty{padding:24px;text-align:center;color:var(--subtle)}.kv{display:grid;grid-template-columns:132px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}
+    .event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
+    @media(max-width:980px){.toolbar,.form-grid,.report-row{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <div class="tabs">
+    <button class="tab is-active" type="button" data-view="reports">Отчеты Bizon365</button>
+    <button class="tab" type="button" data-view="events">Журнал</button>
+    <button class="tab" type="button" data-view="webhook">Webhook</button>
+    <button class="tab" type="button" data-view="settings">Настройки</button>
+    <div class="tabs__right">
+      <span id="statusLine" class="muted">Загрузка</span>
+      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">Обновить</button>
+    </div>
+  </div>
+
+  <section id="viewReports" class="view is-active">
+    <div class="toolbar">
+      <div class="f-group"><label>Тип</label><select id="reportType" class="f-input"><option value="">Все</option><option value="LiveWebinars">Вебинары</option><option value="AutoWebinars">Автовебинары</option></select></div>
+      <div class="f-group"><label>Лимит</label><input id="reportLimit" class="f-input" value="100"></div>
+      <div class="f-group"><label>Skip</label><input id="reportSkip" class="f-input" value="0"></div>
+      <button id="loadReportsBtn" class="btn" type="button">Загрузить отчеты</button>
+    </div>
+    <div id="reportsList" class="reports"><div class="empty">Загрузка отчетов</div></div>
+  </section>
+
+  <section id="viewEvents" class="view">
+    <div class="toolbar" style="grid-template-columns:minmax(230px,1fr) minmax(110px,.35fr) auto">
+      <div class="f-group"><label>Таблица</label><input id="customerTable" class="f-input mono" readonly></div>
+      <div class="f-group"><label>Лимит</label><input id="eventLimit" class="f-input" value="80"></div>
+      <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
+    </div>
+    <div class="split">
+      <div class="table-wrap">
+        <table>
+          <colgroup><col style="width:7%"><col style="width:18%"><col style="width:17%"><col style="width:15%"><col style="width:12%"><col style="width:12%"><col style="width:19%"></colgroup>
+          <thead><tr><th>ID</th><th>Получен</th><th>Webinar</th><th>Зрители</th><th>DB</th><th>Vakas</th><th>URL</th></tr></thead>
+          <tbody id="eventsTable"></tbody>
+        </table>
+      </div>
+      <aside id="eventDetail" class="side"><div class="empty">Выберите событие</div></aside>
+    </div>
+  </section>
+
+  <section id="viewWebhook" class="view">
+    <div class="panel-body">
+      <div class="hint">Поле Vakas endpoint намеренно пустое. Вставьте нужный endpoint, и он попадет в параметр <code>url</code> готовой ссылки.</div>
+      <div class="form-grid" style="grid-template-columns:minmax(300px,1fr) auto">
+        <div class="f-group"><label>Vakas endpoint</label><input id="webhookForwardUrl" class="f-input mono" placeholder="https://vakas-tools.ru/base/report/..."></div>
+        <button id="applyForwardBtn" class="btn" type="button">Обновить ссылку</button>
+        <div class="f-group"><label>Готовый webhook Bizon365</label><input id="webhookUrl" class="f-input mono" readonly></div>
+        <button id="copyWebhookBtn" class="btn btn--primary" type="button">Копировать</button>
+      </div>
+      <pre id="webhookMeta" class="pre"></pre>
+    </div>
+  </section>
+
+  <section id="viewSettings" class="view">
+    <div class="panel-body">
+      <div id="settingsStatus" class="pre"></div>
+      <div class="form-grid">
+        <div class="f-group"><label>Webhook secret</label><input id="webhookSecret" class="f-input mono" autocomplete="off"></div>
+        <div class="f-group"><label>Bizon365 API token</label><input id="bizonApiToken" class="f-input mono" type="password" autocomplete="new-password" placeholder="Оставьте пустым, если не меняете"></div>
+        <div class="f-group"><label>Bizon365 Project ID</label><input id="projectId" class="f-input mono" autocomplete="off"></div>
+        <div class="f-group"><label>Timeout, секунд</label><input id="requestTimeout" class="f-input" type="number" min="5" max="60"></div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="saveSettingsBtn" class="btn btn--primary" type="button">Сохранить настройки</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const parts = location.pathname.split('/');
+const panelIdx = parts.indexOf('panel');
+const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+let settings = {};
+let activeEventRow = null;
+
+function esc(s){return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function badge(kind, text){return `<span class="badge badge--${kind}">${esc(text)}</span>`}
+function notify(msg, level='warn'){if(window.parent && typeof window.parent.notify === 'function') window.parent.notify(msg, level); else console[level === 'bad' ? 'error' : 'log'](msg)}
+async function fetchJson(url, opts){
+  const r = await fetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error(data.error || data.detail || 'Ошибка запроса');
+  return data;
+}
+function activeBaseUrl(){ return `${location.origin}${modBase}/api/webhook`; }
+function buildWebhookUrl(){
+  const forwardUrl = $('webhookForwardUrl').value.trim();
+  const secret = settings.webhook_secret || '';
+  const url = new URL(activeBaseUrl());
+  url.searchParams.set('secret', secret);
+  if(forwardUrl) url.searchParams.set('url', forwardUrl);
+  $('webhookUrl').value = url.toString();
+  return url.toString();
+}
+function renderSettings(){
+  $('statusLine').textContent = [
+    settings.bizon_api_token_configured ? 'Bizon API: ok' : 'Bizon API: нет',
+    settings.customer_db_token_configured ? 'Customer DB: ok' : 'Customer DB: нет'
+  ].join(' · ');
+  $('customerTable').value = `${settings.customer_table_display || 'Клиенты Bizon365'} (${settings.customer_table || 'bizon365_clients'})`;
+  $('webhookSecret').value = settings.webhook_secret || '';
+  $('requestTimeout').value = settings.request_timeout || 20;
+  $('projectId').value = settings.project_id || '97242';
+  $('settingsStatus').textContent = JSON.stringify({
+    webhook_secret_source: settings.webhook_secret_source,
+    bizon_api_token_configured: settings.bizon_api_token_configured,
+    customer_db_token_configured: settings.customer_db_token_configured,
+    customer_table: settings.customer_table,
+    attendance_table: settings.attendance_table,
+    project_id: settings.project_id,
+    feed_token: settings.feed_token,
+    allowed_forward_prefix: settings.allowed_forward_prefix,
+    env_path: settings.env_path
+  }, null, 2);
+  $('webhookMeta').textContent = JSON.stringify({
+    method: 'POST',
+    table: settings.customer_table,
+    allowed_forward_prefix: settings.allowed_forward_prefix,
+    url_parameter: 'заполняется только из поля Vakas endpoint',
+    fallback: settings.bizon_api_token_configured ? 'Bizon API включен' : 'Bizon API token не задан'
+  }, null, 2);
+  buildWebhookUrl();
+}
+async function loadSettings(){
+  settings = await fetchJson(API + '/settings');
+  renderSettings();
+}
+async function loadReports(){
+  const limit = Math.max(1, Math.min(100, Number($('reportLimit').value || 100)));
+  const skip = Math.max(0, Number($('reportSkip').value || 0));
+  const type = $('reportType').value;
+  $('reportsList').innerHTML = '<div class="empty">Загрузка отчетов</div>';
+  try {
+    const data = await fetchJson(`${API}/reports?limit=${limit}&skip=${skip}&type=${encodeURIComponent(type)}`);
+    const rows = data.items || [];
+    $('reportsList').innerHTML = rows.map(row => {
+      const title = row.webinar_id ? `Вебинар ${row.webinar_id}` : (row.name || 'Отчет Bizon365');
+      const meta = [
+        row.imported_at ? `данные пришли ${row.imported_at}` : '',
+        row.records_count ? `строк: ${row.records_count}` : '',
+        row.type || ''
+      ].filter(Boolean).join(' — ');
+      return `
+        <div class="report-row" data-webinar="${esc(row.webinar_id)}">
+          <div>
+            <div class="report-title" title="${esc(title)}">${esc(title)}</div>
+            <div class="report-meta">${esc(meta || row.created || '')}</div>
+          </div>
+          <div>${row.in_base ? badge('ok','есть в базе') : badge('bad','нет в базе')}</div>
+          <button class="btn ${row.in_base ? '' : 'btn--primary'} report-import" type="button" data-webinar="${esc(row.webinar_id)}">${row.in_base ? 'Перезагрузить' : 'Добавить'}</button>
+        </div>
+      `;
+    }).join('') || '<div class="empty">Bizon не вернул отчеты</div>';
+    document.querySelectorAll('.report-import').forEach(btn => btn.addEventListener('click', () => importReport(btn)));
+  } catch(e) {
+    $('reportsList').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+async function importReport(btn){
+  const webinarId = btn.dataset.webinar || '';
+  if(!webinarId) return notify('У отчета нет webinarId', 'bad');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Загрузка';
+  try {
+    const result = await fetchJson(API + '/reports/import', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({webinar_id: webinarId})
+    });
+    notify(`Импортировано: ${result.records_count}`, 'ok');
+    await Promise.all([loadReports(), loadEvents()]);
+  } catch(e) {
+    notify(e.message, 'bad');
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+async function loadEvents(){
+  const limit = Math.max(1, Math.min(200, Number($('eventLimit').value || 80)));
+  const data = await fetchJson(API + '/events?limit=' + limit);
+  const rows = data.items || [];
+  $('eventsTable').innerHTML = rows.map(row => {
+    const forwardBadge = row.forward_url ? (row.forward_ok ? badge('ok', row.forward_status_code || 'ok') : badge('bad', row.forward_status_code || 'fail')) : badge('off','-');
+    return `
+      <tr class="event-row" data-id="${esc(row.id)}">
+        <td>${esc(row.id)}</td>
+        <td class="mono">${esc(row.received_at)}</td>
+        <td>${esc(row.webinar_id || '-')}</td>
+        <td>${esc(row.viewers_source || 'none')}: ${esc(row.viewers_count)} / ${esc(row.records_count)}</td>
+        <td>${row.db_ok ? badge('ok','ok') : badge('bad','fail')}</td>
+        <td>${forwardBadge}</td>
+        <td title="${esc(row.forward_url)}">${esc(row.forward_url || '-')}</td>
+      </tr>
+    `;
+  }).join('') || '<tr><td colspan="7" class="empty">Событий пока нет</td></tr>';
+  document.querySelectorAll('.event-row').forEach(tr => tr.addEventListener('click', () => {
+    if(activeEventRow) activeEventRow.classList.remove('is-active');
+    activeEventRow = tr; tr.classList.add('is-active');
+    const row = rows.find(item => String(item.id) === tr.dataset.id);
+    showEvent(row);
+  }));
+}
+function showEvent(row){
+  if(!row){$('eventDetail').innerHTML = '<div class="empty">Выберите событие</div>'; return}
+  let dbStatus = row.db_status || '';
+  try { dbStatus = JSON.stringify(JSON.parse(dbStatus), null, 2); } catch(e) {}
+  $('eventDetail').innerHTML = `
+    <div class="kv">
+      <span>ID</span><span>${esc(row.id)}</span>
+      <span>Получен</span><span class="mono">${esc(row.received_at)}</span>
+      <span>Webinar</span><span>${esc(row.webinar_id || '-')}</span>
+      <span>Источник</span><span>${esc(row.viewers_source || 'none')}</span>
+      <span>Зрители</span><span>${esc(row.viewers_count)} / ${esc(row.records_count)}</span>
+      <span>DB</span><span>${row.db_ok ? 'ok' : 'fail'}</span>
+      <span>Vakas</span><span>${row.forward_url ? esc(row.forward_status_code || '-') : '-'}</span>
+    </div>
+    <div class="f-group"><label>DB status</label><pre class="pre">${esc(dbStatus)}</pre></div>
+    <div class="f-group"><label>Forward error</label><pre class="pre">${esc(row.forward_error || '')}</pre></div>
+  `;
+}
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('is-active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('is-active'));
+  btn.classList.add('is-active');
+  $('view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)).classList.add('is-active');
+  if(btn.dataset.view === 'reports') loadReports();
+  if(btn.dataset.view === 'events') loadEvents().catch(e => notify(e.message, 'bad'));
+  if(btn.dataset.view === 'webhook') renderSettings();
+  if(btn.dataset.view === 'settings') loadSettings().catch(e => notify(e.message, 'bad'));
+}));
+$('refreshBtn').addEventListener('click', () => Promise.all([loadSettings(), loadReports(), loadEvents()]).catch(e => notify(e.message, 'bad')));
+$('loadReportsBtn').addEventListener('click', loadReports);
+$('loadEventsBtn').addEventListener('click', () => loadEvents().catch(e => notify(e.message, 'bad')));
+$('applyForwardBtn').addEventListener('click', buildWebhookUrl);
+$('copyWebhookBtn').addEventListener('click', async () => {
+  buildWebhookUrl();
+  await navigator.clipboard.writeText($('webhookUrl').value);
+  notify('Webhook URL скопирован', 'ok');
+});
+$('saveSettingsBtn').addEventListener('click', async () => {
+  try {
+    const payload = {
+      webhook_secret: $('webhookSecret').value.trim(),
+      project_id: $('projectId').value.trim(),
+      request_timeout: Number($('requestTimeout').value || 20)
+    };
+    const token = $('bizonApiToken').value.trim();
+    if(token) payload.bizon_api_token = token;
+    settings = await fetchJson(API + '/settings', {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    $('bizonApiToken').value = '';
+    renderSettings();
+    notify('Настройки сохранены', 'ok');
+  } catch(e) {
+    notify(e.message, 'bad');
+  }
+});
+
+Promise.all([loadSettings(), loadReports(), loadEvents()]).catch(e => {
+  $('statusLine').textContent = 'Ошибка';
+  notify(e.message, 'bad');
+});
+</script>
+</body>
+</html>

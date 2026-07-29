@@ -1,0 +1,14 @@
+{
+  "id": "telegram-salebot-proxy",
+  "name": "Telegram → SaleBot Proxy",
+  "version": "1.0.3",
+  "description": "Автоматически ставит Nexus между Telegram и SaleBot, контролирует webhook, доставку и безопасный откат.",
+  "env_vars": {
+    "NEXUS_SECRET": "Стабильный секрет Nexus; используется для шифрования bot token и закрытого URL SaleBot",
+    "TG_SALEBOT_PROXY_PUBLIC_BASE": "Публичная HTTPS-база Nexus, по умолчанию https://junior.sobakovod.pro/nexus",
+    "TELEGRAM_BOT_API_PROXY_URL": "Глобальный HTTP/SOCKS proxy Telegram Bot API из Настройки Nexus → Telegram"
+  },
+  "env_required": [
+    "NEXUS_SECRET"
+  ]
+}

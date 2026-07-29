@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bizon365 → Google Sheets</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--panel:#101010;--line:#2d2d2d;--line-strong:#545454;--text:#f2f2f2;--muted:#bababa;--soft:#848484;--accent:#f4f4f4;--good:#79b98d;--bad:#df8585}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#3a3a3a #090909}
+    html,body{width:100%;height:100%;min-height:0;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 "IBM Plex Sans","Segoe UI",system-ui,sans-serif}
+    button,input{font:inherit;color:inherit}button{cursor:pointer}
+    .app{height:100%;display:grid;grid-template-rows:40px 36px minmax(0,1fr);overflow:hidden}
+    .top{height:40px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;gap:12px;background:#0b0b0b;border-bottom:1px solid var(--line)}
+    .brand{font-weight:650}.state{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);white-space:nowrap}
+    .tabs{height:36px;padding:0 12px;display:flex;gap:2px;overflow:auto;background:#0b0b0b;border-bottom:1px solid var(--line)}
+    .tab{height:35px;padding:0 10px;border:0;background:transparent;color:var(--muted);white-space:nowrap}.tab.active{background:var(--accent);color:#080808}
+    .view{display:none;height:100%;min-height:0;overflow:auto}.view.active{display:grid}
+    #events{grid-template-rows:auto auto minmax(0,1fr)}#settings{grid-template-rows:auto minmax(0,1fr) auto}
+    .banner{padding:7px 12px;border-bottom:1px solid #665a37;background:#19170f;color:#d9c996;font-size:11px}
+    .toolbar{min-height:48px;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line)}
+    .toolbar h2{font-size:13px;margin:0}.toolbar p{font-size:11px;margin:2px 0 0;color:var(--muted)}.actions{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
+    button{min-height:32px;padding:6px 10px;border:1px solid var(--line);border-radius:0;background:#171717}button:hover{background:#202020;border-color:var(--line-strong)}button.primary{background:var(--accent);border-color:var(--accent);color:#080808;font-weight:650}
+    .table{min-height:0;overflow:auto}.row{display:grid;grid-template-columns:65px 105px minmax(180px,1fr) 95px 70px 90px minmax(180px,1fr);gap:10px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--line)}.row.head{position:sticky;top:0;z-index:2;background:var(--panel);color:var(--muted);font-size:11px}
+    .pill{display:inline-block;padding:2px 6px;border:1px solid var(--line);color:var(--muted);font-size:11px}.pill.ok{color:var(--good);border-color:#355441}.pill.bad{color:var(--bad);border-color:#593737}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.empty{padding:30px;text-align:center;color:var(--muted)}
+    .settings-scroll{min-height:0;overflow:auto;padding:12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 10px;max-width:920px}.field{display:grid;gap:4px}.field>span{font-size:11px;color:var(--muted)}.full{grid-column:1/-1}.input{width:100%;min-height:34px;padding:7px 8px;border:1px solid var(--line-strong);border-radius:0;background:#090909;outline:none}.input:focus{border-color:#888}.checks{display:flex;align-items:center;min-height:34px}.checks input{accent-color:#ddd}.pre{max-height:190px;margin:0;padding:8px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:#090909;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+    .internal-note{margin:0;padding:8px 10px;border-left:2px solid #718294;background:#101418;color:#b9c8d8;font-size:11px}.form-actions{padding:8px 12px;display:flex;justify-content:flex-end;border-top:1px solid var(--line);background:#101010}
+    @media(max-width:720px){.app{grid-template-rows:38px 36px minmax(0,1fr)}.top{height:38px;padding:0 9px}.tabs{padding:0 6px}.toolbar{align-items:flex-start;flex-direction:column;padding:7px 9px}.actions{justify-content:flex-start}.row{grid-template-columns:1fr;gap:2px;padding:8px 9px}.row.head{display:none}.grid{grid-template-columns:1fr}.full{grid-column:auto}.settings-scroll{padding:9px}.form-actions{padding:7px 9px}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="top"><div class="brand">Bizon365 → Google Sheets</div><div id="status" class="state">загрузка</div></div>
+  <nav class="tabs"><button class="tab active" data-view="events">Журнал</button><button class="tab" data-view="settings">Настройки</button></nav>
+
+  <section id="events" class="view active">
+    <div id="dryBanner" class="banner">Dry-run включён: строки рассчитываются, таблица не изменяется.</div>
+    <div class="toolbar"><div><h2>Выгрузка посещений</h2><p>Одна строка на attendance key; новая ревизия обновляет её.</p></div><div class="actions"><button id="replayShadow" type="button">Перенести shadow</button><button id="retry" type="button">Повторить ошибки</button><button id="sync" class="primary" type="button">Синхронизировать</button></div></div>
+    <div class="table"><div class="row head"><span>ID</span><span>Статус</span><span>Attendance key</span><span>Nexus</span><span>Строка</span><span>Vakas</span><span>Ошибка</span></div><div id="eventsBody"></div></div>
+  </section>
+
+  <section id="settings" class="view">
+    <div class="toolbar"><div><h2>Подключение</h2><p>Целевая вкладка создаётся автоматически.</p></div><button id="check" type="button">Проверить таблицу</button></div>
+    <div class="settings-scroll"><div class="grid">
+      <label class="field full"><span>Внутренний feed Bizon Reports</span><input id="feed_url" class="input mono"></label>
+      <p class="internal-note full">Адрес 127.0.0.1 используется только модулями внутри сервера Nexus. В Bizon365 его вставлять не нужно.</p>
+      <label class="field full"><span>Feed token</span><input id="feed_token" class="input mono" type="password"></label>
+      <label class="field"><span>Spreadsheet ID</span><input id="spreadsheet_id" class="input mono"></label>
+      <label class="field"><span>Название вкладки</span><input id="worksheet_title" class="input"></label>
+      <label class="field"><span>Зеркальная вкладка Vakas</span><input id="vakas_worksheet_title" class="input"></label>
+      <label class="field"><span>Интервал, секунд</span><input id="poll_seconds" class="input" type="number" min="5"></label>
+      <label class="field"><span>Timeout, секунд</span><input id="request_timeout" class="input" type="number" min="5"></label>
+      <label class="field checks"><span><input id="dry_run" type="checkbox"> Dry-run</span></label>
+      <label class="field checks"><span><input id="poll_enabled" type="checkbox"> Фоновая синхронизация</span></label>
+      <label class="field checks"><span><input id="vakas_mirror_enabled" type="checkbox"> Дублировать новые строки в Vakas (A:W)</span></label>
+      <div class="full"><pre id="meta" class="pre"></pre></div>
+    </div></div>
+    <div class="form-actions"><button id="save" class="primary" type="button">Сохранить</button></div>
+  </section>
+</div>
+<script>
+const p=location.pathname.split('/'),i=p.indexOf('panel'),base=i>0?p.slice(0,i).join('/'):'';const API=base+'/api',$=id=>document.getElementById(id);let settings={};const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function api(path,opt){const r=await fetch(API+path,opt),d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||d.error||'Ошибка');return d}function note(m,l='log'){if(parent&&parent.notify)parent.notify(m,l);else console[l==='bad'?'error':'log'](m)}
+async function loadSettings(){settings=await api('/settings');for(const k of ['feed_url','feed_token','spreadsheet_id','worksheet_title','vakas_worksheet_title','poll_seconds','request_timeout'])$(k).value=settings[k]||'';$('dry_run').checked=!!settings.dry_run;$('poll_enabled').checked=!!settings.poll_enabled;$('vakas_mirror_enabled').checked=!!settings.vakas_mirror_enabled;$('status').textContent=`cursor ${settings.feed_cursor||0} · ${settings.dry_run?'dry-run':'запись'} · Vakas ${settings.vakas_mirror_enabled?'вкл':'выкл'}`;$('dryBanner').style.display=settings.dry_run?'block':'none';$('meta').textContent=JSON.stringify({credentials_configured:settings.credentials_configured,spreadsheet_id:settings.spreadsheet_id,worksheet_title:settings.worksheet_title,columns:settings.headers,vakas_worksheet_title:settings.vakas_worksheet_title,vakas_columns:settings.vakas_headers},null,2)}
+async function loadEvents(){const rows=(await api('/events?limit=180')).items||[];$('eventsBody').innerHTML=rows.map(e=>`<div class="row"><span>${e.id}</span><span><span class="pill ${e.status==='success'?'ok':e.status==='failed'?'bad':''}">${esc(e.status)}</span></span><span class="mono">${esc(e.attendance_key)}</span><span>${esc(e.action)}</span><span>${esc(e.row_number||'-')}</span><span>${esc(e.vakas_action||'-')} ${esc(e.vakas_row_number||'')}</span><span>${esc(e.error||'')}</span></div>`).join('')||'<div class="empty">Событий пока нет</div>'}
+$('save').onclick=async()=>{try{const body={};for(const k of ['feed_url','feed_token','spreadsheet_id','worksheet_title','vakas_worksheet_title'])body[k]=$(k).value;body.poll_seconds=Number($('poll_seconds').value);body.request_timeout=Number($('request_timeout').value);body.dry_run=$('dry_run').checked;body.poll_enabled=$('poll_enabled').checked;body.vakas_mirror_enabled=$('vakas_mirror_enabled').checked;await api('/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await loadSettings();note('Настройки сохранены','ok')}catch(e){note(e.message,'bad')}};
+$('sync').onclick=async()=>{try{await api('/sync/run',{method:'POST'});await Promise.all([loadSettings(),loadEvents()]);note('Синхронизация завершена','ok')}catch(e){note(e.message,'bad')}};$('retry').onclick=async()=>{try{await api('/events/retry',{method:'POST'});await loadEvents()}catch(e){note(e.message,'bad')}};$('check').onclick=async()=>{try{await api('/sheet/check',{method:'POST'});note('Доступ и вкладка проверены','ok')}catch(e){note(e.message,'bad')}};
+$('replayShadow').onclick=async()=>{if(settings.dry_run)return note('Сначала отключите dry-run','bad');if(!confirm('Записать shadow-события в новую вкладку?'))return;try{await api('/events/retry?include_shadow=1',{method:'POST'});await loadEvents();note('Shadow-события обработаны','ok')}catch(e){note(e.message,'bad')}};
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));t.classList.add('active');$(t.dataset.view).classList.add('active')});Promise.all([loadSettings(),loadEvents()]).catch(e=>note(e.message,'bad'));
+</script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Общение с администрацией</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070707;--surface:#101010;--surface2:#171717;--line:#292929;--line2:#414141;--text:#f2f2f2;--muted:#aaa;--subtle:#747474;--accent:#f2f2f2;--ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;--info:#9fd4ff;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}button,input,select{font:inherit}button{color:inherit}
+    *{scrollbar-color:#505050 #090909;scrollbar-width:thin}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#090909}::-webkit-scrollbar-thumb{background:#505050;border:2px solid #090909}
+    .shell{width:100vw;height:100vh;display:grid;grid-template-rows:auto auto auto auto minmax(0,1fr) auto;overflow:hidden}
+    .top{display:flex;align-items:center;gap:9px;min-width:0;padding:10px 12px;border-bottom:1px solid var(--line);background:#0d0d0d}.title{font-size:1rem;font-weight:680;letter-spacing:-.01em;white-space:nowrap}.spacer{flex:1}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:30px;padding:5px 10px;border:1px solid var(--line2);background:var(--surface2);color:var(--text);cursor:pointer;white-space:nowrap;transition:background .16s ease,border-color .16s ease,color .16s ease,opacity .16s ease}.btn:hover{border-color:#686868}.btn.primary{background:var(--accent);border-color:var(--accent);color:#080808}.btn.ghost{background:transparent;border-color:var(--line);color:var(--muted)}.btn:disabled{opacity:.42;cursor:default}
+    .pill{display:inline-flex;align-items:center;min-height:23px;padding:3px 7px;border:1px solid var(--line);background:#0b0b0b;color:var(--muted);font-size:.76rem;white-space:nowrap}.pill.ok{color:var(--ok);border-color:#2d5b3c}.pill.bad{color:var(--bad);border-color:#65323a}.pill.warn{color:var(--warn);border-color:#655424}.pill.info{color:var(--info);border-color:#30536e}.pill.dim{color:var(--subtle)}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));border-bottom:1px solid var(--line);background:#0a0a0a}.metric{min-width:0;padding:11px 13px;border-right:1px solid var(--line)}.metric:last-child{border-right:0}.metric strong{display:block;font-size:1.55rem;line-height:1;font-weight:680;letter-spacing:-.035em}.metric span{display:block;margin-top:5px;color:var(--muted);font-size:.8rem}.metric small{display:block;margin-top:2px;color:var(--subtle);font-size:.72rem}
+    .tabs{display:flex;align-items:flex-end;gap:18px;min-width:0;overflow:auto;padding:0 12px;border-bottom:1px solid var(--line);background:var(--surface)}.tab{position:relative;min-height:38px;padding:0;border:0;background:transparent;color:var(--muted);cursor:pointer;white-space:nowrap}.tab.active{color:var(--text)}.tab.active::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--accent)}.tab-count{margin-left:5px;color:var(--subtle);font-size:.74rem}.tab.active .tab-count{color:var(--text)}
+    .filters{display:flex;align-items:center;gap:8px;min-width:0;min-height:43px;padding:6px 12px;border-bottom:1px solid var(--line);background:#090909;overflow:auto}.filter-group{display:flex;align-items:center;gap:8px}.filter-group[hidden]{display:none}.field{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.8rem;white-space:nowrap}.field input,.field select{height:30px;min-width:116px;padding:4px 8px;border:1px solid var(--line2);background:#0b0b0b;color:var(--text)}.field input[type="search"]{width:190px}.field input[type="number"]{min-width:70px;width:70px;text-align:right}.field input[type="checkbox"]{width:auto;min-width:0;height:auto}.field select.compact{min-width:86px}
+    .content{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;background:var(--bg)}.view{min-width:0;min-height:100%;animation:view-in .18s ease}.view[hidden]{display:none}@keyframes view-in{from{opacity:.45;transform:translateY(3px)}to{opacity:1;transform:none}}
+    table{width:100%;min-width:900px;border-collapse:collapse;table-layout:fixed;font-size:.81rem}#protectedView table{min-width:1080px}#actionsView table{min-width:980px}th,td{height:41px;padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}th{position:sticky;top:0;z-index:3;background:var(--surface);color:var(--subtle);font-weight:500}tbody tr:not(.detail-row):hover td{background:var(--surface2)}tr.seen td{opacity:.66}.c-status{width:142px}.c-person{width:205px}.c-id{width:112px}.c-services{width:142px}.c-date{width:145px}.c-admin{width:168px}.c-actions{width:178px;text-align:right}.preview{white-space:normal;line-height:1.32;max-height:34px;overflow:hidden}.person-name{display:block;overflow:hidden;text-overflow:ellipsis}.person-id{display:block;color:var(--subtle);font:11px "IBM Plex Mono","Consolas",monospace;margin-top:2px}.row-actions{display:flex;justify-content:flex-end;gap:5px}.row-actions .btn{min-height:26px;padding:3px 8px}.service-list{display:flex;gap:4px}.mono{font-family:"IBM Plex Mono","Consolas",monospace}.error{color:var(--bad)}
+    .detail-row[hidden]{display:none}.detail-row td{height:auto;padding:0;border-bottom:1px solid var(--line);background:#0c0c0c}.detail{display:flex;gap:22px;padding:10px 14px 12px 215px;color:var(--muted);animation:view-in .15s ease}.detail-item strong{display:block;margin-bottom:3px;color:var(--subtle);font-size:.7rem;font-weight:500;text-transform:uppercase;letter-spacing:.06em}.detail-item span{color:var(--text)}
+    .empty{min-height:240px;display:grid;place-items:center;padding:30px;color:var(--subtle);text-align:center}.empty[hidden]{display:none}
+    .settings{max-width:980px;margin:0 auto}.settings-section{display:grid;grid-template-columns:220px minmax(0,1fr);gap:24px;padding:24px 16px;border-bottom:1px solid var(--line)}.settings-copy h2{margin:0 0 5px;font-size:.94rem}.settings-copy p{margin:0;color:var(--subtle);font-size:.78rem;line-height:1.45}.settings-controls{display:flex;align-items:flex-start;flex-wrap:wrap;gap:8px}.admin-list{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.check-pill{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:3px 8px;border:1px solid var(--line);background:#0b0b0b;color:var(--muted);white-space:nowrap}.check-pill input{margin:0}.check-pill strong{color:var(--text);font-weight:500}.check-pill small{color:var(--subtle)}
+    .statusbar{height:30px;display:flex;align-items:center;gap:10px;min-width:0;padding:0 10px;border-top:1px solid var(--line);background:var(--surface);color:var(--subtle);font-size:.76rem}.statusbar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    @media(max-width:880px){.top{flex-wrap:wrap}.metrics{grid-template-columns:repeat(2,1fr)}.metric:nth-child(2){border-right:0}.metric:nth-child(-n+2){border-bottom:1px solid var(--line)}.filters{align-items:flex-start}table,#protectedView table,#actionsView table{min-width:760px}.c-id,.c-admin{display:none}th.c-id,td.c-id,th.c-admin,td.c-admin{display:none}.c-person{width:155px}.c-status{width:120px}.c-date{width:120px}.c-actions{width:168px}.detail{padding-left:14px;flex-wrap:wrap}.settings-section{grid-template-columns:1fr;gap:12px}}
+    @media(max-width:540px){.title{width:100%}.top .spacer{display:none}.metrics{grid-template-columns:1fr 1fr}.metric{padding:9px 10px}.metric strong{font-size:1.3rem}.tabs{gap:14px}.field input[type="search"]{width:150px}.c-services{display:none}th.c-services,td.c-services{display:none}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="title">Общение с администрацией</div>
+    <span id="ready" class="pill">проверка…</span>
+    <div class="spacer"></div>
+    <button id="refreshBtn" class="btn ghost" type="button">Обновить</button>
+    <button id="processBtn" class="btn primary" type="button">Обработать сейчас</button>
+  </header>
+
+  <section class="metrics" aria-label="Сводка">
+    <div class="metric"><strong id="metricWaiting">0</strong><span>ждут ответа администратора</span><small id="metricWaitingNote">0 новых</small></div>
+    <div class="metric"><strong id="metricProtected">0</strong><span>людей под защитой</span><small id="metricProtectedNote">Senler 0 · Salebot 0</small></div>
+    <div class="metric"><strong id="metricStops">0</strong><span>активных блокировок</span><small>отдельные записи внешних сервисов</small></div>
+    <div class="metric"><strong id="metricToday">0</strong><span>истекают сегодня</span><small id="metricTodayNote">0 блокировок</small></div>
+  </section>
+
+  <nav class="tabs" aria-label="Разделы">
+    <button class="tab active" data-view="queue" type="button">Очередь <span id="tabQueueCount" class="tab-count">0</span></button>
+    <button class="tab" data-view="protected" type="button">Под защитой <span id="tabProtectedCount" class="tab-count">0</span></button>
+    <button class="tab" data-view="actions" type="button">Журнал <span id="tabErrorCount" class="tab-count">0</span></button>
+    <button class="tab" data-view="settings" type="button">Настройки</button>
+  </nav>
+
+  <div class="filters">
+    <div id="queueFilters" class="filter-group">
+      <label class="field">показать <select id="queueMode"><option value="admin">Ждут администратора</option><option value="problems">Проблемные</option><option value="all">Вся очередь</option></select></label>
+      <label class="field">просмотр <select id="queueUnread"><option value="0">Все активные</option><option value="1">Только новые</option></select></label>
+      <button id="scanBtn" class="btn ghost" type="button">Проверить VK</button>
+    </div>
+    <div id="protectedFilters" class="filter-group" hidden>
+      <label class="field">сервис <select id="serviceFilter"><option value="">Все</option><option value="senler">Senler</option><option value="salebot">Salebot</option></select></label>
+      <label class="field">срок <select id="expiryFilter"><option value="">Все</option><option value="today">Сегодня</option></select></label>
+    </div>
+    <div id="actionFilters" class="filter-group" hidden>
+      <label class="field">статус <select id="actionStatus"><option value="">Все</option><option value="success">Успешные</option><option value="partial">Частично</option><option value="failed">Ошибки</option><option value="skipped">Пропущенные</option></select></label>
+      <label class="field">источник <select id="actionSource"><option value="">Все</option><option value="senler">Senler</option><option value="salebot">Salebot</option><option value="salebot+senler">Senler + Salebot</option><option value="unknown">Не определён</option><option value="admin_filtered">Админ не выбран</option></select></label>
+    </div>
+    <div class="spacer"></div>
+    <label id="searchWrap" class="field">поиск <input id="searchInput" type="search" placeholder="Имя или VK ID" autocomplete="off"></label>
+  </div>
+
+  <main class="content">
+    <section id="queueView" class="view">
+      <table><thead><tr><th class="c-status">Статус</th><th class="c-person">Человек</th><th class="c-date">Сообщение</th><th>Последнее сообщение</th><th class="c-admin">Администратор</th><th class="c-actions"></th></tr></thead><tbody id="queueRows"></tbody></table>
+      <div id="queueEmpty" class="empty" hidden>В этой очереди никого нет</div>
+    </section>
+    <section id="protectedView" class="view" hidden>
+      <table><thead><tr><th class="c-status">Диалог</th><th class="c-person">Человек</th><th class="c-services">Защита</th><th class="c-date">Истекает</th><th class="c-admin">Последний админ</th><th>Последнее сообщение</th><th class="c-actions"></th></tr></thead><tbody id="protectedRows"></tbody></table>
+      <div id="protectedEmpty" class="empty" hidden>Активной защиты нет</div>
+    </section>
+    <section id="actionsView" class="view" hidden>
+      <table><thead><tr><th class="c-status">Статус</th><th class="c-id">Источник</th><th class="c-person">VK ID</th><th>Действие</th><th>Ошибка</th><th class="c-date">Обновлено</th><th class="c-actions"></th></tr></thead><tbody id="actionRows"></tbody></table>
+      <div id="actionsEmpty" class="empty" hidden>Действий под выбранные фильтры нет</div>
+    </section>
+    <section id="settingsView" class="view settings" hidden>
+      <div class="settings-section"><div class="settings-copy"><h2>Срок защиты</h2><p>Сколько дней сохранять человека в Senler и Salebot после последнего сообщения администратора.</p></div><div class="settings-controls"><label class="field">дней <input id="retentionDays" type="number" min="1" max="90" step="1" value="7"></label><button id="saveSettingsBtn" class="btn primary" type="button">Сохранить</button></div></div>
+      <div class="settings-section"><div class="settings-copy"><h2>Администраторы</h2><p>Защита включается только для сообщений выбранных сотрудников. Очистка снимет защиту, созданную выключенными администраторами.</p></div><div class="settings-controls"><label class="field"><input id="adminFilterEnabled" type="checkbox"> только выбранные</label><button id="cleanupExcludedBtn" class="btn ghost" type="button">Снять по выключенным</button><div id="adminList" class="admin-list"></div></div></div>
+      <div class="settings-section"><div class="settings-copy"><h2>Внешние цели</h2><p>Информационно. Идентификаторы и доступы по-прежнему управляются через ENV Nexus.</p></div><div id="targets" class="settings-controls"><span class="pill">—</span></div></div>
+    </section>
+  </main>
+
+  <footer class="statusbar"><span id="left">Загрузка…</span><span id="msg" style="margin-left:auto"></span></footer>
+</div>
+<script>
+const ADMIN_API = location.pathname.replace(/\/panel\/.*$/, '/api');
+const SCANNER_API = ADMIN_API.replace(/\/admin-handoff\/api$/, '/scanner/api');
+const state = {view:'queue', workspace:null, env:null, settings:null, admins:{items:[]}, queue:{items:[],counts:{}}, actions:{items:[],counts:{}}};
+const $ = id => document.getElementById(id);
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function fmtDate(s){if(!s)return '—';const d=new Date(s);return Number.isNaN(d.getTime())?String(s):d.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function statusLabel(s){return ({missing_webhook:'нет webhook',missing_human_reply:'нет ответа ОП',admin_conversation:'ждёт администратора',pending_sla:'ожидание SLA',pending_human_response:'ожидает ОП',answered_by_openrouter:'ответ есть',resolved_not_unanswered:'отвечено',ignored_non_text:'вложение',success:'успешно',partial:'частично',failed:'ошибка',skipped:'пропущено',active:'активно',expired:'снято'})[s]||s||'—';}
+function statusClass(s){if(['missing_webhook','missing_human_reply','failed'].includes(s))return 'bad';if(['admin_conversation','pending_sla','pending_human_response','partial','skipped'].includes(s))return 'warn';if(['resolved_not_unanswered','answered_by_openrouter','success','active'].includes(s))return 'ok';return 'dim';}
+function setMsg(text,kind='info'){$('msg').textContent=text||'';$('msg').style.color=kind==='error'?'var(--bad)':kind==='ok'?'var(--ok)':'var(--subtle)';}
+async function api(base,path,opts={}){const res=await fetch(base+path,opts);if(!res.ok){let data={};try{data=await res.json()}catch{}throw new Error(data.detail||data.error||`HTTP ${res.status}`)}return await res.json();}
+function personCell(name,id){return `<span class="person-name">${esc(name||'Без имени')}</span><span class="person-id">${esc(id||'—')}</span>`;}
+function servicePills(services=[]){return `<div class="service-list">${services.map(s=>`<span class="pill ${s==='senler'?'info':'warn'}">${esc(s==='senler'?'Senler':'Salebot')}</span>`).join('')}</div>`;}
+function dialogButton(url,eventId=''){return url?`<button class="btn ghost open-dialog" data-url="${esc(url)}" data-event="${esc(eventId)}" type="button">Открыть VK</button>`:'';}
+function normalizedSearch(){return $('searchInput').value.trim().toLocaleLowerCase('ru-RU');}
+function matchesSearch(...values){const q=normalizedSearch();return !q||values.some(value=>String(value||'').toLocaleLowerCase('ru-RU').includes(q));}
+
+function renderMetrics(){
+  const c=state.workspace?.counts||{};
+  $('metricWaiting').textContent=c.waiting_admin_people||0;
+  $('metricWaitingNote').textContent=`${c.waiting_admin_unread||0} новых · проблемных ${c.problem_people||0}`;
+  $('metricProtected').textContent=c.protected_people||0;
+  $('metricProtectedNote').textContent=`Senler ${c.senler_stops||0} · Salebot ${c.salebot_stops||0}`;
+  $('metricStops').textContent=c.active_stops||0;
+  $('metricToday').textContent=c.expiring_today_people||0;
+  $('metricTodayNote').textContent=`${c.expiring_today_stops||0} блокировок`;
+  $('tabQueueCount').textContent=c.waiting_admin_people||0;
+  $('tabProtectedCount').textContent=c.protected_people||0;
+  $('tabErrorCount').textContent=state.workspace?.action_counts?.failed||0;
+  $('ready').className='pill '+(state.env?.ready&&state.workspace?.scanner_ready?'ok':'bad');
+  $('ready').textContent=state.env?.ready&&state.workspace?.scanner_ready?`готово · ${state.settings?.retention_days||state.env?.retention_days||7} дней`:'нужны настройки';
+}
+
+function renderQueue(){
+  const rows=(state.queue.items||[]).filter(row=>matchesSearch(row.profile_name,row.vk_user_id,row.message_text_preview));
+  $('queueRows').innerHTML=rows.map(row=>{const adminAt=row.admin_before_at||row.admin_after_at||'';return `<tr class="${row.read_at?'seen':''}" title="${esc(row.reason||'')}"><td class="c-status"><span class="pill ${statusClass(row.status)}">${esc(statusLabel(row.status))}</span></td><td class="c-person">${personCell(row.profile_name,row.vk_user_id)}</td><td class="c-date">${esc(fmtDate(row.message_at))}</td><td><div class="preview">${esc(row.message_text_preview||'—')}</div></td><td class="c-admin">${esc(fmtDate(adminAt))}</td><td class="c-actions"><div class="row-actions">${dialogButton(row.vk_url,row.id)}</div></td></tr>`;}).join('');
+  $('queueEmpty').hidden=rows.length>0;
+  $('left').textContent=`Очередь · показано ${rows.length}`;
+}
+
+function renderProtected(){
+  const service=$('serviceFilter').value;const today=$('expiryFilter').value==='today';const now=new Date();
+  const rows=(state.workspace?.people||[]).filter(person=>{
+    if(service&&!person.services?.includes(service))return false;
+    if(today){const d=new Date(person.expires_at);if(Number.isNaN(d.getTime())||d.toLocaleDateString('ru-RU')!==now.toLocaleDateString('ru-RU'))return false;}
+    return matchesSearch(person.profile_name,person.vk_user_id,person.scanner_event?.message_text_preview);
+  });
+  $('protectedRows').innerHTML=rows.map(person=>{const event=person.scanner_event||{};const status=event.status||'active';const details=(person.memberships||[]).map(m=>`<div class="detail-item"><strong>${esc(m.service)}</strong><span>${esc(m.target_id||'—')} · до ${esc(fmtDate(m.expires_at))}</span></div>`).join('');return `<tr data-person="${esc(person.vk_user_id)}"><td class="c-status"><span class="pill ${statusClass(status)}">${esc(statusLabel(status))}</span></td><td class="c-person">${personCell(person.profile_name,person.vk_user_id)}</td><td class="c-services">${servicePills(person.services)}</td><td class="c-date">${esc(fmtDate(person.expires_at))}</td><td class="c-admin">${esc(person.admin_name||'—')} · ${esc(fmtDate(person.last_admin_message_at))}</td><td><div class="preview">${esc(event.message_text_preview||'—')}</div></td><td class="c-actions"><div class="row-actions"><button class="btn ghost details-toggle" data-person="${esc(person.vk_user_id)}" type="button">Детали</button>${dialogButton(person.vk_url,event.id||'')}</div></td></tr><tr class="detail-row" data-detail="${esc(person.vk_user_id)}" hidden><td colspan="7"><div class="detail">${details||'<span>Деталей нет</span>'}</div></td></tr>`;}).join('');
+  $('protectedEmpty').hidden=rows.length>0;
+  $('left').textContent=`Под защитой · ${rows.length} человек · ${state.workspace?.counts?.active_stops||0} блокировок`;
+}
+
+function renderActions(){
+  const rows=(state.actions.items||[]).filter(row=>matchesSearch(row.vk_user_id,row.error,row.target_type,row.source));
+  $('actionRows').innerHTML=rows.map(row=>`<tr title="${esc(row.error||'')}"><td class="c-status"><span class="pill ${statusClass(row.status)}">${esc(statusLabel(row.status))}</span></td><td class="c-id">${esc(row.source||'—')}</td><td class="c-person mono">${esc(row.vk_user_id||'—')}</td><td>${esc(row.target_type||'—')} ${esc(row.target_id||'')}</td><td class="${row.status==='failed'?'error':''}">${esc(row.error||'—')}</td><td class="c-date">${esc(fmtDate(row.updated_at))}</td><td class="c-actions"><div class="row-actions">${row.status==='failed'?`<button class="btn ghost retry" data-id="${esc(row.id)}" type="button">Повтор</button>`:''}${dialogButton(row.vk_url)}</div></td></tr>`).join('');
+  $('actionsEmpty').hidden=rows.length>0;
+  $('left').textContent=`Журнал · показано ${rows.length}`;
+}
+
+function renderSettings(){
+  const settings=state.settings||{};const admins=state.admins?.items||[];const allowed=new Set((settings.allowed_admin_ids||[]).map(String));
+  $('retentionDays').value=settings.retention_days||state.env?.retention_days||7;
+  $('adminFilterEnabled').checked=!!settings.admin_filter_enabled;
+  $('adminList').innerHTML=admins.length?admins.map(admin=>`<label class="check-pill" title="ID ${esc(admin.id)} · последний ответ ${esc(fmtDate(admin.last_seen))}"><input class="admin-check" type="checkbox" value="${esc(admin.id)}" ${!settings.admin_filter_enabled||allowed.has(String(admin.id))?'checked':''}><strong>${esc(admin.name||admin.id)}</strong><small>${esc(admin.count||0)}</small></label>`).join(''):'<span class="pill">администраторы пока не найдены</span>';
+  $('targets').innerHTML=`<span class="pill info">Senler ${esc(state.env?.senler_subscription_id||'—')}</span><span class="pill warn">Salebot ${esc(state.env?.salebot_list_id||'—')}</span><span class="pill">VK ${esc(settings.vk_group_id||'—')}</span>`;
+  $('left').textContent='Настройки защиты';
+}
+
+function render(){renderMetrics();if(state.view==='queue')renderQueue();else if(state.view==='protected')renderProtected();else if(state.view==='actions')renderActions();else renderSettings();}
+async function loadWorkspace(){const [workspace,env,settings,admins]=await Promise.all([api(ADMIN_API,'/workspace'),api(ADMIN_API,'/env-status'),api(ADMIN_API,'/settings'),api(ADMIN_API,'/admins?days=90')]);state.workspace=workspace;state.env=env;state.settings=settings;state.admins=admins;}
+async function loadQueue(){state.queue=await api(SCANNER_API,`/events?tab=${encodeURIComponent($('queueMode').value)}&unread=${$('queueUnread').value}&limit=20`);}
+async function loadActions(){const p=new URLSearchParams({limit:'100'});if($('actionStatus').value)p.set('status',$('actionStatus').value);if($('actionSource').value)p.set('source',$('actionSource').value);state.actions=await api(ADMIN_API,'/actions?'+p.toString());}
+async function load(){await loadWorkspace();if(state.view==='queue')await loadQueue();if(state.view==='actions')await loadActions();render();setMsg('Данные обновлены','ok');}
+
+function selectView(view){state.view=view;document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===view));['queue','protected','actions','settings'].forEach(name=>$(name+'View').hidden=name!==view);$('queueFilters').hidden=view!=='queue';$('protectedFilters').hidden=view!=='protected';$('actionFilters').hidden=view!=='actions';$('searchWrap').hidden=view==='settings';if(view==='queue')loadQueue().then(render).catch(e=>setMsg(e.message,'error'));else if(view==='actions')loadActions().then(render).catch(e=>setMsg(e.message,'error'));else render();}
+async function scanNow(){$('scanBtn').disabled=true;try{const data=await api(SCANNER_API,'/scan',{method:'POST'});await Promise.all([loadWorkspace(),loadQueue()]);render();setMsg(`VK проверен: ${data.vk_unanswered_seen||0} неотвеченных`,'ok');}finally{$('scanBtn').disabled=false;}}
+async function processNow(){$('processBtn').disabled=true;try{const data=await api(ADMIN_API,'/process?limit=50',{method:'POST'});await load();setMsg(`Обработано ${data.processed||0}, снято ${data.expired||0}, ошибок ${(data.failed||0)+(data.expire_failed||0)}`,(data.failed||data.expire_failed)?'error':'ok');}finally{$('processBtn').disabled=false;}}
+async function saveSettings(){$('saveSettingsBtn').disabled=true;try{const body={retention_days:Number($('retentionDays').value||7),admin_filter_enabled:$('adminFilterEnabled').checked,allowed_admin_ids:[...document.querySelectorAll('.admin-check:checked')].map(input=>input.value)};const data=await api(ADMIN_API,'/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});state.settings=data.settings;await loadWorkspace();render();setMsg(`Настройки сохранены · пересчитано ${data.recomputed||0} · снято ${data.expired||0}`,data.expire_failed?'error':'ok');}finally{$('saveSettingsBtn').disabled=false;}}
+async function cleanupExcluded(){if(!$('adminFilterEnabled').checked){setMsg('Сначала включи фильтр выбранных администраторов и сохрани настройки','error');return}if(!confirm('Снять из Senler и Salebot людей, которых добавил выключенный администратор?'))return;$('cleanupExcludedBtn').disabled=true;try{const data=await api(ADMIN_API,'/admins/cleanup-excluded?limit=1000',{method:'POST'});await loadWorkspace();render();setMsg(`Снято ${data.removed||0}, ошибок ${data.failed||0}`,data.failed?'error':'ok');}finally{$('cleanupExcludedBtn').disabled=false;}}
+
+document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>selectView(tab.dataset.view)));
+['queueMode','queueUnread'].forEach(id=>$(id).addEventListener('change',()=>loadQueue().then(render).catch(e=>setMsg(e.message,'error'))));
+['serviceFilter','expiryFilter'].forEach(id=>$(id).addEventListener('change',renderProtected));
+['actionStatus','actionSource'].forEach(id=>$(id).addEventListener('change',()=>loadActions().then(render).catch(e=>setMsg(e.message,'error'))));
+$('searchInput').addEventListener('input',render);
+$('refreshBtn').addEventListener('click',()=>load().catch(e=>setMsg(e.message,'error')));
+$('scanBtn').addEventListener('click',()=>scanNow().catch(e=>setMsg(e.message,'error')));
+$('processBtn').addEventListener('click',()=>processNow().catch(e=>setMsg(e.message,'error')));
+$('saveSettingsBtn').addEventListener('click',()=>saveSettings().catch(e=>setMsg(e.message,'error')));
+$('cleanupExcludedBtn').addEventListener('click',()=>cleanupExcluded().catch(e=>setMsg(e.message,'error')));
+document.body.addEventListener('click',async event=>{const details=event.target.closest('.details-toggle');if(details){const row=document.querySelector(`[data-detail="${CSS.escape(details.dataset.person)}"]`);if(row)row.hidden=!row.hidden;return}const open=event.target.closest('.open-dialog');if(open){open.disabled=true;try{let url=open.dataset.url;if(open.dataset.event){const data=await api(SCANNER_API,`/events/${encodeURIComponent(open.dataset.event)}/open`,{method:'POST'});url=data.url||url}if(url)window.open(url,'_blank','noopener');if(state.view==='queue')await loadQueue();await loadWorkspace();render()}catch(err){setMsg(err.message,'error')}finally{open.disabled=false}return}const retry=event.target.closest('.retry');if(!retry)return;retry.disabled=true;try{await api(ADMIN_API,`/actions/${encodeURIComponent(retry.dataset.id)}/retry`,{method:'POST'});await Promise.all([loadWorkspace(),loadActions()]);render();setMsg('Повтор выполнен','ok')}catch(err){setMsg(err.message,'error')}finally{retry.disabled=false}});
+load().catch(e=>setMsg(e.message,'error'));
+</script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <link rel="icon" href="data:,">
+  <title>Telegram события · Nexus</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--panel:#101010;--panel-strong:#171717;--panel-soft:#1d1d1d;--text:#f2f2f2;--muted:#bababa;--subtle:#848484;--border:#2d2d2d;--border-strong:#3a3a3a;--focus:#545454;--ok:#43b97f;--warn:#d1a14d;--bad:#d56565;--info:#5b8fd6;font-family:"IBM Plex Sans","Segoe UI",Arial,sans-serif}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#3a3a3a #101010}*::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-track{background:#101010}*::-webkit-scrollbar-thumb{background:#3a3a3a}
+    html,body{width:100%;height:100%;margin:0;min-width:0;overflow:hidden;background:var(--bg);color:var(--text)}button,input,select{font:inherit}.hidden{display:none!important}
+    .app{height:100dvh;min-height:480px;display:flex;flex-direction:column;overflow:hidden}.topbar{height:56px;flex:0 0 56px;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 16px;border-bottom:1px solid var(--border);background:var(--panel)}
+    .heading{display:flex;align-items:baseline;gap:12px;min-width:0}.title{margin:0;font-size:17px;line-height:1;font-weight:600;letter-spacing:-.01em;white-space:nowrap}.lede{margin:0;color:var(--subtle);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.live{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;white-space:nowrap}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--warn)}.live-dot.ok{background:var(--ok)}.live-dot.bad{background:var(--bad)}
+    .metrics{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:0;border-bottom:1px solid var(--border);overflow:auto;background:var(--bg)}.metric{height:100%;display:flex;align-items:center;gap:6px;padding:0 16px;border-right:1px solid var(--border);white-space:nowrap}.metric b{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}.metric span{color:var(--subtle);font-size:10px}
+    .nav{height:38px;flex:0 0 38px;display:flex;align-items:stretch;border-bottom:1px solid var(--border);overflow:auto;background:var(--panel)}.nav-btn{padding:0 16px;border:0;border-right:1px solid var(--border);border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}.nav-btn:hover{background:var(--panel-strong);color:var(--muted)}.nav-btn.active{border-bottom-color:var(--text);background:var(--panel-strong);color:var(--text)}
+    .view{display:none;flex:1;min-height:0}.view.active{display:block}#view-events.active{overflow:hidden}.events-layout{height:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,36%)}.stream{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--border)}
+    .toolbar{flex:0 0 auto;display:grid;grid-template-columns:minmax(130px,1fr) minmax(130px,.9fr) minmax(112px,.7fr) minmax(105px,.65fr) minmax(160px,1.2fr);gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel)}.field{width:100%;min-width:0;height:30px;padding:0 9px;border:1px solid var(--border-strong);border-radius:2px;outline:none;background:var(--panel-strong);color:var(--text);font-size:11px}.field:focus{border-color:var(--focus);background:var(--panel-soft)}.field::placeholder{color:var(--subtle)}
+    .feed{flex:1;min-height:0;overflow:auto}.event{width:100%;display:grid;grid-template-columns:76px minmax(0,1fr) auto;gap:12px;align-items:start;padding:13px 12px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text);text-align:left;cursor:pointer}.event:hover{background:var(--panel)}.event.active{background:var(--panel-strong);box-shadow:inset 2px 0 var(--text)}.event-time{padding-top:2px;color:var(--subtle);font:10px "IBM Plex Mono",Consolas,monospace;font-variant-numeric:tabular-nums}.event-summary{font-size:12px;line-height:1.45;overflow-wrap:anywhere}.event-meta{display:flex;flex-wrap:wrap;gap:4px 9px;margin-top:6px;color:var(--subtle);font-size:9px}.event-meta span{overflow-wrap:anywhere}.tag{display:inline-flex;align-items:center;min-height:20px;padding:2px 6px;border:1px solid var(--border-strong);border-radius:2px;color:var(--subtle);font-size:9px;white-space:nowrap}.tag.error{border-color:#6b3535;color:var(--bad)}.tag.duplicate{border-color:#66522e;color:var(--warn)}
+    .empty{height:100%;min-height:230px;display:grid;place-items:center;padding:24px;text-align:center;color:var(--subtle);font-size:11px;line-height:1.5}.empty strong{display:block;margin-bottom:5px;color:var(--muted);font-size:13px;font-weight:600}.load-more{flex:0 0 auto;margin:8px auto}
+    .btn{height:30px;padding:0 10px;border:1px solid var(--border-strong);border-radius:2px;background:var(--panel-strong);color:var(--text);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}.btn:hover{border-color:var(--focus);background:var(--panel-soft)}.btn:disabled{opacity:.45;cursor:not-allowed}.btn.primary{border-color:#f4f4f4;background:#f4f4f4;color:#111}.btn.primary:hover{background:#d8d8d8}.btn.danger{color:var(--bad)}.btn.small{height:27px;padding:0 8px;font-size:10px}
+    .inspector{min-width:0;min-height:0;overflow:auto;padding:16px;background:var(--panel)}.inspect-empty{height:100%;display:grid;place-items:center;color:var(--subtle);font-size:11px;text-align:center;line-height:1.5}.inspect-head{padding-bottom:14px;border-bottom:1px solid var(--border)}.inspect-kicker{color:var(--subtle);font:9px "IBM Plex Mono",Consolas,monospace;text-transform:uppercase;letter-spacing:.06em}.inspect-head h2{margin:7px 0 0;font-size:14px;line-height:1.45;font-weight:600;overflow-wrap:anywhere}.inspect-grid{display:grid;grid-template-columns:98px minmax(0,1fr);gap:7px 12px;padding:14px 0;border-bottom:1px solid var(--border);font-size:10px;line-height:1.45}.inspect-grid dt{color:var(--subtle)}.inspect-grid dd{margin:0;overflow-wrap:anywhere}.raw-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 8px}.raw-head h3{margin:0;font-size:11px;font-weight:600}.raw{margin:0;max-height:420px;overflow:auto;padding:12px;border:1px solid var(--border);background:var(--bg);color:var(--muted);font:10px/1.55 "IBM Plex Mono",Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+    .section{height:100%;overflow:auto;padding:18px 16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid var(--border)}.section-head h2{margin:0;font-size:15px;font-weight:600}.section-head p{margin:4px 0 0;color:var(--subtle);font-size:10px;line-height:1.45}.source-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(220px,1.45fr) minmax(115px,.7fr) auto;gap:14px;align-items:center;padding:13px 0;border-bottom:1px solid var(--border)}.source-name{font-size:12px;font-weight:600}.source-state{display:flex;align-items:center;gap:6px;margin-top:4px;color:var(--subtle);font-size:9px}.source-state i{width:6px;height:6px;border-radius:50%;background:var(--bad)}.source-state i.on{background:var(--ok)}.source-url{color:var(--subtle);font:9px/1.5 "IBM Plex Mono",Consolas,monospace;overflow-wrap:anywhere}.source-stats{color:var(--subtle);font-size:10px;line-height:1.55}.actions{display:flex;justify-content:flex-end;gap:5px;flex-wrap:wrap}
+    .settings{max-width:none}.setting-row{max-width:760px;display:grid;grid-template-columns:minmax(0,1fr) 150px auto;gap:12px;align-items:center;padding:15px 0;border-bottom:1px solid var(--border)}.setting-row h3{margin:0;font-size:12px;font-weight:600}.setting-row p{margin:4px 0 0;color:var(--subtle);font-size:10px;line-height:1.45}.setting-value{font-size:11px;color:var(--muted)}
+    .modal{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.78)}.modal.open{display:flex}.dialog{width:min(590px,100%);max-height:90dvh;overflow:auto;padding:18px;border:1px solid var(--border-strong);border-radius:2px;background:var(--panel);box-shadow:0 24px 80px rgba(0,0,0,.7)}.dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:17px}.dialog h2{margin:0;font-size:15px;font-weight:600}.dialog p{margin:5px 0 0;color:var(--subtle);font-size:10px;line-height:1.45}.dialog-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:17px}.close{width:28px;height:28px;border:1px solid var(--border);border-radius:2px;background:transparent;color:var(--muted);cursor:pointer}.close:hover{background:var(--panel-soft)}.form-label{display:block;margin:0 0 6px;color:var(--subtle);font-size:10px}.secret-step{padding:12px 0;border-bottom:1px solid var(--border)}.secret-step b{display:block;margin-bottom:6px;font-size:10px}.code{max-height:130px;overflow:auto;padding:9px;border:1px solid var(--border);background:var(--bg);color:var(--muted);font:10px/1.5 "IBM Plex Mono",Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.warning{margin-top:12px;color:var(--warn);font-size:10px;line-height:1.5}.toast{position:fixed;z-index:80;right:16px;bottom:16px;max-width:min(420px,calc(100vw - 32px));padding:9px 12px;border:1px solid #315e47;border-radius:2px;background:#102018;color:#cef1dc;font-size:11px;opacity:0;transform:translateY(6px);pointer-events:none;transition:opacity .12s,transform .12s}.toast.show{opacity:1;transform:none}.toast.bad{border-color:#633737;background:#241313;color:#f5cccc}
+    @media(max-width:920px){.events-layout{grid-template-columns:1fr}.stream{border-right:0}.inspector{position:fixed;z-index:35;inset:auto 0 0;max-height:76dvh;padding:16px;border-top:1px solid var(--border-strong);transform:translateY(105%);transition:transform .16s;background:var(--panel)}.inspector.open{transform:none}.inspect-mobile-close{display:block!important;float:right}.toolbar{grid-template-columns:1fr 1fr}.source-row{grid-template-columns:1fr 1fr}.source-row .actions{grid-column:1/-1;justify-content:flex-start}}
+    @media(max-width:600px){.app{min-height:420px}.topbar{height:50px;flex-basis:50px;padding:0 12px}.heading{display:block}.title{font-size:15px}.lede{display:none}.live span{display:none}.metrics{height:40px;flex-basis:40px}.metric{padding:0 10px}.metric b{font-size:13px}.toolbar{grid-template-columns:1fr 1fr;padding:8px}.toolbar .field:last-child{grid-column:1/-1}.event{grid-template-columns:64px minmax(0,1fr);gap:8px;padding:11px 9px}.event>.tag{display:none}.section{padding:14px 10px}.source-row{grid-template-columns:1fr}.source-row .actions{grid-column:auto}.setting-row{grid-template-columns:1fr}.dialog{padding:15px}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+  </style>
+</head>
+<body>
+<main class="app">
+  <header class="topbar">
+    <div class="heading"><h1 class="title">Telegram события</h1><p class="lede">Senler proxy · входящие Telegram Update</p></div>
+    <div class="live"><i id="liveDot" class="live-dot"></i><span id="liveText">Подключение…</span></div>
+  </header>
+
+  <section class="metrics" aria-label="Сводка">
+    <div class="metric"><b id="metricToday">0</b><span>сегодня</span></div>
+    <div class="metric"><b id="metricStored">0</b><span>в журнале</span></div>
+    <div class="metric"><b id="metricDuplicates">0</b><span>повторов</span></div>
+    <div class="metric"><b id="metricRejected">0</b><span>ошибок</span></div>
+    <div class="metric"><b id="metricSources">0</b><span>источников</span></div>
+  </section>
+
+  <nav class="nav" aria-label="Разделы">
+    <button class="nav-btn active" data-view="events">События</button>
+    <button class="nav-btn" data-view="sources">Источники</button>
+    <button class="nav-btn" data-view="settings">Настройки</button>
+  </nav>
+
+  <section id="view-events" class="view active">
+    <div class="events-layout">
+      <div class="stream">
+        <div class="toolbar">
+          <select id="sourceFilter" class="field" aria-label="Источник"><option value="">Все источники</option></select>
+          <select id="typeFilter" class="field" aria-label="Тип события"><option value="">Все события</option></select>
+          <select id="statusFilter" class="field" aria-label="Статус"><option value="">Любой статус</option><option value="ok">Обработано</option><option value="invalid_json">Невалидный JSON</option><option value="rejected">Отклонено</option></select>
+          <select id="periodFilter" class="field" aria-label="Период"><option value="">Всё время</option><option value="0">Сегодня</option><option value="7">7 дней</option><option value="30">30 дней</option></select>
+          <input id="searchInput" class="field" aria-label="Поиск" placeholder="Текст, @username или ID">
+        </div>
+        <div id="feed" class="feed"><div class="empty"><div><strong>Загрузка журнала</strong>Получаем последние события…</div></div></div>
+        <button id="loadMoreBtn" class="btn load-more hidden">Показать более ранние</button>
+      </div>
+      <aside id="inspector" class="inspector">
+        <button id="closeInspector" class="close inspect-mobile-close hidden" aria-label="Закрыть">×</button>
+        <div id="inspectEmpty" class="inspect-empty">Выберите событие<br>для просмотра всех полей</div>
+        <div id="inspectContent" class="hidden"></div>
+      </aside>
+    </div>
+  </section>
+
+  <section id="view-sources" class="view section">
+    <div class="section-head"><div><h2>Источники Senler</h2><p>Отдельный URL и секретный заголовок для каждого бота.</p></div><button id="addSourceBtn" class="btn primary">Добавить источник</button></div>
+    <div id="sourceList" class="source-list"></div>
+  </section>
+
+  <section id="view-settings" class="view section settings">
+    <div class="section-head"><div><h2>Настройки приёмника</h2><p>Хранение, ограничения и покрытие Telegram Bot API.</p></div></div>
+    <div class="setting-row"><div><h3>Срок хранения полного JSON</h3><p>От 1 до 365 дней. По умолчанию — 30.</p></div><input id="retentionInput" class="field" type="number" min="1" max="365"><button id="saveSettingsBtn" class="btn primary">Сохранить</button></div>
+    <div class="setting-row"><div><h3>Максимальный размер webhook</h3><p>Превышение фиксируется как отклонённое событие без сохранения тела.</p></div><div id="bodyLimit" class="setting-value">5 МБ</div></div>
+    <div class="setting-row"><div><h3>Покрытие Telegram Update</h3><p>Все верхнеуровневые события текущей версии API; неизвестные будущие типы сохраняются с полным JSON.</p></div><div id="coverageValue" class="setting-value">—</div></div>
+  </section>
+</main>
+
+<div id="sourceModal" class="modal" aria-hidden="true"><form id="sourceForm" class="dialog">
+  <div class="dialog-head"><div><h2>Новый источник</h2><p>Например, «Основной TG-бот» или имя проекта Senler.</p></div><button type="button" class="close" data-close="sourceModal" aria-label="Закрыть">×</button></div>
+  <label class="form-label" for="sourceName">Название</label><input id="sourceName" class="field" maxlength="160" required autofocus>
+  <div class="dialog-actions"><button type="button" class="btn" data-close="sourceModal">Отмена</button><button class="btn primary">Создать</button></div>
+</form></div>
+
+<div id="secretModal" class="modal" aria-hidden="true"><div class="dialog">
+  <div class="dialog-head"><div><h2>Подключение Senler</h2><p>Укажите эти значения в настройках прокси-сервера Telegram.</p></div><button type="button" class="close" data-close="secretModal" aria-label="Закрыть">×</button></div>
+  <div class="secret-step"><b>1. URL сервера</b><div id="secretUrl" class="code"></div></div>
+  <div class="secret-step"><b>2. Добавьте заголовок</b><div id="secretHeader" class="code"></div></div>
+  <div class="secret-step"><b>3. Значение заголовка</b><div id="secretValue" class="code"></div></div>
+  <div class="warning">Секрет показывается только сейчас. Если потеряете его, перевыпустите ключ в списке источников.</div>
+  <div class="dialog-actions"><button id="copyConfigBtn" class="btn primary">Скопировать всё</button><button class="btn" data-close="secretModal">Готово</button></div>
+</div></div>
+
+<div id="toast" class="toast" role="status"></div>
+<script>
+(() => {
+  const MODULE='senler-telegram-events';
+  const PREFIX=location.pathname.includes('/nexus/')?'/nexus':'';
+  const API=`${PREFIX}/${MODULE}/api`;
+  const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+  let state={sources:[],events:[],stats:{},settings:{},cursor:null,selectedEvent:null,view:'events'};
+  let loading=false,searchTimer=null,secretConfig=null,lastResetSignature=null;
+
+  function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function setText(selector,value){const el=$(selector),next=String(value);if(el&&el.textContent!==next)el.textContent=next}
+  function toast(message,bad=false){const el=$('#toast');setText('#toast',message);el.className='toast show'+(bad?' bad':'');clearTimeout(el._timer);el._timer=setTimeout(()=>el.className='toast',3500)}
+  async function api(path,options={}){const response=await fetch(API+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(options.headers||{})},...options});const type=response.headers.get('content-type')||'';const body=type.includes('json')?await response.json():await response.text();if(!response.ok)throw new Error((body&&body.detail)||body.error||body||`HTTP ${response.status}`);return body}
+  function formatTime(value){if(!value)return'—';const d=new Date(value);return Number.isNaN(d.getTime())?value:new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(d)}
+  function compactTime(value){if(!value)return'—';const d=new Date(value);return Number.isNaN(d.getTime())?value:new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(d)}
+  function sourceUrl(source){return location.origin+PREFIX+source.webhook_path}
+  function setHealth(ok){const dot=$('#liveDot'),className='live-dot '+(ok?'ok':'bad');if(dot.className!==className)dot.className=className;setText('#liveText',ok?'Приёмник работает':'Модуль недоступен')}
+
+  async function bootstrap(){try{const [sources,settings]=await Promise.all([api('/sources'),api('/settings')]);state.sources=sources.sources||[];state.settings=settings;renderSources();renderSettings();renderTypeOptions();await Promise.all([loadStats(),loadEvents(true)]);setHealth(true)}catch(error){setHealth(false);toast(error.message,true)}}
+  async function loadStats(){const source=$('#sourceFilter')?.value||'';const data=await api('/stats'+(source?`?source_id=${encodeURIComponent(source)}`:''));state.stats=data;setText('#metricToday',data.today||0);setText('#metricStored',data.stored||0);setText('#metricDuplicates',data.duplicates||0);setText('#metricRejected',data.rejected||0);setText('#metricSources',state.sources.filter(s=>s.enabled).length)}
+  function queryString(cursor=''){const p=new URLSearchParams();if($('#sourceFilter').value)p.set('source_id',$('#sourceFilter').value);if($('#typeFilter').value)p.set('event_type',$('#typeFilter').value);if($('#statusFilter').value)p.set('parse_status',$('#statusFilter').value);if($('#periodFilter').value!==''){const days=Number($('#periodFilter').value);const d=new Date();d.setHours(0,0,0,0);if(days>0)d.setDate(d.getDate()-(days-1));p.set('date_from',d.toISOString())}if($('#searchInput').value.trim())p.set('q',$('#searchInput').value.trim());if(cursor)p.set('cursor',cursor);p.set('limit','60');return p.toString()}
+  async function loadEvents(reset=false,quiet=false){if(loading)return;loading=true;try{const data=await api('/events?'+queryString(reset?'':state.cursor));const rows=data.events||[];if(reset){const signature=JSON.stringify([data.next_cursor||null,rows]);state.cursor=data.next_cursor;if(signature!==lastResetSignature){lastResetSignature=signature;state.events=rows;renderEvents()}}else{state.events.push(...rows);state.cursor=data.next_cursor;lastResetSignature=null;renderEvents()}if(reset)await loadStats();setHealth(true)}catch(error){if(!quiet)toast(error.message,true);setHealth(false)}finally{loading=false}}
+  function renderTypeOptions(){const select=$('#typeFilter'),current=select.value;const types=state.settings.update_types||[];select.innerHTML='<option value="">Все события</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('');select.value=current}
+  function renderEvents(){const feed=$('#feed');if(!state.events.length){feed.innerHTML='<div class="empty"><div><strong>Событий пока нет</strong>Добавьте источник и отправьте сообщение боту.</div></div>';$('#loadMoreBtn').classList.add('hidden');return}feed.innerHTML=state.events.map(e=>`<button class="event ${state.selectedEvent===e.id?'active':''}" data-event="${e.id}"><span class="event-time">${esc(compactTime(e.received_at))}</span><span><span class="event-summary">${esc(e.summary)}</span><span class="event-meta"><span>${esc(e.source_name)}</span><span>${esc(e.event_type)}</span>${e.actor_username?`<span>@${esc(e.actor_username)}</span>`:e.actor_id?`<span>TG ${esc(e.actor_id)}</span>`:''}${e.update_id?`<span>Update ${esc(e.update_id)}</span>`:''}</span></span><span class="tag ${e.parse_status!=='ok'?'error':e.duplicate_count?'duplicate':''}">${e.parse_status!=='ok'?esc(e.parse_status):e.duplicate_count?`повтор ×${e.duplicate_count}`:'принято'}</span></button>`).join('');$$('[data-event]').forEach(el=>el.onclick=()=>openEvent(Number(el.dataset.event)));$('#loadMoreBtn').classList.toggle('hidden',!state.cursor)}
+  function markSelected(){$$('[data-event]').forEach(el=>el.classList.toggle('active',Number(el.dataset.event)===state.selectedEvent))}
+  async function openEvent(id){state.selectedEvent=id;markSelected();try{const data=await api('/events/'+id);renderInspector(data.event);$('#inspector').classList.add('open')}catch(error){toast(error.message,true)}}
+  function renderInspector(e){$('#inspectEmpty').classList.add('hidden');const root=$('#inspectContent');root.classList.remove('hidden');const who=e.actor_username?'@'+e.actor_username:(e.actor_name||e.actor_id||'—');const raw=typeof e.payload==='string'?e.payload:JSON.stringify(e.payload,null,2);root.innerHTML=`<div class="inspect-head"><div class="inspect-kicker">${esc(e.event_type)} · ${esc(e.source_name)}</div><h2>${esc(e.summary)}</h2></div><dl class="inspect-grid"><dt>Получено</dt><dd>${esc(formatTime(e.received_at))}</dd><dt>Update ID</dt><dd>${esc(e.update_id||'—')}</dd><dt>Пользователь</dt><dd>${esc(who)}</dd><dt>Telegram ID</dt><dd>${esc(e.actor_id||'—')}</dd><dt>Чат</dt><dd>${esc(e.chat_title||e.chat_id||'—')} ${e.chat_type?`· ${esc(e.chat_type)}`:''}</dd><dt>Message ID</dt><dd>${esc(e.message_id||'—')}</dd><dt>Статус</dt><dd>${esc(e.parse_status)}</dd><dt>Повторы</dt><dd>${esc(e.duplicate_count||0)}</dd><dt>Размер</dt><dd>${esc(e.body_size)} байт</dd>${e.error?`<dt>Ошибка</dt><dd style="color:var(--bad)">${esc(e.error)}</dd>`:''}</dl><div class="raw-head"><h3>Исходный JSON</h3><button id="copyJsonBtn" class="btn small">Копировать</button></div><pre id="rawJson" class="raw">${esc(raw||'Нет сохранённого тела')}</pre>`;$('#copyJsonBtn').onclick=()=>copy(raw||'','JSON скопирован')}
+
+  function renderSources(){const select=$('#sourceFilter'),selected=select.value;select.innerHTML='<option value="">Все источники</option>'+state.sources.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('');if(state.sources.some(s=>String(s.id)===selected))select.value=selected;const list=$('#sourceList');if(!state.sources.length){list.innerHTML='<div class="empty"><div><strong>Источников нет</strong>Создайте адрес для первого Telegram-бота.</div></div>';return}list.innerHTML=state.sources.map(s=>`<div class="source-row"><div><div class="source-name">${esc(s.name)}</div><div class="source-state"><i class="${s.enabled?'on':''}"></i>${s.enabled?'Активен':'Выключен'} · ключ ${esc(s.secret_hint)}</div></div><div class="source-url">${esc(sourceUrl(s))}</div><div class="source-stats">${s.unique_count} уникальных<br>${s.duplicate_count} повторов${s.last_received_at?`<br>${esc(formatTime(s.last_received_at))}`:''}</div><div class="actions"><button class="btn small" data-copy-url="${s.id}">URL</button><button class="btn small" data-rename="${s.id}">Имя</button><button class="btn small" data-toggle="${s.id}">${s.enabled?'Выключить':'Включить'}</button><button class="btn small" data-rotate="${s.id}">Новый ключ</button><button class="btn small danger" data-delete="${s.id}">Удалить</button></div></div>`).join('');$$('[data-copy-url]').forEach(b=>b.onclick=()=>copy(sourceUrl(sourceById(b.dataset.copyUrl)),'URL скопирован'));$$('[data-rename]').forEach(b=>b.onclick=()=>renameSource(Number(b.dataset.rename)));$$('[data-toggle]').forEach(b=>b.onclick=()=>toggleSource(Number(b.dataset.toggle)));$$('[data-rotate]').forEach(b=>b.onclick=()=>rotateSecret(Number(b.dataset.rotate)));$$('[data-delete]').forEach(b=>b.onclick=()=>deleteSource(Number(b.dataset.delete)));setText('#metricSources',state.sources.filter(s=>s.enabled).length)}
+  function sourceById(id){return state.sources.find(s=>String(s.id)===String(id))}
+  async function reloadSources(){const data=await api('/sources');state.sources=data.sources||[];renderSources()}
+  async function toggleSource(id){const source=sourceById(id);if(!source)return;try{await api('/sources/'+id,{method:'PATCH',body:JSON.stringify({enabled:!source.enabled})});await reloadSources();toast(source.enabled?'Источник выключен':'Источник включён')}catch(error){toast(error.message,true)}}
+  async function renameSource(id){const source=sourceById(id);if(!source)return;const name=prompt('Новое название источника',source.name);if(!name||name.trim()===source.name)return;try{await api('/sources/'+id,{method:'PATCH',body:JSON.stringify({name:name.trim()})});await reloadSources();toast('Название обновлено')}catch(error){toast(error.message,true)}}
+  async function deleteSource(id){const source=sourceById(id);if(!source||!confirm(`Удалить источник «${source.name}» и весь его журнал?`))return;try{await api('/sources/'+id,{method:'DELETE'});if(String($('#sourceFilter').value)===String(id))$('#sourceFilter').value='';closeInspector();await reloadSources();lastResetSignature=null;await loadEvents(true);toast('Источник и его события удалены')}catch(error){toast(error.message,true)}}
+  async function rotateSecret(id){const source=sourceById(id);if(!source||!confirm(`Перевыпустить ключ для «${source.name}»? Старый ключ сразу перестанет работать.`))return;try{const data=await api(`/sources/${id}/rotate-secret`,{method:'POST'});await reloadSources();showSecret(data.source,data.secret);toast('Новый ключ создан')}catch(error){toast(error.message,true)}}
+  function renderSettings(){$('#retentionInput').value=state.settings.retention_days||30;setText('#bodyLimit',((state.settings.max_body_bytes||5242880)/1048576).toFixed(0)+' МБ');setText('#coverageValue',`${state.settings.supported_update_types||26}/26 · Bot API ${state.settings.telegram_bot_api_version||'10.2'}`)}
+
+  async function createSource(name){const data=await api('/sources',{method:'POST',body:JSON.stringify({name})});await reloadSources();showSecret(data.source,data.secret);return data}
+  function showSecret(source,secret){secretConfig={url:sourceUrl(source),header:source.header_name||'X-Nexus-Senler-Secret',secret};setText('#secretUrl',secretConfig.url);setText('#secretHeader',secretConfig.header);setText('#secretValue',secretConfig.secret);openModal('secretModal')}
+  function openModal(id){$('#'+id).classList.add('open');$('#'+id).setAttribute('aria-hidden','false')}
+  function closeModal(id){$('#'+id).classList.remove('open');$('#'+id).setAttribute('aria-hidden','true')}
+  function closeInspector(){state.selectedEvent=null;$('#inspector').classList.remove('open');$('#inspectEmpty').classList.remove('hidden');$('#inspectContent').classList.add('hidden');markSelected()}
+  async function copy(text,success){try{await navigator.clipboard.writeText(text);toast(success)}catch{toast('Не удалось скопировать',true)}}
+  function resetAndLoad(){lastResetSignature=null;loadEvents(true)}
+
+  $$('.nav-btn').forEach(btn=>btn.onclick=()=>{$$('.nav-btn').forEach(x=>x.classList.toggle('active',x===btn));$$('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+btn.dataset.view));state.view=btn.dataset.view;if(state.view==='events')loadEvents(true,true)});
+  $('#sourceFilter').onchange=resetAndLoad;$('#typeFilter').onchange=resetAndLoad;$('#statusFilter').onchange=resetAndLoad;$('#periodFilter').onchange=resetAndLoad;$('#searchInput').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(resetAndLoad,280)};$('#loadMoreBtn').onclick=()=>loadEvents(false);$('#closeInspector').onclick=closeInspector;
+  $('#addSourceBtn').onclick=()=>{$('#sourceName').value='Основной TG-бот';openModal('sourceModal');setTimeout(()=>$('#sourceName').select(),40)};$('#sourceForm').onsubmit=async e=>{e.preventDefault();const name=$('#sourceName').value.trim();if(!name)return;try{await createSource(name);closeModal('sourceModal');toast('Источник создан');lastResetSignature=null;await loadEvents(true)}catch(error){toast(error.message,true)}};
+  $$('[data-close]').forEach(btn=>btn.onclick=()=>closeModal(btn.dataset.close));$$('.modal').forEach(modal=>modal.onclick=e=>{if(e.target===modal)closeModal(modal.id)});
+  $('#copyConfigBtn').onclick=()=>secretConfig&&copy(`URL: ${secretConfig.url}\nЗаголовок: ${secretConfig.header}\nЗначение: ${secretConfig.secret}`,'Настройки подключения скопированы');
+  $('#saveSettingsBtn').onclick=async()=>{try{const retention_days=Number($('#retentionInput').value);const data=await api('/settings',{method:'PATCH',body:JSON.stringify({retention_days})});state.settings.retention_days=data.retention_days;renderSettings();lastResetSignature=null;await loadEvents(true);toast(data.deleted?`Сохранено, удалено событий: ${data.deleted}`:'Настройки сохранены')}catch(error){toast(error.message,true)}};
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.view==='events')loadEvents(true,true)});setInterval(()=>{if(!document.hidden&&state.view==='events')loadEvents(true,true)},5000);bootstrap();
+})();
+</script>
+</body>
+</html>

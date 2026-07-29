@@ -92,6 +92,61 @@
     .settings-list{overflow:auto;border-top:1px solid var(--border);}
 
     .empty{padding:24px;text-align:center;color:var(--text-subtle);}
+    .mobile-only,.mobile-action-bar,.mobile-editor-head{display:none;}
+
+    @media (max-width:640px){
+      html,body{width:100%;overflow:hidden;}
+      .tabs{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;}
+      .tabs::-webkit-scrollbar{display:none;}
+      .tab{height:40px;padding:0 12px;flex:0 0 auto;}
+      .tabs__right{position:sticky;right:0;flex:0 0 auto;padding:0 4px;background:var(--panel);}
+      .btn,.btn--sm{min-height:40px;padding:7px 12px;}
+      .f-input{min-height:40px;}
+      .mobile-only{display:inline;}
+      .mobile-action-bar{display:flex;padding:8px;border-bottom:1px solid var(--border);background:var(--panel);}
+      .mobile-action-bar .btn{width:100%;}
+      .mobile-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+
+      #viewBindings:not(.mobile-editing) .form-panel{display:none;}
+      #viewBindings.mobile-editing .mobile-action-bar,
+      #viewBindings.mobile-editing .table-wrap{display:none;}
+      #viewBindings.mobile-editing .form-panel{display:grid;grid-template-columns:1fr;align-content:start;overflow-y:auto;flex:1;}
+      .form-panel{padding:12px;gap:12px;}
+      .form-panel .f-group,.settings-form .f-group{min-width:0!important;width:100%;}
+      .form-panel>.btn{width:100%;}
+
+      .table-wrap,.settings-list{padding:0 8px 8px;overflow-x:hidden;}
+      table,tbody{display:block;width:100%;}
+      thead,colgroup{display:none;}
+      tr{display:grid;width:100%;padding:7px 0;border-bottom:1px solid var(--border);}
+      td{display:grid;grid-template-columns:108px minmax(0,1fr);gap:8px;align-items:start;
+        min-width:0;max-width:none!important;padding:5px 8px;border:0;overflow-wrap:anywhere;word-break:normal!important;}
+      td[data-label]::before{content:attr(data-label);color:var(--text-subtle);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;}
+      td.actions{display:flex;grid-template-columns:none;gap:8px;flex-wrap:wrap;}
+      td.actions::before{display:none;}
+      td.actions .btn{flex:1;}
+      td.empty{display:block;padding:24px 8px;}
+      td.empty::before{display:none;}
+
+      .settings-body{padding:0;display:flex;gap:0;overflow:hidden;}
+      .settings-form{display:none;}
+      #viewSettings.mobile-editing .mobile-action-bar,
+      #viewSettings.mobile-editing .settings-list{display:none;}
+      #viewSettings.mobile-editing .settings-form{display:grid;grid-template-columns:1fr;align-content:start;gap:12px;padding:12px;overflow-y:auto;flex:1;}
+      #viewSettings.mobile-editing .settings-form>.btn{width:100%;}
+      .settings-list{border-top:0;flex:1;}
+
+      .visit-detail{inset:0;max-height:none;z-index:5;border-top:0;}
+      .visit-detail__head{min-height:48px;}
+      .visit-detail__body{padding:12px;}
+      .vd-kv{grid-template-columns:1fr;gap:3px;}
+      .vd-val{margin-bottom:7px;}
+      .vd-pre{overflow-x:hidden;overflow-wrap:anywhere;word-break:break-word;}
+      .script-body{padding:12px;}
+      .script-box{white-space:pre-wrap;overflow-x:hidden;overflow-wrap:anywhere;word-break:break-word;max-height:65vh;overflow-y:auto;}
+      .script-body .btn{width:100%;}
+      .desktop-only{display:none!important;}
+    }
   </style>
 </head>
 <body>
@@ -110,7 +165,9 @@
 
   <!-- Связки -->
   <div class="view view--active" id="viewBindings">
+    <div class="mobile-action-bar"><button id="mobileNewBindingBtn" class="btn btn--primary" type="button">+ Связка</button></div>
     <div class="form-panel">
+      <div class="mobile-editor-head"><strong>Новая связка</strong><button id="bCancelBtn" class="btn btn--ghost" type="button">← Связки</button></div>
       <div class="f-group" style="flex:2;min-width:200px">
         <label>Страница</label>
         <select id="bPageUrl" class="f-input"><option value="">— выберите страницу —</option></select>
@@ -157,6 +214,13 @@
 
   <!-- Журнал -->
   <div class="view" id="viewVisits">
+    <div class="mobile-action-bar">
+      <select id="visitFilterSelect" class="f-input" aria-label="Результат">
+        <option value="ok">Успешные</option>
+        <option value="all">Все</option>
+        <option value="error">Ошибки</option>
+      </select>
+    </div>
     <div class="table-wrap">
       <table style="table-layout:fixed">
         <colgroup>
@@ -199,7 +263,9 @@
   <!-- Настройки -->
   <div class="view" id="viewSettings">
     <div class="settings-body">
+      <div class="mobile-action-bar"><button id="mobileNewChannelBtn" class="btn btn--primary" type="button">+ Канал</button></div>
       <div class="settings-form">
+        <div class="mobile-editor-head"><strong>Канал</strong><button id="chCancelBtn" class="btn btn--ghost" type="button">← Каналы</button></div>
         <div class="f-group" style="min-width:180px">
           <label>ID канала Senler</label>
           <input id="chId" class="f-input" placeholder="123456" />
@@ -231,9 +297,47 @@ const panelIdx = parts.indexOf('panel');
 const modBase = panelIdx > 0 ? parts.slice(0, panelIdx).join('/') : '';
 const API = modBase + '/api';
 const TRACK_URL = location.origin + modBase + '/api/track';
+const mobileMedia = window.matchMedia('(max-width:640px)');
+
+function notify(message, type = 'info') {
+  if (typeof window.parent?.notify === 'function') window.parent.notify(message, type);
+  else if (type === 'error') alert(message);
+}
+
+async function apiJson(url, options = {}) {
+  const response = await fetch(url, options);
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  return data;
+}
+
+async function withBusy(button, busyText, action) {
+  if (!button || button.disabled) return;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  try { return await action(); }
+  catch (error) { notify(error.message || 'Ошибка', 'error'); }
+  finally { button.disabled = false; button.textContent = label; }
+}
+
+function setMobileEditor(viewId, open) {
+  const view = document.getElementById(viewId);
+  view.classList.toggle('mobile-editing', Boolean(open));
+  if (open) view.scrollTop = 0;
+}
+
+document.getElementById('mobileNewBindingBtn').addEventListener('click', () => setMobileEditor('viewBindings', true));
+document.getElementById('bCancelBtn').addEventListener('click', () => setMobileEditor('viewBindings', false));
+document.getElementById('mobileNewChannelBtn').addEventListener('click', () => setMobileEditor('viewSettings', true));
+document.getElementById('chCancelBtn').addEventListener('click', () => setMobileEditor('viewSettings', false));
 
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
+    setMobileEditor('viewBindings', false);
+    setMobileEditor('viewSettings', false);
+    closeVisitDetail();
     document.querySelectorAll('.tab').forEach(b => b.classList.remove('tab--active'));
     document.querySelectorAll('.view').forEach(v => v.classList.remove('view--active'));
     btn.classList.add('tab--active');
@@ -247,7 +351,9 @@ document.querySelectorAll('.tab').forEach(btn => {
   });
 });
 
-document.getElementById('refreshBtn').addEventListener('click', () => { loadBindings(); loadPages(); loadChannels(); loadEnvCheck(); });
+document.getElementById('refreshBtn').addEventListener('click', event => withBusy(event.currentTarget, '…', async () => {
+  await Promise.all([loadBindings(), loadPages(), loadChannels(), loadEnvCheck()]);
+}));
 
 async function loadEnvCheck() {
   const r = await fetch(API + '/env-status').catch(() => null);
@@ -282,12 +388,16 @@ function renderChannelOptions() {
 }
 
 async function loadChannels() {
-  const r = await fetch(API + '/channels').catch(() => null);
-  if (!r?.ok) return;
-  const data = await r.json();
+  const tb = document.getElementById('channelsTable');
+  if (tb) tb.innerHTML = '<tr><td colspan="4" class="empty">Загрузка…</td></tr>';
+  let data;
+  try { data = await apiJson(API + '/channels'); }
+  catch (error) {
+    if (tb) tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(error.message)}</td></tr>`;
+    return;
+  }
   channelsData = data.items || [];
   renderChannelOptions();
-  const tb = document.getElementById('channelsTable');
   if (!tb) return;
   if (!channelsData.length) {
     tb.innerHTML = '<tr><td colspan="4" class="empty">Каналы не настроены. Добавьте ID канала Senler и API ключ.</td></tr>';
@@ -295,48 +405,52 @@ async function loadChannels() {
   }
   const defaultId = data.default_channel_id || '';
   tb.innerHTML = channelsData.map(ch => `<tr>
-    <td><code style="color:var(--warn)">${esc(ch.id)}</code>${ch.id === defaultId ? ' <span class="badge badge--ok">ENV</span>' : ''}</td>
-    <td>${esc(ch.name)}</td>
-    <td>${ch.has_api_key ? '<span class="badge badge--ok">задан</span>' : '<span class="badge badge--bad">нет</span>'}</td>
-    <td style="display:flex;gap:4px">
-      <button class="btn btn--sm btn--ghost" onclick="checkChannel('${escAttr(ch.id)}')">Проверить</button>
+    <td data-label="ID канала"><code style="color:var(--warn)">${esc(ch.id)}</code>${ch.id === defaultId ? ' <span class="badge badge--ok">ENV</span>' : ''}</td>
+    <td data-label="Название">${esc(ch.name)}</td>
+    <td data-label="API ключ">${ch.has_api_key ? '<span class="badge badge--ok">задан</span>' : '<span class="badge badge--bad">нет</span>'}</td>
+    <td class="actions">
+      <button class="btn btn--sm btn--ghost" onclick="checkChannel('${escAttr(ch.id)}',this)">Проверить</button>
       ${ch.id === defaultId
         ? '<span style="color:var(--text-subtle)">из ENV</span>'
-        : `<button class="btn btn--sm btn--danger" onclick="deleteChannel('${escAttr(ch.id)}')">×</button>`}
+        : `<button class="btn btn--sm btn--danger" onclick="deleteChannel('${escAttr(ch.id)}',this)"><span class="desktop-only">×</span><span class="mobile-only">Удалить</span></button>`}
     </td>
   </tr>`).join('');
 }
 
 async function loadPages() {
-  const r = await fetch(API + '/pages').catch(() => null);
-  if (!r?.ok) return;
-  pagesData = await r.json();
+  const tb = document.getElementById('pagesTable');
+  tb.innerHTML = '<tr><td colspan="3" class="empty">Загрузка…</td></tr>';
+  try { pagesData = await apiJson(API + '/pages'); }
+  catch (error) { tb.innerHTML = `<tr><td colspan="3" class="empty">${esc(error.message)}</td></tr>`; return; }
 
   const sel = document.getElementById('bPageUrl');
   const cur = sel.value;
   sel.innerHTML = renderPageOptions(pagesData, getBoundPageUrls());
   if (cur) sel.value = cur;
 
-  const tb = document.getElementById('pagesTable');
   if (!pagesData.length) { tb.innerHTML = '<tr><td colspan="3" class="empty">Нет страниц. Посетите сайт со скриптом.</td></tr>'; return; }
   tb.innerHTML = pagesData.map(p => `<tr>
-    <td style="word-break:break-all">${esc(p.url)}</td>
-    <td style="color:var(--text-subtle);white-space:nowrap">${p.first_seen?.slice(0,16).replace('T',' ')}</td>
-    <td><button class="btn btn--sm btn--danger" onclick="deletePage(${p.id})">×</button></td>
+    <td data-label="Страница" style="word-break:break-all">${esc(p.url)}</td>
+    <td data-label="Первый визит" style="color:var(--text-subtle);white-space:nowrap">${p.first_seen?.slice(0,16).replace('T',' ')}</td>
+    <td class="actions"><button class="btn btn--sm btn--danger" onclick="deletePage(${p.id},this)"><span class="desktop-only">×</span><span class="mobile-only">Удалить</span></button></td>
   </tr>`).join('');
 }
 
-async function deletePage(id) {
+async function deletePage(id, button) {
   if (!confirm('Удалить страницу и все связки для неё?')) return;
-  await fetch(API + `/pages/${id}`, {method:'DELETE'});
-  loadPages(); loadBindings();
+  await withBusy(button, 'Удаление…', async () => {
+    await apiJson(API + `/pages/${id}`, {method:'DELETE'});
+    await Promise.all([loadPages(), loadBindings()]);
+  });
 }
 
 async function loadBindings() {
   if (!channelsData.length) await loadChannels();
-  const r = await fetch(API + '/bindings').catch(() => null);
-  if (!r?.ok) return;
-  const list = await r.json();
+  const tb = document.getElementById('bindingsTable');
+  tb.innerHTML = '<tr><td colspan="8" class="empty">Загрузка…</td></tr>';
+  let list;
+  try { list = await apiJson(API + '/bindings'); }
+  catch (error) { tb.innerHTML = `<tr><td colspan="8" class="empty">${esc(error.message)}</td></tr>`; return; }
   bindingsData = list;
   if (pagesData.length) {
     const sel = document.getElementById('bPageUrl');
@@ -344,24 +458,23 @@ async function loadBindings() {
     sel.innerHTML = renderPageOptions(pagesData, getBoundPageUrls());
     if (cur) sel.value = cur;
   }
-  const tb = document.getElementById('bindingsTable');
   if (!list.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Связок нет.</td></tr>'; return; }
   tb.innerHTML = list.map(b => `<tr>
-    <td style="word-break:break-all;max-width:280px;font-size:.78rem">${esc(b.page_url)}</td>
-    <td><code style="color:var(--text-muted)">${esc(channelLabel(b.channel_id))}</code></td>
-    <td><code style="color:var(--warn)">${esc(b.subscription_id)}</code></td>
-    <td>${b.visit_subscription_id ? `<code style="color:var(--ok)">${esc(b.visit_subscription_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
-    <td style="color:var(--text-subtle)">${esc(b.vk_id_param)}</td>
-    <td style="color:var(--text-subtle)">${esc(b.note)}</td>
-    <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
-    <td style="display:flex;gap:4px">
-      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id})">${b.active?'Откл':'Вкл'}</button>
-      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id})">×</button>
+    <td data-label="Страница" style="word-break:break-all;max-width:280px;font-size:.78rem">${esc(b.page_url)}</td>
+    <td data-label="Канал"><code style="color:var(--text-muted)">${esc(channelLabel(b.channel_id))}</code></td>
+    <td data-label="Список Senler"><code style="color:var(--warn)">${esc(b.subscription_id)}</code></td>
+    <td data-label="Посещение">${b.visit_subscription_id ? `<code style="color:var(--ok)">${esc(b.visit_subscription_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
+    <td data-label="Параметр" style="color:var(--text-subtle)">${esc(b.vk_id_param)}</td>
+    <td data-label="Заметка" style="color:var(--text-subtle)">${esc(b.note) || '—'}</td>
+    <td data-label="Статус"><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
+    <td class="actions">
+      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id},this)">${b.active?'Откл':'Вкл'}</button>
+      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id},this)"><span class="desktop-only">×</span><span class="mobile-only">Удалить</span></button>
     </td>
   </tr>`).join('');
 }
 
-document.getElementById('bAddBtn').addEventListener('click', async () => {
+document.getElementById('bAddBtn').addEventListener('click', async event => withBusy(event.currentTarget, 'Сохранение…', async () => {
   const page_url = document.getElementById('bPageUrl').value;
   const channel_id = document.getElementById('bChannelId').value;
   const subscription_id = document.getElementById('bSubId').value.trim();
@@ -369,72 +482,73 @@ document.getElementById('bAddBtn').addEventListener('click', async () => {
   const vk_id_param = document.getElementById('bParam').value.trim() || 'vk_id';
   const note = document.getElementById('bNote').value.trim();
   if (!page_url || !channel_id || !subscription_id) { alert('Выберите страницу, канал и укажите ID списка'); return; }
-  const r = await fetch(API + '/bindings', {
+  await apiJson(API + '/bindings', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({page_url, channel_id, subscription_id, visit_subscription_id, vk_id_param, note})
   });
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || 'Ошибка'); return; }
   document.getElementById('bSubId').value = '';
   document.getElementById('bVisitSubId').value = '';
   document.getElementById('bNote').value = '';
-  loadBindings();
-});
+  await loadBindings();
+  if (mobileMedia.matches) setMobileEditor('viewBindings', false);
+  notify('Связка сохранена', 'success');
+}));
 
-async function toggleBinding(id) {
-  await fetch(API + `/bindings/${id}/toggle`, {method:'PUT'});
-  loadBindings();
+async function toggleBinding(id, button) {
+  await withBusy(button, '…', async () => {
+    await apiJson(API + `/bindings/${id}/toggle`, {method:'PUT'});
+    await loadBindings();
+  });
 }
 
-async function deleteBinding(id) {
+async function deleteBinding(id, button) {
   if (!confirm('Удалить связку?')) return;
-  await fetch(API + `/bindings/${id}`, {method:'DELETE'});
-  loadBindings();
+  await withBusy(button, 'Удаление…', async () => {
+    await apiJson(API + `/bindings/${id}`, {method:'DELETE'});
+    await loadBindings();
+  });
 }
 
-document.getElementById('chAddBtn').addEventListener('click', async () => {
+document.getElementById('chAddBtn').addEventListener('click', async event => withBusy(event.currentTarget, 'Сохранение…', async () => {
   const id = document.getElementById('chId').value.trim();
   const name = document.getElementById('chName').value.trim();
   const api_key = document.getElementById('chApiKey').value.trim();
   if (!id) { alert('Укажите ID канала'); return; }
-  const r = await fetch(API + '/channels', {
+  await apiJson(API + '/channels', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({id, name, api_key})
   });
-  let d = {};
-  try { d = await r.json(); } catch {}
-  if (!r.ok) { alert(d.error || d.detail || 'Ошибка'); return; }
   document.getElementById('chId').value = '';
   document.getElementById('chName').value = '';
   document.getElementById('chApiKey').value = '';
   await loadChannels();
-});
+  if (mobileMedia.matches) setMobileEditor('viewSettings', false);
+  notify('Канал сохранён', 'success');
+}));
 
-async function deleteChannel(id) {
+async function deleteChannel(id, button) {
   if (!confirm(`Удалить канал «${id}» из списка?`)) return;
-  const r = await fetch(API + `/channels/${encodeURIComponent(id)}`, {method:'DELETE'});
-  let d = {};
-  try { d = await r.json(); } catch {}
-  if (!r.ok) { alert(d.error || d.detail || 'Ошибка'); return; }
-  await loadChannels();
+  await withBusy(button, 'Удаление…', async () => {
+    await apiJson(API + `/channels/${encodeURIComponent(id)}`, {method:'DELETE'});
+    await loadChannels();
+  });
 }
 
-async function checkChannel(id) {
+async function checkChannel(id, button) {
   const user_id = prompt('ID пользователя для проверки', '5601500901');
   if (!user_id) return;
-  const r = await fetch(API + `/channels/${encodeURIComponent(id)}/check`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({user_id})
+  await withBusy(button, 'Проверка…', async () => {
+    const d = await apiJson(API + `/channels/${encodeURIComponent(id)}/check`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_id})
+    });
+    if (d.found) {
+      const u = d.user || {};
+      alert(`Канал отвечает. Пользователь найден: ${[u.first_name, u.last_name].filter(Boolean).join(' ') || user_id}. Подписок: ${u.subscriptions_count ?? 0}`);
+    } else {
+      alert('Канал отвечает, но пользователь не найден.');
+    }
   });
-  let d = {};
-  try { d = await r.json(); } catch {}
-  if (!r.ok) { alert(d.error || d.detail || 'Ошибка проверки'); return; }
-  if (d.found) {
-    const u = d.user || {};
-    alert(`Канал отвечает. Пользователь найден: ${[u.first_name, u.last_name].filter(Boolean).join(' ') || user_id}. Подписок: ${u.subscriptions_count ?? 0}`);
-  } else {
-    alert('Канал отвечает, но пользователь не найден.');
-  }
 }
 
 let _activeVisitRow = null;
@@ -446,14 +560,21 @@ const _thResult = document.getElementById('thResult');
 _thResult.style.color = 'var(--ok)';
 _thResult.addEventListener('click', () => {
   _visitFilter = FILTERS[(FILTERS.indexOf(_visitFilter) + 1) % FILTERS.length];
+  document.getElementById('visitFilterSelect').value = _visitFilter;
+  _thResult.style.color = _visitFilter === 'error' ? 'var(--bad)' : _visitFilter === 'ok' ? 'var(--ok)' : '';
+  renderVisits();
+});
+document.getElementById('visitFilterSelect').addEventListener('change', event => {
+  _visitFilter = event.currentTarget.value;
   _thResult.style.color = _visitFilter === 'error' ? 'var(--bad)' : _visitFilter === 'ok' ? 'var(--ok)' : '';
   renderVisits();
 });
 
 async function loadVisits() {
-  const r = await fetch(API + '/visits?limit=500').catch(() => null);
-  if (!r?.ok) return;
-  _allVisits = await r.json();
+  const tb = document.getElementById('visitsTable');
+  tb.innerHTML = '<tr><td colspan="5" class="empty">Загрузка…</td></tr>';
+  try { _allVisits = await apiJson(API + '/visits?limit=500'); }
+  catch (error) { tb.innerHTML = `<tr><td colspan="5" class="empty">${esc(error.message)}</td></tr>`; return; }
   closeVisitDetail();
   renderVisits();
 }
@@ -467,11 +588,11 @@ function renderVisits() {
     return;
   }
   tb.innerHTML = list.map(v => `<tr class="visit-row" data-id="${v.id}">
-    <td style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
-    <td style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
-    <td>${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
-    <td style="color:var(--text-subtle)">${v.binding_id || '—'}</td>
-    <td>${v.success
+    <td data-label="Время" style="color:var(--text-subtle);white-space:nowrap">${v.visited_at?.slice(0,16).replace('T',' ')}</td>
+    <td data-label="Страница" style="word-break:break-all;max-width:240px;font-size:.75rem">${esc(v.page_url)}</td>
+    <td data-label="VK ID">${v.vk_id ? `<code>${esc(v.vk_id)}</code>` : '<span style="color:var(--text-subtle)">—</span>'}</td>
+    <td data-label="Связка" style="color:var(--text-subtle)">${v.binding_id || '—'}</td>
+    <td data-label="Результат">${v.success
       ? '<span class="badge badge--ok">OK</span>'
       : `<span class="badge badge--bad">ошибка</span>`}</td>
   </tr>`).join('');

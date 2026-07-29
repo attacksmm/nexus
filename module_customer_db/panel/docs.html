@@ -1,8 +1,27 @@
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>Документация customer-db</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Документация customer-db</title>
+<style>
+  :root{color-scheme:dark;--bg:#060606;--panel:#101010;--text:#f2f2f2;--muted:#bababa;--subtle:#848484;--border:#2d2d2d;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif}
+  *{box-sizing:border-box;scrollbar-color:#545454 #080808;scrollbar-width:thin}
+  html{margin:0;min-width:0;background:var(--bg);color:var(--text)}
+  body{width:100%;max-width:1080px;min-width:0;margin:0 auto;padding:22px;font-size:14px;line-height:1.55;overflow-x:hidden}
+  h2,h3{margin:24px 0 10px;line-height:1.25}h2{font-size:19px}h3{font-size:15px}p{margin:8px 0;color:var(--muted)}strong{color:var(--text)}
+  code{font-family:"Cascadia Mono","Consolas",monospace;color:#d8e8dc;overflow-wrap:anywhere}
+  pre{max-height:420px;margin:10px 0;padding:12px;border:1px solid var(--border);background:var(--panel);white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere}
+  pre code{white-space:inherit}
+  table{display:block;width:100%;max-width:100%;margin:10px 0 18px;border:1px solid var(--border);border-collapse:collapse;overflow-x:auto}
+  tbody{display:table;width:100%;min-width:620px;border-collapse:collapse}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+  th{background:var(--panel);color:var(--subtle);font-weight:600}td{color:var(--muted)}tr:last-child td{border-bottom:0}
+  @media(max-width:760px){body{padding:12px;font-size:13px}h2{font-size:17px}h3{font-size:14px}table{margin-bottom:14px}pre{max-height:320px}}
+</style>
+</head>
 <body>
-<h2>База клиентов v2.1.3</h2>
+<h2>База клиентов v2.1.6</h2>
 <p>Модуль для хранения клиентов в SQLite. Поддерживает несколько изолированных таблиц. Каждая запись содержит три поля: <code>id</code>, <code>platform_id</code>, <code>custom_fields</code>.</p>
 
 <h2>Структура записи</h2>
@@ -126,7 +145,7 @@ Content-Type: application/json
     └── docs.html       — эта документация</code></pre>
 
 <h2>Безопасность</h2>
-<p>Панель и чтение API доступны только авторизованным пользователям Nexus с доступом к модулю. Внешние запросы записи <code>/records</code>, <code>/records/upsert</code> и <code>/records/batch-upsert</code> принимают заголовок <code>Authorization: Bearer &lt;NEXUS_CUSTOMER_DB_API_TOKEN&gt;</code>. Для webhook-блоков без заголовков endpoint <code>/records/upsert</code> и короткий endpoint <code>/{table}</code> также принимают верхнеуровневое поле JSON/form <code>token</code>, <code>api_token</code> или <code>secret</code>; эти поля не сохраняются в карточку. Если отдельный токен не задан, используется <code>NEXUS_OPENROUTER_API_TOKEN</code>.</p>
+<p>Панель и чтение API доступны только авторизованным пользователям Nexus с доступом к модулю. Внешние запросы записи <code>/records</code>, <code>/records/upsert</code> и <code>/records/batch-upsert</code> принимают заголовок <code>Authorization: Bearer &lt;NEXUS_CUSTOMER_DB_API_TOKEN&gt;</code>. Для webhook-блоков без заголовков все эти endpoint, а также короткий endpoint <code>/{table}</code>, принимают верхнеуровневое поле JSON/form <code>token</code>, <code>api_token</code> или <code>secret</code>; эти поля не сохраняются в карточку. Если отдельный токен не задан, используется <code>NEXUS_OPENROUTER_API_TOKEN</code>.</p>
 <p>Текущий токен и готовый JSON заголовков доступны в верхней панели Nexus: откройте модуль <strong>База клиентов</strong> и нажмите <strong>Настройки</strong> рядом с кнопкой паузы.</p>
 </body>
 </html>

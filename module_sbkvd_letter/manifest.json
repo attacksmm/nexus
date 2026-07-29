@@ -1,12 +1,18 @@
 {
   "id": "sbkvd-letter",
   "name": "Рассылки",
-  "version": "1.0.3",
-  "description": "Рассылки VK и Telegram по разрешенным листам Базы клиентов с шаблонами в Файловом хранилище.",
+  "version": "1.0.34",
+  "description": "Параллельные рассылки VK и Telegram с исключением купивших, игнора и not_allow, паузой и удалением.",
   "env_vars": {
     "SBKVD_LETTER_VK_TOKEN": "Токен сообщества VK с доступом к сообщениям",
     "SBKVD_LETTER_TELEGRAM_BOT_TOKEN": "Токен Telegram-бота",
     "SBKVD_LETTER_CUSTOMER_DB_PATH": "Необязательный абсолютный путь к SQLite Базы клиентов",
-    "SBKVD_LETTER_FILE_STORAGE_DB_PATH": "Необязательный абсолютный путь к SQLite Файлового хранилища"
-  }
+    "SBKVD_LETTER_FILE_STORAGE_DB_PATH": "Необязательный абсолютный путь к SQLite Файлового хранилища",
+    "SBKVD_LETTER_TELEGRAM_API_BASE": "Необязательный базовый URL Telegram Bot API или закрытого HTTPS-прокси",
+    "SBKVD_LETTER_TELEGRAM_PROXY_URL": "Необязательный HTTP/SOCKS proxy для Telegram Bot API"
+  },
+  "env_required": [
+    "SBKVD_LETTER_VK_TOKEN",
+    "SBKVD_LETTER_TELEGRAM_BOT_TOKEN"
+  ]
 }

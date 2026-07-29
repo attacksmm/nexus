@@ -318,6 +318,7 @@ async function loadFlowStudents(refresh=false){
     $('studentsState').textContent = studentsData.needs_refresh ? `нет свежего кэша${gcText}` : `${cacheLabel} / ${studentsData.items?.length || 0} потоков / ${total} учеников${gcText}`;
     renderStudentsProgress();
     renderStudentFlows();
+    if(refresh) await loadChatFlows().catch(()=>{});
   }catch(e){
     $('studentsState').textContent = e.message;
     $('studentFlows').innerHTML = `<div class="empty bad">${esc(e.message)}</div>`;

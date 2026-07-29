@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import importlib.util
 import json
 import os
 import re
 import sqlite3
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,6 +219,104 @@ def _spreadsheet_id() -> str:
     return _clean(os.environ.get("TILDA_CHAT_LINKS_SPREADSHEET_ID")) or DEFAULT_SPREADSHEET_ID
 
 
+def _google_auth_available() -> bool:
+    return bool(
+        importlib.util.find_spec("google.oauth2.service_account")
+        and importlib.util.find_spec("google.auth.transport.requests")
+    )
+
+
+def _google_credentials_path() -> Path | None:
+    raw = _clean(
+        os.environ.get("TILDA_CHAT_LINKS_GOOGLE_CREDENTIALS_FILE")
+        or os.environ.get("GETCOURSE_CHAT_FIELDS_GOOGLE_CREDENTIALS_FILE")
+        or os.environ.get("GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE")
+        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        or ""
+    )
+    return Path(raw) if raw else None
+
+
+def _course_chat_creator_db_path() -> Path | None:
+    configured = _clean(os.environ.get("TILDA_CHAT_LINKS_COURSE_CHAT_CREATOR_DB"))
+    if configured:
+        path = Path(configured)
+        return path if path.exists() else None
+    candidates: list[Path] = []
+    module_dir = getattr(_ctx, "module_dir", None)
+    if module_dir:
+        candidates.append(Path(module_dir).parent / "course-chat-creator" / "data" / "course-chat-creator.db")
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.extend(
+        [
+            repo_root / "modules" / "course-chat-creator" / "data" / "course-chat-creator.db",
+            repo_root / "module_course_chat_creator" / "data" / "course-chat-creator.db",
+        ]
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _course_chat_creator_catalog(course_key: str) -> dict[str, list[dict[str, Any]]]:
+    path = _course_chat_creator_db_path()
+    result: dict[str, list[dict[str, Any]]] = {"tg": [], "vk": []}
+    if not path:
+        return result
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id,platform,title,stream_number,link
+                FROM runs
+                WHERE course_key=? AND test_mode=0
+                  AND platform IN ('telegram','vk')
+                  AND COALESCE(link,'')<>'' AND status<>'error'
+                ORDER BY id
+                """,
+                (course_key,),
+            ).fetchall()
+    except Exception as error:
+        _log("warning", "course chat creator catalog read failed: %s", error)
+        return result
+    by_stream: dict[int, dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        match = re.search(r"\d+", _clean(row["stream_number"]))
+        if not match:
+            continue
+        stream_number = int(match.group(0))
+        channel = "tg" if row["platform"] == "telegram" else "vk"
+        by_stream.setdefault(stream_number, {})[channel] = {
+            "course": course_key,
+            "title": _clean(row["title"]),
+            "number": stream_number,
+            "url": _clean(row["link"]),
+            "source": "course_chat_creator",
+        }
+    for stream_number in sorted(by_stream):
+        pair = by_stream[stream_number]
+        if not pair.get("tg") or not pair.get("vk"):
+            continue
+        result["tg"].append(pair["tg"])
+        result["vk"].append(pair["vk"])
+    return result
+
+
+def _merge_chat_catalog(base: dict[str, Any], preferred: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    result = {"title": base.get("title", ""), "tg": [], "vk": []}
+    for channel in ("tg", "vk"):
+        by_stream = {
+            int(item.get("number") or 0): dict(item)
+            for item in (base.get(channel) or [])
+            if int(item.get("number") or 0) > 0
+        }
+        for item in preferred.get(channel) or []:
+            number = int(item.get("number") or 0)
+            if number > 0:
+                by_stream[number] = dict(item)
+        result[channel] = [by_stream[number] for number in sorted(by_stream)]
+    return result
+
+
 def _deals_lookback_date() -> str:
     value = _clean(os.environ.get("TILDA_CHAT_LINKS_DEALS_LOOKBACK_DATE")) or DEFAULT_DEALS_LOOKBACK_DATE
     return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) else DEFAULT_DEALS_LOOKBACK_DATE
@@ -340,6 +441,24 @@ def _init_module_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_link_pins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_key TEXT NOT NULL,
+                    identity_kind TEXT NOT NULL,
+                    identity_value TEXT NOT NULL,
+                    stream_number INTEGER NOT NULL,
+                    tg_url TEXT NOT NULL DEFAULT '',
+                    vk_url TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'first_open',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(course_key, identity_kind, identity_value)
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_link_pins_course_stream ON chat_link_pins(course_key, stream_number)")
             conn.commit()
     except Exception as error:
         _log("warning", "module db init failed: %s", error)
@@ -931,6 +1050,13 @@ def _club_course_from_old_access(courses: list[AccessCourse]) -> AccessCourse | 
 
 
 async def _fetch_csv(gid: str) -> str:
+    credentials_path = _google_credentials_path()
+    if credentials_path and credentials_path.exists():
+        try:
+            return await asyncio.to_thread(_fetch_csv_private_sync, gid, credentials_path)
+        except Exception as error:
+            _log("warning", "private Google Sheet read failed gid=%s, trying public CSV: %s", gid, error)
+
     url = f"https://docs.google.com/spreadsheets/d/{_spreadsheet_id()}/gviz/tq?tqx=out:csv&gid={gid}"
     last_error: Exception | None = None
     headers = {"User-Agent": "Mozilla/5.0 Nexus Tilda Chat Links"}
@@ -951,8 +1077,62 @@ async def _fetch_csv(gid: str) -> str:
     raise RuntimeError(str(last_error or "Google Sheet request failed"))
 
 
+def _fetch_csv_private_sync(gid: str, credentials_path: Path) -> str:
+    if not _google_auth_available():
+        raise RuntimeError("google-auth is not installed")
+
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    credentials = Credentials.from_service_account_file(
+        str(credentials_path),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    )
+    session = AuthorizedSession(credentials)
+    spreadsheet_id = _spreadsheet_id()
+    metadata_resp = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets.properties(sheetId,title)"},
+        timeout=30,
+    )
+    metadata_resp.raise_for_status()
+    metadata = metadata_resp.json() or {}
+    sheet_title = ""
+    for sheet in metadata.get("sheets") or []:
+        props = sheet.get("properties") or {}
+        if str(props.get("sheetId")) == str(gid):
+            sheet_title = _clean(props.get("title"))
+            break
+    if not sheet_title:
+        raise RuntimeError(f"worksheet gid={gid} not found")
+
+    values_resp = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchGet",
+        params=[("ranges", f"'{sheet_title.replace(chr(39), chr(39) + chr(39))}'!A:B"), ("majorDimension", "ROWS")],
+        timeout=30,
+    )
+    values_resp.raise_for_status()
+    value_ranges = (values_resp.json() or {}).get("valueRanges") or []
+    rows = (value_ranges[0] or {}).get("values") if value_ranges else []
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerows(rows or [])
+    return out.getvalue()
+
+
 def _parse_latest_chat(csv_text: str, fallback_course: str) -> dict[str, Any]:
     best: dict[str, Any] | None = None
+    for item in _parse_chat_items(csv_text, fallback_course):
+        number = int(item["number"])
+        if best is None or number > best["number"]:
+            best = item
+    if not best:
+        raise RuntimeError("No chat link rows found")
+    return best
+
+
+def _parse_chat_items(csv_text: str, fallback_course: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     reader = csv.reader(io.StringIO(csv_text))
     for row in reader:
         if len(row) < 2:
@@ -964,17 +1144,15 @@ def _parse_latest_chat(csv_text: str, fallback_course: str) -> dict[str, Any]:
         match = re.search(r"(\d+)", title)
         if not match:
             continue
-        number = int(match.group(1))
-        if best is None or number > best["number"]:
-            best = {
+        items.append(
+            {
                 "course": fallback_course,
                 "title": title,
-                "number": number,
+                "number": int(match.group(1)),
                 "url": link,
             }
-    if not best:
-        raise RuntimeError("No chat link rows found")
-    return best
+        )
+    return items
 
 
 async def _load_current_chats() -> dict[str, dict[str, Any]]:
@@ -983,11 +1161,56 @@ async def _load_current_chats() -> dict[str, dict[str, Any]]:
         return cached
     result: dict[str, dict[str, Any]] = {}
     for course_key, config in CHAT_SHEETS.items():
-        result[course_key] = {"title": config["title"]}
-        for channel in ("tg", "vk"):
-            csv_text = await _fetch_csv(config[channel])
-            result[course_key][channel] = _parse_latest_chat(csv_text, course_key)
+        catalog = await _load_chat_catalog(course_key)
+        pair = _latest_pair_from_catalog(catalog)
+        result[course_key] = {"title": config["title"], "tg": pair["tg"], "vk": pair["vk"]}
     return _cache_set("chats", result)
+
+
+async def _load_chat_catalog(course_key: str) -> dict[str, Any]:
+    config = CHAT_SHEETS.get(course_key)
+    if not config:
+        raise RuntimeError("unknown course")
+    cache_key = f"chat_catalog:{course_key}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    result = {"title": config["title"], "tg": [], "vk": []}
+    sheet_error: Exception | None = None
+    for channel in ("tg", "vk"):
+        try:
+            csv_text = await _fetch_csv(config[channel])
+            result[channel] = _parse_chat_items(csv_text, course_key)
+        except Exception as error:
+            sheet_error = error
+            _log("warning", "chat links sheet read failed course=%s channel=%s: %s", course_key, channel, error)
+    if (not result["tg"] or not result["vk"]) and sheet_error is not None:
+        raise sheet_error
+    return _cache_set(cache_key, result)
+
+
+def _latest_pair_from_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+    tg_items = catalog.get("tg") or []
+    vk_items = catalog.get("vk") or []
+    if not tg_items or not vk_items:
+        raise RuntimeError("chat links are empty")
+    tg_by_stream = {int(item.get("number") or 0): item for item in tg_items}
+    vk_by_stream = {int(item.get("number") or 0): item for item in vk_items}
+    common_streams = [number for number in tg_by_stream.keys() & vk_by_stream.keys() if number > 0]
+    if not common_streams:
+        raise RuntimeError("complete chat pair is empty")
+    stream_number = max(common_streams)
+    tg = tg_by_stream[stream_number]
+    vk = vk_by_stream[stream_number]
+    return {"stream_number": stream_number, "tg": tg, "vk": vk}
+
+
+def _pair_for_stream_from_catalog(catalog: dict[str, Any], stream_number: int) -> dict[str, Any] | None:
+    tg = next((item for item in catalog.get("tg") or [] if int(item.get("number") or 0) == stream_number), None)
+    vk = next((item for item in catalog.get("vk") or [] if int(item.get("number") or 0) == stream_number), None)
+    if not tg or not vk:
+        return None
+    return {"stream_number": stream_number, "tg": tg, "vk": vk}
 
 
 def _serialize_course(course: AccessCourse, chats: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1010,6 +1233,173 @@ def _serialize_course(course: AccessCourse, chats: dict[str, dict[str, Any]]) ->
             "vk": (course_chats.get("vk") or {}).get("number"),
         },
     }
+
+
+def _pin_candidates(phone: str, platform_id: str) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    clean_platform_id = _clean(platform_id)[:160]
+    if clean_platform_id:
+        result.append(("platform_id", clean_platform_id))
+    for value in sorted(_phone_variants(phone)):
+        if value:
+            result.append(("phone", value))
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
+    for item in result:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _pin_payload(
+    *,
+    course_key: str,
+    source: str,
+    identity_kind: str,
+    identity_value: str,
+    stream_number: int,
+    tg_url: str,
+    vk_url: str,
+) -> dict[str, Any]:
+    title = COURSE_LABELS.get(course_key) or (CHAT_SHEETS.get(course_key) or {}).get("title") or course_key
+    return {
+        "ok": True,
+        "course_key": course_key,
+        "course_title": title,
+        "source": source,
+        "identity": {"kind": identity_kind, "value": identity_value},
+        "stream_number": stream_number,
+        "links": {"tg": tg_url, "vk": vk_url, "vk_web": _normalize_vk_join_web_url(vk_url)},
+    }
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _strip_query_param(url: str, param_name: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query_items = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if key != param_name
+    ]
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urllib.parse.urlencode(query_items),
+        parsed.fragment,
+    ))
+
+
+def _normalize_vk_join_web_url(vk_url: str) -> str:
+    clean_url = _clean(vk_url)
+    if not clean_url or "vk.me/join/" not in clean_url:
+        return clean_url
+
+    cache_key = f"vk_web:{clean_url}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        request = urllib.request.Request(
+            clean_url,
+            headers={"User-Agent": "Mozilla/5.0 SobakovodChatLinks/1.0"},
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        try:
+            opener.open(request, timeout=5)
+            return _cache_set(cache_key, clean_url)
+        except urllib.error.HTTPError as error:
+            location = error.headers.get("Location") or ""
+            if not location:
+                return _cache_set(cache_key, clean_url)
+            absolute_location = urllib.parse.urljoin(clean_url, location)
+
+        parsed = urllib.parse.urlsplit(absolute_location)
+        if parsed.netloc.lower().endswith("vk.com") and parsed.path == "/chatjoin":
+            return _cache_set(cache_key, _strip_query_param(absolute_location, "force_redirect_to_app"))
+    except Exception as error:
+        _log("warning", "vk web url normalization failed: %s", error)
+
+    return _cache_set(cache_key, clean_url)
+
+
+async def _resolve_static_chat(course_key: str, phone: str, platform_id: str) -> dict[str, Any]:
+    if course_key not in CHAT_SHEETS:
+        return {"ok": False, "error": "unknown_course"}
+    candidates = _pin_candidates(phone, platform_id)
+    if not candidates:
+        return {"ok": False, "error": "identity_required"}
+
+    _init_module_db()
+    with _cache_db() as conn:
+        existing = None
+        for kind, value in candidates:
+            row = conn.execute(
+                """
+                SELECT identity_kind, identity_value, stream_number, tg_url, vk_url
+                FROM chat_link_pins
+                WHERE course_key = ? AND identity_kind = ? AND identity_value = ?
+                LIMIT 1
+                """,
+                (course_key, kind, value),
+            ).fetchone()
+            if row:
+                existing = row
+                break
+
+    catalog = await _load_chat_catalog(course_key)
+    if existing:
+        identity_kind, identity_value, stream_number, tg_url, vk_url = existing
+        stream_number = int(stream_number)
+        pair = _pair_for_stream_from_catalog(catalog, stream_number)
+        if pair:
+            tg_url = str((pair["tg"] or {}).get("url") or tg_url)
+            vk_url = str((pair["vk"] or {}).get("url") or vk_url)
+        return _pin_payload(
+            course_key=course_key,
+            source="pinned",
+            identity_kind=str(identity_kind),
+            identity_value=str(identity_value),
+            stream_number=stream_number,
+            tg_url=str(tg_url or ""),
+            vk_url=str(vk_url or ""),
+        )
+
+    pair = _latest_pair_from_catalog(catalog)
+    stream_number = int(pair["stream_number"])
+    tg_url = str((pair["tg"] or {}).get("url") or "")
+    vk_url = str((pair["vk"] or {}).get("url") or "")
+    now = time.time()
+    primary_kind, primary_value = candidates[0]
+    with _cache_db() as conn:
+        for kind, value in candidates:
+            conn.execute(
+                """
+                INSERT INTO chat_link_pins (
+                    course_key, identity_kind, identity_value, stream_number,
+                    tg_url, vk_url, source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'first_open', ?, ?)
+                ON CONFLICT(course_key, identity_kind, identity_value) DO NOTHING
+                """,
+                (course_key, kind, value, stream_number, tg_url, vk_url, now, now),
+            )
+        conn.commit()
+    return _pin_payload(
+        course_key=course_key,
+        source="first_open",
+        identity_kind=primary_kind,
+        identity_value=primary_value,
+        stream_number=stream_number,
+        tg_url=tg_url,
+        vk_url=vk_url,
+    )
 
 
 async def _lookup_access(email: str, phone: str) -> dict[str, Any]:
@@ -1076,7 +1466,11 @@ async def _lookup_access(email: str, phone: str) -> dict[str, Any]:
 
 @router.get("/status")
 async def status(request: Request):
+    user = await _require_panel_user(request)
+    if isinstance(user, JSONResponse):
+        return user
     account, token = _getcourse_credentials()
+    credentials_path = _google_credentials_path()
     chats_ready = False
     chat_error = ""
     try:
@@ -1092,6 +1486,8 @@ async def status(request: Request):
                 "GETCOURSE_ACCOUNT_NAME": bool(account),
                 "GETCOURSE_API_TOKEN": bool(token),
                 "TILDA_CHAT_LINKS_SPREADSHEET_ID": _spreadsheet_id(),
+                "GOOGLE_CREDENTIALS_FILE": bool(credentials_path and credentials_path.exists()),
+                "GOOGLE_AUTH_AVAILABLE": _google_auth_available(),
             },
             "ready": bool(account and token and chats_ready),
             "chats_ready": chats_ready,
@@ -1236,6 +1632,24 @@ async def lookup(
     return _json(request, payload)
 
 
+@router.get("/resolve-static")
+async def resolve_static(
+    request: Request,
+    course: str = Query("", max_length=20),
+    phone: str = Query("", max_length=80),
+    platform_id: str = Query("", max_length=160),
+):
+    course_key = _clean(course).lower()
+    try:
+        payload = await _resolve_static_chat(course_key, phone, platform_id)
+        if not payload.get("ok"):
+            return _json(request, payload, status_code=400)
+        return _json(request, payload)
+    except Exception as error:
+        _log("error", "resolve-static failed course=%s phone=%s platform_id=%s: %s", course_key, _mask_phone(phone), bool(platform_id), error)
+        return _json(request, {"ok": False, "error": "resolve_failed"}, status_code=502)
+
+
 @router.get("/script.js")
 async def tilda_script(request: Request):
     src = r"""
@@ -1363,6 +1777,9 @@ async def snippet(request: Request):
 
 @router.get("/debug/chats")
 async def debug_chats(request: Request):
+    user = await _require_panel_user(request)
+    if isinstance(user, JSONResponse):
+        return user
     try:
         return _json(request, {"ok": True, "chats": await _load_current_chats()})
     except Exception as error:

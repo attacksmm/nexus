@@ -11,10 +11,15 @@
   <tr><td><code>AMO_BASE_URL</code></td><td>URL аккаунта amoCRM, например <code>https://example.amocrm.ru</code></td></tr>
   <tr><td><code>AMO_ACCESS_TOKEN</code></td><td>Токен amoCRM с доступом к сделкам и пользователям</td></tr>
   <tr><td><code>AMO_SENLER_WEBHOOK_SECRET</code></td><td>Необязательный секрет webhook. Если задан, имеет приоритет над настройкой в панели.</td></tr>
+  <tr><td><code>AMO_SENLER_WEBHOOK_URL</code></td><td>Полный публичный URL webhook для автоматической регистрации в amoCRM. Если пусто, URL собирается из публичной базы Nexus и секрета.</td></tr>
+  <tr><td><code>AMO_SENLER_PUBLIC_BASE</code></td><td>Публичная база Nexus для сборки webhook URL, по умолчанию <code>https://junior.sobakovod.pro/nexus</code>.</td></tr>
+  <tr><td><code>AMO_SENLER_WEBHOOK_WATCHDOG</code></td><td><code>1</code> включает периодическую проверку и восстановление webhook amoCRM.</td></tr>
+  <tr><td><code>AMO_SENLER_WEBHOOK_WATCHDOG_INTERVAL</code></td><td>Интервал проверки в секундах, минимум 300, по умолчанию 3600.</td></tr>
 </table>
 
 <h2>Webhook</h2>
 <p>URL берется во вкладке «Webhook». Если задан секрет, amoCRM должна отправлять запрос на URL с <code>?secret=...</code>. Модуль принимает стандартный формат amoCRM <code>application/x-www-form-urlencoded</code> и JSON для ручного теста. Обрабатываются события <code>leads[add]</code>, <code>leads[status]</code>, <code>leads[responsible]</code> и создание сделки, пришедшее как <code>leads[update]</code>. Ответ для amoCRM всегда возвращается с HTTP 200, чтобы amoCRM не отключала webhook из-за технических ошибок обработки.</p>
+<p>Если включен <code>AMO_SENLER_WEBHOOK_WATCHDOG=1</code>, модуль на старте и далее по интервалу проверяет amoCRM webhook и заново регистрирует его, если amoCRM отключила или удалила запись. Для авто-регистрации используются только события сделок <code>add_lead</code>, <code>status_lead</code>, <code>update_lead</code> и <code>responsible_lead</code>.</p>
 <pre><code>POST /amocrm-senler/api/webhook
 Content-Type: application/x-www-form-urlencoded
 
@@ -40,7 +45,7 @@ leads[status][0][responsible_user_id]=987654</code></pre>
   <li>Если webhook не содержит это поле, модуль запрашивает сделку через amoCRM API.</li>
   <li>Точное имя ответственного берется через amoCRM users API по <code>responsible_user_id</code>. Если amoCRM передала <code>0</code> или пустое значение, модуль не подставляет выдуманное имя.</li>
   <li>После добавления в Senler вызывается <code>vars/set</code> для <code>amo_deal_id</code>. <code>amo_responsible</code> записывается только когда amoCRM отдала точного ответственного.</li>
-  <li>После успешной отправки в Senler модуль добавляет обычное примечание в сделку amoCRM со ссылкой на VK-диалог.</li>
+  <li>После успешной отправки в Senler модуль не добавляет примечания в сделку amoCRM.</li>
 </ol>
 
 <h2>API модуля</h2>
@@ -48,6 +53,7 @@ leads[status][0][responsible_user_id]=987654</code></pre>
   <tr><th>Метод</th><th>Путь</th><th>Описание</th></tr>
   <tr><td>GET</td><td><code>/env-status</code></td><td>Проверка наличия ENV без вывода значений</td></tr>
   <tr><td>GET/POST</td><td><code>/settings</code></td><td>Настройки webhook secret, поля VK ID и таймаута</td></tr>
+  <tr><td>GET</td><td><code>/webhook/status</code></td><td>Проверить и восстановить webhook amoCRM</td></tr>
   <tr><td>GET</td><td><code>/amo/statuses</code></td><td>Список воронок и статусов amoCRM для выбора галочками</td></tr>
   <tr><td>GET/POST</td><td><code>/bindings</code></td><td>Список и сохранение связок статусов</td></tr>
   <tr><td>PUT</td><td><code>/bindings/{id}/toggle</code></td><td>Включить/отключить связку</td></tr>

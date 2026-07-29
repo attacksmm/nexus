@@ -39,6 +39,7 @@
 
     /* table selector */
     .table-tabs{display:flex;align-items:center;gap:4px;flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;}
+    .table-tab-wrap{display:inline-flex;align-items:stretch;flex-shrink:0;}
     .table-tab{
       display:inline-flex;align-items:center;gap:6px;padding:4px 10px;
       border:1px solid transparent;background:transparent;color:var(--text-muted);
@@ -46,8 +47,8 @@
     }
     .table-tab:hover{border-color:var(--border);background:var(--panel-strong);}
     .table-tab--active{border-color:var(--border-mid)!important;background:var(--panel-soft)!important;color:var(--text);}
-    .table-tab__del{opacity:.5;margin-left:2px;font-size:.9em;}
-    .table-tab__del:hover{opacity:1;color:var(--bad);}
+    .table-tab__del{display:grid;place-items:center;min-width:26px;padding:0;border:1px solid transparent;background:transparent;color:var(--text-subtle);cursor:pointer;}
+    .table-tab__del:hover{border-color:var(--bad-bd);background:var(--bad-bg);color:var(--bad);}
 
     /* table */
     .table-wrap{overflow:auto;min-width:0;}
@@ -89,6 +90,48 @@
     .status-line{margin:0;color:var(--text-subtle);font-size:.78rem;min-height:16px;}
     .status-line--ok{color:var(--ok);}
     .status-line--err{color:var(--bad);}
+
+    @media(max-width:760px){
+      .toolbar{height:auto;min-height:104px;display:grid;grid-template-columns:auto auto minmax(0,1fr) 40px 40px;gap:8px;padding:8px;overflow:visible;}
+      .table-tabs{grid-column:1/-1;width:100%;min-height:40px;}
+      .table-tab,.table-tab__del{min-height:40px;}
+      .table-tab__del{min-width:40px;}
+      .toolbar__divider,.toolbar__stats{display:none;}
+      #newTableBtn{grid-column:1;}
+      #addRecordBtn{grid-column:2;}
+      #searchInput{grid-column:3;}
+      #searchBtn{grid-column:4;}
+      #refreshBtn{grid-column:5;}
+      .btn,.btn--xs,.search,.form-input{min-height:40px;}
+      .search{width:100%;min-width:0;max-width:none;}
+      .table-wrap{overflow-x:hidden;overflow-y:auto;}
+      table{display:block;width:100%;min-width:0;}
+      #tableHead{display:none;}
+      #tableBody{display:block;}
+      #tableBody tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 10px;padding:11px 10px;border-bottom:1px solid var(--border);}
+      #tableBody td{display:block;max-width:none;padding:0;border:0;white-space:normal;overflow:visible;text-overflow:clip;}
+      #tableBody td::before{content:attr(data-label);display:block;margin-bottom:3px;color:var(--text-subtle);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;}
+      #tableBody .record-platform{grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere;}
+      #tableBody .record-actions{grid-column:2;grid-row:1;display:flex;gap:6px;align-items:end;}
+      #tableBody .record-actions::before{display:none;}
+      #tableBody .record-actions .btn{width:40px;padding:0;}
+      #tableBody .record-fields{grid-column:1/-1;grid-row:2;overflow-wrap:anywhere;}
+      #tableBody .record-id{grid-column:1;grid-row:3;color:var(--text-subtle);}
+      #tableBody .record-created{grid-column:2;grid-row:3;color:var(--text-subtle);text-align:right;}
+      #tableBody .record-empty{grid-column:1/-1;}
+      .pagination{min-height:56px;padding:8px 10px;}
+      .pagination .btn{min-width:40px;padding:0;}
+      .overlay{place-items:end center;padding:0;}
+      .dialog{width:100%;max-height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;}
+      .dialog__head{padding:10px 12px;}
+      .dialog__head .btn{width:40px;padding:0;}
+      .dialog__body{padding:12px;max-height:none;}
+      .dialog__foot{padding:10px 12px;}
+      .dialog__foot .btn{min-width:120px;}
+      .form-2col{grid-template-columns:1fr;}
+      .cf-row{grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) 40px;gap:6px;}
+      .cf-row .btn{width:40px;padding:0;}
+    }
   </style>
 </head>
 <body>
@@ -111,7 +154,7 @@
   <div class="table-wrap scroll-zone">
     <table>
       <thead id="tableHead"><tr><th>id</th><th>platform_id</th><th>Поля</th><th>Создан</th><th></th></tr></thead>
-      <tbody id="tableBody"></tbody>
+      <tbody id="tableBody"><tr><td class="record-empty" colspan="5">Загрузка…</td></tr></tbody>
     </table>
   </div>
 
@@ -127,10 +170,10 @@
 
 <!-- Record dialog -->
 <div id="recDialog" class="overlay" hidden>
-  <div class="dialog">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="recTitle">
     <div class="dialog__head">
       <div><p class="eyebrow">Клиент</p><h2 id="recTitle">Новая запись</h2></div>
-      <button id="recClose" class="btn btn--xs btn--ghost" type="button">×</button>
+      <button id="recClose" class="btn btn--xs btn--ghost" type="button" aria-label="Закрыть">×</button>
     </div>
     <div class="dialog__body scroll-zone">
       <input id="recId" type="hidden" />
@@ -153,10 +196,10 @@
 
 <!-- New table dialog -->
 <div id="tblDialog" class="overlay" hidden>
-  <div class="dialog">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="tblTitle">
     <div class="dialog__head">
-      <div><p class="eyebrow">Таблицы</p><h2>Новая таблица</h2></div>
-      <button id="tblClose" class="btn btn--xs btn--ghost" type="button">×</button>
+      <div><p class="eyebrow">Таблицы</p><h2 id="tblTitle">Новая таблица</h2></div>
+      <button id="tblClose" class="btn btn--xs btn--ghost" type="button" aria-label="Закрыть">×</button>
     </div>
     <div class="dialog__body scroll-zone">
       <label class="form-label">Системное имя (латиница, _)
@@ -189,6 +232,7 @@ const API = BASE.replace(/\/panel$/, "") + "/api";
 let currentTable = "default";
 let offset = 0, total = 0, query = "";
 const LIMIT = 50;
+let tablesRequest = 0, recordsRequest = 0;
 
 const $ = id => document.getElementById(id);
 const SAFE_TABLE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
@@ -202,6 +246,7 @@ function setCurrentTable(name, syncPath = true) {
   currentTable = SAFE_TABLE.test(name) ? name : "default";
   offset = 0;
   query = "";
+  if ($("searchInput")) $("searchInput").value = "";
   if (syncPath) syncModulePath();
 }
 
@@ -244,33 +289,61 @@ installHoverScroll();
 // ── Tables ────────────────────────────────────────────────────────────────────
 
 async function loadTables() {
-  const res = await fetch(API + "/tables");
-  const tables = await res.json();
-  const tabs = $("tableTabs");
-  tabs.innerHTML = "";
-  if (!tables.some(t => t.name === currentTable)) {
-    currentTable = "default";
-    syncModulePath();
-  }
-  for (const t of tables) {
-    const btn = document.createElement("button");
-    btn.className = "table-tab" + (t.name === currentTable ? " table-tab--active" : "");
-    btn.dataset.name = t.name;
-    btn.type = "button";
-    btn.innerHTML = `${esc(t.display_name)}${t.name !== "default" ? `<span class="table-tab__del" data-del="${esc(t.name)}" title="Удалить таблицу">×</span>` : ""}`;
-    btn.addEventListener("click", e => {
-      if (e.target.dataset.del) { delTable(e.target.dataset.del); return; }
-      setCurrentTable(t.name);
-      loadTables();
-      loadRecords();
-    });
-    tabs.appendChild(btn);
+  const requestId = ++tablesRequest;
+  try {
+    const res = await fetch(API + "/tables");
+    const tables = await res.json();
+    if (!res.ok) throw new Error(tables.detail || tables.error || "Не удалось загрузить таблицы");
+    if (requestId !== tablesRequest) return;
+    const tabs = $("tableTabs");
+    if (!tables.some(t => t.name === currentTable)) {
+      currentTable = "default";
+      syncModulePath();
+    }
+    const fragment = document.createDocumentFragment();
+    for (const t of tables) {
+      const label = t.display_name || t.name;
+      const wrap = document.createElement("div");
+      wrap.className = "table-tab-wrap";
+      const btn = document.createElement("button");
+      btn.className = "table-tab" + (t.name === currentTable ? " table-tab--active" : "");
+      btn.dataset.name = t.name;
+      btn.type = "button";
+      btn.textContent = label;
+      btn.addEventListener("click", () => {
+        setCurrentTable(t.name);
+        loadTables();
+        loadRecords();
+      });
+      wrap.appendChild(btn);
+      if (t.name !== "default") {
+        const del = document.createElement("button");
+        del.className = "table-tab__del";
+        del.type = "button";
+        del.dataset.del = t.name;
+        del.title = `Удалить ${label}`;
+        del.setAttribute("aria-label", `Удалить таблицу ${label}`);
+        del.textContent = "×";
+        del.addEventListener("click", () => delTable(t.name));
+        wrap.appendChild(del);
+      }
+      fragment.appendChild(wrap);
+    }
+    tabs.replaceChildren(fragment);
+    requestAnimationFrame(() => tabs.querySelector(".table-tab--active")?.scrollIntoView({block:"nearest",inline:"center"}));
+  } catch (error) {
+    if (requestId === tablesRequest) $("statsLine").textContent = error.message;
   }
 }
 
 async function delTable(name) {
   if (!confirm(`Удалить таблицу «${name}»? Все данные будут потеряны.`)) return;
-  await fetch(API + `/tables/${name}`, { method: "DELETE" });
+  const res = await fetch(API + `/tables/${name}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    $("statsLine").textContent = data.detail || data.error || "Не удалось удалить таблицу";
+    return;
+  }
   setCurrentTable("default");
   loadTables();
   loadRecords();
@@ -279,50 +352,60 @@ async function delTable(name) {
 // ── Records ───────────────────────────────────────────────────────────────────
 
 async function loadRecords() {
+  const requestId = ++recordsRequest;
   const url = `${API}/tables/${currentTable}/records?limit=${LIMIT}&offset=${offset}&q=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  if (data.error) { $("tableBody").innerHTML = `<tr><td colspan="5" style="color:var(--bad)">${esc(data.error)}</td></tr>`; return; }
-  total = data.total;
+  $("statsLine").textContent = "Загрузка…";
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.detail || data.error || "Не удалось загрузить записи");
+    if (requestId !== recordsRequest) return;
+    total = Number(data.total || 0);
 
-  const tbody = $("tableBody");
-  if (!data.items.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-subtle);text-align:center;padding:20px">Нет записей</td></tr>';
-  } else {
-    tbody.innerHTML = data.items.map(r => {
-      const cf = r.custom_fields || {};
-      const sourceTable = r.source_table || currentTable;
-      const sourceLabel = r.source_display_name || sourceTable;
-      // показываем основные поля если есть
-      const main = ["name","имя","phone","телефон","email","source","источник"]
-        .filter(k => cf[k])
-        .slice(0, 4)
-        .map(k => `<span class="cf-badge">${esc(k)}: ${esc(previewValue(cf[k]))}</span>`)
-        .join("");
-      const sourceBadge = currentTable === "default" && sourceTable !== "default"
-        ? `<span class="cf-badge">лист: ${esc(sourceLabel)}</span>`
-        : "";
-      const extra = Object.keys(cf).length - 4;
-      return `<tr>
-        <td style="color:var(--text-subtle)">${r.id}</td>
-        <td>${esc(r.platform_id) || '<span style="color:var(--text-subtle)">—</span>'}</td>
-        <td>${sourceBadge}${main || '<span style="color:var(--text-subtle);font-size:.78rem">пусто</span>'}${extra > 0 ? `<span style="color:var(--text-subtle);font-size:.72rem"> +${extra}</span>` : ""}</td>
-        <td style="color:var(--text-subtle)">${(r.created_at||"").slice(0,10)}</td>
-        <td style="display:flex;gap:3px">
-          <button class="btn btn--xs" onclick="editRecord(${r.id}, '${escAttr(sourceTable)}')">✎</button>
-          <button class="btn btn--xs btn--danger" onclick="delRecord(${r.id}, '${escAttr(sourceTable)}')">×</button>
-        </td>
-      </tr>`;
-    }).join("");
+    const tbody = $("tableBody");
+    if (!data.items.length) {
+      tbody.innerHTML = '<tr><td class="record-empty" colspan="5">Нет записей</td></tr>';
+    } else {
+      tbody.innerHTML = data.items.map(r => {
+        const cf = r.custom_fields || {};
+        const sourceTable = r.source_table || currentTable;
+        const sourceLabel = r.source_display_name || sourceTable;
+        const main = ["name","имя","phone","телефон","email","source","источник"]
+          .filter(k => cf[k])
+          .slice(0, 4)
+          .map(k => `<span class="cf-badge">${esc(k)}: ${esc(previewValue(cf[k]))}</span>`)
+          .join("");
+        const sourceBadge = currentTable === "default" && sourceTable !== "default"
+          ? `<span class="cf-badge">лист: ${esc(sourceLabel)}</span>`
+          : "";
+        const extra = Math.max(0, Object.keys(cf).length - 4);
+        return `<tr>
+          <td class="record-id" data-label="ID">${esc(r.id)}</td>
+          <td class="record-platform" data-label="platform_id">${esc(r.platform_id) || '<span style="color:var(--text-subtle)">—</span>'}</td>
+          <td class="record-fields" data-label="Поля">${sourceBadge}${main || '<span style="color:var(--text-subtle);font-size:.78rem">пусто</span>'}${extra > 0 ? `<span style="color:var(--text-subtle);font-size:.72rem"> +${extra}</span>` : ""}</td>
+          <td class="record-created" data-label="Создан">${esc((r.created_at||"").slice(0,10))}</td>
+          <td class="record-actions">
+            <button class="btn btn--xs" type="button" aria-label="Изменить запись" title="Изменить" onclick="editRecord(${Number(r.id)}, '${escAttr(sourceTable)}')">✎</button>
+            <button class="btn btn--xs btn--danger" type="button" aria-label="Удалить запись" title="Удалить" onclick="delRecord(${Number(r.id)}, '${escAttr(sourceTable)}')">×</button>
+          </td>
+        </tr>`;
+      }).join("");
+    }
+
+    $("pageInfo").textContent = total ? `${offset+1}–${Math.min(offset+LIMIT,total)}` : "0";
+    $("totalInfo").textContent = `Всего: ${total}`;
+    $("prevBtn").disabled = offset === 0;
+    $("nextBtn").disabled = offset + LIMIT >= total;
+
+    const statsRes = await fetch(API + `/tables/${currentTable}/stats`);
+    const stats = await statsRes.json().catch(() => ({}));
+    if (requestId !== recordsRequest) return;
+    $("statsLine").textContent = statsRes.ok && stats.total !== undefined ? `Всего: ${stats.total} · Сегодня: ${stats.today}` : `Всего: ${total}`;
+  } catch (error) {
+    if (requestId !== recordsRequest) return;
+    $("tableBody").innerHTML = `<tr><td class="record-empty" colspan="5" style="color:var(--bad)">${esc(error.message)}</td></tr>`;
+    $("statsLine").textContent = "Ошибка загрузки";
   }
-
-  $("pageInfo").textContent = `${offset+1}–${Math.min(offset+LIMIT,total)}`;
-  $("totalInfo").textContent = `Всего: ${total}`;
-  $("prevBtn").disabled = offset === 0;
-  $("nextBtn").disabled = offset + LIMIT >= total;
-
-  const stats = await fetch(API + `/tables/${currentTable}/stats`).then(r => r.json()).catch(() => ({}));
-  $("statsLine").textContent = stats.total !== undefined ? `Всего: ${stats.total} · Сегодня: ${stats.today}` : "";
 }
 
 $("prevBtn").addEventListener("click", () => { offset = Math.max(0, offset - LIMIT); loadRecords(); });
@@ -334,8 +417,9 @@ $("refreshBtn").addEventListener("click", () => { loadTables(); loadRecords(); }
 // ── Record dialog ─────────────────────────────────────────────────────────────
 
 $("addRecordBtn").addEventListener("click", () => openRecDialog());
-$("recClose").addEventListener("click", () => { $("recDialog").hidden = true; });
-$("recDialog").addEventListener("click", e => { if (e.target === $("recDialog")) $("recDialog").hidden = true; });
+function closeRecDialog() { $("recDialog").hidden = true; }
+$("recClose").addEventListener("click", closeRecDialog);
+$("recDialog").addEventListener("click", e => { if (e.target === $("recDialog")) closeRecDialog(); });
 
 function openRecDialog(rec = null) {
   $("recId").value = rec?.id ?? "";
@@ -344,6 +428,7 @@ function openRecDialog(rec = null) {
   $("recPlatformId").value = rec?.platform_id ?? "";
   buildCfEditor(rec?.custom_fields ?? {});
   $("recStatus").textContent = "";
+  $("recStatus").className = "status-line";
   $("recDialog").hidden = false;
   $("recPlatformId").focus();
 }
@@ -384,6 +469,8 @@ function addCfRow(k = "", v = "") {
 $("cfAddRow").addEventListener("click", () => addCfRow());
 
 $("recSave").addEventListener("click", async () => {
+  const saveBtn = $("recSave");
+  if (saveBtn.disabled) return;
   const id = $("recId").value;
   const platform_id = $("recPlatformId").value.trim();
   const cf = {};
@@ -401,15 +488,29 @@ $("recSave").addEventListener("click", async () => {
   const targetTable = id ? ($("recSourceTable").value || currentTable) : currentTable;
   const url = id ? `${API}/tables/${targetTable}/records/${id}` : `${API}/tables/${currentTable}/records`;
   const method = id ? "PUT" : "POST";
-  const res = await fetch(url, { method, headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
-  if (!res.ok) { const e = await res.json().catch(() => ({})); $("recStatus").textContent = e.detail || e.error || "Ошибка"; $("recStatus").className = "status-line status-line--err"; return; }
-  $("recDialog").hidden = true;
-  loadRecords();
+  saveBtn.disabled = true;
+  $("recStatus").textContent = "Сохранение…";
+  $("recStatus").className = "status-line";
+  try {
+    const res = await fetch(url, { method, headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || e.error || "Не удалось сохранить запись");
+    }
+    closeRecDialog();
+    loadRecords();
+  } catch (error) {
+    $("recStatus").textContent = error.message;
+    $("recStatus").className = "status-line status-line--err";
+  } finally {
+    saveBtn.disabled = false;
+  }
 });
 
 async function editRecord(id, sourceTable = currentTable) {
+  $("statsLine").textContent = "Загрузка записи…";
   const res = await fetch(`${API}/tables/${sourceTable}/records/${id}`);
-  if (!res.ok) return;
+  if (!res.ok) { $("statsLine").textContent = "Не удалось загрузить запись"; return; }
   const rec = await res.json();
   rec.source_table = sourceTable;
   openRecDialog(rec);
@@ -417,30 +518,50 @@ async function editRecord(id, sourceTable = currentTable) {
 
 async function delRecord(id, sourceTable = currentTable) {
   if (!confirm("Удалить запись?")) return;
-  await fetch(`${API}/tables/${sourceTable}/records/${id}`, { method: "DELETE" });
+  const res = await fetch(`${API}/tables/${sourceTable}/records/${id}`, { method: "DELETE" });
+  if (!res.ok) { $("statsLine").textContent = "Не удалось удалить запись"; return; }
   loadRecords();
 }
 
 // ── New table dialog ──────────────────────────────────────────────────────────
 
-$("newTableBtn").addEventListener("click", () => { $("tblName").value=""; $("tblDisplay").value=""; $("tblDesc").value=""; $("tblStatus").textContent=""; $("tblDialog").hidden=false; $("tblName").focus(); });
-$("tblClose").addEventListener("click", () => { $("tblDialog").hidden=true; });
-$("tblDialog").addEventListener("click", e => { if (e.target===$("tblDialog")) $("tblDialog").hidden=true; });
+function closeTableDialog() { $("tblDialog").hidden = true; }
+$("newTableBtn").addEventListener("click", () => { $("tblName").value=""; $("tblDisplay").value=""; $("tblDesc").value=""; $("tblStatus").textContent=""; $("tblStatus").className="status-line"; $("tblDialog").hidden=false; $("tblName").focus(); });
+$("tblClose").addEventListener("click", closeTableDialog);
+$("tblDialog").addEventListener("click", e => { if (e.target===$("tblDialog")) closeTableDialog(); });
 
 $("tblSave").addEventListener("click", async () => {
+  const saveBtn = $("tblSave");
+  if (saveBtn.disabled) return;
   const name = $("tblName").value.trim();
   const display_name = $("tblDisplay").value.trim() || name;
-  if (!name) { $("tblStatus").textContent = "Введите имя"; return; }
-  const res = await fetch(API + "/tables", {
-    method: "POST", headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ name, display_name, description: $("tblDesc").value.trim() })
-  });
-  const data = await res.json();
-  if (!res.ok) { $("tblStatus").textContent = data.error || data.detail || "Ошибка"; $("tblStatus").className="status-line status-line--err"; return; }
-  $("tblDialog").hidden = true;
-  setCurrentTable(name);
-  loadTables();
-  loadRecords();
+  if (!name) { $("tblStatus").textContent = "Введите имя"; $("tblStatus").className="status-line status-line--err"; return; }
+  saveBtn.disabled = true;
+  $("tblStatus").textContent = "Создание…";
+  $("tblStatus").className = "status-line";
+  try {
+    const res = await fetch(API + "/tables", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ name, display_name, description: $("tblDesc").value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || data.detail || "Не удалось создать таблицу");
+    closeTableDialog();
+    setCurrentTable(name);
+    loadTables();
+    loadRecords();
+  } catch (error) {
+    $("tblStatus").textContent = error.message;
+    $("tblStatus").className = "status-line status-line--err";
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("recDialog").hidden) closeRecDialog();
+  else if (!$("tblDialog").hidden) closeTableDialog();
 });
 
 // ── Utils ─────────────────────────────────────────────────────────────────────

@@ -1,0 +1,11 @@
+{
+  "id": "getcourse-users",
+  "name": "GetCourse → Пользователи",
+  "version": "1.0.1",
+  "description": "Принимает пользователей из процесса GetCourse и без дублей обновляет таблицу «Клиенты GetCourse».",
+  "env_required": [],
+  "env_vars": {
+    "NEXUS_CUSTOMER_DB_API_TOKEN": "Токен внутреннего API модуля «База клиентов»",
+    "NEXUS_INTERNAL_BASE": "Необязательный внутренний адрес Nexus, по умолчанию http://127.0.0.1:8080"
+  }
+}

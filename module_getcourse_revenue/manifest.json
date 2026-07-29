@@ -1,0 +1,14 @@
+{
+  "id": "getcourse-revenue",
+  "name": "Конверсии",
+  "version": "1.5.3",
+  "description": "Конверсии GetCourse и входящей воронки amoCRM с дисковым индексом личностей и двумя режимами аналитики.",
+  "env_required": [],
+  "env_vars": {
+    "GETCOURSE_REVENUE_CUSTOMER_DB_PATH": "Необязательный абсолютный путь к customer-db.db",
+    "GETCOURSE_REVENUE_ORDERS_DB_PATH": "Необязательный абсолютный путь к БД модуля getcourse-orders",
+    "GETCOURSE_REVENUE_TRACKER_DB_PATH": "Необязательный абсолютный путь к БД модуля tracker",
+    "GETCOURSE_ACCOUNT_NAME": "Имя аккаунта GetCourse для синхронизации точного поля «Заработано»",
+    "GETCOURSE_API_TOKEN": "API-ключ GetCourse для Export API"
+  }
+}

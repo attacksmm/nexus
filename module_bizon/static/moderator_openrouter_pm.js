@@ -31,7 +31,7 @@
     const FETCH_TIMEOUT = 180000;
     const MINIMUM_REPLY_DELAY_MS = 60000;
 
-    console.log('[NEXUS-BIZON] Runtime 1.1.22 loaded');
+    console.log('[NEXUS-BIZON] Runtime 1.1.23 loaded');
     console.log('[NEXUS-BIZON] Config loaded:', CFG);
     console.log('[NEXUS-BIZON] Status:', { isActive });
 

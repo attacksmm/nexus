@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bizon365 → Google Sheets — документация</title>
+  <style>:root{color-scheme:dark}*{box-sizing:border-box}body{max-width:900px;margin:0;padding:20px;background:#060606;color:#f2f2f2;font:14px/1.55 "IBM Plex Sans","Segoe UI",system-ui,sans-serif;overflow-wrap:anywhere}p{color:#bababa}code,pre{background:#101010;border:1px solid #2d2d2d;border-radius:0}code{padding:1px 4px;color:#eee}pre{padding:10px;white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:14px}}</style>
+</head>
+<body>
+  <h1>Bizon365 → Google Sheets</h1>
+  <p>Модуль выгружает все посещения из <code>bizon-reports</code>, независимо от порога amoCRM.</p>
+  <h2>Целевые вкладки</h2>
+  <p>Полная техническая запись хранится во вкладке <code>Bizon365 Nexus</code>. Новые и изменённые посещения параллельно зеркалируются во вкладку <code>Vakas</code> строго в существующие столбцы A:W. Заголовок Vakas, порядок и количество столбцов модуль не меняет.</p>
+  <p>Перед записью проверяются все 23 заголовка Vakas, включая исторические <code>sity</code>, <code>Watched from</code> и два столбца <code>web_min</code>. При несовпадении схема не исправляется автоматически: событие получает ошибку, а таблица остаётся нетронутой.</p>
+  <p>Успешная проверка схемы кэшируется на 5 минут для всего пакета. Это защищает массовые отчёты после нескольких эфиров от минутного лимита Google Sheets на чтение.</p>
+  <h2>Идемпотентность</h2>
+  <p><code>attendance_key</code> уникален. Первая версия добавляет по одной строке в обе вкладки, следующая обновляет те же строки. Их номера хранятся раздельно в SQLite модуля.</p>
+  <p>При запуске был сделан контролируемый backfill 10 фактически заполненных строк <code>Bizon365 Nexus</code>; все они сопоставлены с конкретными строками Vakas. Пустая сетка до 1010 строк не копировалась. Дальше модуль добавляет только новые attendance key и обновляет уже сопоставленные.</p>
+  <h2>Авторизация</h2>
+  <pre>GOOGLE_APPLICATION_CREDENTIALS=/secure/path/service-account.json
+NEXUS_BIZON_FEED_TOKEN=...</pre>
+  <p>Service account должен иметь роль редактора таблицы. JSON-ключ не должен попадать в ZIP, репозиторий или логи.</p>
+  <h2>Теневой режим</h2>
+  <p>В dry-run события получают статус <code>shadow</code>. После отключения режима их можно повторно обработать через API <code>POST /events/retry?include_shadow=1</code>.</p>
+</body>
+</html>

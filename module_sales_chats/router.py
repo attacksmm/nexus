@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from orchestrator.auth import can_access_module, enforce_rate_limit, require_admin, verify_token_from_request
+from orchestrator.telegram_proxy import telegram_bot_api_base, telegram_bot_api_proxy_url
 
 router = APIRouter()
 
@@ -192,15 +193,11 @@ def _customer_db_path() -> Path:
 
 
 def _telegram_api_base() -> str:
-    return (os.getenv("SBKVD_LETTER_TELEGRAM_API_BASE", "").strip() or "https://api.telegram.org").rstrip("/")
+    return telegram_bot_api_base(os.getenv("SBKVD_LETTER_TELEGRAM_API_BASE", ""))
 
 
 def _telegram_proxy_url() -> str:
-    return (
-        os.getenv("SBKVD_LETTER_TELEGRAM_PROXY_URL", "").strip()
-        or os.getenv("TELEGRAM_BOT_API_PROXY_URL", "").strip()
-        or os.getenv("TELEGRAM_HTTPS_PROXY_URL", "").strip()
-    )
+    return telegram_bot_api_proxy_url(os.getenv("SBKVD_LETTER_TELEGRAM_PROXY_URL", ""))
 
 
 def _vk_group_id() -> str:

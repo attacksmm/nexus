@@ -1,36 +1,50 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import mimetypes
 import os
 import random
 import re
-import shutil
 import sqlite3
 import time
 from urllib.parse import parse_qs, urlparse
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 try:
     from orchestrator.auth import can_access_module, require_admin, verify_token_from_request
+    from orchestrator.telegram_proxy import telegram_mtproto_proxy_url, telethon_proxy_config
+    from orchestrator.vk_group_poll import VkGroupPollSubscription, shared_vk_group_poll_hub
 except Exception:  # pragma: no cover - isolated local tests
     can_access_module = None
     require_admin = None
     verify_token_from_request = None
+    telegram_mtproto_proxy_url = None
+    telethon_proxy_config = None
+    VkGroupPollSubscription = Any
+    shared_vk_group_poll_hub = None
 
 router = APIRouter()
 
-VK_API_VERSION = "5.131"
+VK_API_VERSION = "5.199"
+VK_INITIAL_USER_LIMIT = 450
+VK_TEST_STAFF_ID = 1105209997
 DEFAULT_MODULE_ID = "course-chat-creator"
+DEFAULT_CHAT_LINKS_SPREADSHEET_ID = "1zu1__XcKxJH8yC9ForDvibaUnKFCS1pxWHEjLgqlVXA"
+CHAT_LINK_SHEETS = {
+    "dog": {"telegram": "304757615", "vk": "443062527"},
+    "puppy": {"telegram": "1437498106", "vk": "65520414"},
+}
 TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
 COURSE_CHAT_TITLE_RE = re.compile(r"^\s*\d+\.\s*\d{2}\.\d{2}\.\d{4}\s*-\s*(Курс Щенок\. Современный Собаковод|Современный Собаковод\b)", re.IGNORECASE)
 
@@ -38,10 +52,17 @@ _ctx = None
 _logger = None
 _db_initialized = False
 _tg_auth_pending: dict[str, dict[str, Any]] = {}
-_vk_web_lock = asyncio.Lock()
-_vk_web_playwright: Any | None = None
-_vk_web_context: Any | None = None
-_vk_web_page: Any | None = None
+_vk_bootstrap_subscription: VkGroupPollSubscription | None = None
+_vk_pin_watchdog_task: asyncio.Task[Any] | None = None
+_vk_invite_dispatch_task: asyncio.Task[Any] | None = None
+_vk_pin_watchdog_state: dict[str, Any] = {
+    "interval_seconds": 10,
+    "last_check_at": "",
+    "checked": 0,
+    "restored": 0,
+    "suspended": 0,
+    "last_error": "",
+}
 
 
 COURSE_DEFAULTS = [
@@ -73,6 +94,8 @@ PEOPLE_DEFAULTS = [
 ]
 
 VK_WELCOME_TEMPLATE = "🐾 Добро пожаловать в закрытый чат курса «{course_full_name}»! 🐾\n\nЯ очень рада, что вы здесь. Вы уже сделали важный шаг на пути к осознанному воспитанию вашей собаки.\n\n🗓 Поток №{stream_number}: Обучение стартует {date_start}\nВпереди у нас 11 недель практического обучения, поддержки и маленьких побед! 💪🏼🐶\n\n📍 ПЕРВЫЙ ШАГ — ЗНАКОМСТВО (ВИЗИТКА)\nПожалуйста, расскажите о себе и своем питомце в ОДНОМ сообщении по форме:\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода/фенотип/дворняжка\n3️⃣ С какими трудностями пришли и какой результат хотите получить (ваша точка В)?\n\n✅ ОБЯЗАТЕЛЬСТВО НА КУРС:\nВ конце своего сообщения обязательно добавьте фразу:\n«Я обязуюсь внимательно изучать материалы курса, если я что-то не понял(а) — посмотреть урок еще раз. Выполнять практику, задавать вопросы Анне и кураторам. Быть терпеливым(ой) к себе и своей любимой собаке и идти к результату шаг за шагом».\n\n🎓 КАК ПРОХОДИТ ОБУЧЕНИЕ:\n• Модули открываются еженедельно в субботу в 12:00 (МСК) на платформе.\n• Все вопросы по урокам, разборы и обратную связь пишем прямо в этот чат.\n• Обязательно отмечайте нас, чтобы мы не пропустили вопрос!\n\n👩‍🏫 Создатель курса: Анна - [id765938|@timofeevapodbordog]\n🛡 Кураторы-кинологи: {kurators_text}\n❤️ Руководитель отдела заботы: Андрей - [id11335495|@id11335495]\n🛠 Технические специалисты: Техническая поддержка - [id1105209997|@tehpod_sobakovodpro], Никита - [id741919467|@attackpng]\n📢 Наше сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat\n\n⚖ ПРАВИЛА ЧАТА:\n— Общаемся культурно, ненормативная лексика и спам запрещены.\n— Аудиосообщения запрещены (их используют только кураторы).\n— Сообщения, нарушающие правила, удаляются автоматически.\n\nНу что, начинаем наше путешествие в новый мир! ❤️"
+VK_TEST_WELCOME_TEMPLATE = "Проверка учебного VK-чата\n\nПроверьте ссылку, закреп, приветствие модератора и права администратора.\n\nСотрудник: [id1105209997|Техническая поддержка]"
+VK_INVITE_FALLBACK_TEMPLATE = "Здравствуйте! Вас не удалось добавить в учебный чат автоматически.\n\nВступите по ссылке: {invite_link}\n\nЕсли войти не получилось, напишите в техническую поддержку: https://vk.me/tehpod_sobakovodpro"
 TG_WELCOME_TEMPLATE = "<b>Всем привет и добро пожаловать в закрытый чат курса «{course_name}»!🐾</b>\n\n<i>Я очень рада, что вы здесь. Вы уже сделали важный шаг, а именно решили осознанно выстраивать жизнь со своей собакой, а не терпеть, надеяться, что перерастёт или бороться в одиночку.\n\nВпереди у нас <b>11 недель практического обучения</b>, поддержки, вопросов, открытий и маленьких (а иногда и очень больших) побед💪🏼🐶\n\nЗдесь находится ваше новое окружение, которые всегда помогут вам, подскажут и поддержат! Этого же они ждут и с вашей стороны. Поэтому открытость и общительность всегда приветствуется🙏🏼</i>\n\n🗓Обучение стартует: {date_start}\n\n<b>А пока несколько ВАЖНЫХ организационных моментов, чтобы ваше пребывание на курсе стало еще удобнее и продуктивнее⤵️</b>\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_info_id}\">Главный чат (вы сейчас здесь)</a></u>\nЭто наш навигатор. Здесь мы с командой будем писать важные объявления, делиться новостями курса, напоминать про эфиры и обновления.\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_vizitka_id}\">Подчат «🤝 Визитка»</a></u>\nМесто, где мы знакомимся. После прочтения этого сообщения обязательно перейдите в подчат «Визитка» и расскажите о себе по заданной форме. \nТак мы с командой сможем узнать вас и вашего питомца поближе, а соответственно точнее помочь вам с вашей ситуацией. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_obuchenie_id}\">Подчат «🎓 Обучение»</a></u>\nСвоего рода наш рабочий кабинет. Здесь все, что касается самого обучения: вопросы по урокам, разборы, обратная связь. \nЕсли что-то не получается - это сюда. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_boltalka_id}\">Подчат «💬 Болталка»</a></u>\nПросто по-человечески поделиться радостью, сомнениями, успехами, поддержать друг друга, выдохнуть, обсудить - в общем, все что угодно (в рамках правил, разумеется😁)\n_________________________________\n\n<b>ПРАВИЛА ЗАКРЫТОГО ЧАТА</b>\n\n1️⃣ Вопросы <u>по рассрочкам и оплатам</u> курса адресуются <u>в службу заботы</u> @andrew_karakchiev\n\n2️⃣ Если вы <u>хотите задать вопрос</u> мне или моим кураторам, то <u>обязательно упоминайте нас в сообщении</u>, чтобы мы точно не пропустили ваш вопрос. \n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\n\nКураторы-кинологи в чате: {kurators_list}\n\n❗️Только обязательно делайте это в чате, не пишите нам в личные сообщения❗️\n\n3️⃣ По <u>техническим вопросам или проблемам</u> обращайтесь <u>к тех.поддержке</u> школы @tech_sobakovod_pro\n\n\n<b>В ЧАТЕ ЗАПРЕЩЕНО</b> (сообщения нарушающие правила, будут удалены ботом-модератором автоматически)\n\n• Ненормативная лексика\n• Видео, ссылки НЕ относящиеся к теме обучения\n• Аудио сообщения. Их размещаю я и кураторы\n_________________________________\n\nНу что, начинаем путешествие в новый мир!❤️"
 TG_VIZITKA_TEMPLATE = "<b>Место, где мы начинаем знакомство 💛</b>\n\nЗдесь вы можете чуть больше рассказать о себе и своей собаке, а мы сможем лучше понять вашу ситуацию и помочь максимально точно.\n\nОчень прошу не пропускать этот шаг!\n\n✍️ <u>Пожалуйста, напишите ОДНО сообщение по следующей форме:</u>\n\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода / метис / дворняжка\n3️⃣ С какими трудностями вы пришли на курс? Какой результат вы хотите получить к концу обучения? Что должно измениться в жизни с собакой?\n\n И в конце обязательно добавьте фразу:\n\n<blockquote>«Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым(ой) к себе и своей собаке и идти к результату шаг за шагом».\n</blockquote>\n\nЭто не формальность. Это ваш личный путь из точки А в точку Б и настрой на 100% результат 😉\n\n<u>Пример сообщения, которое у вас должно получится:</u>\n\n<i>Меня зовут Ольга, г. Москва. У меня Лабрадор-ретривер, 3 года.\n\nХочу, чтобы моя собака перестала тянуть поводок и слышала меня на прогулке. Очень нервничаю каждый выход на улицу, потому что первая проезжающая машина сводит ее с ума.\n\nЯ обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливой к себе и своей собаке и идти к результату шаг за шагом!</i>\n\n<b>Ждем ваших визиток🙌🏼</b>"
 TG_OBUCHENIE_TEMPLATE = "<b>Наш рабочий кабинет🎓</b>\n\nСамое важное пространство курса. Всё, что касается обучения, живёт здесь.\n\n👩‍🎓 На обучающей платформе уже доступен нулевой модуль в котором есть первые задания.\n\nДоступ должен был прийти вам на почту, если вы не смогли найти письмо с доступом в кабинет, напишите куратору @Tech_kurator\n\n<b>Модули будут открываться еженедельно в субботу в 12:00 по московскому времени</b>. Не забывайте выполнять задания после видеоуроков, я и мои кураторы проверим каждый ответ лично и дадим развернутую обратную связь.\n\nКроме того, за выполнения заданий, вам <b>будут начисляться бонусные баллы</b>. <b>В нулевом модуле об этом рассказано подробнее.</b>\n\n✅ <u>В этом чате вы можете и даже нужно:</u>\n\n• Задавать вопросы по урокам и заданиям\n• Писать, если что-то не получается или вызывает сомнения\n• Делиться наблюдениями и результатами практики\n• Получать обратную связь от меня и кураторов\n• Разбирать конкретные ситуации с вашей собакой\n\n<b>❗️Здесь нет глупых вопросов. </b>\n\nЛучше спросить, чем делать «на авось». Мы рядом, чтобы поддержать вас на каждом этапе🤍\n\n<u>Как задавать вопросы, чтобы помощь была максимально точной</u>👇🏼\n\nПожалуйста, старайтесь сразу прописать:\n- в каком уроке или задании возник вопрос\n- что именно не получается\n- что уже пробовали делать\n- поведение собаки в этот момент (спокойна / возбуждена / отвлекается и т.д.)\n\nИ <b>обязательно отмечайте нас в сообщении</b>, чтобы мы точно не пропустили вопрос🙌🏼\n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\nКураторы-кинологи: #{kurators_list}\n\nПомните: результат складывается из маленьких шагов!"
@@ -108,6 +131,220 @@ def _asset_path(name: str) -> Path | None:
 
 def _avatar_path() -> Path | None:
     return _asset_path("group_photo.jpg")
+
+
+def _sibling_module_db(env_key: str, module_id: str, filename: str) -> Path | None:
+    configured = _clean(os.environ.get(env_key))
+    if configured:
+        path = Path(configured)
+        return path if path.exists() else None
+    candidates: list[Path] = []
+    if _ctx is not None:
+        candidates.append(Path(_ctx.module_dir).parent / module_id / "data" / filename)
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.extend(
+        [
+            repo_root / "modules" / module_id / "data" / filename,
+            repo_root / f"module_{module_id.replace('-', '_')}" / "data" / filename,
+        ]
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _vk_student_cohort(course_key: str, stream_number: str) -> dict[str, Any]:
+    chat_fields_db = _sibling_module_db(
+        "GETCOURSE_CHAT_FIELDS_DB", "getcourse-chat-fields", "getcourse-chat-fields.db"
+    )
+    customer_db = _sibling_module_db("CUSTOMER_DB_PATH", "customer-db", "customer-db.db")
+    empty = {
+        "available": False,
+        "source": "getcourse-chat-fields.flow_students_cache",
+        "total": 0,
+        "with_vk": 0,
+        "without_vk": 0,
+        "vk_ids": [],
+    }
+    if not chat_fields_db or not customer_db:
+        empty["reason"] = "cohort_database_missing"
+        return empty
+    try:
+        with sqlite3.connect(f"file:{chat_fields_db}?mode=ro", uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            cache_row = db.execute(
+                "SELECT value_json,updated_at FROM flow_students_cache ORDER BY datetime(updated_at) DESC LIMIT 1"
+            ).fetchone()
+        if not cache_row:
+            return {**empty, "reason": "flow_students_cache_empty"}
+        snapshot = _json_dict(cache_row["value_json"])
+        flow = next(
+            (
+                item
+                for item in (snapshot.get("items") or [])
+                if _course_key(item.get("course_key")) == _course_key(course_key)
+                and _clean(item.get("stream")) == _clean(stream_number)
+            ),
+            None,
+        )
+        if not isinstance(flow, dict):
+            return {
+                **empty,
+                "reason": "exact_flow_not_in_cache",
+                "cache_updated_at": _clean(cache_row["updated_at"]),
+            }
+        students = [item for item in (flow.get("students") or []) if isinstance(item, dict)]
+        customer_by_id: dict[int, dict[str, Any]] = {}
+        customer_by_email: dict[str, list[dict[str, Any]]] = {}
+        with sqlite3.connect(f"file:{customer_db}?mode=ro", uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT id,custom_fields,updated_at,created_at FROM cdb_getcourse_orders ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC"
+            ).fetchall()
+        for row in rows:
+            fields = _json_dict(row["custom_fields"])
+            item = {"id": int(row["id"]), "fields": fields}
+            customer_by_id[item["id"]] = item
+            email = _clean(fields.get("email") or fields.get("user_email")).casefold()
+            if email:
+                customer_by_email.setdefault(email, []).append(item)
+        people: dict[str, dict[str, Any]] = {}
+        unmatched = 0
+        not_completed_paid = 0
+        standard_excluded = 0
+        for student in students:
+            email = _clean(student.get("email")).casefold()
+            source_id = int(student.get("source_record_id") or 0)
+            candidates = ([customer_by_id[source_id]] if source_id in customer_by_id else []) + customer_by_email.get(email, [])
+            if not candidates:
+                unmatched += 1
+                continue
+            order = next(
+                (
+                    item
+                    for item in candidates
+                    if _clean(item["fields"].get("status")).casefold().replace("ё", "е") == "завершен"
+                    and _clean(item["fields"].get("payment_state")).casefold() == "paid"
+                ),
+                None,
+            )
+            if not order:
+                not_completed_paid += 1
+                continue
+            fields = order["fields"]
+            tariff_text = " ".join(
+                str(value or "")
+                for value in (
+                    student.get("tariff"),
+                    fields.get("title"),
+                    fields.get("positions"),
+                    fields.get("offers"),
+                )
+            ).casefold().replace("ё", "е")
+            if "стандарт" in tariff_text:
+                standard_excluded += 1
+                continue
+            phone = re.sub(r"\D+", "", _clean(fields.get("phone")))
+            gc_user_id = _clean(fields.get("gc_user_id") or student.get("gc_user_id"))
+            raw_vk = _clean(fields.get("vk_id"))
+            vk_digits = re.sub(r"\D+", "", raw_vk)
+            vk_id = int(vk_digits) if vk_digits and len(vk_digits) <= 19 and int(vk_digits) > 0 else 0
+            identity = gc_user_id or email or phone or f"source:{order['id']}"
+            current = people.get(identity)
+            if current is None or (not int(current.get("vk_id") or 0) and vk_id):
+                people[identity] = {"vk_id": vk_id}
+        vk_ids = sorted({int(item["vk_id"]) for item in people.values() if int(item.get("vk_id") or 0) > 0})
+        total = len(people)
+        return {
+            "available": True,
+            "source": "getcourse-chat-fields.flow_students_cache",
+            "total": total,
+            "with_vk": len(vk_ids),
+            "without_vk": max(0, total - len(vk_ids)),
+            "vk_ids": vk_ids,
+            "sheet_students": len(students),
+            "unmatched_orders": unmatched,
+            "not_completed_paid": not_completed_paid,
+            "standard_excluded": standard_excluded,
+            "sheet_title": _clean(flow.get("sheet_title")),
+            "sheet_id": _clean(flow.get("sheet_id")),
+            "sheet_url": _clean(flow.get("sheet_url")),
+            "cache_updated_at": _clean(cache_row["updated_at"]),
+        }
+    except Exception as exc:
+        _log("error", "VK student cohort lookup failed course=%s stream=%s: %s", course_key, stream_number, exc)
+        return {**empty, "reason": _exc_text(exc)}
+
+
+def _vk_processed_entitlement_cohort(course_key: str, stream_number: str) -> dict[str, Any]:
+    """Read only v2 order decisions already assigned to this exact chat flow."""
+
+    chat_fields_db = _sibling_module_db(
+        "GETCOURSE_CHAT_FIELDS_DB", "getcourse-chat-fields", "getcourse-chat-fields.db"
+    )
+    customer_db = _sibling_module_db("CUSTOMER_DB_PATH", "customer-db", "customer-db.db")
+    empty = {
+        "available": False,
+        "source": "getcourse-chat-fields.processed_orders.entitlement_v2",
+        "total": 0,
+        "with_vk": 0,
+        "without_vk": 0,
+        "vk_ids": [],
+    }
+    if not chat_fields_db or not customer_db:
+        return {**empty, "reason": "entitlement_database_missing"}
+    try:
+        with sqlite3.connect(f"file:{chat_fields_db}?mode=ro", uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                """
+                SELECT source_record_id,details_json
+                FROM processed_orders
+                WHERE course_key=? AND stream=? AND customer_ok=1
+                  AND COALESCE(vk_link,'')<>'' AND COALESCE(tg_link,'')<>''
+                """,
+                (_course_key(course_key), _clean(stream_number)),
+            ).fetchall()
+        source_ids: set[int] = set()
+        for row in rows:
+            entitlement = _json_dict(_json_dict(row["details_json"]).get("entitlement"))
+            if int(entitlement.get("version") or 0) != 2 or entitlement.get("eligible") is not True:
+                continue
+            source_id = int(row["source_record_id"] or 0)
+            if source_id > 0:
+                source_ids.add(source_id)
+        if not source_ids:
+            return {**empty, "available": True, "reason": "no_entitled_orders_for_flow"}
+        placeholders = ",".join("?" for _ in source_ids)
+        with sqlite3.connect(f"file:{customer_db}?mode=ro", uri=True, timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            customer_rows = db.execute(
+                f"SELECT id,custom_fields FROM cdb_getcourse_orders WHERE id IN ({placeholders})",
+                tuple(sorted(source_ids)),
+            ).fetchall()
+        people: dict[str, int] = {}
+        for row in customer_rows:
+            fields = _json_dict(row["custom_fields"])
+            raw_vk = re.sub(r"\D+", "", _clean(fields.get("vk_id")))
+            vk_id = int(raw_vk) if raw_vk and len(raw_vk) <= 19 and int(raw_vk) > 0 else 0
+            identity = (
+                _clean(fields.get("gc_user_id"))
+                or _clean(fields.get("email") or fields.get("user_email")).casefold()
+                or re.sub(r"\D+", "", _clean(fields.get("phone") or fields.get("user_phone")))
+                or f"source:{int(row['id'])}"
+            )
+            if identity not in people or (not people[identity] and vk_id):
+                people[identity] = vk_id
+        vk_ids = sorted({value for value in people.values() if value > 0})
+        return {
+            **empty,
+            "available": True,
+            "total": len(people),
+            "with_vk": len(vk_ids),
+            "without_vk": max(0, len(people) - len(vk_ids)),
+            "vk_ids": vk_ids,
+            "source_records": len(source_ids),
+        }
+    except Exception as exc:
+        return {**empty, "reason": "entitlement_read_failed", "error": _exc_text(exc)}
 
 
 def _connect() -> sqlite3.Connection:
@@ -211,10 +448,10 @@ def _init_db() -> None:
             """
         )
         db.execute("DELETE FROM people WHERE name IN ('Екатерина','ТГ куратор 1','ТГ куратор 2')")
-        db.execute("UPDATE people SET kind='author',parity='any',enabled=1,updated_at=strftime('%s','now') WHERE name='Анна'")
-        db.execute("UPDATE people SET kind='kurator',parity='any',enabled=1,updated_at=strftime('%s','now') WHERE name='Ирина'")
+        db.execute("UPDATE people SET kind='author',parity='any',updated_at=strftime('%s','now') WHERE name='Анна'")
+        db.execute("UPDATE people SET kind='kurator',parity='any',updated_at=strftime('%s','now') WHERE name='Ирина'")
         db.execute(
-            "UPDATE people SET kind='admin',parity='any',enabled=1,updated_at=strftime('%s','now') "
+            "UPDATE people SET kind='admin',parity='any',updated_at=strftime('%s','now') "
             "WHERE name IN ('Наталья','Андрей','Техническая поддержка','Никита')"
         )
         for row in PEOPLE_DEFAULTS:
@@ -247,6 +484,8 @@ def _init_db() -> None:
             )
         template_defaults = {
             "vk_welcome": VK_WELCOME_TEMPLATE,
+            "vk_test_welcome": VK_TEST_WELCOME_TEMPLATE,
+            "vk_invite_fallback": VK_INVITE_FALLBACK_TEMPLATE,
             "tg_welcome": TG_WELCOME_TEMPLATE,
             "tg_vizitka": TG_VIZITKA_TEMPLATE,
             "tg_obuchenie": TG_OBUCHENIE_TEMPLATE,
@@ -282,6 +521,63 @@ def _ensure_db() -> None:
         _init_db()
 
 
+async def setup(ctx: Any) -> None:
+    global _ctx, _logger, _vk_bootstrap_subscription, _vk_pin_watchdog_task, _vk_invite_dispatch_task
+    _ctx = ctx
+    _logger = ctx.logger
+    _ensure_db()
+    token = _clean(os.environ.get("VK_GROUP_TOKEN"))
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    if not token or group_id <= 0:
+        return
+    if _vk_pin_watchdog_task is None or _vk_pin_watchdog_task.done():
+        _vk_pin_watchdog_task = asyncio.create_task(
+            _vk_pin_watchdog_loop(), name=f"{DEFAULT_MODULE_ID}-vk-pin-watchdog"
+        )
+    if _vk_invite_dispatch_task is None or _vk_invite_dispatch_task.done():
+        _vk_invite_dispatch_task = asyncio.create_task(
+            _vk_invite_dispatch_loop(), name=f"{DEFAULT_MODULE_ID}-vk-invite-dispatch"
+        )
+    if shared_vk_group_poll_hub is None:
+        return
+    try:
+        _vk_bootstrap_subscription = await shared_vk_group_poll_hub.subscribe(
+            subscriber_id=f"{DEFAULT_MODULE_ID}:bootstrap",
+            token=token,
+            group_id=group_id,
+            on_event=_handle_vk_bootstrap_event,
+            on_error=_handle_vk_bootstrap_error,
+        )
+        _vk_bootstrap_subscription.activate()
+        _log("info", "VK community bootstrap listener started for group %s", group_id)
+    except Exception as exc:
+        _vk_bootstrap_subscription = None
+        _log("error", "VK community bootstrap listener failed: %s", exc)
+
+
+async def shutdown() -> None:
+    global _vk_bootstrap_subscription, _vk_pin_watchdog_task, _vk_invite_dispatch_task
+    invite_task, _vk_invite_dispatch_task = _vk_invite_dispatch_task, None
+    if invite_task is not None and not invite_task.done():
+        invite_task.cancel()
+    if invite_task is not None:
+        try:
+            await invite_task
+        except asyncio.CancelledError:
+            pass
+    task, _vk_pin_watchdog_task = _vk_pin_watchdog_task, None
+    if task is not None and not task.done():
+        task.cancel()
+    if task is not None:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    subscription, _vk_bootstrap_subscription = _vk_bootstrap_subscription, None
+    if subscription is not None:
+        await subscription.close()
+
+
 async def _require_panel_access(request: Request) -> dict:
     if verify_token_from_request is None:
         return {"role": "admin", "username": "local"}
@@ -297,6 +593,10 @@ async def _require_panel_access(request: Request) -> dict:
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _today_moscow() -> str:
+    return datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y")
 
 
 def _exc_text(exc: Exception) -> str:
@@ -421,6 +721,15 @@ def _selected_curator_id(stream_number: str, curator_id: Any | None = None) -> i
     if selected["kurators"]:
         return int(selected["kurators"][0]["id"])
     return None
+
+
+def _vk_staff_for_mode(selected: dict[str, list[dict[str, Any]]], *, test_mode: bool) -> list[dict[str, Any]]:
+    staff = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
+    if not test_mode:
+        return staff
+    configured_id = _clean(os.environ.get("VK_TEST_STAFF_ID"))
+    test_staff_id = int(configured_id) if configured_id.isdigit() else VK_TEST_STAFF_ID
+    return [person for person in staff if test_staff_id in _vk_ids([person])]
 
 
 def _vk_ids(people: list[dict[str, Any]]) -> list[int]:
@@ -554,10 +863,10 @@ def _render_template(key: str, *, course: sqlite3.Row, stream_number: str, date_
     return body.format(**values)
 
 
-def _record_run(platform: str, title: str, stream_number: str, date_start: str, course_key: str, test_mode: bool, status: str, request_json: dict[str, Any], response_json: dict[str, Any] | None = None, error: str = "", link: str = "", chat_id: str = "") -> None:
+def _record_run(platform: str, title: str, stream_number: str, date_start: str, course_key: str, test_mode: bool, status: str, request_json: dict[str, Any], response_json: dict[str, Any] | None = None, error: str = "", link: str = "", chat_id: str = "") -> int:
     _ensure_db()
     with _db() as db:
-        db.execute(
+        cursor = db.execute(
             """INSERT INTO runs(platform,title,stream_number,date_start,course_key,test_mode,status,link,chat_id,error,request_json,response_json)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
@@ -576,6 +885,7 @@ def _record_run(platform: str, title: str, stream_number: str, date_start: str, 
             ),
         )
         db.commit()
+        return int(cursor.lastrowid)
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -598,13 +908,207 @@ def _update_run(run_id: int, status: str, response_json: dict[str, Any], *, erro
         db.commit()
 
 
+def _chat_links_credentials_path() -> Path | None:
+    raw = _clean(
+        os.environ.get("COURSE_CHAT_CREATOR_GOOGLE_CREDENTIALS_FILE")
+        or os.environ.get("GETCOURSE_CHAT_FIELDS_GOOGLE_CREDENTIALS_FILE")
+        or os.environ.get("GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE")
+        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+    return Path(raw) if raw else None
+
+
+def _chat_links_sync_status() -> dict[str, Any]:
+    credentials_path = _chat_links_credentials_path()
+    return {
+        "configured": bool(credentials_path and credentials_path.exists()),
+        "delivery_source": "google_sheet",
+        "spreadsheet_id": _clean(os.environ.get("COURSE_CHAT_CREATOR_CHAT_LINKS_SPREADSHEET_ID"))
+        or DEFAULT_CHAT_LINKS_SPREADSHEET_ID,
+    }
+
+
+def _ready_chat_pair(course_key: str, stream_number: str) -> dict[str, dict[str, Any]]:
+    pair: dict[str, dict[str, Any]] = {}
+    _ensure_db()
+    with _db() as db:
+        for platform in ("vk", "telegram"):
+            row = db.execute(
+                """
+                SELECT id,platform,title,stream_number,link,status,created_at
+                FROM runs
+                WHERE course_key=? AND stream_number=? AND platform=? AND test_mode=0
+                  AND COALESCE(link,'')<>'' AND status<>'error'
+                ORDER BY created_at DESC,id DESC
+                LIMIT 1
+                """,
+                (course_key, stream_number, platform),
+            ).fetchone()
+            if row:
+                pair[platform] = dict(row)
+    return pair
+
+
+def _chat_link_row(rows: list[list[Any]], stream_number: str) -> int | None:
+    expected = _clean(stream_number)
+    for index, row in enumerate(rows, start=1):
+        title = _clean(row[0] if row else "")
+        match = re.search(r"(?:^|\D)(\d{1,6})(?:\D|$)", title)
+        if match and match.group(1) == expected:
+            return index
+    return None
+
+
+def _sheet_link_write_value(platform: str, existing_link: Any, generated_link: Any) -> tuple[str, str]:
+    current = _clean(existing_link)
+    if current:
+        return current, "preserved"
+    if platform == "vk":
+        return "", "waiting_manual_link"
+    return _clean(generated_link), "filled"
+
+
+def _sync_chat_pair_to_sheet_sync(
+    pair: dict[str, dict[str, Any]],
+    credentials_path: Path,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    course_key = _clean((pair.get("vk") or {}).get("course_key") or (pair.get("telegram") or {}).get("course_key"))
+    stream_number = _clean((pair.get("vk") or {}).get("stream_number") or (pair.get("telegram") or {}).get("stream_number"))
+    sheet_ids = CHAT_LINK_SHEETS.get(course_key) or {}
+    if not sheet_ids:
+        raise RuntimeError(f"Неизвестный курс для таблицы ссылок: {course_key}")
+    spreadsheet_id = _clean(os.environ.get("COURSE_CHAT_CREATOR_CHAT_LINKS_SPREADSHEET_ID")) or DEFAULT_CHAT_LINKS_SPREADSHEET_ID
+    credentials = Credentials.from_service_account_file(
+        str(credentials_path),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    session = AuthorizedSession(credentials)
+    metadata_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets.properties(sheetId,title)"},
+        timeout=30,
+    )
+    metadata_response.raise_for_status()
+    titles = {
+        str((item.get("properties") or {}).get("sheetId")): _clean((item.get("properties") or {}).get("title"))
+        for item in (metadata_response.json() or {}).get("sheets") or []
+    }
+    platform_titles: dict[str, str] = {}
+    ranges: list[tuple[str, str]] = []
+    for platform in ("telegram", "vk"):
+        gid = _clean(sheet_ids.get(platform))
+        title = titles.get(gid, "")
+        if not title:
+            raise RuntimeError(f"Лист gid={gid} не найден")
+        platform_titles[platform] = title
+        escaped = title.replace("'", "''")
+        ranges.append((platform, f"'{escaped}'!A:B"))
+    values_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchGet",
+        params=[("ranges", value_range) for _platform, value_range in ranges] + [("majorDimension", "ROWS")],
+        timeout=30,
+    )
+    values_response.raise_for_status()
+    value_ranges = (values_response.json() or {}).get("valueRanges") or []
+    data: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    waiting_manual = False
+    for index, platform in enumerate(("telegram", "vk")):
+        rows = ((value_ranges[index] or {}).get("values") or []) if index < len(value_ranges) else []
+        existing_row = _chat_link_row(rows, stream_number)
+        row_number = existing_row or (len(rows) + 1)
+        title = platform_titles[platform]
+        escaped = title.replace("'", "''")
+        run = pair[platform]
+        existing_link = (
+            rows[existing_row - 1][1]
+            if existing_row and len(rows[existing_row - 1]) > 1
+            else ""
+        )
+        link_value, action = _sheet_link_write_value(platform, existing_link, run.get("link"))
+        waiting_manual = waiting_manual or action == "waiting_manual_link"
+        if action != "preserved":
+            values = [[_clean(run.get("title")), link_value]] if platform != "vk" else [[_clean(run.get("title"))]]
+            target_range = (
+                f"'{escaped}'!A{row_number}:B{row_number}"
+                if platform != "vk"
+                else f"'{escaped}'!A{row_number}"
+            )
+            data.append(
+                {
+                    "range": target_range,
+                    "majorDimension": "ROWS",
+                    "values": values,
+                }
+            )
+        updated.append(
+            {
+                "platform": platform,
+                "gid": sheet_ids[platform],
+                "row": row_number,
+                "action": action,
+                "link": link_value,
+            }
+        )
+    if data:
+        update_response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+            json={"valueInputOption": "RAW", "data": data},
+            timeout=30,
+        )
+        update_response.raise_for_status()
+    return {
+        "ok": True,
+        "status": "waiting_manual_vk_link" if waiting_manual else "synced",
+        "stream_number": stream_number,
+        "spreadsheet_id": spreadsheet_id,
+        "manual_vk_link_required": waiting_manual,
+        "updated": updated,
+    }
+
+
+async def _sync_chat_pair_to_sheet(course_key: str, stream_number: str, *, test_mode: bool) -> dict[str, Any]:
+    if test_mode:
+        return {"ok": True, "status": "skipped_test_mode"}
+    pair = _ready_chat_pair(course_key, stream_number)
+    missing = [platform for platform in ("telegram", "vk") if platform not in pair]
+    if missing:
+        return {"ok": True, "status": "waiting_pair", "missing": missing}
+    for run in pair.values():
+        run["course_key"] = course_key
+        run["stream_number"] = stream_number
+    credentials_path = _chat_links_credentials_path()
+    if not credentials_path or not credentials_path.exists():
+        return {
+            "ok": True,
+            "status": "direct_ready_sheet_not_configured",
+            "sheet_sync_ok": False,
+            "warning": "Не настроен service account Google Sheets",
+        }
+    try:
+        result = await asyncio.to_thread(_sync_chat_pair_to_sheet_sync, pair, credentials_path)
+        result["sheet_sync_ok"] = True
+        return result
+    except Exception as exc:
+        _log("error", "Chat links sheet sync failed course=%s stream=%s: %s", course_key, stream_number, exc)
+        return {
+            "ok": True,
+            "status": "direct_ready_sheet_error",
+            "sheet_sync_ok": False,
+            "warning": _exc_text(exc),
+        }
+
+
 def _vk_admin_run(run_id: int | None = None) -> dict[str, Any] | None:
     _ensure_db()
     with _db() as db:
         if run_id:
             row = db.execute("SELECT * FROM runs WHERE id=? AND platform='vk'", (run_id,)).fetchone()
         else:
-            row = db.execute("SELECT * FROM runs WHERE platform='vk' AND status='needs_vk_web_admins' ORDER BY id DESC LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM runs WHERE platform='vk' AND status IN ('needs_admins','needs_members','needs_vk_web_admins') ORDER BY id DESC LIMIT 1").fetchone()
     return dict(row) if row else None
 
 
@@ -621,6 +1125,625 @@ async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
         _log("error", "VK API error in %s: %s", method, data["error"])
         return {"error": data["error"]}
     return data.get("response")
+
+
+def _vk_group_token(*, test_mode: bool = False) -> str:
+    if test_mode:
+        test_token = _clean(os.environ.get("VK_TEST_GROUP_TOKEN"))
+        if test_token:
+            return test_token
+    return _clean(os.environ.get("VK_GROUP_TOKEN"))
+
+
+def _vk_created_chat_id(response: Any) -> int:
+    if isinstance(response, int):
+        return int(response)
+    if isinstance(response, str) and response.isdigit():
+        return int(response)
+    if isinstance(response, dict):
+        value = response.get("chat_id") or response.get("id")
+        if value is not None:
+            return int(value)
+    raise HTTPException(status_code=502, detail="VK did not return chat_id")
+
+
+def _vk_message_reference(response: Any) -> tuple[int | None, int | None]:
+    if isinstance(response, int):
+        return int(response), None
+    if not isinstance(response, dict):
+        return None, None
+    message_id = response.get("message_id") or response.get("id")
+    cmid = response.get("conversation_message_id") or response.get("cmid")
+    return (int(message_id) if message_id else None, int(cmid) if cmid else None)
+
+
+def _vk_require_success(method: str, response: Any) -> Any:
+    if isinstance(response, dict) and "error" in response:
+        error = response.get("error") or {}
+        detail = error.get("error_msg") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"{method}: {detail or error}")
+    return response
+
+
+async def _find_vk_community_chat_message(
+    peer_id: int,
+    token: str,
+    *,
+    text: str = "",
+    attachment_type: str = "",
+    max_cmid: int = 64,
+) -> tuple[int | None, int | None]:
+    """Resolve VK community-chat messages whose global message id is always zero."""
+
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    if group_id <= 0:
+        return None, None
+    response = await _vk_method(
+        "messages.getByConversationMessageId",
+        {
+            "peer_id": int(peer_id),
+            "conversation_message_ids": ",".join(str(value) for value in range(1, max_cmid + 1)),
+        },
+        token,
+    )
+    if not isinstance(response, dict) or "error" in response:
+        return None, None
+    items = response.get("items") or []
+    for item in reversed(items):
+        if not isinstance(item, dict) or int(item.get("from_id") or 0) != -group_id:
+            continue
+        if item.get("action"):
+            continue
+        if text and str(item.get("text") or "") != text:
+            continue
+        if attachment_type and not any(
+            isinstance(attachment, dict) and attachment.get("type") == attachment_type
+            for attachment in (item.get("attachments") or [])
+        ):
+            continue
+        message_id, cmid = _vk_message_reference(item)
+        if cmid:
+            return message_id, cmid
+    return None, None
+
+
+def _event_value(source: Any, key: str, default: Any = None) -> Any:
+    if isinstance(source, dict):
+        return source.get(key, default)
+    getter = getattr(source, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except TypeError:
+            pass
+    return getattr(source, key, default)
+
+
+def _vk_bootstrap_event_message(event: Any) -> dict[str, Any] | None:
+    event_type = getattr(getattr(event, "type", ""), "value", getattr(event, "type", ""))
+    if str(event_type or "").strip().lower().split(".")[-1] != "message_new":
+        return None
+    payload = getattr(event, "object", None) or {}
+    message = _event_value(payload, "message", {}) or {}
+    action = _event_value(message, "action", {}) or {}
+    return {
+        "peer_id": int(_event_value(message, "peer_id", 0) or 0),
+        "from_id": int(_event_value(message, "from_id", 0) or 0),
+        "text": _clean(_event_value(message, "text", "")),
+        "action_type": _clean(_event_value(action, "type", "")),
+        "action_member_id": int(_event_value(action, "member_id", 0) or 0),
+        "action_cmid": int(_event_value(action, "conversation_message_id", 0) or 0),
+    }
+
+
+def _vk_owned_run(peer_id: int) -> dict[str, Any] | None:
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    with _db() as db:
+        rows = db.execute(
+            "SELECT * FROM runs WHERE platform='vk' ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+    for row in rows:
+        item = dict(row)
+        response = _json_dict(item.get("response_json"))
+        try:
+            owner_group_id = int(response.get("owner_group_id") or 0)
+            run_peer_id = int(response.get("peer_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if owner_group_id != group_id or run_peer_id != int(peer_id):
+            continue
+        item["response"] = response
+        item["request"] = _json_dict(item.get("request_json"))
+        return item
+    return None
+
+
+def _pending_vk_bootstrap_run(peer_id: int) -> dict[str, Any] | None:
+    item = _vk_owned_run(peer_id)
+    if item is None or (item.get("response") or {}).get("bootstrap_status") == "ready":
+        return None
+    return item
+
+
+def _persist_vk_bootstrap(
+    row: dict[str, Any], response: dict[str, Any], status: str, *, error: str = ""
+) -> None:
+    response["bootstrap_status"] = "ready" if status == "ok" else status
+    response["bootstrap_updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    response["needs_attention"] = status not in {"ok", "waiting_for_message"}
+    response["followup_status"] = status
+    response["detail"] = error
+    _update_run(int(row["id"]), status, response, error=error)
+
+
+async def _initialize_vk_chat_from_run(row: dict[str, Any]) -> dict[str, Any]:
+    token = _vk_group_token(test_mode=bool(row.get("test_mode")))
+    if not token:
+        raise RuntimeError("VK_GROUP_TOKEN is not configured")
+    response = dict(row.get("response") or _json_dict(row.get("response_json")))
+    request_json = dict(row.get("request") or _json_dict(row.get("request_json")))
+    peer_id = int(response.get("peer_id") or 0)
+    if peer_id <= 2000000000:
+        raise RuntimeError("VK peer_id is missing for chat bootstrap")
+    stream_number = _clean(row.get("stream_number") or request_json.get("stream_number"))
+    date_start = _clean(row.get("date_start") or request_json.get("date_start") or request_json.get("start_date"))
+    course = _course_by_input(row.get("course_key") or request_json.get("course_type") or request_json.get("course_choice"))
+    selected = _selected_people(stream_number, request_json.get("curator_id"))
+    try:
+        welcome_photo = _asset_path("welcome_message_photo.jpg")
+        welcome_text = _render_template(
+            "vk_test_welcome" if bool(row.get("test_mode")) else "vk_welcome",
+            course=course,
+            stream_number=stream_number,
+            date_start=date_start,
+            selected=selected,
+            platform="vk",
+        )
+        if not response.get("welcome_message_id") and not response.get("welcome_cmid"):
+            message_id, cmid = await _find_vk_community_chat_message(
+                peer_id,
+                token,
+                text=welcome_text,
+                attachment_type="photo" if welcome_photo else "",
+            )
+            if not message_id and not cmid:
+                attachment = ""
+                if welcome_photo:
+                    attachment = _clean(await _upload_vk_message_photo(peer_id, welcome_photo, token))
+                    if not attachment:
+                        raise RuntimeError("VK welcome photo upload failed")
+                send_params: dict[str, Any] = {
+                    "peer_id": peer_id,
+                    "message": welcome_text,
+                    "random_id": random.randint(1, 2**31 - 1),
+                }
+                if attachment:
+                    send_params["attachment"] = attachment
+                welcome_response = await _vk_method(
+                    "messages.send",
+                    send_params,
+                    token,
+                )
+                _vk_require_success("messages.send welcome", welcome_response)
+                message_id, cmid = _vk_message_reference(welcome_response)
+                if not message_id and not cmid:
+                    for _attempt in range(3):
+                        await asyncio.sleep(0.3)
+                        message_id, cmid = await _find_vk_community_chat_message(
+                            peer_id,
+                            token,
+                            text=welcome_text,
+                            attachment_type="photo" if attachment else "",
+                        )
+                        if cmid:
+                            break
+            if not message_id and not cmid:
+                raise RuntimeError("VK did not return welcome message ID")
+            response["welcome_message_id"] = message_id
+            response["welcome_cmid"] = cmid
+            response["welcome_photo_sent"] = True
+            if welcome_photo:
+                response["welcome_photo_cmid"] = cmid
+                response["welcome_message_has_photo"] = True
+            _persist_vk_bootstrap(row, response, "waiting_for_message")
+        if not response.get("welcome_pinned"):
+            pin_params: dict[str, Any] = {"peer_id": peer_id}
+            if response.get("welcome_cmid"):
+                pin_params["cmid"] = int(response["welcome_cmid"])
+            else:
+                pin_params["message_id"] = int(response["welcome_message_id"])
+            pin_response = await _vk_method("messages.pin", pin_params, token)
+            _vk_require_success("messages.pin", pin_response)
+            response["welcome_pinned"] = True
+        _persist_vk_bootstrap(row, response, "ok")
+        _log("info", "VK community chat bootstrap completed peer_id=%s run_id=%s", peer_id, row["id"])
+        return response
+    except Exception as exc:
+        response["bootstrap_error"] = _exc_text(exc)
+        _persist_vk_bootstrap(row, response, "needs_bootstrap", error=_exc_text(exc))
+        raise
+
+
+def _persist_vk_event_result(
+    row: dict[str, Any], response: dict[str, Any], *, status: str | None = None, error: str | None = None
+) -> None:
+    current_status = _clean(row.get("status")) or "ok"
+    current_error = _clean(row.get("error"))
+    _update_run(
+        int(row["id"]),
+        status or current_status,
+        response,
+        error=current_error if error is None else error,
+    )
+
+
+async def _promote_joined_vk_staff(row: dict[str, Any], message: dict[str, Any]) -> None:
+    action_type = _clean(message.get("action_type"))
+    if action_type and action_type not in {"chat_invite_user", "chat_invite_user_by_link"}:
+        return
+    member_id = int(message.get("action_member_id") or message.get("from_id") or 0)
+    response = dict(row.get("response") or {})
+    members_result = response.get("members_result") if isinstance(response.get("members_result"), dict) else {}
+    stored_expected_ids = {
+        int(value)
+        for value in (members_result.get("expected_staff_ids") or [])
+        if str(value).lstrip("-").isdigit() and int(value) > 0
+    }
+    token = _vk_group_token(test_mode=bool(row.get("test_mode")))
+    if not token:
+        return
+    expected_ids = stored_expected_ids
+    try:
+        request_json = dict(row.get("request") or _json_dict(row.get("request_json")))
+        stream_number = _clean(row.get("stream_number") or request_json.get("stream_number"))
+        selected = _selected_people(stream_number, request_json.get("curator_id"))
+        current_staff = _vk_staff_for_mode(selected, test_mode=bool(row.get("test_mode")))
+        expected_ids = set(await _resolve_vk_people_ids(current_staff, token))
+    except Exception as exc:
+        _log("warning", "VK current staff resolution failed for peer %s: %s", message.get("peer_id"), exc)
+    if member_id not in expected_ids:
+        return
+    staff_roles = response.get("staff_roles") if isinstance(response.get("staff_roles"), dict) else {}
+    member_state = staff_roles.get(str(member_id)) if isinstance(staff_roles.get(str(member_id)), dict) else {}
+    if member_state.get("status") == "admin":
+        return
+    peer_id = int(message["peer_id"])
+    api_response = await _vk_method(
+        "messages.setMemberRole",
+        {"peer_id": peer_id, "member_id": member_id, "role": "admin"},
+        token,
+    )
+    state = await _vk_admin_state(peer_id, sorted(expected_ids), token)
+    promoted_ids = sorted(set(int(value) for value in (state.get("admins") or [])) & expected_ids)
+    pending_ids = sorted(expected_ids - set(promoted_ids))
+    failed = isinstance(api_response, dict) and "error" in api_response
+    staff_roles[str(member_id)] = {
+        "status": "error" if failed or member_id not in promoted_ids else "admin",
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "error": (api_response.get("error") if failed else state.get("error")) or "",
+    }
+    response["staff_roles"] = staff_roles
+    response["admin_result"] = {
+        "ok": member_id in promoted_ids,
+        "automatic": True,
+        "promoted_ids": promoted_ids,
+        "pending_join_ids": pending_ids,
+    }
+    present_ids = {
+        int(item.get("id") or 0)
+        for item in (state.get("members") or [])
+        if int(item.get("id") or 0) in expected_ids
+    }
+    members_result = (
+        response.get("members_result")
+        if isinstance(response.get("members_result"), dict)
+        else {}
+    )
+    members_result["staff_present"] = sorted(present_ids)
+    members_result["staff_pending_join"] = sorted(expected_ids - present_ids)
+    members_result["ok"] = not members_result["staff_pending_join"]
+    response["members_result"] = members_result
+    if member_id in promoted_ids and not pending_ids:
+        response.update({"needs_attention": False, "followup_status": "ok", "detail": ""})
+        _persist_vk_event_result(row, response, status="ok", error="")
+        return
+    if member_id in promoted_ids:
+        status = "needs_members" if members_result["staff_pending_join"] else "needs_admins"
+        detail = (
+            "Ожидается вход сотрудников: "
+            + ", ".join(map(str, members_result["staff_pending_join"]))
+            if members_result["staff_pending_join"]
+            else "Ожидается выдача администраторских прав"
+        )
+        response.update({"needs_attention": True, "followup_status": status, "detail": detail})
+        _persist_vk_event_result(row, response, status=status, error=detail)
+        return
+    detail = f"VK не подтвердил роль администратора для {member_id}"
+    response.update({"needs_attention": True, "followup_status": "needs_admins", "detail": detail})
+    _persist_vk_event_result(row, response, status="needs_admins", error=detail)
+
+
+async def _restore_vk_course_pin(row: dict[str, Any], message: dict[str, Any]) -> None:
+    action_type = _clean(message.get("action_type"))
+    if action_type not in {"chat_pin_message", "chat_unpin_message"}:
+        return
+    response = dict(row.get("response") or {})
+    cmid = int(response.get("welcome_cmid") or 0)
+    if cmid <= 0:
+        return
+    action_cmid = int(message.get("action_cmid") or 0)
+    watchdog = response.get("pin_watchdog") if isinstance(response.get("pin_watchdog"), dict) else {}
+    if action_type == "chat_pin_message" and action_cmid == cmid:
+        if watchdog.get("suspended_by_admin"):
+            response["pin_watchdog"] = {
+                **watchdog,
+                "suspended_by_admin": False,
+                "suspended_by_admin_id": 0,
+                "suspended_at": "",
+                "cmid": cmid,
+                "trigger": "course_pin_selected",
+            }
+            response["welcome_pinned"] = True
+            _persist_vk_event_result(row, response)
+        return
+    token = _vk_group_token(test_mode=bool(row.get("test_mode")))
+    if not token:
+        return
+    actor_id = int(message.get("from_id") or 0)
+    if actor_id > 0:
+        state = await _vk_admin_state(int(message["peer_id"]), [actor_id], token)
+        if actor_id in {int(value) for value in (state.get("admins") or [])}:
+            response["pin_watchdog"] = {
+                **watchdog,
+                "suspended_by_admin": True,
+                "suspended_by_admin_id": actor_id,
+                "suspended_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "admin_cmid": action_cmid,
+                "cmid": cmid,
+                "trigger": action_type,
+            }
+            response["welcome_pinned"] = False
+            _persist_vk_event_result(row, response)
+            _log(
+                "info",
+                "VK course pin watchdog suspended by admin peer_id=%s actor_id=%s trigger=%s",
+                message.get("peer_id"),
+                actor_id,
+                action_type,
+            )
+            return
+    pin_response = await _vk_method(
+        "messages.pin", {"peer_id": int(message["peer_id"]), "cmid": cmid}, token
+    )
+    if isinstance(pin_response, dict) and "error" in pin_response:
+        detail = "VK не восстановил закреплённое сообщение"
+        response.update({"needs_attention": True, "followup_status": "needs_pin", "detail": detail})
+        _persist_vk_event_result(row, response, status="needs_pin", error=detail)
+        return
+    response["pin_watchdog"] = {
+        **watchdog,
+        "restored_count": int(watchdog.get("restored_count") or 0) + 1,
+        "last_restored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "cmid": cmid,
+        "trigger": action_type,
+        "suspended_by_admin": False,
+        "suspended_by_admin_id": 0,
+        "suspended_at": "",
+    }
+    response["welcome_pinned"] = True
+    _persist_vk_event_result(row, response, error="")
+    _log(
+        "info",
+        "VK course pin restored peer_id=%s cmid=%s trigger=%s",
+        message.get("peer_id"),
+        cmid,
+        action_type,
+    )
+
+
+def _vk_course_pin_rows() -> list[dict[str, Any]]:
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    if group_id <= 0:
+        return []
+    with _db() as db:
+        rows = db.execute(
+            "SELECT * FROM runs WHERE platform='vk' ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+    result: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for source in rows:
+        row = dict(source)
+        response = _json_dict(row.get("response_json"))
+        try:
+            peer_id = int(response.get("peer_id") or 0)
+            owner_group_id = int(response.get("owner_group_id") or 0)
+            welcome_cmid = int(response.get("welcome_cmid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if (
+            peer_id <= 2000000000
+            or owner_group_id != group_id
+            or welcome_cmid <= 0
+            or peer_id in seen
+        ):
+            continue
+        seen.add(peer_id)
+        row["response"] = response
+        result.append(row)
+    return result
+
+
+def _vk_conversation_pin_map(response: Any) -> dict[int, int]:
+    if not isinstance(response, dict) or "error" in response:
+        return {}
+    result: dict[int, int] = {}
+    for item in response.get("items") or []:
+        conversation = item.get("conversation") or item
+        peer = conversation.get("peer") or {}
+        settings = conversation.get("chat_settings") or {}
+        pinned = settings.get("pinned_message") or {}
+        try:
+            peer_id = int(peer.get("id") or 0)
+            cmid = int(pinned.get("conversation_message_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if peer_id > 2000000000:
+            result[peer_id] = cmid
+    return result
+
+
+async def _reconcile_vk_course_pins_once() -> dict[str, Any]:
+    token = _vk_group_token()
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    rows = _vk_course_pin_rows()
+    checked = 0
+    restored = 0
+    suspended = 0
+    failed = 0
+    for offset in range(0, len(rows), 100):
+        batch = rows[offset : offset + 100]
+        peer_ids = [int((row.get("response") or {}).get("peer_id") or 0) for row in batch]
+        state = await _vk_method(
+            "messages.getConversationsById",
+            {"peer_ids": ",".join(map(str, peer_ids)), "group_id": group_id},
+            token,
+        )
+        if isinstance(state, dict) and "error" in state:
+            raise RuntimeError(
+                _clean((state.get("error") or {}).get("error_msg"))
+                or "VK pin state request failed"
+            )
+        pin_map = _vk_conversation_pin_map(state)
+        for row in batch:
+            response = dict(row.get("response") or {})
+            peer_id = int(response.get("peer_id") or 0)
+            cmid = int(response.get("welcome_cmid") or 0)
+            if peer_id not in pin_map:
+                continue
+            checked += 1
+            watchdog = (
+                response.get("pin_watchdog")
+                if isinstance(response.get("pin_watchdog"), dict)
+                else {}
+            )
+            if pin_map[peer_id] == cmid:
+                if watchdog.get("suspended_by_admin"):
+                    response["pin_watchdog"] = {
+                        **watchdog,
+                        "suspended_by_admin": False,
+                        "suspended_by_admin_id": 0,
+                        "suspended_at": "",
+                        "cmid": cmid,
+                        "trigger": "course_pin_detected",
+                    }
+                    response["welcome_pinned"] = True
+                    _persist_vk_event_result(row, response)
+                continue
+            if watchdog.get("suspended_by_admin"):
+                suspended += 1
+                continue
+            pin_response = await _vk_method(
+                "messages.pin", {"peer_id": peer_id, "cmid": cmid}, token
+            )
+            if isinstance(pin_response, dict) and "error" in pin_response:
+                failed += 1
+                continue
+            verify = await _vk_method(
+                "messages.getConversationsById",
+                {"peer_ids": str(peer_id), "group_id": group_id},
+                token,
+            )
+            if _vk_conversation_pin_map(verify).get(peer_id) != cmid:
+                failed += 1
+                continue
+            response["pin_watchdog"] = {
+                **watchdog,
+                "restored_count": int(watchdog.get("restored_count") or 0) + 1,
+                "last_restored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "cmid": cmid,
+                "trigger": "periodic_reconcile",
+                "suspended_by_admin": False,
+                "suspended_by_admin_id": 0,
+                "suspended_at": "",
+            }
+            response["welcome_pinned"] = True
+            _persist_vk_event_result(row, response, error="")
+            restored += 1
+            _log(
+                "info",
+                "VK course pin restored peer_id=%s cmid=%s trigger=periodic_reconcile",
+                peer_id,
+                cmid,
+            )
+    result = {
+        "ok": failed == 0,
+        "checked": checked,
+        "restored": restored,
+        "suspended": suspended,
+        "failed": failed,
+    }
+    _vk_pin_watchdog_state.update(
+        {
+            **result,
+            "last_check_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "last_error": "" if failed == 0 else f"pin restore failed for {failed} chat(s)",
+        }
+    )
+    return result
+
+
+async def _vk_pin_watchdog_loop() -> None:
+    await asyncio.sleep(2)
+    while True:
+        try:
+            await _reconcile_vk_course_pins_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            detail = _exc_text(exc)
+            if detail != _vk_pin_watchdog_state.get("last_error"):
+                _log("warning", "VK course pin reconcile failed: %s", detail)
+            _vk_pin_watchdog_state.update(
+                {
+                    "ok": False,
+                    "last_check_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "last_error": detail,
+                }
+            )
+        await asyncio.sleep(int(_vk_pin_watchdog_state["interval_seconds"]))
+
+
+async def _handle_vk_bootstrap_event(event: Any) -> None:
+    message = _vk_bootstrap_event_message(event)
+    if not message or message["peer_id"] <= 2000000000 or message["from_id"] <= 0:
+        return
+    owned_row = _vk_owned_run(message["peer_id"])
+    if owned_row is not None:
+        try:
+            await _promote_joined_vk_staff(owned_row, message)
+            if message["action_type"]:
+                await _restore_vk_course_pin(owned_row, message)
+        except Exception as exc:
+            _log("error", "VK community chat event automation failed peer_id=%s: %s", message["peer_id"], exc)
+    row = _pending_vk_bootstrap_run(message["peer_id"])
+    if row is None:
+        return
+    # A join service event arrives before VK grants the community message-history
+    # access. Wait for the participant's first ordinary message instead of
+    # recording a false send success or duplicating the welcome on retry.
+    if message["action_type"]:
+        response = dict(row.get("response") or {})
+        response.pop("bootstrap_error", None)
+        _persist_vk_bootstrap(row, response, "waiting_for_message")
+        return
+    try:
+        await _initialize_vk_chat_from_run(row)
+    except Exception as exc:
+        _log("error", "VK community chat bootstrap failed peer_id=%s: %s", message["peer_id"], exc)
+
+
+async def _handle_vk_bootstrap_error(error: Exception) -> None:
+    _log("warning", "VK community bootstrap listener error: %s", error)
 
 
 async def _resolve_current_vk_user_id(token: str | None) -> int | None:
@@ -688,162 +1811,6 @@ async def _upload_vk_chat_photo(peer_id: int, photo_path: Path, token: str) -> b
         return False
 
 
-def _vk_web_profile_dir() -> Path:
-    return Path(_clean(os.environ.get("VK_WEB_PROFILE_DIR")) or (_data_dir() / "vk-web-profile"))
-
-
-def _vk_web_screenshot_path() -> Path:
-    return _data_dir() / "vk-web-last.png"
-
-
-async def _vk_web_start() -> tuple[Any, Any]:
-    global _vk_web_playwright, _vk_web_context, _vk_web_page
-    async with _vk_web_lock:
-        if _vk_web_context is not None:
-            pages = list(getattr(_vk_web_context, "pages", []) or [])
-            if _vk_web_page is None or getattr(_vk_web_page, "is_closed", lambda: True)():
-                _vk_web_page = pages[0] if pages else await _vk_web_context.new_page()
-            return _vk_web_context, _vk_web_page
-        try:
-            from playwright.async_api import async_playwright
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Playwright is not installed: {exc}")
-        profile_dir = _vk_web_profile_dir()
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        _vk_web_playwright = await async_playwright().start()
-        _vk_web_context = await _vk_web_playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=_clean(os.environ.get("VK_WEB_HEADLESS") or "1").lower() not in {"0", "false", "no"},
-            viewport={"width": 1366, "height": 900},
-            locale="ru-RU",
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        pages = list(getattr(_vk_web_context, "pages", []) or [])
-        _vk_web_page = pages[0] if pages else await _vk_web_context.new_page()
-        _vk_web_page.set_default_timeout(10000)
-        return _vk_web_context, _vk_web_page
-
-
-async def _vk_web_stop() -> None:
-    global _vk_web_playwright, _vk_web_context, _vk_web_page
-    async with _vk_web_lock:
-        context, playwright = _vk_web_context, _vk_web_playwright
-        _vk_web_context = None
-        _vk_web_playwright = None
-        _vk_web_page = None
-    if context is not None:
-        try:
-            await context.close()
-        except Exception:
-            pass
-    if playwright is not None:
-        try:
-            await playwright.stop()
-        except Exception:
-            pass
-
-
-async def _vk_web_save_screenshot(page: Any | None = None) -> str:
-    if page is None:
-        _, page = await _vk_web_start()
-    path = _vk_web_screenshot_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    await page.screenshot(path=str(path), full_page=False)
-    return str(path)
-
-
-async def _vk_web_is_authorized(page: Any, *, navigate: bool = True) -> tuple[bool, str]:
-    if navigate:
-        await page.goto("https://vk.com/im", wait_until="domcontentloaded", timeout=45000)
-        await page.wait_for_timeout(2500)
-    url = _clean(getattr(page, "url", ""))
-    cookies = await page.context.cookies("https://vk.com")
-    cookie_names = {cookie.get("name") for cookie in cookies}
-    body = ""
-    try:
-        body = (await page.locator("body").inner_text(timeout=3000)).lower()
-    except Exception:
-        body = ""
-    login_words = ("войти", "телефон или почта", "qr", "код", "пароль")
-    app_words = ("мессенджер", "сообщения", "новости", "моя страница", "друзья")
-    if "not_robot_captcha" in body or "captcha-widget" in body or await page.locator("iframe[src*='not_robot_captcha'], [data-test-id='captcha-widget']").count():
-        return False, "captcha_required"
-    has_session_cookie = bool(cookie_names.intersection({"remixsid", "remixusid", "remixua"}))
-    looks_like_login = any(word in body for word in login_words) and not any(word in body for word in app_words)
-    if any(part in url.lower() for part in ("/login", "act=login", "login.vk.", "connect.vk.")):
-        return False, "waiting_auth"
-    if has_session_cookie and not looks_like_login:
-        return True, "authorized"
-    if any(word in body for word in app_words) and not looks_like_login:
-        return True, "authorized"
-    return False, "waiting_auth"
-
-
-async def _vk_web_auth_state(*, open_browser: bool = False, screenshot: bool = False) -> dict[str, Any]:
-    profile_dir = _vk_web_profile_dir()
-    state = {
-        "available": True,
-        "browser_open": _vk_web_context is not None,
-        "authorized": False,
-        "status": "not_opened",
-        "profile_dir": str(profile_dir),
-        "screenshot": False,
-        "screenshot_url": "../api/vk-web/auth/screenshot",
-    }
-    if not open_browser and _vk_web_context is None:
-        state["profile_exists"] = profile_dir.exists()
-        return state
-    try:
-        _, page = await _vk_web_start()
-        authorized, status_value = await _vk_web_is_authorized(page, navigate=open_browser)
-        state.update({"browser_open": True, "authorized": authorized, "status": status_value, "url": getattr(page, "url", "")})
-        if screenshot:
-            await _vk_web_save_screenshot(page)
-            state["screenshot"] = True
-    except HTTPException:
-        raise
-    except Exception as exc:
-        state.update({"status": "error", "error": _exc_text(exc)})
-        try:
-            await _vk_web_save_screenshot()
-            state["screenshot"] = True
-        except Exception:
-            pass
-    return state
-
-
-async def _vk_web_interaction_state(page: Any) -> dict[str, Any]:
-    authorized, status_value = await _vk_web_is_authorized(page, navigate=False)
-    await _vk_web_save_screenshot(page)
-    return {
-        "available": True,
-        "browser_open": True,
-        "authorized": authorized,
-        "status": status_value,
-        "url": getattr(page, "url", ""),
-        "profile_dir": str(_vk_web_profile_dir()),
-        "screenshot": True,
-        "screenshot_url": "../api/vk-web/auth/screenshot",
-    }
-
-
-async def _vk_web_require_authorized() -> Any:
-    _, page = await _vk_web_start()
-    authorized, status_value = await _vk_web_is_authorized(page, navigate=True)
-    if not authorized:
-        await _vk_web_save_screenshot(page)
-        if status_value == "captcha_required":
-            raise HTTPException(status_code=409, detail="VK требует проверку «не робот». Откройте вкладку «VK Авторизация», пройдите проверку и повторите создание/выдачу админок.")
-        raise HTTPException(status_code=409, detail="Нужно авторизовать ВКонтакте во вкладке «Авторизация ВКонтакте».")
-    return page
-
-
-async def _vk_web_raise_if_captcha(page: Any) -> None:
-    if await page.locator("iframe[src*='not_robot_captcha'], [data-test-id='captcha-widget']").count():
-        await _vk_web_save_screenshot(page)
-        raise RuntimeError("VK требует проверку «не робот». Откройте вкладку «VK Авторизация», пройдите проверку и повторите выдачу админок.")
-
-
 def _vk_member_role(member: dict[str, Any]) -> str:
     return _clean(member.get("role") or member.get("member_role") or member.get("is_admin") and "admin")
 
@@ -885,12 +1852,6 @@ async def _vk_wait_for_chat_members(chat_id: int, peer_id: int, target_ids: list
         attempts.append({"present": present, "missing": missing, "error": state.get("error")})
         if not missing:
             return {"ok": True, "present": present, "missing": [], "attempts": attempts[-5:]}
-        for user_id in missing:
-            try:
-                await _vk_method("messages.addChatUser", {"chat_id": chat_id, "user_id": user_id}, token)
-            except Exception:
-                pass
-            await asyncio.sleep(0.4)
         await asyncio.sleep(2.5)
     return {"ok": False, "present": [user_id for user_id in target_ids if user_id not in missing], "missing": missing, "attempts": attempts[-5:]}
 
@@ -906,225 +1867,582 @@ async def _vk_try_api_admins(peer_id: int, target_ids: list[int], token: str) ->
     return {"ok": not state.get("missing_admins"), "results": results, "state": state}
 
 
-async def _vk_web_click_first(page: Any, selectors: list[str], *, timeout: int = 2500) -> bool:
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first()
-            await locator.wait_for(state="visible", timeout=timeout)
-            await locator.click(timeout=timeout)
-            await page.wait_for_timeout(700)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-async def _vk_web_open_members(page: Any, peer_id: int) -> None:
-    chat_id = peer_id - 2000000000
-    await page.goto(f"https://vk.com/im?sel=c{chat_id}", wait_until="domcontentloaded", timeout=45000)
-    await page.wait_for_timeout(3000)
-    await _vk_web_raise_if_captcha(page)
-    try:
-        await page.get_by_text(re.compile(r"\d+\s+участник", re.IGNORECASE)).click(timeout=5000)
-        await page.wait_for_timeout(2500)
-        await _vk_web_raise_if_captcha(page)
-    except Exception:
-        await _vk_web_raise_if_captcha(page)
-        pass
-    if await _vk_web_click_first(page, [
-        "[aria-label*='Информация']",
-        "[aria-label*='информация']",
-        "[data-testid*='conversation_header']",
-        ".ConvoHeader",
-        ".im-page--title-main",
-        ".im-page--chat-header",
-    ]):
-        await _vk_web_raise_if_captcha(page)
-        await _vk_web_click_first(page, [
-            "text=/Участники/i",
-            "text=/участник/i",
-            "[href*='members']",
-            "[data-testid*='members']",
-        ], timeout=3500)
-    await page.wait_for_timeout(1500)
-    await _vk_web_raise_if_captcha(page)
-
-
-async def _vk_web_promote_one(page: Any, peer_id: int, user_id: int, person: dict[str, Any] | None = None) -> None:
-    await _vk_web_open_members(page, peer_id)
-    screen = _vk_screen_name((person or {}).get("vk_id")) or _vk_screen_name((person or {}).get("vk_mention"))
-    found = await page.evaluate(
-        """({userId, screen}) => {
-            const needles = [`/id${userId}`, `sel=${userId}`, `/${screen}`].filter(Boolean).map(String);
-            const links = Array.from(document.querySelectorAll('a[href]'));
-            const link = links.find((a) => needles.some((n) => a.href.includes(n)));
-            if (!link) return false;
-            let row = link;
-            let node = link;
-            for (let i = 0; i < 8 && node; i += 1) {
-                const box = node.getBoundingClientRect();
-                const hasAction = !!node.querySelector('button, [role="button"], [aria-label]');
-                if (box.width > 420 || hasAction || node.matches('[role="listitem"], .vkuiSimpleCell, .ListItem, .im-member, .nim-dialog, li')) {
-                    row = node;
-                }
-                node = node.parentElement;
-            }
-            row.scrollIntoView({block: 'center'});
-            row.setAttribute('data-nexus-target-member', String(userId));
-            return true;
-        }""",
-        {"userId": user_id, "screen": screen},
+async def _send_vk_invite_fallbacks(
+    user_ids: list[int],
+    *,
+    invite_link: str,
+    group_id: int,
+    token: str,
+    course: sqlite3.Row,
+    stream_number: str,
+    date_start: str,
+    selected: dict[str, list[dict[str, Any]]],
+    dedupe_namespace: int = 0,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "candidates": len(user_ids),
+        "sent": 0,
+        "not_allowed": 0,
+        "failed": 0,
+        "errors": [],
+        "sent_user_ids": [],
+        "not_allowed_user_ids": [],
+        "failed_user_ids": [],
+    }
+    if not user_ids or not invite_link:
+        return result
+    message = _render_template(
+        "vk_invite_fallback",
+        course=course,
+        stream_number=stream_number,
+        date_start=date_start,
+        selected=selected,
+        platform="vk",
+        extra={"invite_link": invite_link},
     )
-    if not found:
-        raise RuntimeError(f"VK member {user_id} was not found in conversation members UI")
-    row = page.locator(f"[data-nexus-target-member='{user_id}']").first()
-    await row.hover(timeout=5000)
-    clicked_menu = await _vk_web_click_first(page, [
-        f"[data-nexus-target-member='{user_id}'] [aria-label*='…']",
-        f"[data-nexus-target-member='{user_id}'] [aria-label*='Ещё']",
-        f"[data-nexus-target-member='{user_id}'] [aria-label*='Еще']",
-        f"[data-nexus-target-member='{user_id}'] [aria-label*='Действ']",
-        f"[data-nexus-target-member='{user_id}'] .vkuiIconButton",
-        f"[data-nexus-target-member='{user_id}'] .vkuiTappable",
-        f"[data-nexus-target-member='{user_id}'] button",
-        f"[data-nexus-target-member='{user_id}'] [role='button']",
-    ], timeout=2500)
-    if not clicked_menu:
-        await row.click(button="right", timeout=5000)
-        await page.wait_for_timeout(700)
-    if not await _vk_web_click_first(page, [
-        "text=/Назначить администратором/i",
-        "text=/Сделать администратором/i",
-        "text=/Назначить админ/i",
-    ], timeout=4000):
-        raise RuntimeError(f"VK admin action was not found for member {user_id}")
-    await page.wait_for_timeout(1500)
-    await _vk_web_click_first(page, ["text=/Подтвердить/i", "text=/Назначить/i", "text=/Да/i"], timeout=1500)
-
-
-async def _vk_web_promote_admins(peer_id: int, target_people: list[dict[str, Any]], target_ids: list[int], token: str) -> dict[str, Any]:
-    page = await _vk_web_require_authorized()
-    by_id: dict[int, dict[str, Any]] = {}
-    for person in target_people:
-        for user_id in await _resolve_vk_people_ids([person], token):
-            by_id[user_id] = person
-    results: list[dict[str, Any]] = []
-    for user_id in target_ids:
+    for user_id in user_ids:
         try:
-            await _vk_web_promote_one(page, peer_id, user_id, by_id.get(user_id))
-            state = await _vk_admin_state(peer_id, [user_id], token)
-            ok = not state.get("missing_admins")
-            results.append({"member_id": user_id, "ok": ok, "state": state})
+            allowed_response = await _vk_method(
+                "messages.isMessagesFromGroupAllowed",
+                {"group_id": int(group_id), "user_id": int(user_id)},
+                token,
+            )
+            allowed = bool(
+                allowed_response.get("is_allowed")
+                if isinstance(allowed_response, dict)
+                else allowed_response
+            )
+            if not allowed:
+                result["not_allowed"] += 1
+                result["not_allowed_user_ids"].append(int(user_id))
+                continue
+            send_response = await _vk_method(
+                "messages.send",
+                {
+                    "peer_id": int(user_id),
+                    "message": message,
+                    "random_id": (
+                        ((int(dedupe_namespace) * 1_000_003 + int(user_id)) % (2**31 - 1)) or 1
+                        if dedupe_namespace
+                        else random.randint(1, 2**31 - 1)
+                    ),
+                },
+                token,
+            )
+            if isinstance(send_response, dict) and "error" in send_response:
+                raise RuntimeError(_clean((send_response.get("error") or {}).get("error_msg")) or "VK send failed")
+            result["sent"] += 1
+            result["sent_user_ids"].append(int(user_id))
         except Exception as exc:
-            await _vk_web_save_screenshot(page)
-            results.append({"member_id": user_id, "ok": False, "error": _exc_text(exc), "screenshot_url": "../api/vk-web/auth/screenshot"})
-    final_state = await _vk_admin_state(peer_id, target_ids, token)
-    return {"ok": not final_state.get("missing_admins"), "results": results, "state": final_state, "screenshot_url": "../api/vk-web/auth/screenshot"}
+            result["failed"] += 1
+            result["failed_user_ids"].append(int(user_id))
+            if len(result["errors"]) < 20:
+                result["errors"].append({"user_id": int(user_id), "error": _exc_text(exc)})
+        await asyncio.sleep(0.1)
+    return result
+
+
+def _manual_vk_link_from_rows(
+    rows: list[list[Any]], stream_number: str, generated_link: str = ""
+) -> str:
+    expected = _clean(stream_number)
+    generated = _clean(generated_link)
+    for row in rows:
+        if len(row) < 2:
+            continue
+        title = _clean(row[0])
+        link = _clean(row[1])
+        match = re.search(r"(?:^|\D)(\d{1,6})(?:\D|$)", title)
+        if match and match.group(1) == expected and link.startswith("http") and link != generated:
+            return link
+    return ""
+
+
+async def _manual_vk_invite_link(course_key: str, stream_number: str, generated_link: str) -> str:
+    gid = _clean((CHAT_LINK_SHEETS.get(course_key) or {}).get("vk"))
+    if not gid:
+        return ""
+    spreadsheet_id = (
+        _clean(os.environ.get("COURSE_CHAT_CREATOR_CHAT_LINKS_SPREADSHEET_ID"))
+        or DEFAULT_CHAT_LINKS_SPREADSHEET_ID
+    )
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.get(
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq",
+            params={"tqx": "out:csv", "gid": gid},
+            headers={"User-Agent": "Nexus Course Chat Creator"},
+        )
+        response.raise_for_status()
+    rows = [list(row) for row in csv.reader(io.StringIO(response.text.lstrip("\ufeff")))]
+    return _manual_vk_link_from_rows(rows, stream_number, generated_link)
+
+
+def _canonical_vk_invite_runs(rows: list[Any]) -> list[dict[str, Any]]:
+    """Keep one run per flow and carry durable recipient outcomes across old runs."""
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in rows:
+        row = dict(raw)
+        key = (_course_key(row.get("course_key")), _clean(row.get("stream_number")))
+        if not key[0] or not key[1]:
+            continue
+        group = grouped.setdefault(key, {"run": row, "completed_vk_ids": set()})
+        if int(row.get("id") or 0) > int(group["run"].get("id") or 0):
+            group["run"] = row
+        response = _json_dict(row.get("response_json"))
+        invites = response.get("student_invites") if isinstance(response.get("student_invites"), dict) else {}
+        for field in ("sent_vk_ids", "not_allowed_vk_ids", "joined_vk_ids"):
+            group["completed_vk_ids"].update(
+                int(value)
+                for value in (invites.get(field) or [])
+                if str(value).lstrip("-").isdigit() and int(value) > 0
+            )
+    result: list[dict[str, Any]] = []
+    for group in grouped.values():
+        row = dict(group["run"])
+        row["historical_completed_vk_ids"] = sorted(group["completed_vk_ids"])
+        result.append(row)
+    return sorted(result, key=lambda item: int(item.get("id") or 0))
+
+
+def _community_owned_vk_invite_runs(rows: list[Any], group_id: int) -> list[dict[str, Any]]:
+    owned: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        response = _json_dict(row.get("response_json"))
+        try:
+            owner_group_id = int(response.get("owner_group_id") or 0)
+        except (TypeError, ValueError):
+            owner_group_id = 0
+        if owner_group_id == int(group_id):
+            owned.append(row)
+    return _canonical_vk_invite_runs(owned)
+
+
+async def _dispatch_pending_vk_student_invites_once() -> dict[str, int]:
+    token = _vk_group_token(test_mode=False)
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    result = {"checked": 0, "sent": 0, "waiting_link": 0, "not_allowed": 0, "failed": 0}
+    if not token or group_id <= 0:
+        return result
+    _ensure_db()
+    with _db() as db:
+        stored_rows = db.execute(
+            """
+            SELECT id,status,error,course_key,stream_number,date_start,link,request_json,response_json
+            FROM runs
+            WHERE platform='vk' AND test_mode=0 AND COALESCE(response_json,'')<>''
+            ORDER BY id
+            """
+        ).fetchall()
+    for stored in _community_owned_vk_invite_runs(stored_rows, group_id):
+        response_json = _json_dict(stored["response_json"])
+        invites = response_json.get("student_invites")
+        entitlement_cohort = _vk_processed_entitlement_cohort(
+            _clean(stored["course_key"]), _clean(stored["stream_number"])
+        )
+        entitlement_ids = {
+            int(value)
+            for value in (entitlement_cohort.get("vk_ids") or [])
+            if str(value).lstrip("-").isdigit() and int(value) > 0
+        }
+        if not isinstance(invites, dict):
+            invites = {
+                "initial_added": 0,
+                "delivery": "community_message_and_client_chat_links_page",
+                "community_messages": "waiting_manual_link" if entitlement_ids else "not_needed",
+                "pending_vk_ids": sorted(entitlement_ids),
+                "sent_vk_ids": [],
+                "not_allowed_vk_ids": [],
+                "joined_vk_ids": [],
+            }
+        else:
+            existing_pending = {
+                int(value)
+                for value in (invites.get("pending_vk_ids") or [])
+                if str(value).lstrip("-").isdigit() and int(value) > 0
+            }
+            invites["pending_vk_ids"] = sorted(existing_pending | entitlement_ids)
+        invites["entitlement_cohort"] = {
+            key: value for key, value in entitlement_cohort.items() if key != "vk_ids"
+        }
+        response_json["student_invites"] = invites
+        if entitlement_ids:
+            _update_run(
+                int(stored["id"]),
+                _clean(stored["status"]),
+                response_json,
+                error=_clean(stored["error"]),
+            )
+        pending_ids = {
+            int(value)
+            for value in (invites.get("pending_vk_ids") or [])
+            if str(value).lstrip("-").isdigit() and int(value) > 0
+        }
+        completed_ids = {
+            int(value)
+            for key in ("sent_vk_ids", "not_allowed_vk_ids", "joined_vk_ids")
+            for value in (invites.get(key) or [])
+            if str(value).lstrip("-").isdigit() and int(value) > 0
+        }
+        completed_ids.update(int(value) for value in stored.get("historical_completed_vk_ids") or [])
+        target_ids = sorted(pending_ids - completed_ids)
+        if not target_ids:
+            continue
+        peer_id = int(response_json.get("peer_id") or 0)
+        if peer_id > 2000000000:
+            member_state = await _vk_admin_state(peer_id, target_ids, token)
+            joined_ids = {
+                int(item.get("id") or 0)
+                for item in (member_state.get("members") or [])
+                if int(item.get("id") or 0) in target_ids
+            }
+            if joined_ids:
+                invites["joined_vk_ids"] = sorted(
+                    set(invites.get("joined_vk_ids") or []) | joined_ids
+                )
+                target_ids = sorted(set(target_ids) - joined_ids)
+                response_json["student_invites"] = invites
+                _update_run(
+                    int(stored["id"]),
+                    _clean(stored["status"]),
+                    response_json,
+                    error=_clean(stored["error"]),
+                )
+        if not target_ids:
+            continue
+        result["checked"] += len(target_ids)
+        try:
+            manual_link = await _manual_vk_invite_link(
+                _clean(stored["course_key"]), _clean(stored["stream_number"]), _clean(stored["link"])
+            )
+        except Exception as exc:
+            invites["community_messages"] = "waiting_manual_link"
+            invites["last_error"] = _exc_text(exc)
+            response_json["student_invites"] = invites
+            _update_run(int(stored["id"]), _clean(stored["status"]), response_json, error=_clean(stored["error"]))
+            result["waiting_link"] += len(target_ids)
+            continue
+        if not manual_link:
+            invites["community_messages"] = "waiting_manual_link"
+            invites["last_error"] = ""
+            response_json["student_invites"] = invites
+            _update_run(int(stored["id"]), _clean(stored["status"]), response_json, error=_clean(stored["error"]))
+            result["waiting_link"] += len(target_ids)
+            continue
+        request_json = _json_dict(stored["request_json"])
+        course = _course_by_input(_clean(stored["course_key"]))
+        selected = _selected_people(_clean(stored["stream_number"]), request_json.get("curator_id"))
+        delivery = await _send_vk_invite_fallbacks(
+            target_ids,
+            invite_link=manual_link,
+            group_id=group_id,
+            token=token,
+            course=course,
+            stream_number=_clean(stored["stream_number"]),
+            date_start=_clean(stored["date_start"]),
+            selected=selected,
+            dedupe_namespace=int(stored["id"]),
+        )
+        sent_ids = sorted(set(invites.get("sent_vk_ids") or []) | set(delivery["sent_user_ids"]))
+        not_allowed_ids = sorted(
+            set(invites.get("not_allowed_vk_ids") or []) | set(delivery["not_allowed_user_ids"])
+        )
+        invites.update(
+            {
+                "community_messages": "sent" if not delivery["failed"] else "partial",
+                "manual_vk_link": manual_link,
+                "sent_vk_ids": sent_ids,
+                "not_allowed_vk_ids": not_allowed_ids,
+                "last_error": "; ".join(item["error"] for item in delivery["errors"][:3]),
+            }
+        )
+        response_json["student_invites"] = invites
+        _update_run(int(stored["id"]), _clean(stored["status"]), response_json, error=_clean(stored["error"]))
+        result["sent"] += delivery["sent"]
+        result["not_allowed"] += delivery["not_allowed"]
+        result["failed"] += delivery["failed"]
+    return result
+
+
+async def _vk_invite_dispatch_loop() -> None:
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await _dispatch_pending_vk_student_invites_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("warning", "VK student invite dispatch failed: %s", _exc_text(exc))
+        await asyncio.sleep(60)
+
+
+async def _send_vk_staff_invites(
+    user_ids: list[int],
+    *,
+    invite_link: str,
+    group_id: int,
+    token: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "candidates": len(user_ids),
+        "sent": 0,
+        "not_allowed": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    if not user_ids or not invite_link:
+        return result
+    message = (
+        "Вступите в учебный чат по ссылке:\n"
+        f"{invite_link}\n\n"
+        "После входа права администратора будут выданы автоматически."
+    )
+    for user_id in user_ids:
+        try:
+            allowed_response = await _vk_method(
+                "messages.isMessagesFromGroupAllowed",
+                {"group_id": int(group_id), "user_id": int(user_id)},
+                token,
+            )
+            allowed = bool(
+                allowed_response.get("is_allowed")
+                if isinstance(allowed_response, dict)
+                else allowed_response
+            )
+            if not allowed:
+                result["not_allowed"] += 1
+                continue
+            send_response = await _vk_method(
+                "messages.send",
+                {
+                    "peer_id": int(user_id),
+                    "message": message,
+                    "random_id": random.randint(1, 2**31 - 1),
+                },
+                token,
+            )
+            if isinstance(send_response, dict) and "error" in send_response:
+                raise RuntimeError(
+                    _clean((send_response.get("error") or {}).get("error_msg"))
+                    or "VK send failed"
+                )
+            result["sent"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            if len(result["errors"]) < 20:
+                result["errors"].append({"user_id": int(user_id), "error": _exc_text(exc)})
+        await asyncio.sleep(0.4)
+    return result
 
 
 async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
     _check_password(data, trusted=trusted)
     test_mode = _bool(data.get("test_mode"))
-    token = _clean(os.environ.get("VK_TEST_USER_TOKEN") if test_mode and os.environ.get("VK_TEST_USER_TOKEN") else os.environ.get("VK_USER_TOKEN"))
+    token = _vk_group_token(test_mode=test_mode)
+    group_id = _clean(os.environ.get("VK_GROUP_ID"))
+    if not token:
+        raise HTTPException(status_code=503, detail="VK_GROUP_TOKEN is not configured")
+    if not group_id.isdigit() or int(group_id) <= 0:
+        raise HTTPException(status_code=503, detail="VK_GROUP_ID is not configured")
     stream_number = _clean(data.get("stream_number") or "15")
-    date_start = _clean(data.get("date_start") or data.get("start_date") or "17 марта")
+    date_start = _clean(data.get("date_start") or data.get("start_date")) or _today_moscow()
     course = _course_by_input(data.get("course_type") or data.get("course_choice") or "puppy")
     title = _format_title(stream_number, date_start, course, "vk")
     selected = _selected_people(stream_number, data.get("curator_id"))
-    staff_people = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
-    chat_member_ids = await _resolve_vk_people_ids(staff_people, token)
+    staff_people = _vk_staff_for_mode(selected, test_mode=test_mode)
+    if test_mode and not staff_people:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Тестовый сотрудник VK {VK_TEST_STAFF_ID} не найден среди активных сотрудников",
+        )
+    expected_staff_ids = await _resolve_vk_people_ids(staff_people, token)
     if test_mode:
-        chat_member_ids = []
-    create_params: dict[str, Any] = {"title": title}
-    if chat_member_ids:
-        create_params["user_ids"] = ",".join(map(str, chat_member_ids))
-    create_resp = await _vk_method("messages.createChat", create_params, token)
-    if isinstance(create_resp, dict) and "error" in create_resp and chat_member_ids:
-        create_resp = await _vk_method("messages.createChat", {"title": title}, token)
+        cohort = {
+            "available": True,
+            "source": "test_mode",
+            "total": 0,
+            "with_vk": 0,
+            "without_vk": 0,
+            "vk_ids": [],
+            "reason": "test_mode",
+        }
+    else:
+        cohort = _vk_processed_entitlement_cohort(course["key"], stream_number)
+    student_vk_ids = [int(value) for value in cohort.get("vk_ids", []) if int(value) > 0]
+    requested_ids = list(dict.fromkeys(expected_staff_ids + student_vk_ids))
+    initial_ids = requested_ids[:VK_INITIAL_USER_LIMIT]
+    initial_params: dict[str, Any] = {"title": title, "group_id": int(group_id)}
+    if initial_ids:
+        initial_params["user_ids"] = ",".join(map(str, initial_ids))
+    create_resp = await _vk_method("messages.createChat", initial_params, token)
+    bulk_create_error = ""
+    if isinstance(create_resp, dict) and "error" in create_resp and initial_ids:
+        bulk_create_error = _clean((create_resp.get("error") or {}).get("error_msg")) or "VK rejected initial members"
+        create_resp = await _vk_method(
+            "messages.createChat", {"title": title, "group_id": int(group_id)}, token
+        )
     if isinstance(create_resp, dict) and "error" in create_resp:
         raise HTTPException(status_code=500, detail=create_resp["error"].get("error_msg") or create_resp["error"])
-    chat_id = int(create_resp)
+    chat_id = _vk_created_chat_id(create_resp)
     peer_id = 2000000000 + chat_id
-    await asyncio.sleep(0.5)
-    await _vk_method("messages.editChat", {"chat_id": chat_id, "show_history": 1}, token)
-    group_id = _clean(os.environ.get("VK_GROUP_ID"))
-    if not test_mode and group_id:
-        try:
-            await asyncio.sleep(1)
-            await _vk_method("messages.addChatUser", {"chat_id": chat_id, "user_id": -int(group_id)}, token)
-        except Exception as exc:
-            _log("warning", "VK group add failed: %s", exc)
-    for user_id in chat_member_ids:
-        try:
-            await asyncio.sleep(0.2)
-            await _vk_method("messages.addChatUser", {"chat_id": chat_id, "user_id": user_id}, token)
-        except Exception:
-            pass
-    members_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "test_mode" if test_mode else "no_staff_members"}
-    if not test_mode and chat_member_ids:
-        members_result = await _vk_wait_for_chat_members(chat_id, peer_id, chat_member_ids, token)
+    response_peer_ids = {
+        int(value)
+        for value in (create_resp.get("peer_ids", []) if isinstance(create_resp, dict) else [])
+        if str(value).lstrip("-").isdigit() and int(value) > 0
+    }
+    member_state = await _vk_admin_state(peer_id, expected_staff_ids, token)
+    actual_ids = {
+        int(item.get("id") or 0)
+        for item in member_state.get("members", [])
+        if int(item.get("id") or 0) > 0
+    } or response_peer_ids
+    added_student_ids = sorted(actual_ids & set(student_vk_ids))
+    failed_student_ids = sorted(set(student_vk_ids) - set(added_student_ids))
+    present_staff_ids = sorted(actual_ids & set(expected_staff_ids))
+    missing_staff_ids = sorted(set(expected_staff_ids) - set(present_staff_ids))
+    members_result: dict[str, Any] = {
+        "ok": not bulk_create_error and not failed_student_ids and not missing_staff_ids,
+        "join_mode": "initial_members_and_invite_link" if initial_ids else "invite_link",
+        "expected_staff_ids": expected_staff_ids,
+        "staff_present": present_staff_ids,
+        "staff_pending_join": missing_staff_ids,
+        "student_source": cohort.get("source"),
+        "student_cohort_available": bool(cohort.get("available")),
+        "student_total": int(cohort.get("total") or 0),
+        "student_with_vk": int(cohort.get("with_vk") or 0),
+        "student_without_vk": int(cohort.get("without_vk") or 0),
+        "student_requested": len(student_vk_ids),
+        "student_added": len(added_student_ids),
+        "student_not_added": len(failed_student_ids),
+        "initial_request_limit": VK_INITIAL_USER_LIMIT,
+        "bulk_create_error": bulk_create_error,
+        "reason": "test_mode" if test_mode else _clean(cohort.get("reason")),
+    }
+    avatar_ready = False
     photo = _avatar_path()
     if photo:
-        await _upload_vk_chat_photo(peer_id, photo, token)
-    welcome_photo = _asset_path("welcome_message_photo.jpg")
-    if welcome_photo:
-        attachment = await _upload_vk_message_photo(peer_id, welcome_photo, token)
-        if attachment:
-            await _vk_method("messages.send", {"peer_id": peer_id, "attachment": attachment, "random_id": random.randint(1, 2**31 - 1)}, token)
-            await asyncio.sleep(1)
-    welcome_text = _render_template("vk_welcome", course=course, stream_number=stream_number, date_start=date_start, selected=selected, platform="vk")
-    welcome_resp = await _vk_method("messages.send", {"peer_id": peer_id, "message": welcome_text, "random_id": random.randint(1, 2**31 - 1)}, token)
-    if isinstance(welcome_resp, int):
-        await asyncio.sleep(2)
-        await _vk_method("messages.pin", {"peer_id": peer_id, "message_id": welcome_resp}, token)
-    admin_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "test_mode" if test_mode else "no_staff_members"}
-    run_status = "ok"
-    run_error = ""
-    if not test_mode and chat_member_ids:
-        if members_result.get("missing"):
-            missing_members = ", ".join(map(str, members_result.get("missing") or []))
-            admin_result = {"ok": False, "skipped": True, "reason": "members_missing", "missing_members": members_result.get("missing") or []}
-            run_status = "needs_members"
-            run_error = f"VK не подтвердил всех участников после наполнения беседы: missing_members={missing_members}"
-        else:
-            await asyncio.sleep(3)
-            api_result = await _vk_try_api_admins(peer_id, chat_member_ids, token)
-            admin_result = api_result
-            missing_admins = list(((api_result.get("state") or {}).get("missing_admins") or []))
-            if missing_admins:
-                try:
-                    web_result = await _vk_web_promote_admins(peer_id, staff_people, missing_admins, token)
-                except Exception as exc:
-                    final_state = await _vk_admin_state(peer_id, chat_member_ids, token)
-                    web_result = {
-                        "ok": False,
-                        "error": _exc_text(exc),
-                        "state": final_state,
-                        "screenshot_url": "../api/vk-web/auth/screenshot",
-                    }
-                admin_result = {"ok": web_result.get("ok"), "api": api_result, "web": web_result}
-                missing = list((web_result.get("state") or {}).get("missing_admins") or [])
-                if missing:
-                    run_status = "needs_vk_web_admins"
-                    run_error = f"VK Web не смог выдать админки после наполнения беседы: missing_admins={', '.join(map(str, missing))}"
+        avatar_ready = await _upload_vk_chat_photo(peer_id, photo, token)
     invite_data = await _vk_method("messages.getInviteLink", {"peer_id": peer_id}, token)
     invite_link = invite_data.get("link", "") if isinstance(invite_data, dict) else ""
+    run_status = "waiting_for_message" if invite_link else "needs_invite_link"
+    run_error = "" if invite_link else "VK did not return an invite link"
+    members_result["invite_link_ready"] = bool(invite_link)
+    if present_staff_ids:
+        admin_result = await _vk_try_api_admins(peer_id, present_staff_ids, token)
+        admin_result["pending_join_ids"] = missing_staff_ids
+    else:
+        admin_result = {
+            "ok": not expected_staff_ids,
+            "skipped": True,
+            "reason": "no_staff_present" if expected_staff_ids else "no_staff_members",
+            "expected_staff_ids": expected_staff_ids,
+            "pending_join_ids": missing_staff_ids,
+        }
     response = {
-        "message": "Success! VK chat created." if run_status == "ok" else "VK chat created, but follow-up action is required.",
+        "message": "VK community chat created. Waiting for the first member." if invite_link else "VK community chat created without an invite link.",
         "group_link": invite_link,
         "chat_id": chat_id,
         "peer_id": peer_id,
+        "owner_group_id": int(group_id),
+        "join_mode": members_result["join_mode"],
+        "avatar_ready": avatar_ready,
+        "bootstrap_status": run_status,
         "test_mode": test_mode,
         "title": title,
         "curator_id": _selected_curator_id(stream_number, data.get("curator_id")),
         "members_result": members_result,
         "admin_result": admin_result,
-        "needs_attention": run_status != "ok",
+        "needs_attention": run_status == "needs_invite_link",
         "followup_status": run_status,
         "detail": run_error,
     }
-    _record_run("vk", title, stream_number, date_start, course["key"], test_mode, run_status, data, response, error=run_error, link=invite_link, chat_id=str(chat_id))
-    return response
+    run_id = _record_run(
+        "vk",
+        title,
+        stream_number,
+        date_start,
+        course["key"],
+        test_mode,
+        run_status,
+        data,
+        response,
+        error=run_error,
+        link=invite_link,
+        chat_id=str(chat_id),
+    )
+    if not invite_link:
+        return response
+    row = {
+        "id": run_id,
+        "stream_number": stream_number,
+        "date_start": date_start,
+        "course_key": course["key"],
+        "test_mode": int(test_mode),
+        "request": dict(data),
+        "response": response,
+    }
+    try:
+        prepared = await _initialize_vk_chat_from_run(row)
+        link_sync = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=test_mode)
+        prepared["student_invites"] = {
+            "initial_added": len(added_student_ids),
+            "delivery": "community_message_and_client_chat_links_page",
+            "community_messages": "waiting_manual_link" if failed_student_ids else "not_needed",
+            "pending_vk_ids": failed_student_ids,
+            "sent_vk_ids": [],
+            "not_allowed_vk_ids": [],
+            "client_link_required": int(cohort.get("without_vk") or 0) + len(failed_student_ids),
+            "getcourse_link_required": int(cohort.get("without_vk") or 0) + len(failed_student_ids),
+        }
+        prepared["staff_invites"] = {
+            "delivery": "history_link",
+            "community_messages": "disabled",
+            "pending": missing_staff_ids,
+        }
+        prepared["link_sync"] = link_sync
+        prepared["message"] = "VK community chat created and prepared."
+        if missing_staff_ids:
+            detail = "Ожидается вход сотрудников: " + ", ".join(map(str, missing_staff_ids))
+            prepared.update(
+                {
+                    "needs_attention": True,
+                    "followup_status": "needs_members",
+                    "detail": detail,
+                }
+            )
+            _update_run(run_id, "needs_members", prepared, error=detail)
+        elif not bool((prepared.get("admin_result") or {}).get("ok", True)):
+            detail = "Ожидается выдача администраторских прав"
+            prepared.update(
+                {
+                    "needs_attention": True,
+                    "followup_status": "needs_admins",
+                    "detail": detail,
+                }
+            )
+            _update_run(run_id, "needs_admins", prepared, error=detail)
+        elif not bool(link_sync.get("ok", True)):
+            detail = _clean(link_sync.get("error")) or "Не удалось обновить таблицу ссылок"
+            prepared.update(
+                {
+                    "needs_attention": True,
+                    "followup_status": "needs_link_sync",
+                    "detail": detail,
+                }
+            )
+            _update_run(run_id, "needs_link_sync", prepared, error=detail)
+        else:
+            prepared.update({"needs_attention": False, "followup_status": "ok", "detail": ""})
+            _update_run(run_id, "ok", prepared)
+        return prepared
+    except Exception:
+        with _db() as db:
+            stored = db.execute("SELECT response_json FROM runs WHERE id=?", (run_id,)).fetchone()
+        failed = _json_dict(stored["response_json"] if stored else response)
+        failed["message"] = "VK community chat created; preparation needs attention."
+        _update_run(run_id, "needs_bootstrap", failed, error=_clean(failed.get("bootstrap_error")))
+        return failed
 
 
 async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]:
@@ -1138,45 +2456,45 @@ async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]
         peer_id = 2000000000 + int(row["chat_id"])
     if not peer_id:
         raise HTTPException(status_code=400, detail="В запуске не сохранён peer_id VK-чата")
-    chat_id = peer_id - 2000000000
     test_mode = bool(row.get("test_mode"))
-    token = _clean(os.environ.get("VK_TEST_USER_TOKEN") if test_mode and os.environ.get("VK_TEST_USER_TOKEN") else os.environ.get("VK_USER_TOKEN"))
+    token = _vk_group_token(test_mode=test_mode)
+    if not token:
+        raise HTTPException(status_code=503, detail="VK_GROUP_TOKEN is not configured")
     stream_number = _clean(row.get("stream_number") or request_json.get("stream_number"))
     selected = _selected_people(stream_number, request_json.get("curator_id"))
-    staff_people = selected["admins"] + selected["authors"] + selected["kurators"] + selected["techs"]
+    staff_people = _vk_staff_for_mode(selected, test_mode=test_mode)
     target_ids = await _resolve_vk_people_ids(staff_people, token)
     if not target_ids:
         result = {"ok": True, "skipped": True, "reason": "no_staff_members", "run_id": row["id"], "peer_id": peer_id}
         response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
         _update_run(int(row["id"]), "ok", response_json)
         return result
-    members_result = await _vk_wait_for_chat_members(chat_id, peer_id, target_ids, token, timeout_seconds=20)
-    if members_result.get("missing"):
-        missing_members = list(members_result.get("missing") or [])
+    state = await _vk_admin_state(peer_id, target_ids, token)
+    present_ids = {
+        int(item.get("id") or 0)
+        for item in state.get("members", [])
+        if int(item.get("id") or 0) > 0
+    }
+    missing_members = [user_id for user_id in target_ids if user_id not in present_ids]
+    members_result = {
+        "ok": not missing_members,
+        "present": [user_id for user_id in target_ids if user_id in present_ids],
+        "missing": missing_members,
+        "join_mode": "invite_link",
+        "error": state.get("error"),
+    }
+    if missing_members:
         error = f"VK не подтвердил всех участников перед выдачей админок: missing_members={', '.join(map(str, missing_members))}"
         result = {"ok": False, "run_id": row["id"], "peer_id": peer_id, "members_result": members_result, "error": error}
         response_json.update({"members_result": members_result, "admin_result": result, "needs_attention": True, "followup_status": "needs_members", "detail": error})
         _update_run(int(row["id"]), "needs_members", response_json, error=error)
         return result
-    state = await _vk_admin_state(peer_id, target_ids, token)
     missing_admins = list(state.get("missing_admins") or [])
     api_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "already_admin", "state": state}
     if missing_admins:
         api_result = await _vk_try_api_admins(peer_id, missing_admins, token)
         missing_admins = list(((api_result.get("state") or {}).get("missing_admins") or []))
-    web_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "api_completed"}
-    if missing_admins:
-        try:
-            web_result = await _vk_web_promote_admins(peer_id, staff_people, missing_admins, token)
-        except Exception as exc:
-            final_state = await _vk_admin_state(peer_id, target_ids, token)
-            web_result = {
-                "ok": False,
-                "error": _exc_text(exc),
-                "state": final_state,
-                "screenshot_url": "../api/vk-web/auth/screenshot",
-            }
-    final_state = (web_result.get("state") or api_result.get("state") or state)
+    final_state = api_result.get("state") or state
     final_missing = list(final_state.get("missing_admins") or [])
     result = {
         "ok": not final_missing,
@@ -1184,14 +2502,13 @@ async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]
         "peer_id": peer_id,
         "members_result": members_result,
         "api": api_result,
-        "web": web_result,
         "state": final_state,
         "missing_admins": final_missing,
     }
     if final_missing:
-        error = f"VK Web не смог выдать админки: missing_admins={', '.join(map(str, final_missing))}"
-        response_json.update({"admin_result": result, "needs_attention": True, "followup_status": "needs_vk_web_admins", "detail": error})
-        _update_run(int(row["id"]), "needs_vk_web_admins", response_json, error=error)
+        error = f"VK API не подтвердил роли администраторов: missing_admins={', '.join(map(str, final_missing))}"
+        response_json.update({"admin_result": result, "needs_attention": True, "followup_status": "needs_admins", "detail": error})
+        _update_run(int(row["id"]), "needs_admins", response_json, error=error)
     else:
         response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
         _update_run(int(row["id"]), "ok", response_json)
@@ -1212,13 +2529,20 @@ def _telegram_session_file() -> str:
 
 
 def _telegram_proxy_url() -> str:
-    return _clean(os.environ.get("TELEGRAM_MTPROTO_PROXY_URL") or os.environ.get("TELEGRAM_PROXY_URL"))
+    if telegram_mtproto_proxy_url is not None:
+        return telegram_mtproto_proxy_url(os.environ.get("TELEGRAM_PROXY_URL"))
+    return _clean(os.environ.get("TELEGRAM_MTPROTO_PROXY_URL") or os.environ.get("TELEGRAM_MTPROTO_PROXY") or os.environ.get("TELEGRAM_PROXY_URL"))
 
 
 def _telegram_proxy_config() -> tuple[Any | None, tuple[str, int, str] | None]:
     raw = _telegram_proxy_url()
     if not raw:
         return None, None
+    if telethon_proxy_config is not None:
+        try:
+            return telethon_proxy_config(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     parsed = urlparse(raw)
     if parsed.scheme in {"http", "https"} and parsed.netloc == "t.me" and parsed.path == "/proxy":
         query = parse_qs(parsed.query)
@@ -1449,9 +2773,9 @@ def _runs_broadcast_chats(platforms: set[str]) -> list[dict[str, Any]]:
 
 
 async def _scan_vk_broadcast_chats(limit: int = 500) -> dict[str, Any]:
-    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    token = _vk_group_token()
     if not token:
-        return _broadcast_empty_status("VK_USER_TOKEN is not configured")
+        return _broadcast_empty_status("VK_GROUP_TOKEN is not configured")
     items: list[dict[str, Any]] = []
     offset = 0
     while offset < limit:
@@ -1605,10 +2929,10 @@ async def _broadcast_sleep(delay_bounds: tuple[int, int], *, index: int, total: 
 
 
 async def _send_vk_broadcast_message(chat: dict[str, Any], message: str) -> tuple[bool, str, str]:
-    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    token = _vk_group_token()
     peer_id = _clean(chat.get("peer_id"))
     if not token:
-        return False, "", "VK_USER_TOKEN is not configured"
+        return False, "", "VK_GROUP_TOKEN is not configured"
     if not peer_id:
         return False, "", "peer_id is empty"
     last_error = ""
@@ -1622,16 +2946,17 @@ async def _send_vk_broadcast_message(chat: dict[str, Any], message: str) -> tupl
                 await asyncio.sleep(3 + attempt * 5)
                 continue
             return False, "", last_error
-        if response:
-            return True, str(response), ""
+        message_id, cmid = _vk_message_reference(response)
+        if message_id or cmid:
+            return True, str(message_id or cmid), ""
         last_error = "VK did not return message id"
     return False, "", last_error
 
 
 async def _delete_vk_broadcast_message(peer_id: str, message_id: str) -> tuple[bool, str]:
-    token = _clean(os.environ.get("VK_USER_TOKEN"))
+    token = _vk_group_token()
     if not token:
-        return False, "VK_USER_TOKEN is not configured"
+        return False, "VK_GROUP_TOKEN is not configured"
     if not message_id:
         return False, "message_id is empty"
     params = {"message_ids": message_id, "delete_for_all": 1}
@@ -1737,45 +3062,340 @@ async def _send_tg_with_entity(client: Any, entity: Any, message: str) -> tuple[
     return False, "", "Telegram send failed"
 
 
-async def _remove_vk_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
-    token = _clean(os.environ.get("VK_USER_TOKEN"))
+def _recorded_vk_course_chats() -> list[dict[str, Any]]:
+    _ensure_db()
+    with _db() as db:
+        rows = [
+            dict(row)
+            for row in db.execute(
+                "SELECT id,title,chat_id,response_json,test_mode,status FROM runs WHERE platform=? ORDER BY id DESC",
+                ("vk",),
+            ).fetchall()
+        ]
+    result: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    for row in rows:
+        title = _clean(row.get("title"))
+        if not _is_course_chat_title(title):
+            continue
+        response = _json_object(row.get("response_json"))
+        peer_id = int(response.get("peer_id") or 0)
+        chat_id = int(row.get("chat_id") or response.get("chat_id") or 0)
+        if peer_id <= 2000000000 and chat_id > 0:
+            peer_id = 2000000000 + chat_id
+        if peer_id <= 2000000000 or peer_id in seen:
+            continue
+        seen.add(peer_id)
+        result.append(
+            {
+                "run_id": int(row["id"]),
+                "peer_id": peer_id,
+                "chat_id": peer_id - 2000000000,
+                "title": title,
+                "test_mode": bool(row.get("test_mode")),
+                "run_status": _clean(row.get("status")),
+                "community_owned": int(response.get("owner_group_id") or 0) == group_id,
+                "welcome_cmid": int(response.get("welcome_cmid") or 0),
+                "pin_watchdog_suspended": bool(
+                    isinstance(response.get("pin_watchdog"), dict)
+                    and response["pin_watchdog"].get("suspended_by_admin")
+                ),
+                "url": f"https://vk.com/gim{group_id}?sel=c{peer_id - 2000000000}" if group_id else "",
+            }
+        )
+    return result
+
+
+def _vk_error_summary(response: Any) -> dict[str, Any] | None:
+    if not isinstance(response, dict) or "error" not in response:
+        return None
+    error = response.get("error") or {}
+    if isinstance(error, dict):
+        return {"code": error.get("error_code"), "message": _clean(error.get("error_msg"))}
+    return {"code": None, "message": _clean(error)}
+
+
+async def _vk_course_chat_inventory(target_user_id: int | None = None) -> dict[str, Any]:
+    token = _vk_group_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="VK_GROUP_TOKEN is not configured")
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    items: list[dict[str, Any]] = []
+    for chat in _recorded_vk_course_chats():
+        if not chat.get("community_owned"):
+            item = dict(chat)
+            item.update(
+                {
+                    "accessible": False,
+                    "status": "legacy_inaccessible",
+                    "error": {
+                        "code": 927,
+                        "message": "Чат создан старым пользовательским контуром и недоступен сообществу",
+                    },
+                }
+            )
+            items.append(item)
+            continue
+        members = await _vk_method(
+            "messages.getConversationMembers",
+            {"peer_id": chat["peer_id"], "count": 1000, "group_id": group_id},
+            token,
+        )
+        error = _vk_error_summary(members)
+        item = dict(chat)
+        if error:
+            item.update({"accessible": False, "status": "inaccessible", "error": error})
+            items.append(item)
+            continue
+        member_rows = members.get("items", []) if isinstance(members, dict) else []
+        item["accessible"] = True
+        item["members_count"] = len(member_rows)
+        if target_user_id:
+            target = next(
+                (row for row in member_rows if int(row.get("member_id") or 0) == target_user_id),
+                None,
+            )
+            item["target_present"] = bool(target)
+            item["target_role"] = _vk_member_role(target or {}) or ("member" if target else "")
+        item["status"] = "ready"
+        items.append(item)
+    return {
+        "ok": True,
+        "source": "recorded_course_chats",
+        "target": target_user_id,
+        "accessible": sum(1 for item in items if item.get("accessible")),
+        "inaccessible": sum(1 for item in items if not item.get("accessible")),
+        "items": items,
+    }
+
+
+async def _restore_vk_course_pin_manual(peer_id: int, *, dry_run: bool) -> dict[str, Any]:
+    row = _vk_owned_run(peer_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="VK chat is not recorded or is not community-owned")
+    response = dict(row.get("response") or {})
+    cmid = int(response.get("welcome_cmid") or 0)
+    if cmid <= 0:
+        raise HTTPException(status_code=409, detail="В запуске не сохранён закреп курса")
+    token = _vk_group_token(test_mode=bool(row.get("test_mode")))
+    if not token:
+        raise HTTPException(status_code=503, detail="VK_GROUP_TOKEN is not configured")
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    current = await _vk_method(
+        "messages.getConversationsById",
+        {"peer_ids": str(peer_id), "group_id": group_id},
+        token,
+    )
+    current_cmid = int(_vk_conversation_pin_map(current).get(peer_id) or 0)
+    legacy_photo_cmid = int(response.get("welcome_photo_cmid") or 0)
+    needs_photo_upgrade = legacy_photo_cmid > 0 and legacy_photo_cmid != cmid
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "peer_id": peer_id,
+            "current_cmid": current_cmid,
+            "target_cmid": cmid,
+            "status": (
+                "would_add_photo"
+                if needs_photo_upgrade
+                else ("already_pinned" if current_cmid == cmid else "would_restore")
+            ),
+        }
+    photo_added = False
+    if needs_photo_upgrade:
+        request_json = dict(row.get("request") or _json_dict(row.get("request_json")))
+        stream_number = _clean(row.get("stream_number") or request_json.get("stream_number"))
+        date_start = _clean(
+            row.get("date_start") or request_json.get("date_start") or request_json.get("start_date")
+        )
+        course = _course_by_input(
+            row.get("course_key") or request_json.get("course_type") or request_json.get("course_choice")
+        )
+        selected = _selected_people(stream_number, request_json.get("curator_id"))
+        welcome_text = _render_template(
+            "vk_test_welcome" if bool(row.get("test_mode")) else "vk_welcome",
+            course=course,
+            stream_number=stream_number,
+            date_start=date_start,
+            selected=selected,
+            platform="vk",
+        )
+        welcome_photo = _asset_path("welcome_message_photo.jpg")
+        if not welcome_photo:
+            raise HTTPException(status_code=500, detail="Изображение закрепа не найдено")
+        attachment = _clean(await _upload_vk_message_photo(peer_id, welcome_photo, token))
+        if not attachment:
+            raise HTTPException(status_code=502, detail="VK не загрузил изображение закрепа")
+        welcome_response = await _vk_method(
+            "messages.send",
+            {
+                "peer_id": peer_id,
+                "message": welcome_text,
+                "attachment": attachment,
+                "random_id": random.randint(1, 2**31 - 1),
+            },
+            token,
+        )
+        _vk_require_success("messages.send welcome with photo", welcome_response)
+        message_id, upgraded_cmid = _vk_message_reference(welcome_response)
+        if not message_id and not upgraded_cmid:
+            for _attempt in range(3):
+                await asyncio.sleep(0.3)
+                message_id, upgraded_cmid = await _find_vk_community_chat_message(
+                    peer_id, token, text=welcome_text, attachment_type="photo"
+                )
+                if upgraded_cmid:
+                    break
+        if not message_id and not upgraded_cmid:
+            raise HTTPException(status_code=502, detail="VK не вернул идентификатор закрепа")
+        cmid = int(upgraded_cmid or 0)
+        if cmid <= 0:
+            raise HTTPException(status_code=502, detail="VK не вернул локальный идентификатор закрепа")
+        response["welcome_message_id"] = message_id
+        response["welcome_cmid"] = cmid
+        response["welcome_photo_sent"] = True
+        response["welcome_photo_cmid"] = cmid
+        response["welcome_message_has_photo"] = True
+        photo_added = True
+    if current_cmid != cmid:
+        pin_response = await _vk_method(
+            "messages.pin", {"peer_id": peer_id, "cmid": cmid}, token
+        )
+        if isinstance(pin_response, dict) and "error" in pin_response:
+            raise HTTPException(status_code=502, detail="VK не восстановил закреп курса")
+        verify = await _vk_method(
+            "messages.getConversationsById",
+            {"peer_ids": str(peer_id), "group_id": group_id},
+            token,
+        )
+        if _vk_conversation_pin_map(verify).get(peer_id) != cmid:
+            raise HTTPException(status_code=502, detail="VK не подтвердил закреп курса")
+    watchdog = response.get("pin_watchdog") if isinstance(response.get("pin_watchdog"), dict) else {}
+    response["pin_watchdog"] = {
+        **watchdog,
+        "restored_count": int(watchdog.get("restored_count") or 0)
+        + (1 if current_cmid != cmid else 0),
+        "last_restored_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "cmid": cmid,
+        "trigger": "manual",
+        "suspended_by_admin": False,
+        "suspended_by_admin_id": 0,
+        "suspended_at": "",
+    }
+    response["welcome_pinned"] = True
+    _persist_vk_event_result(row, response)
+    return {
+        "ok": True,
+        "dry_run": False,
+        "peer_id": peer_id,
+        "current_cmid": cmid,
+        "target_cmid": cmid,
+        "status": "photo_added" if photo_added else ("already_pinned" if current_cmid == cmid else "restored"),
+    }
+
+
+async def _manage_vk_course_chats(target: str, *, action: str, dry_run: bool = True) -> dict[str, Any]:
+    token = _vk_group_token()
+    if not token:
+        raise HTTPException(status_code=503, detail="VK_GROUP_TOKEN is not configured")
+    if action not in {"grant_admin", "revoke_admin", "remove"}:
+        raise HTTPException(status_code=400, detail="action must be grant_admin, revoke_admin or remove")
     user_id = await _resolve_vk_target_id(target, token)
-    touched: list[dict[str, Any]] = []
-    offset = 0
-    while offset < limit:
-        data = await _vk_method("messages.getConversations", {"count": min(200, limit - offset), "offset": offset}, token)
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if not items:
-            break
-        for item in items:
-            conv = item.get("conversation", {})
-            peer = conv.get("peer", {})
-            peer_id = int(peer.get("id", 0) or 0)
-            chat_settings = conv.get("chat_settings", {}) or {}
-            title = chat_settings.get("title", "")
-            if peer_id <= 2000000000 or not _is_course_chat_title(title):
-                continue
-            chat_id = peer_id - 2000000000
-            present = False
-            try:
-                members = await _vk_method("messages.getConversationMembers", {"peer_id": peer_id}, token)
-                profiles = members.get("profiles", []) if isinstance(members, dict) else []
-                present = any(int(p.get("id", 0)) == user_id for p in profiles)
-            except Exception:
-                present = True
-            if not present:
-                touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "not_found", "present": False})
-                continue
-            if not dry_run:
-                result = await _vk_method("messages.removeChatUser", {"chat_id": chat_id, "member_id": user_id}, token)
-                if isinstance(result, dict) and "error" in result:
-                    touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "error", "error": result["error"]})
-                    continue
-            touched.append({"platform": "vk", "title": title, "peer_id": peer_id, "status": "would_remove" if dry_run else "removed", "present": present})
-        if len(items) < 200:
-            break
-        offset += len(items)
-    return {"ok": True, "platform": "vk", "target": user_id, "dry_run": dry_run, "items": touched}
+    inventory = await _vk_course_chat_inventory(user_id)
+    result_items: list[dict[str, Any]] = []
+    admin_roles = {"admin", "administrator", "creator"}
+    for source in inventory["items"]:
+        item = dict(source)
+        if not item.get("accessible"):
+            result_items.append(item)
+            continue
+        present = bool(item.get("target_present"))
+        is_admin = _clean(item.get("target_role")).lower() in admin_roles
+        if not present:
+            item["status"] = "not_member"
+            result_items.append(item)
+            continue
+        if action == "grant_admin" and is_admin:
+            item["status"] = "already_admin"
+            result_items.append(item)
+            continue
+        if action == "revoke_admin" and not is_admin:
+            item["status"] = "already_member"
+            result_items.append(item)
+            continue
+        planned = {
+            "grant_admin": "would_grant_admin",
+            "revoke_admin": "would_revoke_admin",
+            "remove": "would_remove",
+        }[action]
+        if dry_run:
+            item["status"] = planned
+            result_items.append(item)
+            continue
+        if action == "remove":
+            response = await _vk_method(
+                "messages.removeChatUser",
+                {"chat_id": item["chat_id"], "member_id": user_id},
+                token,
+            )
+        else:
+            response = await _vk_method(
+                "messages.setMemberRole",
+                {
+                    "peer_id": item["peer_id"],
+                    "member_id": user_id,
+                    "role": "admin" if action == "grant_admin" else "member",
+                },
+                token,
+            )
+        error = _vk_error_summary(response)
+        if error:
+            item.update({"status": "error", "error": error})
+            result_items.append(item)
+            await asyncio.sleep(0.4)
+            continue
+        await asyncio.sleep(0.4)
+        verify = await _vk_method(
+            "messages.getConversationMembers",
+            {"peer_id": item["peer_id"], "count": 1000},
+            token,
+        )
+        verify_rows = verify.get("items", []) if isinstance(verify, dict) and "error" not in verify else []
+        member = next((row for row in verify_rows if int(row.get("member_id") or 0) == user_id), None)
+        verified_role = _vk_member_role(member or {}) or ("member" if member else "")
+        verified_admin = verified_role.lower() in admin_roles
+        verified = (
+            (action == "remove" and member is None)
+            or (action == "grant_admin" and verified_admin)
+            or (action == "revoke_admin" and member is not None and not verified_admin)
+        )
+        item.update(
+            {
+                "status": {"grant_admin": "admin_granted", "revoke_admin": "admin_revoked", "remove": "removed"}[action]
+                if verified
+                else "verify_failed",
+                "target_present": member is not None,
+                "target_role": verified_role,
+            }
+        )
+        result_items.append(item)
+    return {
+        "ok": not any(item.get("status") in {"error", "verify_failed"} for item in result_items),
+        "platform": "vk",
+        "target": user_id,
+        "action": action,
+        "dry_run": dry_run,
+        "accessible": inventory["accessible"],
+        "inaccessible": inventory["inaccessible"],
+        "items": result_items,
+    }
+
+
+async def _remove_vk_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
+    del limit
+    return await _manage_vk_course_chats(target, action="remove", dry_run=dry_run)
 
 
 async def _remove_tg_from_course_chats(target: str, *, dry_run: bool = True, limit: int = 200) -> dict[str, Any]:
@@ -1822,11 +3442,11 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Telethon is not installed: {exc}")
     stream_number = _clean(data.get("stream_number"))
-    date_start = _clean(data.get("start_date") or data.get("date_start"))
+    date_start = _clean(data.get("start_date") or data.get("date_start")) or _today_moscow()
     course = _course_by_input(data.get("course_choice") or data.get("course_type") or "puppy")
     test_mode = _bool(data.get("test_mode"))
-    if not stream_number or not date_start:
-        raise HTTPException(status_code=400, detail="Missing required parameters: stream_number, start_date")
+    if not stream_number:
+        raise HTTPException(status_code=400, detail="Missing required parameter: stream_number")
     title = _format_title(stream_number, date_start, course, "tg")
     selected = _selected_people(stream_number, data.get("curator_id"))
     admins = _tg_refs(selected["admins"])
@@ -2006,7 +3626,15 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
             _log("warning", "Telegram invite export failed: %s", exc)
             invite_link = ""
     response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids, "curator_id": _selected_curator_id(stream_number, data.get("curator_id"))}
-    _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
+    run_id = _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
+    link_sync = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=test_mode)
+    response["link_sync"] = link_sync
+    if not bool(link_sync.get("ok", True)):
+        detail = _clean(link_sync.get("error")) or "Не удалось обновить таблицу ссылок"
+        response.update({"needs_attention": True, "followup_status": "needs_link_sync", "detail": detail})
+        _update_run(run_id, "needs_link_sync", response, error=detail)
+    else:
+        _update_run(run_id, "ok", response)
     return response
 
 
@@ -2018,7 +3646,7 @@ async def process_vk(request: Request):
         return JSONResponse(await _create_vk_chat(data))
     except Exception as exc:
         stream_number = _clean(data.get("stream_number"))
-        date_start = _clean(data.get("date_start") or data.get("start_date"))
+        date_start = _clean(data.get("date_start") or data.get("start_date")) or _today_moscow()
         course_key = _course_key(data.get("course_type") or data.get("course_choice"))
         title = f"{stream_number}. {date_start}"
         _record_run("vk", title, stream_number, date_start, course_key, _bool(data.get("test_mode")), "error", data, error=str(exc))
@@ -2033,7 +3661,7 @@ async def process6(request: Request):
         return JSONResponse(await _create_tg_chat(data))
     except Exception as exc:
         stream_number = _clean(data.get("stream_number"))
-        date_start = _clean(data.get("date_start") or data.get("start_date"))
+        date_start = _clean(data.get("date_start") or data.get("start_date")) or _today_moscow()
         course_key = _course_key(data.get("course_type") or data.get("course_choice"))
         title = f"{stream_number}. {date_start}"
         _record_run("telegram", title, stream_number, date_start, course_key, _bool(data.get("test_mode")), "error", data, error=str(exc))
@@ -2055,7 +3683,7 @@ async def create_from_panel(request: Request):
     except Exception as exc:
         if platform in {"vk", "tg", "telegram"}:
             stream_number = _clean(data.get("stream_number"))
-            date_start = _clean(data.get("date_start") or data.get("start_date"))
+            date_start = _clean(data.get("date_start") or data.get("start_date")) or _today_moscow()
             course_key = _course_key(data.get("course_type") or data.get("course_choice"))
             title = f"{stream_number}. {date_start}"
             _record_run("telegram" if platform in {"tg", "telegram"} else "vk", title, stream_number, date_start, course_key, _bool(data.get("test_mode")), "error", data, error=str(exc))
@@ -2128,77 +3756,9 @@ async def telegram_auth_confirm(request: Request):
         await client.disconnect()
 
 
-@router.get("/vk-web/auth/status")
-async def vk_web_auth_status(request: Request):
-    await _require_panel_access(request)
-    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=True, screenshot=True)}
-
-
-@router.post("/vk-web/auth/open")
-async def vk_web_auth_open(request: Request):
-    await _require_panel_access(request)
-    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=True, screenshot=True)}
-
-
-@router.get("/vk-web/auth/screenshot")
-async def vk_web_auth_screenshot(request: Request):
-    await _require_panel_access(request)
-    path = _vk_web_screenshot_path()
-    if _vk_web_context is not None:
-        try:
-            await _vk_web_save_screenshot()
-        except Exception:
-            pass
-    if not path.exists():
-        return Response(status_code=404)
-    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "no-store"})
-
-
-@router.post("/vk-web/auth/click")
-async def vk_web_auth_click(request: Request):
-    await _require_panel_access(request)
-    data = await request.json()
-    _, page = await _vk_web_start()
-    viewport = getattr(page, "viewport_size", None) or {"width": 1366, "height": 900}
-    image_width = float(data.get("image_width") or viewport["width"])
-    image_height = float(data.get("image_height") or viewport["height"])
-    x = float(data.get("x") or 0)
-    y = float(data.get("y") or 0)
-    click_x = max(0, min(float(viewport["width"]), x * float(viewport["width"]) / max(1, image_width)))
-    click_y = max(0, min(float(viewport["height"]), y * float(viewport["height"]) / max(1, image_height)))
-    await page.mouse.click(click_x, click_y)
-    await page.wait_for_timeout(1200)
-    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
-
-
-@router.post("/vk-web/auth/type")
-async def vk_web_auth_type(request: Request):
-    await _require_panel_access(request)
-    data = await request.json()
-    text = str(data.get("text") or "")
-    _, page = await _vk_web_start()
-    if text:
-        await page.keyboard.type(text, delay=25)
-        await page.wait_for_timeout(700)
-    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
-
-
-@router.post("/vk-web/auth/key")
-async def vk_web_auth_key(request: Request):
-    await _require_panel_access(request)
-    data = await request.json()
-    key = _clean(data.get("key")) or "Enter"
-    allowed = {"Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"}
-    if key not in allowed:
-        raise HTTPException(status_code=400, detail="Unsupported key")
-    _, page = await _vk_web_start()
-    await page.keyboard.press(key)
-    await page.wait_for_timeout(900)
-    return {"ok": True, "vk_web": await _vk_web_interaction_state(page)}
-
-
-@router.post("/vk-web/admins/retry")
-async def vk_web_admins_retry(request: Request):
+@router.post("/vk/admins/retry")
+@router.post("/vk-web/admins/retry", include_in_schema=False)
+async def vk_admins_retry(request: Request):
     await _require_panel_access(request)
     data = await request.json()
     run_id = data.get("run_id")
@@ -2207,52 +3767,27 @@ async def vk_web_admins_retry(request: Request):
     return {"ok": True, "result": await _retry_vk_admins_from_run(int(run_id))}
 
 
-@router.post("/vk-web/admins/retry-pending")
-async def vk_web_admins_retry_pending(request: Request):
+@router.post("/vk/admins/retry-pending")
+@router.post("/vk-web/admins/retry-pending", include_in_schema=False)
+async def vk_admins_retry_pending(request: Request):
     await _require_panel_access(request)
     return {"ok": True, "result": await _retry_vk_admins_from_run(None)}
-
-
-@router.post("/vk-web/auth/close")
-async def vk_web_auth_close(request: Request):
-    await _require_panel_access(request)
-    await _vk_web_stop()
-    return {"ok": True, "vk_web": await _vk_web_auth_state(open_browser=False)}
-
-
-@router.post("/vk-web/auth/reset")
-async def vk_web_auth_reset(request: Request):
-    await _require_panel_access(request)
-    state = await _vk_web_auth_state(open_browser=True, screenshot=True)
-    if state.get("authorized"):
-        raise HTTPException(status_code=409, detail="Профиль авторизован. Сброс отменён, чтобы не потерять рабочую VK-сессию.")
-    await _vk_web_stop()
-    profile_dir = _vk_web_profile_dir()
-    if profile_dir.exists():
-        shutil.rmtree(profile_dir)
-    shot = _vk_web_screenshot_path()
-    if shot.exists():
-        shot.unlink()
-    return {"ok": True, "reset": True, "profile_dir": str(profile_dir)}
 
 
 @router.get("/status")
 async def status():
     _ensure_db()
     telegram = await _telegram_auth_state()
-    vk_web = await _vk_web_auth_state(open_browser=False)
     required_env = {
-        "vk_user_token": bool(os.environ.get("VK_USER_TOKEN")),
+        "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
+        "vk_group_id": bool(os.environ.get("VK_GROUP_ID")),
         "telegram_api": bool(os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH")),
         "telegram_session": bool(telegram.get("authorized")),
     }
     optional_env = {
         "webhook_password": bool(_password()),
         "sbkvd_legacy_password": bool(os.environ.get("SBKVD_PROCESS_WEBHOOK_PASSWORD")),
-        "vk_test_user_token": bool(os.environ.get("VK_TEST_USER_TOKEN")),
-        "vk_group_token": bool(os.environ.get("VK_GROUP_TOKEN")),
-        "vk_group_id": bool(os.environ.get("VK_GROUP_ID")),
-        "vk_web_profile": bool(vk_web.get("profile_exists") or vk_web.get("browser_open")),
+        "vk_test_group_token": bool(os.environ.get("VK_TEST_GROUP_TOKEN")),
     }
     return {
         "ok": True,
@@ -2260,10 +3795,23 @@ async def status():
         "required_env": required_env,
         "optional_env": optional_env,
         "telegram": telegram,
-        "vk_web": vk_web,
+        "vk_pin_watchdog": dict(_vk_pin_watchdog_state),
+        "chat_links_sync": _chat_links_sync_status(),
         "asset_group_photo": bool(_avatar_path()),
         "asset_welcome_photo": bool(_asset_path("welcome_message_photo.jpg")),
     }
+
+
+@router.post("/chat-links/sync")
+async def sync_chat_links(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    stream_number = _clean(data.get("stream_number"))
+    if not stream_number:
+        raise HTTPException(status_code=400, detail="stream_number is required")
+    course = _course_by_input(data.get("course_key") or data.get("course") or data.get("course_type"))
+    result = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=False)
+    return {"ok": bool(result.get("ok")), "course_key": course["key"], **result}
 
 
 @router.get("/people")
@@ -2390,16 +3938,27 @@ async def update_template(request: Request):
 
 
 @router.get("/preview")
-async def preview(stream_number: str = "51", start_date: str = "01.06.2026", course: str = "puppy", curator_id: str = ""):
+async def preview(stream_number: str = "51", start_date: str = "", course: str = "puppy", curator_id: str = "", test_mode: str = "false"):
+    start_date = _clean(start_date) or _today_moscow()
     course_row = _course_by_input(course)
     selected = _selected_people(stream_number, curator_id)
+    is_test = _bool(test_mode)
+    vk_staff = _vk_staff_for_mode(selected, test_mode=is_test)
+    cohort = (
+        {"available": True, "source": "test_mode", "total": 0, "with_vk": 0, "without_vk": 0, "reason": "test_mode"}
+        if is_test
+        else _vk_student_cohort(course_row["key"], stream_number)
+    )
     return {
         "ok": True,
+        "test_mode": is_test,
         "vk_title": _format_title(stream_number, start_date, course_row, "vk"),
         "tg_title": _format_title(stream_number, start_date, course_row, "tg"),
         "selected": selected,
+        "vk_staff": [{"id": person.get("id"), "name": person.get("name"), "vk_id": person.get("vk_id")} for person in vk_staff],
         "curator_id": _selected_curator_id(stream_number, curator_id),
-        "vk_welcome": _render_template("vk_welcome", course=course_row, stream_number=stream_number, date_start=start_date, selected=selected, platform="vk"),
+        "vk_students": {key: value for key, value in cohort.items() if key != "vk_ids"},
+        "vk_welcome": _render_template("vk_test_welcome" if is_test else "vk_welcome", course=course_row, stream_number=stream_number, date_start=start_date, selected=selected, platform="vk"),
         "tg_welcome": _render_template("tg_welcome", course=course_row, stream_number=stream_number, date_start=start_date, selected=selected, platform="tg"),
     }
 
@@ -2428,27 +3987,29 @@ async def clear_runs(request: Request):
 async def broadcast_status(request: Request):
     await _require_panel_access(request)
     _ensure_db()
-    vk_token = _clean(os.environ.get("VK_USER_TOKEN"))
-    vk_user: dict[str, Any] | None = None
+    vk_token = _vk_group_token()
+    group_id = _clean(os.environ.get("VK_GROUP_ID"))
+    vk_community: dict[str, Any] | None = None
     vk_error = ""
-    if vk_token:
+    if vk_token and group_id:
         try:
-            users = await _vk_method("users.get", {"fields": "screen_name"}, vk_token)
-            if isinstance(users, list) and users:
-                user = users[0]
-                vk_user = {
-                    "id": user.get("id"),
-                    "screen_name": user.get("screen_name"),
-                    "name": " ".join(filter(None, [_clean(user.get("first_name")), _clean(user.get("last_name"))])),
+            groups = await _vk_method("groups.getById", {"group_id": group_id, "fields": "screen_name"}, vk_token)
+            group_items = groups.get("groups", []) if isinstance(groups, dict) and "groups" in groups else groups
+            if isinstance(group_items, list) and group_items:
+                group = group_items[0]
+                vk_community = {
+                    "id": group.get("id"),
+                    "screen_name": group.get("screen_name"),
+                    "name": _clean(group.get("name")),
                 }
-            elif isinstance(users, dict) and "error" in users:
-                vk_error = str(users["error"])
+            elif isinstance(groups, dict) and "error" in groups:
+                vk_error = str(groups["error"])
         except Exception as exc:
             vk_error = str(exc)
     telegram = await _telegram_auth_state(include_user=True)
     return {
         "ok": True,
-        "vk": {"configured": bool(vk_token), "user": vk_user, "error": vk_error},
+        "vk": {"configured": bool(vk_token and group_id), "community": vk_community, "error": vk_error},
         "telegram": telegram,
         "course_title_rule": r"^\d+\. DD.MM.YYYY",
     }
@@ -2684,3 +4245,36 @@ async def remove_member_from_course_chats(request: Request):
             "telegram": await _remove_tg_from_course_chats(target, dry_run=dry_run),
         }
     raise HTTPException(status_code=400, detail="platform must be vk, telegram or both")
+
+
+@router.get("/vk-course-chats")
+async def list_vk_course_chats(request: Request):
+    await _require_panel_access(request)
+    return await _vk_course_chat_inventory()
+
+
+@router.post("/vk-course-chats/pin/restore")
+async def restore_vk_course_chat_pin(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    try:
+        peer_id = int(data.get("peer_id") or 0)
+    except (TypeError, ValueError):
+        peer_id = 0
+    if peer_id <= 2000000000:
+        raise HTTPException(status_code=400, detail="peer_id is required")
+    return await _restore_vk_course_pin_manual(peer_id, dry_run=_bool(data.get("dry_run", False)))
+
+
+@router.post("/vk-members/manage")
+async def manage_vk_course_chat_members(request: Request):
+    await _require_panel_access(request)
+    data = await request.json()
+    target = _clean(data.get("target"))
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    return await _manage_vk_course_chats(
+        target,
+        action=_clean(data.get("action")).lower(),
+        dry_run=_bool(data.get("dry_run", True)),
+    )

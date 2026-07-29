@@ -6,7 +6,9 @@
   <p>Модуль принимает webhook GetCourse, сохраняет заказ в таблицу customer-db <code>getcourse_orders</code> с названием «Заказы GetCourse» и по правилам добавляет VK ID в группы Senler.</p>
 
   <h2>Webhook</h2>
-  <p>Основные endpoint для трёх отдельных процессов GetCourse: <code>/getcourse-orders/api/webhook/created?secret=...</code>, <code>/getcourse-orders/api/webhook/partial?secret=...</code>, <code>/getcourse-orders/api/webhook/paid?secret=...</code>. Каждый URL принудительно задаёт состояние заказа, независимо от сырого поля <code>status</code>. Старый <code>/webhook</code> оставлен для совместимости и определяет состояние по <code>status</code>.</p>
+  <p>Если процесс GetCourse отобран условием <code>Заказ → С тегом → Автооплата</code>, к URL можно добавить <code>&amp;autopayment=1</code>. Маркер сохраняется в Customer DB и позволяет модулю GetCourse → amoCRM принять заказ, даже когда слова «Автооплата» нет в названии предложения. Переданные внешним источником поля <code>tags</code>, <code>order_tags</code> и <code>tag_names</code> также сохраняются.</p>
+  <p>Основные endpoint для трёх отдельных процессов GetCourse: <code>/getcourse-orders/api/webhook/created?secret=...</code>, <code>/getcourse-orders/api/webhook/partial?secret=...</code>, <code>/getcourse-orders/api/webhook/paid?secret=...</code>. URL задаёт состояние заказа, но модуль повышает его по финансовым полям: если в <code>created</code> придёт уже оплаченный заказ с <code>payedMoney &gt; 0</code> и нулевым остатком, он будет обработан как <code>paid</code>, а не как <code>unpaid</code>. Старый <code>/webhook</code> оставлен для совместимости и определяет состояние по <code>status</code>.</p>
+  <p>В самом конце готового URL находится отдельный полный набор UTM источника заказа: <code>orderUtmS</code>, <code>orderUtmM</code>, <code>orderUtmCa</code>, <code>orderUtmCo</code>, <code>orderUtmT</code>. Профильные UTM остаются в прежних параметрах и не заменяются.</p>
   <p><code>order_id</code> используется как <code>platform_id</code>. Если запись с таким <code>platform_id</code> уже есть, модуль обновляет её актуальными данными.</p>
 
   <h2>Оплата</h2>

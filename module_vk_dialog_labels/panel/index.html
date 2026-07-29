@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VK метки диалогов</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080808;--panel:#101010;--panel2:#161616;--line:#2b2b2b;--line2:#444;--text:#f1f1f1;--muted:#a0a0a0;--soft:#d7d7d7;--ok:#70d98b;--bad:#ff7777;--warn:#ffd166}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}
+    .app{height:100%;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;min-width:0}
+    .top{height:44px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line);background:#0b0b0b;min-width:0}
+    .brand{font-weight:800;white-space:nowrap}.top .spacer{flex:1}.status{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .tabs{height:38px;display:flex;gap:6px;align-items:center;padding:0 12px;border-bottom:1px solid var(--line);background:#0d0d0d;overflow:auto}
+    .tab{min-width:92px;min-height:28px;border:1px solid var(--line2);background:#111;color:var(--soft);padding:4px 10px}.tab.active{background:#fff;color:#000;border-color:#fff}
+    .view{display:none;min-height:0;overflow:auto}.view.active{display:block}
+    .grid{display:grid;grid-template-columns:minmax(340px,440px) minmax(0,1fr);gap:12px;padding:12px;min-height:0}.full{padding:12px}
+    .box{border:1px solid var(--line);background:var(--panel);padding:12px;min-width:0}.box h2{font-size:13px;margin:0 0 10px}.sub{color:var(--muted);font-size:12px}.warn{color:var(--warn)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+    label{display:block;color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.08em;margin:0 0 5px}
+    .input,.select,.textarea{width:100%;min-height:31px;border:1px solid var(--line2);background:#070707;color:var(--text);padding:6px 8px;outline:none}.textarea{min-height:84px;resize:vertical}.input:focus,.select:focus,.textarea:focus{border-color:#777}
+    .row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:8px}.row3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:8px}
+    .actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.btn{min-height:31px;border:1px solid var(--line2);background:#151515;color:var(--text);padding:6px 10px}.btn.primary{background:#fff;color:#000;border-color:#fff}.btn.ghost{background:transparent}.btn.danger{background:#251010;border-color:#6b2525;color:#ffc7c7}.btn:disabled{opacity:.45;cursor:default}
+    .checkline{display:flex;align-items:center;gap:8px;margin:0;color:var(--soft);text-transform:none;letter-spacing:0;font-size:13px}.checkline input{width:auto;min-height:0;margin:0}
+    .status-menu{max-height:320px;overflow:auto;border:1px solid var(--line2);background:#080808;margin-top:6px}.status-head{position:sticky;top:0;display:flex;gap:6px;padding:8px;border-bottom:1px solid var(--line);background:#121212}.status-head input{flex:1;min-width:0}
+    .pipeline{padding:8px 8px 4px;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.status-option{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-top:1px solid #151515}.status-option:hover{background:#151515}.status-option small{display:block;color:var(--muted);font-size:11px}
+    .table-wrap{overflow:auto;border:1px solid var(--line);max-height:calc(100vh - 190px)}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}th{position:sticky;top:0;background:#141414;color:var(--muted);z-index:1}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);background:#141414;padding:2px 7px}.pill.ok{border-color:#276b3a;color:#9af0ad}.pill.bad{border-color:#753333;color:#ffc3c3}.pill.muted{color:var(--muted)}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.notice{min-height:18px;color:var(--muted)}.footer{height:30px;display:flex;align-items:center;gap:10px;padding:0 12px;border-top:1px solid var(--line);background:#0b0b0b;color:var(--muted);font-size:12px}.footer span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    pre{margin:0;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);background:#070707;padding:10px;color:#ddd}
+    @media(max-width:920px){.grid{grid-template-columns:1fr}.row,.row3{grid-template-columns:1fr}.tab{min-width:78px}.table-wrap{max-height:none}html,body{overflow:auto}.app{min-height:100vh;height:auto}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="brand">VK метки диалогов</div>
+    <button id="refreshBtn" class="btn ghost" type="button">↻</button>
+    <div class="spacer"></div>
+    <div id="topStatus" class="status"></div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-view="rules" type="button">Правила</button>
+    <button class="tab" data-view="webhook" type="button">Webhook</button>
+    <button class="tab" data-view="test" type="button">Тест</button>
+    <button class="tab" data-view="events" type="button">Журнал</button>
+    <button class="tab" data-view="diag" type="button">Диагностика</button>
+  </div>
+
+  <main>
+    <section id="view-rules" class="view active">
+      <div class="grid">
+        <div class="box">
+          <h2 id="ruleTitle">Новое правило</h2>
+          <input id="ruleId" type="hidden">
+          <div class="row">
+            <div><label>Тип</label><select id="category" class="select">
+              <option value="created">Создана</option><option value="work">В работе</option><option value="success">Успех</option><option value="closed_lost">Закрыто</option>
+            </select></div>
+            <div><label>Действие VK</label><select id="officialAction" class="select"></select></div>
+          </div>
+          <div class="row">
+            <div><label>Метка</label><input id="targetLabel" class="input" placeholder="НА КУРСЕ"></div>
+            <div><label>Название</label><input id="ruleName" class="input" placeholder="Сделка в работе"></div>
+          </div>
+          <div><label>Статусы amoCRM</label>
+            <button id="statusBtn" class="btn" type="button" style="width:100%;text-align:left"><span>Загрузка статусов...</span></button>
+            <div id="statusMenu" class="status-menu" hidden>
+              <div class="status-head"><input id="statusSearch" class="input" placeholder="Поиск статуса"><button id="clearStatusesBtn" class="btn ghost" type="button">Снять</button></div>
+              <div id="statusList"></div>
+            </div>
+          </div>
+          <div style="margin-top:8px"><label>Заметка</label><input id="ruleNote" class="input"></div>
+          <div class="actions" style="margin-top:10px">
+            <button id="saveRuleBtn" class="btn primary" type="button">Сохранить</button>
+            <button id="newRuleBtn" class="btn ghost" type="button">Новое</button>
+            <label class="checkline"><input id="ruleActive" type="checkbox" checked> активно</label>
+          </div>
+          <p class="sub warn">Кастомная метка сохраняется в Nexus. В VK применяются только официальные отметки, доступные в API.</p>
+        </div>
+        <div class="box">
+          <h2>Правила</h2>
+          <div class="table-wrap"><table><thead><tr><th>Метка</th><th>Тип</th><th>Статусы</th><th>VK</th><th>Статус</th><th></th></tr></thead><tbody id="rulesBody"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-webhook" class="view">
+      <div class="grid">
+        <div class="box">
+          <h2>Настройки</h2>
+          <div class="row">
+            <div><label>Поле VK ID</label><input id="vkField" class="input" value="utm_term"></div>
+            <div><label>Timeout, sec</label><input id="timeout" class="input" value="12"></div>
+          </div>
+          <div><label>Webhook secret</label><input id="secret" class="input"></div>
+          <div class="actions" style="margin-top:10px"><button id="saveSettingsBtn" class="btn primary" type="button">Сохранить</button><button id="checkWebhookBtn" class="btn" type="button">Проверить webhook</button></div>
+          <p id="settingsStatus" class="notice"></p>
+        </div>
+        <div class="box">
+          <h2>URL amoCRM webhook</h2>
+          <input id="webhookUrl" class="input mono" readonly>
+          <p class="sub">Модуль принимает стандартный form payload amoCRM и JSON для тестов. При неверном секрете возвращает HTTP 200 с ошибкой, чтобы amoCRM не отключала webhook.</p>
+          <h2>Тестовый payload</h2>
+          <textarea id="payloadBox" class="textarea mono"></textarea>
+          <div class="actions" style="margin-top:8px"><button id="sendPayloadBtn" class="btn" type="button">Отправить локально</button></div>
+          <pre id="webhookOutput" style="margin-top:10px" hidden></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-test" class="view">
+      <div class="grid">
+        <div class="box">
+          <h2>Тестовый диалог</h2>
+          <div class="row">
+            <div><label>Group ID</label><input id="testGroup" class="input mono" value="225075265" readonly></div>
+            <div><label>Peer ID</label><input id="testPeer" class="input mono" value="1105209997" readonly></div>
+          </div>
+          <div class="row">
+            <div><label>Метка Nexus</label><input id="testLabel" class="input" value="Тест"></div>
+            <div><label>Действие VK</label><select id="testAction" class="select"></select></div>
+          </div>
+          <div class="actions">
+            <button id="probeBtn" class="btn" type="button">Проверить доступ</button>
+            <button id="testApplyBtn" class="btn primary" type="button">Применить</button>
+            <a class="btn ghost" href="https://vk.com/gim225075265/convo/1105209997" target="_blank" rel="noopener">Открыть VK</a>
+          </div>
+          <p class="sub warn">Тестовый endpoint отклоняет любой другой peer_id/group_id.</p>
+        </div>
+        <div class="box">
+          <h2>Ответ</h2>
+          <pre id="testOutput"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-events" class="view">
+      <div class="full">
+        <div class="box">
+          <div class="actions" style="margin-bottom:10px">
+            <select id="eventStatus" class="select" style="width:170px"><option value="">Все статусы</option><option value="applied">applied</option><option value="stored_only">stored_only</option><option value="failed">failed</option><option value="ignored">ignored</option></select>
+            <input id="eventLimit" class="input" value="100" style="width:90px">
+            <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Время</th><th>Источник</th><th>Deal</th><th>VK</th><th>Метка</th><th>Action</th><th>Статус</th><th>Ошибка</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-diag" class="view">
+      <div class="grid">
+        <div class="box"><h2>ENV</h2><pre id="envBox"></pre></div>
+        <div class="box"><h2>Последние внутренние метки</h2><div class="table-wrap"><table><thead><tr><th>Peer</th><th>Метка</th><th>Deal</th><th>Action</th><th>Обновлено</th></tr></thead><tbody id="labelsBody"></tbody></table></div></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="footer"><span id="footerStatus">Готово</span></div>
+</div>
+
+<script>
+const modBase = location.pathname.split('/panel/')[0];
+const API = modBase + '/api';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let pipelines = [];
+let rules = [];
+let selectedStatuses = new Map();
+let actions = [];
+
+async function fetchJson(url, opts){
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok) throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+  return data;
+}
+function setStatus(text, cls=''){ $('footerStatus').textContent = text || 'Готово'; $('footerStatus').className = cls; }
+function statusKey(s){ return `${s.pipeline_id || ''}:${s.status_id || ''}`; }
+function statusLabel(s){ return `${s.pipeline_name || 'Любая воронка'} / ${s.status_name || s.status_id}`; }
+function findStatus(key){
+  for (const p of pipelines) for (const s of (p.statuses || [])) {
+    const item = {pipeline_id:String(p.id||''), pipeline_name:p.name||'', status_id:String(s.id||''), status_name:s.name||''};
+    if (statusKey(item) === key) return item;
+  }
+  return null;
+}
+function renderActions(){
+  const html = actions.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+  $('officialAction').innerHTML = html;
+  $('testAction').innerHTML = html;
+}
+function renderStatusButton(){
+  const span = $('statusBtn').querySelector('span');
+  if ($('category').value === 'created') { span.textContent = 'Событие создания сделки'; $('statusBtn').disabled = true; $('statusMenu').hidden = true; return; }
+  $('statusBtn').disabled = false;
+  const count = selectedStatuses.size;
+  span.textContent = count ? count === 1 ? statusLabel([...selectedStatuses.values()][0]) : `Выбрано статусов: ${count}` : 'Выберите статусы amoCRM';
+}
+function renderStatusList(){
+  const query = $('statusSearch').value.trim().toLowerCase();
+  const html = pipelines.map(p => {
+    const options = (p.statuses || []).filter(s => !query || `${p.name} ${s.name} ${s.id}`.toLowerCase().includes(query)).map(s => {
+      const item = {pipeline_id:String(p.id||''), pipeline_name:p.name||'', status_id:String(s.id||''), status_name:s.name||''};
+      const key = statusKey(item);
+      return `<label class="status-option"><input type="checkbox" data-key="${esc(key)}" ${selectedStatuses.has(key)?'checked':''}><span>${esc(s.name)}<small>${esc(p.name)} · ${esc(s.id)}</small></span></label>`;
+    }).join('');
+    return options ? `<div class="pipeline">${esc(p.name)}</div>${options}` : '';
+  }).join('');
+  $('statusList').innerHTML = html || '<div class="sub" style="padding:10px">Статусы не найдены</div>';
+  $('statusList').querySelectorAll('input[type=checkbox]').forEach(input => input.addEventListener('change', () => {
+    const item = findStatus(input.dataset.key);
+    if (!item) return;
+    if (input.checked) selectedStatuses.set(input.dataset.key, item); else selectedStatuses.delete(input.dataset.key);
+    renderStatusButton();
+  }));
+  renderStatusButton();
+}
+async function loadStatuses(){
+  const data = await fetchJson(API + '/amo/statuses');
+  pipelines = data.pipelines || [];
+  renderStatusList();
+}
+async function loadActions(){
+  const data = await fetchJson(API + '/actions');
+  actions = data.actions || [];
+  renderActions();
+}
+function resetRule(){
+  $('ruleId').value = '';
+  $('ruleTitle').textContent = 'Новое правило';
+  $('category').value = 'work';
+  $('targetLabel').value = '';
+  $('ruleName').value = '';
+  $('ruleNote').value = '';
+  $('officialAction').value = 'none';
+  $('ruleActive').checked = true;
+  selectedStatuses.clear();
+  renderStatusList();
+}
+function editRule(id){
+  const rule = rules.find(r => String(r.id) === String(id));
+  if (!rule) return;
+  $('ruleId').value = rule.id;
+  $('ruleTitle').textContent = `Правило #${rule.id}`;
+  $('category').value = rule.category || 'work';
+  $('targetLabel').value = rule.target_label || '';
+  $('ruleName').value = rule.name || '';
+  $('ruleNote').value = rule.note || '';
+  $('officialAction').value = rule.official_action || 'none';
+  $('ruleActive').checked = !!rule.active;
+  selectedStatuses.clear();
+  (rule.statuses || []).forEach(s => selectedStatuses.set(statusKey(s), s));
+  renderStatusList();
+}
+async function loadRules(){
+  rules = await fetchJson(API + '/rules');
+  $('rulesBody').innerHTML = rules.map(r => `<tr>
+    <td title="${esc(r.target_label)}">${esc(r.target_label || '-')}</td>
+    <td>${esc(r.category_label || r.category)}</td>
+    <td title="${esc((r.statuses || []).map(statusLabel).join(', '))}">${r.category === 'created' ? 'Создание сделки' : esc((r.statuses || []).length ? ((r.statuses || []).length === 1 ? statusLabel(r.statuses[0]) : `Выбрано: ${(r.statuses || []).length}`) : '-')}</td>
+    <td>${esc(r.official_action_label || r.official_action)}</td>
+    <td><span class="pill ${r.active?'ok':'muted'}">${r.active?'активно':'выкл'}</span></td>
+    <td class="actions"><button class="btn ghost edit-rule" data-id="${esc(r.id)}" type="button">Изм.</button><button class="btn ghost toggle-rule" data-id="${esc(r.id)}" data-active="${r.active?'0':'1'}" type="button">${r.active?'Выкл':'Вкл'}</button><button class="btn danger del-rule" data-id="${esc(r.id)}" type="button">×</button></td>
+  </tr>`).join('') || '<tr><td colspan="6" class="sub">Правил нет</td></tr>';
+  document.querySelectorAll('.edit-rule').forEach(btn => btn.addEventListener('click', () => editRule(btn.dataset.id)));
+  document.querySelectorAll('.toggle-rule').forEach(btn => btn.addEventListener('click', async () => { await fetchJson(`${API}/rules/${btn.dataset.id}/toggle`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({active:btn.dataset.active === '1'})}); await loadRules(); }));
+  document.querySelectorAll('.del-rule').forEach(btn => btn.addEventListener('click', async () => { if(!confirm('Удалить правило?')) return; await fetchJson(`${API}/rules/${btn.dataset.id}`, {method:'DELETE'}); await loadRules(); resetRule(); }));
+}
+async function saveRule(){
+  const payload = {id:$('ruleId').value || null, category:$('category').value, target_label:$('targetLabel').value.trim(), official_action:$('officialAction').value, name:$('ruleName').value.trim(), note:$('ruleNote').value.trim(), active:$('ruleActive').checked, statuses:[...selectedStatuses.values()]};
+  await fetchJson(API + '/rules', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  setStatus('Правило сохранено','ok'); await loadRules(); resetRule();
+}
+async function loadSettings(){
+  const data = await fetchJson(API + '/settings');
+  $('vkField').value = data.vk_field || 'utm_term';
+  $('timeout').value = data.request_timeout || '12';
+  $('secret').value = data.webhook_secret_source === 'env' ? '' : (data.webhook_secret || '');
+  $('secret').placeholder = data.webhook_secret_source === 'env' ? 'Задан в ENV' : '';
+  $('webhookUrl').value = data.safe_webhook_url || data.webhook_url || '';
+  $('topStatus').textContent = `VK group ${data.vk_group_id || '225075265'} · amo ${data.amo_base_url || '-'}`;
+}
+async function saveSettings(){
+  await fetchJson(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({vk_field:$('vkField').value.trim() || 'utm_term', request_timeout:$('timeout').value.trim() || '12', webhook_secret:$('secret').value.trim()})});
+  $('settingsStatus').textContent = 'Сохранено'; $('settingsStatus').className = 'notice ok'; await loadSettings();
+}
+async function checkWebhook(){
+  const data = await fetchJson(API + '/webhook/status');
+  $('settingsStatus').textContent = data.ok ? 'Webhook готов' : data.error;
+  $('settingsStatus').className = 'notice ' + (data.ok ? 'ok' : 'bad');
+}
+async function sendPayload(){
+  const data = await fetchJson(API + '/webhook', {method:'POST', headers:{'Content-Type':'application/json'}, body:$('payloadBox').value});
+  $('webhookOutput').hidden = false; $('webhookOutput').textContent = JSON.stringify(data, null, 2); await loadEvents();
+}
+async function loadEvents(){
+  const params = new URLSearchParams();
+  if ($('eventStatus').value) params.set('status', $('eventStatus').value);
+  params.set('limit', $('eventLimit').value || '100');
+  const rows = await fetchJson(API + '/events?' + params.toString());
+  $('eventsBody').innerHTML = rows.map(r => `<tr>
+    <td>${esc(r.received_at)}</td><td>${esc(r.source)}</td><td class="mono">${esc(r.deal_id || '-')}</td><td class="mono">${esc(r.peer_id || r.vk_id || '-')}</td>
+    <td>${esc(r.target_label || '-')}</td><td>${esc(r.official_action || '-')}</td>
+    <td><span class="pill ${r.success?'ok':r.ignored?'muted':'bad'}">${esc(r.status || '-')}</span></td><td title="${esc(r.error)}">${esc(r.error || '')}</td>
+  </tr>`).join('') || '<tr><td colspan="8" class="sub">Событий нет</td></tr>';
+}
+async function loadEnv(){
+  const data = await fetchJson(API + '/env-status');
+  $('envBox').textContent = JSON.stringify(data, null, 2);
+}
+async function loadLabels(){
+  const rows = await fetchJson(API + '/labels?limit=100');
+  $('labelsBody').innerHTML = rows.map(r => `<tr><td class="mono">${esc(r.peer_id)}</td><td>${esc(r.target_label)}</td><td class="mono">${esc(r.deal_id || '-')}</td><td>${esc(r.official_action)}</td><td>${esc(r.updated_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="sub">Меток нет</td></tr>';
+}
+async function probe(){
+  const data = await fetchJson(API + '/probe/vk', {method:'POST'});
+  $('testOutput').textContent = JSON.stringify(data, null, 2);
+}
+async function applyTest(){
+  const data = await fetchJson(API + '/test/dialog', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({group_id:$('testGroup').value, peer_id:$('testPeer').value, target_label:$('testLabel').value, official_action:$('testAction').value})});
+  $('testOutput').textContent = JSON.stringify(data, null, 2); await loadEvents(); await loadLabels();
+}
+async function refreshAll(){
+  try{
+    setStatus('Загрузка...');
+    await loadActions(); await loadSettings(); await loadStatuses(); await loadRules(); await loadEvents(); await loadEnv(); await loadLabels();
+    $('payloadBox').value ||= JSON.stringify({leads:{status:{"0":{id:"17692053", pipeline_id:"8061498", status_id:"142", old_status_id:"66041242", responsible_user_id:"0", utm_term:"1105209997"}}}}, null, 2);
+    setStatus('Готово','ok');
+  }catch(e){ setStatus(e.message,'bad'); }
+}
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+  btn.classList.add('active'); $('view-' + btn.dataset.view).classList.add('active');
+}));
+$('refreshBtn').addEventListener('click', refreshAll);
+$('statusBtn').addEventListener('click', () => { if (!$('statusBtn').disabled) $('statusMenu').hidden = !$('statusMenu').hidden; });
+$('statusSearch').addEventListener('input', renderStatusList);
+$('clearStatusesBtn').addEventListener('click', () => { selectedStatuses.clear(); renderStatusList(); });
+$('category').addEventListener('change', renderStatusButton);
+$('saveRuleBtn').addEventListener('click', () => saveRule().catch(e => setStatus(e.message,'bad')));
+$('newRuleBtn').addEventListener('click', resetRule);
+$('saveSettingsBtn').addEventListener('click', () => saveSettings().catch(e => setStatus(e.message,'bad')));
+$('checkWebhookBtn').addEventListener('click', () => checkWebhook().catch(e => setStatus(e.message,'bad')));
+$('sendPayloadBtn').addEventListener('click', () => sendPayload().catch(e => setStatus(e.message,'bad')));
+$('loadEventsBtn').addEventListener('click', () => loadEvents().catch(e => setStatus(e.message,'bad')));
+$('probeBtn').addEventListener('click', () => probe().catch(e => setStatus(e.message,'bad')));
+$('testApplyBtn').addEventListener('click', () => applyTest().catch(e => setStatus(e.message,'bad')));
+document.addEventListener('click', e => { if(!$('statusMenu').hidden && !e.target.closest('.status-menu') && !e.target.closest('#statusBtn')) $('statusMenu').hidden = true; });
+refreshAll();
+</script>
+</body>
+</html>

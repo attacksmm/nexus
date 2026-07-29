@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
@@ -23,6 +24,19 @@ WorkerFactory = Callable[[str, str], "_VkPollWorker"]
 
 _logger = logging.getLogger("nexus.vk-poll")
 
+_VK_MANUAL_INTERVENTION_CODES = {5, 14, 17, 24, 25}
+_VK_MANUAL_INTERVENTION_MARKERS = (
+    "access_token has expired",
+    "authorization failed",
+    "captcha needed",
+    "confirmation required",
+    "invalid access_token",
+    "token confirmation required",
+    "user authorization failed",
+    "user is blocked",
+    "validation required",
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -32,6 +46,28 @@ def _token_key(token: str) -> str:
     """Return a stable non-secret identity for connection de-duplication."""
 
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _vk_error_code(error: BaseException) -> int | None:
+    for attr in ("code", "error_code"):
+        value = getattr(error, attr, None)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    match = re.search(r"\[(\d+)\]", str(error or ""))
+    return int(match.group(1)) if match else None
+
+
+def _requires_manual_vk_intervention(error: BaseException) -> bool:
+    """Return true when retrying cannot recover without account/user action."""
+
+    code = _vk_error_code(error)
+    if code in _VK_MANUAL_INTERVENTION_CODES:
+        return True
+    text = str(error or "").lower()
+    return any(marker in text for marker in _VK_MANUAL_INTERVENTION_MARKERS)
 
 
 def _run_handler(handler: Callable[[Any], Awaitable[None]], value: Any) -> None:
@@ -206,6 +242,8 @@ class _VkPollWorker:
         self._events_dispatched = 0
         self._poll_errors = 0
         self._reconnections = 0
+        self._halted_at = ""
+        self._halt_reason = ""
 
     @property
     def running(self) -> bool:
@@ -311,6 +349,16 @@ class _VkPollWorker:
                     self._last_error_at = _now()
                 _logger.warning("VK poll error token=%s: %s", self.token_key[:10], error)
                 self._dispatch_error(error)
+                if _requires_manual_vk_intervention(error):
+                    self._halted_at = _now()
+                    self._halt_reason = str(error)
+                    self._stop_event.set()
+                    _logger.error(
+                        "VK poll halted until manual restart token=%s: %s",
+                        self.token_key[:10],
+                        error,
+                    )
+                    break
                 if self._stop_event.wait(5):
                     break
                 try:
@@ -325,6 +373,16 @@ class _VkPollWorker:
                         recreate_error,
                     )
                     self._dispatch_error(recreate_error)
+                    if _requires_manual_vk_intervention(recreate_error):
+                        self._halted_at = _now()
+                        self._halt_reason = str(recreate_error)
+                        self._stop_event.set()
+                        _logger.error(
+                            "VK poll halted until manual restart token=%s: %s",
+                            self.token_key[:10],
+                            recreate_error,
+                        )
+                        break
         _logger.info("VK poll stopped token=%s", self.token_key[:10])
 
     def snapshot(self) -> dict[str, Any]:
@@ -337,6 +395,8 @@ class _VkPollWorker:
                 "events_dispatched": self._events_dispatched,
                 "poll_errors": self._poll_errors,
                 "reconnections": self._reconnections,
+                "halted_at": self._halted_at,
+                "halt_reason": self._halt_reason,
             }
         subscribers = self._subscriber_snapshot()
         return {

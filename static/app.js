@@ -23,8 +23,18 @@ let activeModuleId = null;
 let modulesCache = {};
 let sortOrder = [];  // localStorage порядок
 let globalBusyCount = 0;
+const moduleRuntimeStatus = new Map();
+const mobileShellQuery = window.matchMedia("(max-width: 760px)");
 
 const $ = id => document.getElementById(id);
+
+function setMobileModulesOpen(open) {
+  const active = mobileShellQuery.matches && Boolean(open);
+  $("workspace")?.classList.toggle("workspace--mobile-nav", active);
+  $("mobileModulesBtn")?.setAttribute("aria-expanded", String(active));
+  if ($("mobileSidebarBackdrop")) $("mobileSidebarBackdrop").hidden = !active;
+  if ($("moduleSidebar")) $("moduleSidebar").inert = mobileShellQuery.matches && !active;
+}
 
 function setGlobalBusy(on, text = "Загрузка") {
   globalBusyCount = Math.max(0, globalBusyCount + (on ? 1 : -1));
@@ -55,6 +65,14 @@ function applyOrder(list) {
   const ordered = order.filter(id => map[id]).map(id => map[id]);
   const rest = list.filter(m => !order.includes(m.id));
   return [...ordered, ...rest];
+}
+
+function isModuleHiddenFromNavigation(module) {
+  try {
+    return JSON.parse(module?.manifest_json || "{}").ui_hidden === true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Hash routing ──────────────────────────────────────────────────────────────
@@ -96,16 +114,40 @@ window.addEventListener("popstate", () => {
 window.addEventListener("message", event => {
   if (event.origin !== location.origin) return;
   const data = event.data || {};
-  if (data.type !== "nexus:set-module-path") return;
-  if (!activeModuleId || data.moduleId !== activeModuleId) return;
-  setHashModule(activeModuleId, data.path || "", true);
+  if (data.type === "nexus:module-status") {
+    const allowed = new Set(["active", "paused", "error", "restarting"]);
+    for (const update of Array.isArray(data.updates) ? data.updates : []) {
+      const id = String(update?.id || "");
+      const status = String(update?.status || "");
+      if (!modulesCache[id] || !allowed.has(status)) continue;
+      moduleRuntimeStatus.set(id, {status, message: String(update?.message || "")});
+      const dot = document.querySelector(`.module-item[data-id="${CSS.escape(id)}"] .module-item__dot`);
+      if (dot) {
+        dot.className = `module-item__dot module-item__dot--${status}`;
+        dot.title = String(update?.message || statusLabel(status));
+      }
+    }
+    return;
+  }
+  if (data.type === "nexus:refresh-modules") {
+    const ids = Array.isArray(data.moduleIds) ? data.moduleIds.map(String) : [];
+    setTimeout(async () => {
+      ids.forEach(id => moduleRuntimeStatus.delete(id));
+      await refreshModules();
+    }, 900);
+    return;
+  }
+  if (data.type === "nexus:set-module-path") {
+    if (!activeModuleId || data.moduleId !== activeModuleId) return;
+    setHashModule(activeModuleId, data.path || "", true);
+  }
 });
 
 // ── Module list render ────────────────────────────────────────────────────────
 
 function renderModules(list) {
-  modulesCache = {};
-  const ordered = applyOrder(list);
+  modulesCache = Object.fromEntries(list.map(module => [module.id, module]));
+  const ordered = applyOrder(list).filter(module => !isModuleHiddenFromNavigation(module));
   const el = $("moduleList");
   el.innerHTML = "";
 
@@ -115,7 +157,8 @@ function renderModules(list) {
   }
 
   for (const m of ordered) {
-    modulesCache[m.id] = m;
+    const runtimeStatus = moduleRuntimeStatus.get(m.id);
+    const displayStatus = runtimeStatus?.status || m.status;
     const btn = document.createElement("button");
     btn.className = "module-item" + (m.id === activeModuleId ? " module-item--active" : "");
     btn.dataset.id = m.id;
@@ -123,12 +166,13 @@ function renderModules(list) {
     btn.draggable = true;
     btn.innerHTML = `
       <span class="module-item__drag" title="Перетащить">⠿</span>
-      <span class="module-item__dot module-item__dot--${m.status}"></span>
+      <span class="module-item__dot module-item__dot--${displayStatus}" title="${esc(runtimeStatus?.message || statusLabel(displayStatus))}"></span>
       <span class="module-item__name">${esc(m.name)}</span>
       <span class="module-item__ver">v${esc(m.version)}</span>`;
     btn.addEventListener("click", e => {
       if (e.target.classList.contains("module-item__drag")) return;
       selectModule(m.id);
+      setMobileModulesOpen(false);
     });
     attachDrag(btn);
     el.appendChild(btn);
@@ -243,38 +287,34 @@ function updateToolbar(m) {
   $("mtResume").hidden = m.status !== "paused";
 }
 
-const STATUS_LABELS = { active: "активен", paused: "пауза", unloaded: "выгружен", error: "ошибка" };
+const STATUS_LABELS = { active: "активен", paused: "пауза", unloaded: "выгружен", error: "ошибка", restarting: "перезапуск" };
 function statusLabel(s) { return STATUS_LABELS[s] || s; }
 
 // ── Toolbar actions ───────────────────────────────────────────────────────────
 
 async function moduleAction(action) {
   if (!activeModuleId) return;
-  const labels = {pause: "Пауза модуля", resume: "Запуск модуля", unload: "Выгрузка модуля"};
+  const labels = {pause: "Пауза модуля", resume: "Запуск модуля"};
   const res = await withGlobalBusy(
     fetch(`${RP}/api/modules/${activeModuleId}/${action}`, { method: "POST" }),
     labels[action] || "Операция"
   );
   if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || "Ошибка"); return; }
-  if (action === "unload") {
-    history.pushState({}, "", RP + "/");
-    document.title = "Nexus";
-    activeModuleId = null;
-    $("contentWelcome").hidden = false;
-    $("contentModule").hidden = true;
-    $("topbarCrumb").textContent = "Оркестратор";
-  }
   await refreshModules();
   if (activeModuleId && modulesCache[activeModuleId]) selectModule(activeModuleId, false);
 }
 
 $("mtPause").addEventListener("click",  () => moduleAction("pause"));
 $("mtResume").addEventListener("click", () => moduleAction("resume"));
-$("mtUnload").addEventListener("click", () => {
-  if (confirm(`Выгрузить модуль «${modulesCache[activeModuleId]?.name}»? Файлы будут удалены.`))
-    moduleAction("unload");
-});
 $("mtModuleSettings").addEventListener("click", openModuleSettings);
+$("mobileModulesBtn").addEventListener("click", () => {
+  setMobileModulesOpen($("mobileModulesBtn").getAttribute("aria-expanded") !== "true");
+});
+$("mobileSidebarBackdrop").addEventListener("click", () => setMobileModulesOpen(false));
+mobileShellQuery.addEventListener("change", () => setMobileModulesOpen(false));
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") setMobileModulesOpen(false);
+});
 
 async function openModuleSettings() {
   if (activeModuleId !== "customer-db") return;
@@ -413,6 +453,7 @@ function esc(s) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 (async () => {
+  setMobileModulesOpen(false);
   const res = await withGlobalBusy(fetch(RP + "/api/modules"), "Загрузка Nexus");
   if (!res.ok) return;
   const list = await res.json();

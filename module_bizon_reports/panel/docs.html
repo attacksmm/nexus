@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bizon365 отчеты docs</title><style>:root{color-scheme:dark}*{box-sizing:border-box;scrollbar-color:#3a3a3a #090909}body{max-width:920px;margin:0;padding:20px;background:#060606;color:#f2f2f2;font:14px/1.55 "IBM Plex Sans","Segoe UI",system-ui,sans-serif;overflow-wrap:anywhere}p,li{color:#bababa}code,pre{background:#101010;border:1px solid #2d2d2d;border-radius:0}code{padding:1px 4px;color:#eee}pre{padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto}li{margin:5px 0}@media(max-width:600px){body{padding:14px}pre{max-width:100%}}</style></head>
+<body>
+<h2>Bizon365 отчеты</h2>
+<p>Модуль принимает webhook Bizon365 после создания отчета, объединяет повторные входы, сохраняет клиентов и отдельные посещения в customer-db и публикует feed для downstream-модулей. Пересылка в Vakas оставлена только для теневого переезда.</p>
+
+<h3>Webhook</h3>
+<pre><code>GET /nexus/bizon-reports/api/webhook?secret=...&amp;webinarId=...
+POST /nexus/bizon-reports/api/webhook?secret=...&amp;url=https%3A%2F%2Fvakas-tools.ru%2Fbase%2Freport%2F...</code></pre>
+<p><code>GET</code> нужен для вставки готовой ссылки в Bizon365. Если параметр <code>url</code> не задан, модуль только сохранит клиентов в лист <strong>Клиенты Bizon365</strong> и не будет пересылать запрос в Vakas. Если <code>url</code> задан, он должен начинаться с <code>https://vakas-tools.ru/base/report/</code>.</p>
+
+<h3>Настройки в панели</h3>
+<ul>
+  <li><strong>Webhook secret</strong> - входной секрет для Bizon365 webhook, хранится в базе модуля.</li>
+  <li><strong>Bizon365 API token</strong> и <strong>Project ID</strong> - используются для API v2, если Bizon присылает только <code>webinarId</code>.</li>
+  <li><strong>Timeout</strong> - общий таймаут запросов к Bizon API, customer-db и Vakas.</li>
+</ul>
+
+<h3>Отчеты Bizon365</h3>
+<p>Вкладка <strong>Отчеты Bizon365</strong> получает список отчетов через Bizon API v2 <code>/api/v2/{projectId}/reports/getlist</code>. Кнопка <strong>Добавить</strong> или <strong>Перезагрузить</strong> забирает зрителей через <code>getviewers</code> и пишет обе проекции без пересылки в Vakas.</p>
+
+<h3>Customer DB</h3>
+<p>Модуль создает таблицу <code>bizon365_clients</code> с актуальной карточкой клиента и <code>bizon365_attendance</code> с отдельным фактом «человек + webinarId». Повторная доставка обновляет тот же <code>attendance_key</code>, а новый вебинар не перезаписывает историю.</p>
+
+<h3>Attendance feed</h3>
+<pre><code>GET /nexus/bizon-reports/api/attendance-feed?after=0&amp;limit=200
+Authorization: Bearer &lt;feed token&gt;</code></pre>
+<p>Feed использует монотонный change ID. Токен отображается только авторизованным пользователям Nexus в настройках модуля.</p>
+
+<h3>Расчет времени</h3>
+<p>Повторные профили объединяются по телефону, email, uid, sid или chatUserId. Время считается по объединению непересекающихся интервалов <code>vi</code>; при их отсутствии используется валидная разница <code>viewTill-view</code>. Отрицательные и чрезмерные значения помечаются ошибкой.</p>
+
+<h3>Источники зрителей</h3>
+<ul>
+  <li>Если webhook уже содержит массив <code>viewers</code>, <code>items</code>, <code>users</code> или packed Bizon <code>report.usersMeta</code>, модуль берет зрителей из webhook.</li>
+  <li>Если зрителей нет, но есть <code>webinarId</code>, модуль вызывает Bizon API v2 <code>/api/v2/{projectId}/reports/getviewers</code> с заголовком <code>X-Token: BIZON365_API_TOKEN</code>.</li>
+  <li>Если нет ни зрителей, ни API token, raw webhook все равно сохраняется и пересылается в Vakas.</li>
+</ul>
+
+<h3>ENV</h3>
+<ul>
+  <li>Дополнительные ENV вручную не требуются: секрет webhook и Bizon token задаются во вкладке <strong>Настройки</strong>.</li>
+  <li>Customer DB и внутренний адрес Nexus модуль определяет автоматически внутри Nexus.</li>
+</ul>
+</body>
+</html>

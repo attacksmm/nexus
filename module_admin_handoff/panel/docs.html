@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Общение с администрацией — документация</title>
+  <style>
+    :root{color-scheme:dark;--bg:#060606;--text:#f2f2f2;--muted:#bababa;--border:#2d2d2d;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px}
+    *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text)}body{padding:22px;line-height:1.55}main{max-width:920px}p,li{color:var(--muted)}code,pre{font-family:"IBM Plex Mono","Consolas",monospace;background:#030303;border:1px solid var(--border)}code{padding:1px 5px}pre{padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+  </style>
+</head>
+<body><main>
+  <h1>Общение с администрацией</h1>
+  <p>Это единое рабочее место для Scanner и защиты диалогов. Scanner по-прежнему отвечает только за обнаружение и классификацию VK-очереди, а Admin Handoff определяет источник клиента по истории <code>openrouter.db</code> и управляет защитой во внешних сервисах.</p>
+  <h2>Что показывает панель</h2>
+  <ul>
+    <li><code>Ждут ответа администратора</code> — люди в текущей VK-очереди, а не количество внешних записей.</li>
+    <li><code>Людей под защитой</code> — уникальные VK ID, одна строка на человека.</li>
+    <li><code>Активных блокировок</code> — отдельные memberships Senler и Salebot. У одного человека их может быть две.</li>
+    <li>Вкладка <code>Очередь</code> использует API Scanner и сохраняет его действия «Проверить VK» и «Открыть VK».</li>
+  </ul>
+  <h2>Правила</h2>
+  <ul>
+    <li><code>source=senler</code> — добавить VK ID в Senler список <code>3748755</code> через <code>subscribers/add</code>.</li>
+    <li><code>source=salebot</code> — добавить Salebot <code>client_id</code> в список <code>2427562</code> через <code>add_to_list</code>.</li>
+    <li>Если источник не найден в OpenRouter, модуль дополнительно проверяет VK ID через Salebot <code>find_client_id_by_platform_id</code> и берёт <code>id</code> из ответа как Salebot <code>client_id</code>.</li>
+    <li>Каждое новое сообщение админа продлевает участие на <code>7</code> дней. После истечения срока модуль удаляет человека из этого же списка через <code>subscribers/del</code> или <code>remove_from_list</code>.</li>
+    <li>Если источник не найден, событие записывается как <code>skipped</code>, чтобы модуль не дёргал API вслепую.</li>
+  </ul>
+  <p>Повторная обработка защищена уникальным <code>scanner_event_id</code>. Активные участия хранятся отдельно в таблице <code>memberships</code>, чтобы срок можно было продлевать и безопасно удалять просроченных. Миграция исторических действий создаёт только отсутствующие memberships и не может повторно активировать уже снятую запись.</p>
+  <h2>ENV</h2>
+  <pre>ADMIN_HANDOFF_ENABLED=1
+ADMIN_HANDOFF_PROCESS_EXISTING=0
+ADMIN_HANDOFF_RETENTION_DAYS=7
+ADMIN_HANDOFF_SALEBOT_LOOKUP_FALLBACK=1
+ADMIN_HANDOFF_SENLER_SUBSCRIPTION_ID=3748755
+ADMIN_HANDOFF_SALEBOT_LIST_ID=2427562
+SENLER_ACCESS_TOKEN=...
+SENLER_GROUP_ID=...
+SALEBOT_API_KEY=...</pre>
+  <p><code>ADMIN_HANDOFF_SCANNER_DB_PATH</code> и <code>ADMIN_HANDOFF_OPENROUTER_DB_PATH</code> нужны только если автоопределение путей не подходит. Для поиска Salebot <code>client_id</code> по VK/platform ID можно указать <code>SALEBOT_GROUP_ID</code>.</p>
+  <h2>API</h2>
+  <pre>GET /nexus/admin-handoff/api/env-status
+GET /nexus/admin-handoff/api/workspace
+GET /nexus/admin-handoff/api/actions?limit=100
+GET /nexus/admin-handoff/api/memberships?status=active
+POST /nexus/admin-handoff/api/process
+POST /nexus/admin-handoff/api/actions/{id}/retry</pre>
+</main></body></html>

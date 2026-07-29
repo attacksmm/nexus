@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Токены</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070807;--panel:#101110;--line:#2a2d2b;--text:#f2f5f1;--muted:#9aa39d;--ok:#9fe0aa;--bad:#ffc2ca;--warn:#ffe08a;--accent:#f4f4f4}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+    header{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(7,8,7,.96);z-index:5}
+    h1{font-size:16px;margin:0;font-weight:800}.hint{color:var(--muted);font-size:12px}.spacer{flex:1}
+    button,input,select{background:#0c0d0c;color:var(--text);border:1px solid var(--line);padding:9px 11px;font:inherit}
+    button{cursor:pointer}button:disabled{opacity:.45;cursor:wait}button.primary{background:var(--accent);color:#050505;border-color:var(--accent);font-weight:800}button.danger{color:var(--bad);border-color:#5f3137;background:#241315}
+    main{display:grid;grid-template-columns:minmax(360px,1fr) 420px;min-height:calc(100vh - 58px)}
+    .list{border-right:1px solid var(--line);overflow:auto}.side{padding:18px;position:sticky;top:58px;height:calc(100vh - 58px);border-left:1px solid var(--line);background:#0a0b0a}
+    .tools{display:flex;gap:8px;padding:14px 18px;border-bottom:1px solid var(--line)}.tools input{flex:1}
+    table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:#0b0c0b}
+    tr{cursor:pointer}tr:hover{background:#111311}tr.active{background:#171917}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .pill{display:inline-flex;align-items:center;border:1px solid var(--line);padding:2px 7px;font-size:11px;background:#111;color:var(--muted);white-space:nowrap}.pill.ok{color:var(--ok);border-color:#22552b;background:#0d1d10}.pill.bad,.pill.invalid,.pill.error,.pill.missing{color:var(--bad);border-color:#5f3137;background:#251315}.pill.warn,.pill.unchecked,.pill.present,.pill.optional{color:var(--warn);border-color:#6b5417;background:#211a08}
+    label{display:block;margin:14px 0 6px;color:var(--muted);font-size:12px}.field{width:100%}.textarea{width:100%;height:124px;resize:vertical;background:#0c0d0c;color:var(--text);border:1px solid var(--line);padding:10px;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}
+    .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}.msg{margin-top:12px;white-space:pre-wrap}.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}.modules{max-width:360px}.empty{padding:28px;color:var(--muted)}.mobile-back{display:none}
+    @media(max-width:900px){
+      html,body{width:100%;max-width:100%;overflow-x:hidden}
+      header{padding:10px;gap:8px;flex-wrap:wrap}
+      header .spacer{display:none}header .hint{margin-right:auto}
+      header button{min-height:40px;flex:1 1 140px}
+      main{display:block;min-height:0}
+      .list{border-right:0;overflow:visible}.side{display:none;position:static;height:auto;padding:12px;border:0}
+      body.mobile-editing .list{display:none}body.mobile-editing .side{display:block}
+      .mobile-back{display:inline-flex;align-items:center;justify-content:center;min-height:40px;margin-bottom:12px}
+      .tools{display:grid;grid-template-columns:minmax(0,1fr) 116px;padding:10px;gap:8px}
+      .tools input,.tools select,.field,.textarea,.actions button{min-height:40px;min-width:0}
+      #table{padding:0 10px 10px}
+      table,tbody,tr,td{display:block;width:100%}thead{display:none}tbody{display:grid;gap:8px}
+      tr[data-key]{padding:10px;border:1px solid var(--line);background:var(--panel)}
+      tr[data-key].active{border-color:#59605b}
+      td{padding:0;border:0;overflow-wrap:anywhere}
+      .token-key{padding-bottom:8px}.token-value,.token-validation{display:inline;color:var(--muted);font-size:12px}.token-validation::before{content:" · "}
+      .modules{max-width:none;margin-top:7px;color:var(--muted);font-size:12px}
+      .actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.actions button{width:100%}
+      #force{grid-column:1/-1}
+      .textarea{height:170px}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Токены</h1>
+    <span class="hint">ENV без раскрытия значений</span>
+    <span class="spacer"></span>
+    <button id="validateAll">Проверить известные</button>
+    <button id="refresh">Обновить</button>
+  </header>
+  <main>
+    <section class="list">
+      <div class="tools">
+        <input id="search" placeholder="Поиск по ключу или модулю">
+        <select id="filter"><option value="">Все</option><option value="bad">Проблемные</option><option value="present">Заданные</option><option value="missing">Пустые</option></select>
+      </div>
+      <div id="table"></div>
+    </section>
+    <aside class="side">
+      <button id="backToList" class="mobile-back" type="button">← Токены</button>
+      <div class="hint">Выбранный ключ</div>
+      <h1 id="selectedTitle">Не выбран</h1>
+      <div id="selectedMeta" class="hint"></div>
+      <label>ENV ключ</label>
+      <input id="key" class="field mono" placeholder="VK_USER_TOKEN">
+      <label>Новое значение</label>
+      <textarea id="value" class="textarea" autocomplete="off" spellcheck="false" placeholder="Вставьте токен. После сохранения значение не возвращается в браузер."></textarea>
+      <div class="actions">
+        <button id="validate">Проверить</button>
+        <button id="save" class="primary">Проверить и сохранить</button>
+        <button id="force" class="danger">Сохранить без проверки</button>
+      </div>
+      <div id="message" class="msg hint"></div>
+    </aside>
+  </main>
+<script>
+const API = location.pathname.replace(/\/panel\/.*$/, "/api");
+const state = {items: [], selected: null, validated: false, listScroll: 0};
+const $ = id => document.getElementById(id);
+function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
+function pill(status, required=false){const s=String(status||"missing");let cls=s==="ok"?"ok":(["invalid","error"].includes(s)||s==="missing"&&required?"bad":(["unchecked","present","optional"].includes(s)||s==="missing"?"warn":""));return `<span class="pill ${cls}">${esc(s)}</span>`}
+async function api(path, opts){const res=await fetch(API+path, opts);let data={};try{data=await res.json()}catch{}if(!res.ok)throw new Error(data.detail||data.error||`HTTP ${res.status}`);return data}
+function modulesText(item){return (item.modules||[]).map(m=>m.name).join(", ")}
+function activeModules(item){return (item?.modules||[]).filter(m=>m.status==="active")}
+function postModuleStatus(modules,status,message){
+  if(window.parent===window)return;
+  window.parent.postMessage({type:"nexus:module-status",updates:modules.map(m=>({id:m.id,status,message}))},location.origin)
+}
+function refreshParentModules(modules){
+  if(window.parent===window)return;
+  window.parent.postMessage({type:"nexus:refresh-modules",moduleIds:modules.map(m=>m.id)},location.origin)
+}
+function setSaving(saving){["validate","save","force","refresh","validateAll"].forEach(id=>$(id).disabled=saving)}
+function visibleItems(){const q=$("search").value.trim().toLowerCase();const f=$("filter").value;return state.items.filter(item=>{const v=item.validation||{};const hay=[item.key,item.description,modulesText(item),item.provider].join(" ").toLowerCase();if(q&&!hay.includes(q))return false;if(f==="present"&&!item.present)return false;if(f==="missing"&&item.present)return false;if(f==="bad"&&!["invalid","error"].includes(v.status)&&!(v.status==="missing"&&item.required))return false;return true})}
+function render(){
+  const rows=visibleItems().map(item=>{const v=item.validation||{};const active=state.selected?.key===item.key?"active":"";return `<tr class="${active}" data-key="${esc(item.key)}"><td class="mono token-key">${esc(item.key)}<br><span class="hint">${esc(item.description||"")}</span></td><td class="token-value">${item.present?esc(item.masked):'<span class="hint">не задано</span>'}</td><td class="token-validation">${pill(v.status,item.required)}<br><span class="hint">${esc(v.message||"")}</span></td><td class="modules">${esc(modulesText(item)||"—")}</td></tr>`}).join("");
+  $("table").innerHTML=rows?`<table><thead><tr><th>Ключ</th><th>Значение</th><th>Проверка</th><th>Модули</th></tr></thead><tbody>${rows}</tbody></table>`:'<div class="empty">Нет ключей</div>';
+  document.querySelectorAll("tr[data-key]").forEach(row=>row.onclick=()=>select(row.dataset.key));
+}
+function select(key){
+  state.selected=state.items.find(x=>x.key===key)||{key};$("key").value=state.selected.key;$("selectedTitle").textContent=state.selected.key;$("selectedMeta").textContent=`${state.selected.provider||"unknown"} · ${modulesText(state.selected)||"без привязки к модулю"}`;$("value").value="";$("message").textContent="";render();
+  if(matchMedia("(max-width:900px)").matches){state.listScroll=window.scrollY;document.body.classList.add("mobile-editing");requestAnimationFrame(()=>window.scrollTo(0,0))}
+}
+function showTokenList(){document.body.classList.remove("mobile-editing");requestAnimationFrame(()=>window.scrollTo(0,state.listScroll||0))}
+async function load(validate=false){$("message").textContent=validate?"Проверяю...":"Загружаю...";const data=await api(`/status${validate?"?validate=1":""}`);state.items=data.items||[];if(state.selected)state.selected=state.items.find(x=>x.key===state.selected.key)||state.selected;render();$("message").textContent=`Обновлено: ${data.updated_at||""}`}
+async function validateSelected(){const key=$("key").value.trim();const value=$("value").value.trim();if(!key)return;$("message").textContent="Проверяю...";const data=await api("/validate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,value})});$("message").textContent=`${data.validation.status}: ${data.validation.message||""}`}
+async function save(force=false){
+  const key=$("key").value.trim();const value=$("value").value.trim();
+  if(!key||!value){$("message").textContent="Укажите ключ и значение";return}
+  const selected=state.items.find(item=>item.key===key)||state.selected;
+  const affected=activeModules(selected);
+  setSaving(true);$("message").className="msg hint";
+  $("message").textContent=affected.length?`Проверяю токен и применяю к модулям: ${affected.map(m=>m.name).join(", ")}...`:"Проверяю и сохраняю...";
+  postModuleStatus(affected,"restarting",`Применяется ${key}`);
+  try{
+    const data=await api("/env",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,value,validate:!force,force})});
+    if(data.saved===false){
+      postModuleStatus(affected,"active","Токен не изменён");
+      $("message").textContent=`Не сохранено: ${data.validation.status} ${data.validation.message||""}`;
+      $("message").className="msg bad";
+      refreshParentModules(affected);
+      return;
+    }
+    const results=data.restart?.modules||[];
+    const byId=new Map(results.map(item=>[item.id,item]));
+    postModuleStatus(affected.map(m=>byId.get(m.id)||{...m,status:"error"}),"restarting",`Завершается применение ${key}`);
+    for(const item of results){
+      postModuleStatus([item],item.status,item.status==="active"?`Перезапущен после изменения ${key}`:(item.error||"Ошибка перезапуска"));
+    }
+    if(data.restart?.error){postModuleStatus(affected,"error",data.restart.error)}
+    const restarted=Number(data.restart?.restarted||0);const failed=Number(data.restart?.failed||0);
+    const summary=failed?`Токен сохранён. Перезапущено: ${restarted}; с ошибкой: ${failed}.`:`Токен сохранён и применён. Перезапущено модулей: ${restarted}.`;
+    await load(false);select(key);$("message").textContent=`${summary}\nПроверка: ${data.validation.status} ${data.validation.message||""}`;$("message").className=`msg ${failed?"bad":"ok"}`;
+    refreshParentModules(affected);
+  }catch(error){
+    postModuleStatus(affected,"error",error.message||"Ошибка применения токена");
+    $("message").textContent=`Ошибка: ${error.message||error}`;$("message").className="msg bad";
+    refreshParentModules(affected);
+  }finally{setSaving(false)}
+}
+$("refresh").onclick=()=>load(false);$("validateAll").onclick=()=>load(true);$("validate").onclick=validateSelected;$("save").onclick=()=>save(false);$("force").onclick=()=>{if(confirm("Сохранить без проверки?"))save(true)};$("backToList").onclick=showTokenList;$("search").oninput=render;$("filter").onchange=render;
+load(false);
+</script>
+</body>
+</html>

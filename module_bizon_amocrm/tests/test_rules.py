@@ -65,14 +65,65 @@ class BizonAmoRulesTest(unittest.TestCase):
             {"roomid": "97242:puppy"},
         ))
 
+    def test_exclude_filter_requires_all_conditions(self):
+        binding = {"exclude_conditions": [
+            {"source": "utm_source", "operator": "contains", "value": "_baza"},
+            {"source": "room_title", "operator": "contains", "value": "агрессия"},
+        ]}
+        attendance = {
+            "utm_source": "VK_ADS_DK_BAZA",
+            "room_title": "Мастер-класс «Агрессия у собак»",
+        }
+        self.assertEqual(len(router._matching_exclude_conditions(binding, attendance)), 2)
+        attendance["room_title"] = "Другой эфир"
+        self.assertEqual(router._matching_exclude_conditions(binding, attendance), [])
+
+    def test_empty_exclude_filter_blocks_nothing(self):
+        self.assertEqual(router._matching_exclude_conditions(
+            {"exclude_conditions": []},
+            {"utm_source": "_baza"},
+        ), [])
+
+    def test_exclude_filter_empty_and_negative_operators(self):
+        attendance = {"utm_source": "organic", "utm_medium": ""}
+        self.assertTrue(router._exclude_condition_matches(
+            attendance, {"source": "utm_medium", "operator": "is_empty"},
+        ))
+        self.assertTrue(router._exclude_condition_matches(
+            attendance, {"source": "utm_source", "operator": "not_contains", "value": "_baza"},
+        ))
+
     def test_phone_comparison_is_normalized(self):
         self.assertTrue(router._same("+7 (999) 111-22-33", "89991112233"))
+
+    def test_phone_is_serialized_for_amocrm_with_country_prefix(self):
+        self.assertEqual(router._phone_text("9171283205"), "+79171283205")
+        self.assertEqual(router._phone_text("8 (917) 128-32-05"), "+79171283205")
+        self.assertEqual(router._phone_text("+7 917 128-32-05"), "+79171283205")
 
     def test_closed_duplicate_is_found_inside_selected_pipeline(self):
         binding = {"pipeline_scope": ["10", "20"], "status_scope": []}
         self.assertFalse(router._lead_allowed({"pipeline_id": 30, "status_id": 100}, binding))
         self.assertTrue(router._lead_allowed({"pipeline_id": 10, "status_id": 142}, binding))
         self.assertTrue(router._lead_allowed({"pipeline_id": 20, "status_id": 101}, binding))
+
+    def test_unsorted_status_type_one_is_detected(self):
+        pipelines = [{
+            "id": 10,
+            "_embedded": {"statuses": [
+                {"id": 20, "type": 1, "name": "Неразобранное"},
+                {"id": 21, "type": 0, "name": "Входящие"},
+            ]},
+        }]
+        self.assertTrue(router._lead_unsorted_from_pipelines(
+            {"pipeline_id": 10, "status_id": 20}, pipelines
+        ))
+        self.assertFalse(router._lead_unsorted_from_pipelines(
+            {"pipeline_id": 10, "status_id": 21}, pipelines
+        ))
+        self.assertIsNone(router._lead_unsorted_from_pipelines(
+            {"pipeline_id": 10, "status_id": 999}, pipelines
+        ))
 
     def test_exact_contact_deals_are_found_and_sorted_newest_first(self):
         async def fake_request(method, path, payload=None):
@@ -168,11 +219,34 @@ class BizonAmoRulesTest(unittest.TestCase):
         self.assertFalse(router._binding_time_matches(below, {**base, "watch_minutes": 60}))
         self.assertTrue(router._binding_time_matches(above, {**base, "watch_minutes": 60}))
 
+    def test_click_bypasses_minimum_only_when_click_status_is_configured(self):
+        binding = {"min_minutes": 60, "max_minutes": None, "click_status_id": "66368618"}
+        attendance = {"watch_valid": True, "watch_minutes": 12, "clicked_button": True}
+        self.assertTrue(router._binding_time_matches(binding, attendance))
+        self.assertFalse(router._binding_time_matches(
+            {**binding, "click_status_id": ""}, attendance,
+        ))
+        self.assertFalse(router._binding_time_matches(
+            binding, {**attendance, "clicked_button": False},
+        ))
+        self.assertEqual(
+            router._qualification_reason(attendance, 60, None, "66368618"),
+            "eligible",
+        )
+        self.assertEqual(router._qualification_reason(attendance, 60), "below_minimum")
+
     def test_ignored_status_forces_note_only(self):
         existing = {"id": 1, "status_id": 142, "responsible_user_id": 999}
         binding = {"duplicate_action": "merge_empty", "note_only_status_ids": ["142"]}
         self.assertEqual(router._duplicate_plan(existing, binding), "note_only")
         self.assertEqual(router._duplicate_plan({**existing, "status_id": 101}, binding), "merge_empty")
+
+    def test_note_only_binding_applies_to_every_existing_status(self):
+        binding = {"duplicate_action": "note_only", "note_only_status_ids": ["142"]}
+        self.assertEqual(
+            router._duplicate_plan({"id": 1, "status_id": 101}, binding),
+            "note_only",
+        )
 
     def test_lead_name_contains_moscow_webinar_time_minutes_and_name(self):
         attendance = {"webinar_at": 1784010240, "watch_minutes": 6.917, "username": "Никита"}
@@ -286,6 +360,57 @@ class BizonAmoRulesTest(unittest.TestCase):
         self.assertIn("Сообщения и ответы в чате: [00:52] 10", text)
         self.assertIn("[02:16] Мой вопрос", text)
 
+    def test_chat_messages_become_one_separate_note_and_leave_main_report(self):
+        texts = router._note_texts(
+            {
+                "username": "Анна",
+                "chat_messages": [
+                    {"time": "00:52", "text": "10"},
+                    {"time": "02:16", "text": "Мой вопрос"},
+                ],
+                "chat_messages_text": "[00:52] 10\n[02:16] Мой вопрос",
+            },
+            {"note_template": "Имя: {username}\nСообщения и ответы в чате: {chat_messages_text}"},
+        )
+        self.assertEqual(texts, [
+            "Имя: Анна",
+            "Bizon365 · комментарии с вебинара:\n[00:52] 10\n[02:16] Мой вопрос",
+        ])
+
+    def test_grouped_chat_note_is_batched_and_idempotent(self):
+        attendance = {
+            "username": "Анна",
+            "chat_messages": [
+                {"time": "00:52", "text": "10"},
+                {"time": "02:16", "text": "Мой вопрос"},
+            ],
+        }
+        binding = {"note_template": "Имя: {username}"}
+        calls = []
+
+        async def fake_request(method, path, payload=None):
+            calls.append((method, path, payload))
+            if method == "GET":
+                return {"_embedded": {"notes": [{
+                    "note_type": "common", "params": {"text": "Имя: Анна"},
+                }]}}, "", 200
+            return [{"id": 1}, {"id": 2}], "", 200
+
+        original = router._amo_request
+        router._amo_request = fake_request
+        try:
+            _result, error = asyncio.run(router._add_note("20", attendance, binding))
+        finally:
+            router._amo_request = original
+        self.assertEqual(error, "")
+        self.assertEqual([call[0] for call in calls], ["GET", "POST"])
+        self.assertEqual(
+            [item["params"]["text"] for item in calls[1][2]],
+            [
+                "Bizon365 · комментарии с вебинара:\n[00:52] 10\n[02:16] Мой вопрос",
+            ],
+        )
+
     def test_round_robin_skips_inactive_and_rotates(self):
         users = ["10", "20", "30"]
         active = {"10", "30"}
@@ -327,8 +452,18 @@ class BizonAmoRulesTest(unittest.TestCase):
         lead_values = asyncio.run(router._mapped_field_values(attendance, binding, "leads", lead_catalog))
         contact_values = asyncio.run(router._mapped_field_values(attendance, binding, "contacts", contact_catalog))
         self.assertEqual(lead_values, [{"field_id": 10, "values": [{"value": 75.5}]}])
-        self.assertEqual(contact_values, [{"field_id": 20, "values": [{"value": "79990001122", "enum_code": "WORK"}]}])
+        self.assertEqual(contact_values, [{"field_id": 20, "values": [{"value": "+79990001122", "enum_code": "WORK"}]}])
         self.assertEqual(router._mapped_entity_name(attendance, binding, "contacts"), "Анна")
+
+    def test_automatic_contact_phone_is_serialized_for_amocrm(self):
+        fields = [{"id": 20, "type": "multitext", "code": "PHONE"}]
+        values = router._ensure_contact_identity_fields(
+            {"phone": "79171283205"}, fields, [],
+        )
+        self.assertEqual(values, [{
+            "field_id": 20,
+            "values": [{"value": "+79171283205", "enum_code": "WORK"}],
+        }])
 
     def test_complex_bizon_value_is_serialized_for_text_field(self):
         self.assertEqual(router._scalar_for_amo({"answer": "да"}, "text"), '{"answer": "да"}')
@@ -408,6 +543,61 @@ class BizonAmoRulesTest(unittest.TestCase):
         self.assertEqual(lead["custom_fields_values"][0]["values"][0]["value"], 61)
         contact_fields = {item["field_id"] for item in lead["_embedded"]["contacts"][0]["custom_fields_values"]}
         self.assertEqual(contact_fields, {100, 200})
+
+    def test_create_payload_uses_click_status(self):
+        calls = []
+
+        async def fake_catalog(_entity):
+            return [], ""
+
+        async def fake_request(method, path, payload=None):
+            calls.append((method, path, payload))
+            return [{"id": 779}], "", 200
+
+        original_catalog, original_request = router._catalog, router._amo_request
+        router._catalog, router._amo_request = fake_catalog, fake_request
+        try:
+            asyncio.run(router._create_lead(
+                {"username": "Анна", "clicked_banner": True},
+                {"pipeline_id": "8062042", "status_id": "66368622", "click_status_id": "66368618"},
+                "30",
+            ))
+        finally:
+            router._catalog, router._amo_request = original_catalog, original_request
+        lead = calls[0][2][0]
+        self.assertEqual(lead["pipeline_id"], 8062042)
+        self.assertEqual(lead["status_id"], 66368618)
+
+    def test_successful_existing_lead_click_preserves_pipeline_status_and_owner(self):
+        async def fail_request(*_args, **_kwargs):
+            raise AssertionError("existing click must not call amoCRM")
+        original_request = router._amo_request
+        router._amo_request = fail_request
+        try:
+            existing = {
+                "id": 777,
+                "pipeline_id": 8061498,
+                "status_id": 142,
+                "responsible_user_id": 999,
+            }
+            self.assertEqual(
+                router._duplicate_plan(existing, {"duplicate_action": "note_only"}),
+                "note_only",
+            )
+            result, error = asyncio.run(router._preserve_existing_lead_route(
+                existing,
+                {"clicked_button": True},
+                {"pipeline_id": "8062042", "status_id": "66368622", "click_status_id": "66368618"},
+            ))
+        finally:
+            router._amo_request = original_request
+        self.assertEqual(error, "")
+        self.assertTrue(result["preserved"])
+        self.assertTrue(result["click_detected"])
+        self.assertEqual(result["configured_click_status_id"], "66368618")
+        self.assertEqual(result["pipeline_id"], 8061498)
+        self.assertEqual(result["status_id"], 142)
+        self.assertEqual(result["responsible_user_id"], 999)
 
     def test_create_payload_resolves_room_tag_template(self):
         calls = []

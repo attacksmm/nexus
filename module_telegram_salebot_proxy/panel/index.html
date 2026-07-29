@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <link rel="icon" href="data:,">
+  <title>Telegram → SaleBot Proxy</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08090b;--surface:#0f1115;--surface2:#14171c;--line:#252a32;--line2:#343b47;--text:#f2f4f8;--muted:#8e97a6;--blue:#4d84ff;--blue2:#75a2ff;--green:#37c87c;--amber:#f3b84b;--red:#ef6464;--radius:14px;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#343b47 #0d0f12}
+    *::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-track{background:#0d0f12}*::-webkit-scrollbar-thumb{background:#343b47;border-radius:8px}
+    html,body{margin:0;width:100%;min-height:100%;background:var(--bg);color:var(--text)}
+    body{overflow-x:hidden}.app{min-height:100svh;padding:22px clamp(16px,2.6vw,36px) 40px}
+    button,input{font:inherit}.topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding-bottom:22px;border-bottom:1px solid var(--line)}
+    .eyebrow{margin:0 0 7px;color:var(--blue2);font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.title{margin:0;font-size:clamp(25px,3vw,38px);line-height:1.02;letter-spacing:-.045em}.lede{margin:9px 0 0;color:var(--muted);font-size:14px;max-width:670px;line-height:1.5}
+    .system{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px;white-space:nowrap;padding-top:7px}.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.dot.ok{background:var(--green);box-shadow:0 0 0 5px rgba(55,200,124,.09)}.dot.warn{background:var(--amber)}.dot.bad{background:var(--red)}
+    .summary{display:flex;align-items:center;gap:24px;min-height:66px;border-bottom:1px solid var(--line);overflow:auto}.metric{display:flex;align-items:baseline;gap:8px;white-space:nowrap}.metric b{font-size:20px;letter-spacing:-.03em}.metric span{color:var(--muted);font-size:12px}
+    .layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:620px}.sidebar{padding:22px 18px 0 0;border-right:1px solid var(--line);min-width:0}.main{padding:22px 0 0 28px;min-width:0}
+    .side-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.side-head h2{font-size:12px;margin:0;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}.icon-btn{border:1px solid var(--line2);background:transparent;color:var(--text);border-radius:9px;width:32px;height:32px;cursor:pointer;font-size:20px;line-height:1}.icon-btn:hover{border-color:var(--blue);color:var(--blue2)}
+    .bot-list{display:grid;gap:6px}.bot-item{width:100%;display:grid;grid-template-columns:36px minmax(0,1fr);gap:10px;align-items:center;text-align:left;padding:10px;border:1px solid transparent;border-radius:11px;background:transparent;color:var(--text);cursor:pointer}.bot-item:hover{background:var(--surface)}.bot-item.active{background:var(--surface2);border-color:var(--line)}.bot-avatar{width:36px;height:36px;border-radius:10px;background:#172440;color:#86abff;display:grid;place-items:center;font-weight:900}.bot-name{display:block;font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bot-state{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;margin-top:3px}.bot-state i{display:block;width:6px;height:6px;border-radius:50%;background:var(--muted)}.bot-state i.active{background:var(--green)}.bot-state i.waiting{background:var(--amber);animation:pulse 1.5s infinite}.bot-state i.error,.bot-state i.conflict{background:var(--red)}
+    .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:24px;overflow:auto}.tab{height:38px;padding:0 15px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font-weight:700;font-size:12px;white-space:nowrap;cursor:pointer}.tab.active{color:var(--text);border-bottom-color:var(--blue)}
+    .panel{display:none;animation:enter .2s ease}.panel.active{display:block}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.section-head h2{font-size:20px;letter-spacing:-.025em;margin:0}.section-head p{color:var(--muted);font-size:13px;line-height:1.45;margin:6px 0 0;max-width:650px}
+    .pipeline{display:grid;grid-template-columns:1fr 58px 1fr 58px 1fr;align-items:center;margin:20px 0 32px}.node{min-height:82px;border-top:1px solid var(--line2);padding:16px 2px 0}.node strong{display:block;font-size:14px}.node span{display:block;color:var(--muted);font-size:11px;margin-top:6px;overflow-wrap:anywhere}.node.center strong{color:var(--blue2)}.wire{height:1px;background:var(--line2);position:relative}.wire::after{content:"";position:absolute;right:-1px;top:-3px;border-left:6px solid var(--line2);border-top:3px solid transparent;border-bottom:3px solid transparent}.pipeline.live .wire{background:var(--green)}.pipeline.live .wire::after{border-left-color:var(--green)}
+    .steps{border-top:1px solid var(--line)}.step{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:14px;align-items:start;padding:19px 0;border-bottom:1px solid var(--line)}.step-no{width:30px;height:30px;border:1px solid var(--line2);border-radius:50%;display:grid;place-items:center;color:var(--muted);font-size:12px;font-weight:800}.step.done .step-no{background:rgba(55,200,124,.12);border-color:rgba(55,200,124,.45);color:var(--green)}.step.current .step-no{background:rgba(77,132,255,.13);border-color:var(--blue);color:var(--blue2)}.step h3{font-size:14px;margin:1px 0 5px}.step p{font-size:12px;color:var(--muted);line-height:1.5;margin:0;max-width:680px}.step-action{align-self:center}
+    .btn{height:36px;border-radius:9px;padding:0 14px;border:1px solid var(--line2);background:var(--surface2);color:var(--text);font-size:12px;font-weight:760;cursor:pointer;white-space:nowrap;transition:.16s ease}.btn:hover{border-color:#536077;transform:translateY(-1px)}.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}.btn.primary{background:var(--blue);border-color:var(--blue);color:white}.btn.primary:hover{background:#5c8eff}.btn.danger{color:#ff9292;border-color:#5b3034;background:transparent}.btn.ghost{background:transparent}.btn.small{height:30px;padding:0 10px;font-size:11px}
+    .notice{border-left:2px solid var(--amber);padding:10px 13px;background:rgba(243,184,75,.06);color:#dac79e;font-size:12px;line-height:1.55;margin:18px 0}.notice.ok{border-color:var(--green);background:rgba(55,200,124,.06);color:#a8dfc2}.notice.bad{border-color:var(--red);background:rgba(239,100,100,.06);color:#efb0b0}
+    .empty{min-height:380px;display:grid;place-items:center;text-align:center;border:1px dashed var(--line2);border-radius:var(--radius);padding:28px}.empty-inner{max-width:470px}.empty-icon{width:56px;height:56px;margin:0 auto 18px;border-radius:16px;background:#162440;color:#7fa7ff;display:grid;place-items:center;font-size:25px}.empty h2{font-size:21px;margin:0 0 8px}.empty p{color:var(--muted);font-size:13px;line-height:1.55;margin:0 0 19px}
+    .table-wrap{max-height:470px;overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:11px 10px;border-bottom:1px solid var(--line);font-size:11px;vertical-align:middle}th{position:sticky;top:0;background:var(--bg);z-index:1;color:var(--muted);font-weight:750;text-transform:uppercase;letter-spacing:.06em}td{color:#cdd2db}.status-tag{display:inline-flex;align-items:center;gap:6px}.status-tag::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted)}.status-tag.delivered::before{background:var(--green)}.status-tag.failed::before{background:var(--red)}.mono{font-family:"SFMono-Regular",Consolas,monospace;color:#aab4c4}
+    .form-grid{display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:14px;max-width:760px}.field{display:grid;gap:7px}.field label{font-size:11px;color:var(--muted);font-weight:700}.input{width:100%;height:40px;border:1px solid var(--line2);border-radius:9px;background:#0b0d10;color:var(--text);padding:0 12px;outline:none}.input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(77,132,255,.09)}.input::placeholder{color:#59616f}.code{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px;background:#0a0c0f;border:1px solid var(--line);border-radius:9px;padding:12px;color:#aeb8c8;white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto}
+    .settings-list{max-width:780px;border-top:1px solid var(--line)}.setting-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;padding:18px 0;border-bottom:1px solid var(--line)}.setting-row h3{font-size:13px;margin:0 0 5px}.setting-row p{font-size:12px;color:var(--muted);line-height:1.5;margin:0}.switch{width:42px;height:24px;border-radius:999px;background:#303642;border:0;padding:3px;cursor:pointer;transition:.2s}.switch::after{content:"";display:block;width:18px;height:18px;border-radius:50%;background:#c8ced8;transition:.2s}.switch.on{background:var(--blue)}.switch.on::after{transform:translateX(18px);background:#fff}
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:none;place-items:center;padding:18px;z-index:20}.modal.open{display:grid}.dialog{width:min(560px,100%);background:var(--surface);border:1px solid var(--line2);border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.5);padding:23px;animation:pop .18s ease}.dialog-head{display:flex;justify-content:space-between;gap:14px;margin-bottom:20px}.dialog h2{font-size:18px;margin:0}.dialog p{font-size:12px;color:var(--muted);line-height:1.5;margin:7px 0 0}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.close{border:0;background:transparent;color:var(--muted);font-size:22px;cursor:pointer}
+    .toast{position:fixed;right:20px;bottom:20px;max-width:min(420px,calc(100vw - 40px));background:#171a20;border:1px solid var(--line2);border-radius:10px;padding:12px 15px;font-size:12px;box-shadow:0 16px 50px rgba(0,0,0,.4);transform:translateY(18px);opacity:0;pointer-events:none;transition:.2s;z-index:30}.toast.show{transform:none;opacity:1}.toast.bad{border-color:#69383d;color:#ffc0c0}
+    .hidden{display:none!important}@keyframes enter{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}@keyframes pop{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:none}}@keyframes pulse{50%{opacity:.35}}
+    @media(max-width:800px){.app{padding:16px 14px 32px}.topbar{display:block}.system{margin-top:14px}.summary{gap:18px}.layout{display:block}.sidebar{border-right:0;border-bottom:1px solid var(--line);padding:16px 0}.bot-list{display:flex;overflow:auto}.bot-item{min-width:200px}.main{padding:18px 0 0}.pipeline{grid-template-columns:1fr 34px 1fr 34px 1fr}.step{grid-template-columns:36px minmax(0,1fr)}.step-action{grid-column:2;justify-self:start}.form-grid{grid-template-columns:1fr}.section-head{display:block}.section-head .btn{margin-top:12px}.setting-row{grid-template-columns:minmax(0,1fr) auto}}
+    @media(max-width:480px){.pipeline{display:block}.node{min-height:auto;padding:12px 0}.wire{width:1px;height:24px;margin-left:8px}.wire::after{right:-3px;top:auto;bottom:-1px;border-top:6px solid var(--line2);border-left:3px solid transparent;border-right:3px solid transparent;border-bottom:0}.pipeline.live .wire::after{border-top-color:var(--green);border-left-color:transparent}.step{gap:9px}.dialog{padding:18px}.dialog-actions{flex-wrap:wrap}.dialog-actions .btn{flex:1}.title{font-size:27px}}
+
+    /* Nexus design contract: same density, palette and controls as the shell. */
+    :root{--bg:#060606;--surface:#101010;--surface2:#171717;--line:#2d2d2d;--line2:#3a3a3a;--text:#f2f2f2;--muted:#bababa;--blue:#f4f4f4;--blue2:#f2f2f2;--green:#9fe0aa;--amber:#ffe08a;--red:#ffc2ca;--radius:0;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif}
+    *{scrollbar-color:#3a3a3a #101010}*::-webkit-scrollbar-track{background:#101010}*::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:0}
+    .app{padding:0;min-height:100svh}.topbar{min-height:58px;padding:11px 18px;align-items:center;background:var(--bg)}
+    .topbar .eyebrow{display:none}.title{font-size:16px;line-height:1.2;letter-spacing:0}.lede{margin:3px 0 0;font-size:12px;line-height:1.35;max-width:760px}.system{padding:0;color:var(--muted)}
+    .dot.ok{box-shadow:none}.summary{min-height:44px;padding:0 18px;gap:20px;background:var(--surface)}.metric{gap:6px}.metric b{font-size:14px;letter-spacing:0}.metric span{font-size:11px}
+    .layout{grid-template-columns:240px minmax(0,1fr);min-height:calc(100svh - 102px)}.sidebar{padding:12px;border-right:1px solid var(--line);background:var(--surface)}.main{padding:14px 18px;min-width:0}
+    .side-head{margin-bottom:8px}.side-head h2{font-size:10px}.icon-btn{width:30px;height:30px;border-radius:0;background:var(--surface2);font-size:18px}.icon-btn:hover{border-color:var(--text);color:var(--text)}
+    .bot-list{gap:3px}.bot-item{grid-template-columns:30px minmax(0,1fr);gap:8px;padding:7px;border-radius:0}.bot-item:hover,.bot-item.active{background:var(--surface2)}.bot-avatar{width:30px;height:30px;border-radius:0;background:#242424;color:var(--text);font-size:11px}.bot-name{font-size:12px}.bot-state{font-size:10px;margin-top:2px}
+    .tabs{margin:0 0 16px}.tab{height:34px;padding:0 12px;font-size:11px}.tab.active{border-bottom-color:var(--text)}
+    .section-head{margin-bottom:14px}.section-head h2{font-size:16px;letter-spacing:0}.section-head p{font-size:12px;margin-top:4px}.pipeline{margin:14px 0 22px}.node{min-height:66px;padding-top:12px}.node strong{font-size:12px}.node span{font-size:10px;margin-top:4px}.node.center strong{color:var(--text)}
+    .step{grid-template-columns:34px minmax(0,1fr) auto;gap:10px;padding:13px 0}.step-no{width:26px;height:26px;border-radius:0;font-size:11px}.step.current .step-no{background:#252525;border-color:var(--text);color:var(--text)}.step h3{font-size:12px}.step p{font-size:11px}.btn{height:32px;border-radius:0;padding:0 12px;background:var(--surface2);font-size:11px;transition:none}.btn:hover{border-color:var(--text);transform:none}.btn.primary{background:#f4f4f4;border-color:#f4f4f4;color:#080808}.btn.primary:hover{background:#d8d8d8;border-color:#d8d8d8}.btn.danger{color:var(--red);border-color:#704047}.btn.small{height:28px}
+    .notice{margin:14px 0;padding:9px 11px}.empty{min-height:300px;border-radius:0;padding:22px}.empty-icon{display:none}.empty h2{font-size:16px}.empty p{font-size:12px}.table-wrap{max-height:470px}th{background:var(--bg)}
+    .input,.code{border-radius:0;background:#0b0b0b}.input{height:34px;padding:0 10px}.input:focus{border-color:var(--text);box-shadow:none}.settings-list{max-width:none}.setting-row{padding:14px 0}.switch{border-radius:0;background:#303030}.switch::after{border-radius:0}.switch.on{background:#e8e8e8}.switch.on::after{background:#080808}
+    .modal{background:rgba(0,0,0,.78)}.dialog{width:min(500px,100%);padding:0;border-radius:0;background:var(--surface);border-color:#545454;box-shadow:0 20px 60px rgba(0,0,0,.65)}.dialog-head{margin:0;padding:14px 16px;border-bottom:1px solid var(--line)}.dialog h2{font-size:15px}.dialog p{font-size:11px;margin-top:5px}.dialog form{padding:16px}.dialog-actions{margin-top:14px}.toast{border-radius:0;background:var(--surface2)}
+    @media(max-width:800px){.app{padding:0}.topbar{padding:11px 14px}.summary{padding:0 14px}.layout{display:block}.sidebar{padding:10px 14px;border-right:0;border-bottom:1px solid var(--line)}.main{padding:12px 14px}.system{margin-top:8px}.bot-item{min-width:180px}.step{grid-template-columns:32px minmax(0,1fr)}.step-action{grid-column:2}.dialog{padding:0}}
+    @media(max-width:480px){.title{font-size:15px}.dialog{padding:0}}
+  </style>
+</head>
+<body>
+<main class="app">
+  <header class="topbar">
+    <div><p class="eyebrow">Nexus relay</p><h1 class="title">Telegram → SaleBot Proxy</h1><p class="lede">Автоматическое управление webhook и доставка Telegram Update в SaleBot.</p></div>
+    <div class="system"><span id="systemDot" class="dot"></span><span id="systemText">Проверяем модуль…</span></div>
+  </header>
+  <section class="summary" aria-label="Сводка"><div class="metric"><b id="metricBots">0</b><span>ботов</span></div><div class="metric"><b id="metricEvents">0</b><span>событий</span></div><div class="metric"><b id="metricDelivered">0</b><span>доставлено</span></div><div class="metric"><b id="metricFailed">0</b><span>ошибок</span></div></section>
+  <div class="layout">
+    <aside class="sidebar"><div class="side-head"><h2>Боты</h2><button class="icon-btn" id="addBotBtn" title="Добавить бота" aria-label="Добавить бота">+</button></div><div class="bot-list" id="botList"></div></aside>
+    <section class="main">
+      <div id="emptyState" class="empty"><div class="empty-inner"><div class="empty-icon">↗</div><h2>Подключите первого бота</h2><p>Понадобится только токен BotFather. Nexus сам увидит webhook SaleBot и включит проксирование.</p><button class="btn primary" id="emptyAddBtn">Добавить Telegram-бота</button></div></div>
+      <div id="workspace" class="hidden">
+        <nav class="tabs" aria-label="Разделы"><button class="tab active" data-tab="connection">Подключение</button><button class="tab" data-tab="delivery">Доставка</button><button class="tab" data-tab="settings">Настройки</button></nav>
+        <section class="panel active" id="panel-connection">
+          <div class="section-head"><div><h2 id="botTitle">Telegram-бот</h2><p id="botSubtitle">Состояние подключения</p></div><button class="btn ghost" id="checkBtn">Проверить сейчас</button></div>
+          <div class="pipeline" id="pipeline"><div class="node"><strong>Telegram</strong><span id="telegramNode">Webhook проверяется</span></div><div class="wire"></div><div class="node center"><strong>Nexus Proxy</strong><span id="nexusNode">Ожидает настройки</span></div><div class="wire"></div><div class="node"><strong>SaleBot</strong><span id="salebotNode">Приёмник не найден</span></div></div>
+          <div id="connectionNotice"></div>
+          <div class="steps">
+            <div class="step" id="step1"><span class="step-no">1</span><div><h3>Токен проверен</h3><p id="step1Text">Nexus проверяет бота через официальный Telegram Bot API и сохраняет токен в зашифрованном виде.</p></div><div class="step-action"><button class="btn small" id="replaceTokenBtn">Заменить токен</button></div></div>
+            <div class="step" id="step2"><span class="step-no">2</span><div><h3>Подключите бота в SaleBot</h3><p>Нажмите «Начать ожидание», затем вставьте этот же токен в SaleBot. Nexus автоматически распознает его webhook после двух проверок.</p></div><div class="step-action"><button class="btn primary" id="waitBtn">Начать ожидание</button></div></div>
+            <div class="step" id="step3"><span class="step-no">3</span><div><h3>Подключите SaleBot API</h3><p id="step3Text">Нужен API-ключ именно того SaleBot-проекта, где подключён этот Telegram-бот. Nexus проверит совпадение канала и сохранит ключ зашифрованно.</p><div class="field" style="margin-top:9px"><input class="input" id="salebotKeyInput" type="password" autocomplete="new-password" placeholder="API-ключ SaleBot-проекта"></div></div><div class="step-action"><button class="btn primary" id="saveSalebotBtn">Проверить и подключить</button></div></div>
+            <div class="step" id="step4"><span class="step-no">4</span><div><h3>Включите прокси</h3><p id="step4Text">Nexus забирает Telegram Update через глобальный Bot API proxy и передаёт сообщение в официальный SaleBot tg_callback.</p></div><div class="step-action"><button class="btn" id="activateBtn">Включить прокси</button></div></div>
+          </div>
+        </section>
+        <section class="panel" id="panel-delivery">
+          <div class="section-head"><div><h2>Журнал доставки</h2><p>Тексты сообщений не показываются. Тело успешно доставленного события сразу удаляется из базы.</p></div><button class="btn ghost" id="refreshEventsBtn">Обновить</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Время</th><th>Update</th><th>Тип</th><th>Чат</th><th>Статус</th><th>HTTP</th><th>Время</th><th></th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+        </section>
+        <section class="panel" id="panel-settings">
+          <div class="section-head"><div><h2>Настройки бота</h2><p>Секреты скрыты. Откат возвращает прямой webhook SaleBot одной операцией.</p></div></div>
+          <div class="settings-list">
+            <div class="setting-row"><div><h3>Автовосстановление Nexus</h3><p>Если SaleBot повторно перезапишет webhook, Nexus распознает официальный адрес, обновит приёмник и вернёт прокси.</p></div><button class="switch" id="recoverSwitch" role="switch" aria-label="Автовосстановление"></button></div>
+            <div class="setting-row"><div><h3>Webhook Nexus</h3><p>Закрытый адрес Telegram. Не публикуйте его и не вставляйте вручную в сторонние сервисы.</p><div class="code" id="proxyUrl">—</div></div><button class="btn small" id="copyProxyBtn">Копировать</button></div>
+            <div class="setting-row"><div><h3>Вернуть прямое подключение SaleBot</h3><p>Telegram снова будет отправлять обновления напрямую в сохранённый SaleBot URL. Ожидающие сообщения не удаляются.</p></div><button class="btn danger" id="restoreBtn">Откатить</button></div>
+            <div class="setting-row"><div><h3>Удалить из Nexus</h3><p>Доступно только после отката или до включения прокси.</p></div><button class="btn danger ghost" id="deleteBtn">Удалить</button></div>
+          </div>
+          <div class="section-head" style="margin-top:34px"><div><h2>Общие настройки</h2><p>Публичный адрес используется при регистрации webhook в Telegram. Менять его при активном прокси нельзя.</p></div></div>
+          <div class="form-grid"><div class="field"><label for="publicBaseInput">Публичная HTTPS-база Nexus</label><input class="input" id="publicBaseInput" type="url" placeholder="https://junior.sobakovod.pro/nexus"></div><div class="field"><label for="retentionInput">Журнал, дней</label><input class="input" id="retentionInput" type="number" min="1" max="90" value="14"></div></div>
+          <div style="margin-top:12px"><button class="btn" id="saveSettingsBtn">Сохранить общие настройки</button></div>
+          <div class="notice">Внутренний <code>tg_webhook</code> SaleBot не является публичным relay API и защищён скрытым Telegram secret. Для надёжной прокси-доставки используется официальный <code>tg_callback</code> с API-ключом конкретного проекта.</div>
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div class="modal" id="botModal" aria-hidden="true"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="botModalTitle"><div class="dialog-head"><div><h2 id="botModalTitle">Добавить Telegram-бота</h2><p>Вставьте токен из BotFather. Он отправляется только Telegram API и сохраняется зашифрованно.</p></div><button class="close" data-close-modal aria-label="Закрыть">×</button></div><form id="botForm"><div class="field"><label for="tokenInput">Bot token</label><input class="input" id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="123456789:AA…"></div><div class="dialog-actions"><button class="btn ghost" type="button" data-close-modal>Отмена</button><button class="btn primary" id="saveBotBtn" type="submit">Проверить и сохранить</button></div></form></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+  const marker='/telegram-salebot-proxy/panel';
+  const root=location.pathname.includes(marker)?location.pathname.split(marker)[0]:'';
+  const API=root+'/telegram-salebot-proxy/api';
+  const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+  let state={bots:[],totals:{},settings:{},selectedId:null}, refreshTimer=null, busy=false;
+  const stateNames={draft:'Черновик',waiting:'Ожидает SaleBot',active:'Прокси активен',needs_salebot_key:'Нужен API-ключ SaleBot',restored:'Прямой SaleBot',conflict:'Конфликт webhook',error:'Ошибка'};
+
+  async function api(path, options={}){
+    const response=await fetch(API+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(options.headers||{})},...options});
+    const type=response.headers.get('content-type')||'';
+    const body=type.includes('json')?await response.json():await response.text();
+    if(!response.ok){const message=typeof body==='object'?(body.detail||body.error||JSON.stringify(body)):body;throw new Error(message||('HTTP '+response.status))}
+    return body;
+  }
+  function toast(message,bad=false){const el=$('#toast');el.textContent=message;el.className='toast show'+(bad?' bad':'');clearTimeout(el._timer);el._timer=setTimeout(()=>el.className='toast',3600)}
+  function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function selected(){return state.bots.find(b=>b.id===state.selectedId)||state.bots[0]||null}
+  function setBusy(on){busy=on;$$('button').forEach(button=>{if(button.id!=='recoverSwitch')button.disabled=on})}
+
+  async function load(quiet=false){
+    try{const data=await api('/status');state={...state,...data};if(!state.selectedId&&state.bots.length)state.selectedId=state.bots[0].id;if(state.selectedId&&!state.bots.some(b=>b.id===state.selectedId))state.selectedId=state.bots[0]?.id||null;render();if(selected())await loadEvents(true)}
+    catch(error){if(!quiet)toast(error.message,true);$('#systemDot').className='dot bad';$('#systemText').textContent='Модуль недоступен'}
+  }
+  function render(){
+    const bot=selected(), healthy=state.encryption_ready&&state.watcher_running;
+    $('#systemDot').className='dot '+(healthy?'ok':'bad');$('#systemText').textContent=healthy?'Шифрование и контроль активны':'Требуется NEXUS_SECRET';
+    $('#metricBots').textContent=state.bots.length;$('#metricEvents').textContent=state.totals.events||0;$('#metricDelivered').textContent=state.totals.delivered||0;$('#metricFailed').textContent=state.totals.failed||0;
+    $('#botList').innerHTML=state.bots.map(b=>`<button class="bot-item ${b.id===state.selectedId?'active':''}" data-bot="${b.id}"><span class="bot-avatar">TG</span><span><span class="bot-name">@${esc(b.username||b.telegram_id)}</span><span class="bot-state"><i class="${esc(b.state)}"></i>${esc(stateNames[b.state]||b.state)}</span></span></button>`).join('');
+    $$('[data-bot]').forEach(el=>el.onclick=()=>{state.selectedId=Number(el.dataset.bot);render();loadEvents(true)});
+    $('#emptyState').classList.toggle('hidden',!!bot);$('#workspace').classList.toggle('hidden',!bot);if(!bot)return;
+    $('#botTitle').textContent='@'+(bot.username||bot.telegram_id);$('#botSubtitle').textContent=(bot.display_name?bot.display_name+' · ':'')+(stateNames[bot.state]||bot.state);
+    const active=bot.state==='active', waiting=bot.state==='waiting', hasTarget=bot.has_upstream, hasApi=bot.salebot_api_connected, polling=bot.transport==='polling';
+    $('#pipeline').classList.toggle('live',active);$('#telegramNode').textContent=polling?'Long polling · общий Bot API proxy':(bot.current_webhook_masked||'Webhook не установлен');$('#nexusNode').textContent=polling&&active?'Забирает Update и пересылает':polling?'Очередь сохранена · ждёт SaleBot API':active?'Принимает webhook и пересылает':waiting?'Наблюдает за Telegram':'Готов к включению';$('#salebotNode').textContent=bot.upstream_masked||(bot.observed_masked?('Найден: '+bot.observed_masked):'Приёмник не найден');
+    $('#step1').className='step done';$('#step1Text').textContent='@'+(bot.username||bot.telegram_id)+' · '+bot.token_hint+' · токен зашифрован';
+    $('#step2').className='step '+(hasTarget?'done':waiting?'current':'');$('#step3').className='step '+(hasApi?'done':hasTarget?'current':'');$('#step4').className='step '+(active?'done':hasApi?'current':'');$('#step3Text').textContent=hasApi?`SaleBot API подключён${bot.salebot_project_id?' · проект '+bot.salebot_project_id:''}. Ключ хранится зашифрованно.`:'Нужен API-ключ именно того SaleBot-проекта, где подключён этот Telegram-бот. Nexus проверит совпадение канала.';$('#step4Text').textContent=active&&polling?'Long polling активен: Telegram Update забираются через глобальный Bot API proxy Nexus.':polling?'Long polling подготовлен; очередь сохранена до подключения SaleBot API.':'После подключения SaleBot API Nexus включит long polling без удаления ожидающих сообщений.';
+    $('#waitBtn').textContent=waiting?'Ожидание включено':'Начать ожидание';$('#waitBtn').disabled=busy||active||hasTarget;$('#saveSalebotBtn').disabled=busy||!hasTarget;$('#activateBtn').disabled=busy||active||!hasTarget||!hasApi;$('#activateBtn').textContent=active?'Прокси включён':'Включить прокси';
+    $('#restoreBtn').disabled=busy||!active||!hasTarget;$('#deleteBtn').disabled=busy||active;$('#checkBtn').disabled=busy;$('#recoverSwitch').classList.toggle('on',!!bot.auto_recover);$('#recoverSwitch').setAttribute('aria-checked',bot.auto_recover?'true':'false');
+    $('#proxyUrl').textContent=bot.proxy_url;$('#connectionNotice').innerHTML=notice(bot);
+    $('#publicBaseInput').value=state.settings.public_base||'';$('#retentionInput').value=state.settings.retention_days||14;
+  }
+  function notice(bot){
+    if(bot.last_check_error)return `<div class="notice bad">${esc(bot.last_check_error)}</div>`;
+    if(bot.state==='needs_salebot_key')return `<div class="notice bad">Внутренний webhook SaleBot отклонил relay. Введите API-ключ этого SaleBot-проекта на шаге 3; очередь Telegram сохранена.</div>`;
+    if(bot.state==='active'&&bot.transport==='polling')return `<div class="notice ok">Long polling активен через общий Bot API proxy. Nexus забирает Update у Telegram и передаёт их в SaleBot.</div>`;
+    if(bot.state==='active')return `<div class="notice ok">Webhook подтверждён Telegram. При недоступном входящем соединении Nexus автоматически переключится на long polling.</div>`;
+    if(bot.state==='waiting')return `<div class="notice">Ожидание запущено. Теперь подключите токен в SaleBot — обнаружение обычно занимает до 10 секунд.${bot.observed_count?` Совпадений: ${bot.observed_count}/2.`:''}</div>`;
+    if(bot.has_upstream)return `<div class="notice ok">Webhook SaleBot сохранён. Можно включать прокси.</div>`;
+    return `<div class="notice">Webhook SaleBot ещё не найден. Запустите ожидание и подключите бота в сервисе.</div>`;
+  }
+  async function action(path,options={},success='Готово'){if(busy)return;setBusy(true);try{await api(path,options);toast(success);await load(true)}catch(error){toast(error.message,true)}finally{setBusy(false);render()}}
+  async function loadEvents(quiet=false){const bot=selected();if(!bot)return;try{const data=await api('/events?bot_id='+bot.id+'&limit=100');const rows=data.events||[];$('#eventsBody').innerHTML=rows.length?rows.map(e=>`<tr><td>${esc((e.received_at||'').replace('T',' ').replace('Z',''))}</td><td class="mono">${esc(e.update_id)}</td><td>${esc(e.event_type)}</td><td class="mono">${esc(e.chat_id||'—')}</td><td><span class="status-tag ${esc(e.status)}">${esc(e.status==='delivered'?'Доставлено':e.status==='failed'?'Ошибка':e.status)}</span></td><td>${esc(e.response_code??'—')}</td><td>${esc(e.duration_ms)} мс</td><td>${e.status==='failed'?`<button class="btn small" data-replay="${e.id}">Повторить</button>`:''}</td></tr>`).join(''):'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:36px">Событий пока нет</td></tr>';$$('[data-replay]').forEach(el=>el.onclick=()=>action('/events/'+el.dataset.replay+'/replay',{method:'POST'},'Событие отправлено повторно'))}catch(error){if(!quiet)toast(error.message,true)}}
+
+  function openModal(replace=false){const bot=selected();$('#botModalTitle').textContent=replace?'Заменить токен':'Добавить Telegram-бота';$('#tokenInput').value='';$('#botModal').classList.add('open');$('#botModal').setAttribute('aria-hidden','false');setTimeout(()=>$('#tokenInput').focus(),50)}
+  function closeModal(force=false){if(busy&&!force)return;$('#botModal').classList.remove('open');$('#botModal').setAttribute('aria-hidden','true')}
+  async function saveBot(){const token=$('#tokenInput').value.trim();if(!token)return toast('Введите bot token',true);setBusy(true);try{const data=await api('/bots',{method:'POST',body:JSON.stringify({token})});state.selectedId=data.bot.id;closeModal(true);toast(data.captured?'Бот сохранён, webhook SaleBot найден':'Бот сохранён. Теперь подключите SaleBot');await load(true)}catch(error){toast(error.message,true)}finally{setBusy(false);render()}}
+  async function saveSalebot(){const bot=selected(),apiKey=$('#salebotKeyInput').value.trim();if(!bot||!apiKey)return toast('Введите API-ключ SaleBot-проекта',true);setBusy(true);try{const data=await api('/bots/'+bot.id+'/salebot',{method:'POST',body:JSON.stringify({api_key:apiKey})});$('#salebotKeyInput').value='';toast(`SaleBot подключён · проект ${data.match.project_id}`);await load(true)}catch(error){toast(error.message,true)}finally{setBusy(false);render()}}
+
+  $$('.tab').forEach(tab=>tab.onclick=()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===tab));$$('.panel').forEach(panel=>panel.classList.toggle('active',panel.id==='panel-'+tab.dataset.tab));if(tab.dataset.tab==='delivery')loadEvents()});
+  $('#addBotBtn').onclick=()=>openModal(false);$('#emptyAddBtn').onclick=()=>openModal(false);$('#replaceTokenBtn').onclick=()=>openModal(true);$$('[data-close-modal]').forEach(x=>x.onclick=closeModal);$('#botModal').onclick=e=>{if(e.target===$('#botModal'))closeModal()};$('#botForm').onsubmit=e=>{e.preventDefault();saveBot()};
+  $('#waitBtn').onclick=()=>{const b=selected();if(b)action('/bots/'+b.id+'/wait',{method:'POST'},'Ожидание SaleBot включено')};$('#activateBtn').onclick=()=>{const b=selected();if(b)action('/bots/'+b.id+'/activate',{method:'POST'},'Прокси включён')};$('#checkBtn').onclick=()=>{const b=selected();if(b)action('/bots/'+b.id+'/check',{method:'POST'},'Webhook проверен')};$('#refreshEventsBtn').onclick=()=>loadEvents();
+  $('#saveSalebotBtn').onclick=saveSalebot;
+  $('#recoverSwitch').onclick=()=>{const b=selected();if(b)action('/bots/'+b.id,{method:'PATCH',body:JSON.stringify({auto_recover:!b.auto_recover})},!b.auto_recover?'Автовосстановление включено':'Автовосстановление выключено')};
+  $('#restoreBtn').onclick=()=>{const b=selected();if(b&&confirm('Вернуть Telegram напрямую на сохранённый webhook SaleBot?'))action('/bots/'+b.id+'/restore',{method:'POST'},'Прямой webhook SaleBot восстановлен')};
+  $('#deleteBtn').onclick=()=>{const b=selected();if(b&&confirm('Удалить бота и его журнал из Nexus?'))action('/bots/'+b.id,{method:'DELETE'},'Бот удалён')};
+  $('#copyProxyBtn').onclick=async()=>{const b=selected();if(!b)return;try{await navigator.clipboard.writeText(b.proxy_url);toast('Webhook скопирован')}catch{toast('Не удалось скопировать',true)}};
+  $('#saveSettingsBtn').onclick=()=>action('/settings',{method:'POST',body:JSON.stringify({public_base:$('#publicBaseInput').value.trim(),retention_days:Number($('#retentionInput').value)})},'Общие настройки сохранены');
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)load(true)});load();refreshTimer=setInterval(()=>{const b=selected();if(b&&['waiting','active'].includes(b.state)&&!busy)load(true)},5000);
+})();
+</script>
+</body>
+</html>

@@ -21,13 +21,14 @@
     p,li{color:var(--text-muted);line-height:1.55;}
     p{margin:0 0 8px;}
     ul{margin:0;padding-left:20px;}
-    code{font-family:"IBM Plex Mono","Fira Code",monospace;color:var(--text);background:#090909;border:1px solid var(--border);padding:1px 5px;}
+    code{font-family:"IBM Plex Mono","Fira Code",monospace;color:var(--text);background:#090909;border:1px solid var(--border);padding:1px 5px;overflow-wrap:anywhere;word-break:break-word;}
     .muted{color:var(--text-subtle);}
+    @media(max-width:560px){body{padding:10px;}section{padding:11px;}ul{padding-left:18px;}}
   </style>
 </head>
 <body>
 <main>
-  <h1>Bizon365</h1>
+  <h1>Bizon365 1.1.23</h1>
   <section>
     <h2>Назначение</h2>
     <p>Модуль переносит логику <code>sbkvd_bizon</code> в Nexus: запускает headless runner Bizon365, держит комнаты открытыми, отслеживает консольные события модератора и пишет лог.</p>

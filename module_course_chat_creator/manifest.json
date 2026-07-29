@@ -1,24 +1,27 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.1.5",
-  "description": "Nexus-модуль для создания учебных Telegram/VK чатов, VK Web-авторизации для авто-админок и рассылок по обучающим чатам с удалением отправленных сообщений.",
+  "version": "1.3.17",
+  "description": "Создание учебных Telegram/VK чатов, invite-ссылки, рассылки и управление участниками.",
   "env_required": [
-    "VK_USER_TOKEN",
+    "VK_GROUP_TOKEN",
+    "VK_GROUP_ID",
     "TELEGRAM_API_ID",
     "TELEGRAM_API_HASH"
   ],
   "env_vars": {
     "NEXUS_CHAT_CREATOR_PASSWORD": "Опционально: пароль для публичных webhook endpoint'ов создания чатов. Из панели Nexus не нужен.",
-    "VK_USER_TOKEN": "Пользовательский VK token, от имени которого создаются боевые беседы.",
+    "VK_GROUP_TOKEN": "Официальный токен сообщества с правами messages и photos.",
+    "VK_GROUP_ID": "Идентификатор сообщества, от имени которого создаются VK-беседы.",
     "TELEGRAM_API_ID": "Telegram API ID для Telethon.",
     "TELEGRAM_API_HASH": "Telegram API hash для Telethon.",
     "SBKVD_PROCESS_WEBHOOK_PASSWORD": "Legacy пароль webhook'ов Sobakovod. Используется только если NEXUS_CHAT_CREATOR_PASSWORD не задан.",
-    "VK_TEST_USER_TOKEN": "Опционально: отдельный пользовательский VK token для test_mode.",
-    "VK_GROUP_TOKEN": "Опционально: VK group token для настройки истории чата, если доступно.",
-    "VK_GROUP_ID": "Опционально: ID сообщества VK для добавления бота/сообщества в беседу.",
-    "VK_WEB_PROFILE_DIR": "Опционально: путь к persistent Chromium-профилю VK Web. По умолчанию data/vk-web-profile внутри модуля.",
-    "VK_WEB_HEADLESS": "Опционально: 1/0, запускать серверный Chromium headless. По умолчанию 1.",
+    "VK_TEST_GROUP_TOKEN": "Опционально: отдельный токен тестового сообщества для test_mode.",
+    "VK_TEST_STAFF_ID": "Опционально: VK ID сотрудника для тестового VK-чата. По умолчанию техподдержка, 1105209997.",
+    "GETCOURSE_CHAT_FIELDS_DB": "Опционально: путь к базе getcourse-chat-fields. По умолчанию определяется автоматически.",
+    "CUSTOMER_DB_PATH": "Опционально: путь к базе customer-db. По умолчанию определяется автоматически.",
+    "COURSE_CHAT_CREATOR_GOOGLE_CREDENTIALS_FILE": "Service account Google Sheets для добавления строк потоков. Существующие ссылки сохраняются; VK-ссылка заполняется вручную. Если не задан, используются общие настройки Google Sheets.",
+    "COURSE_CHAT_CREATOR_CHAT_LINKS_SPREADSHEET_ID": "ID таблицы ссылок поточной системы. По умолчанию используется таблица Собаковода.",
     "TELEGRAM_SESSION_FILE": "Опционально: путь к Telethon session-файлу. По умолчанию data/telegram.session внутри модуля.",
     "TELEGRAM_MTPROTO_PROXY_URL": "Опционально: MTProto proxy URL формата https://t.me/proxy?server=...&port=...&secret=... для Telegram через Telethon."
   }

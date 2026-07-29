@@ -1,0 +1,11 @@
+{
+  "id": "bizon-google-sheets",
+  "name": "Bizon365 → Google Sheets",
+  "version": "1.1.2",
+  "description": "Идемпотентно выгружает Bizon365 в отдельную вкладку и зеркалирует новые строки в схему Vakas.",
+  "env_required": ["GOOGLE_APPLICATION_CREDENTIALS"],
+  "env_vars": {
+    "GOOGLE_APPLICATION_CREDENTIALS": "Абсолютный путь к защищенному JSON-ключу service account",
+    "NEXUS_BIZON_FEED_TOKEN": "Токен attendance-feed из модуля bizon-reports"
+  }
+}

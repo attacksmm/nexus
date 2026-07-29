@@ -1,0 +1,28 @@
+{
+  "id": "admin-handoff",
+  "name": "Общение с администрацией",
+  "version": "1.1.0",
+  "description": "Единое рабочее место для очереди Scanner и защиты диалогов: Senler-клиентов добавляет в группу 3748755, Salebot-клиентов — в список 2427562.",
+  "env_vars": {
+    "ADMIN_HANDOFF_ENABLED": "0/1: включить фоновую обработку, по умолчанию включена.",
+    "ADMIN_HANDOFF_POLL_SECONDS": "Интервал проверки scanner, по умолчанию 120.",
+    "ADMIN_HANDOFF_LOOKBACK_DAYS": "За сколько дней искать события scanner и историю OpenRouter, по умолчанию 14.",
+    "ADMIN_HANDOFF_SOURCE_GRACE_SECONDS": "Сколько секунд ждать появления источника в OpenRouter перед fallback-поиском Salebot по platform_id, по умолчанию 600.",
+    "ADMIN_HANDOFF_RETENTION_DAYS": "Сколько дней держать человека в группе/списке после последнего сообщения админа, по умолчанию 7.",
+    "VK_GROUP_TOKEN": "Токен VK для получения имён админов через users.get. Можно использовать общий VK_GROUP_TOKEN Nexus.",
+    "VK_USER_TOKEN": "Fallback VK токен для получения имён админов, если VK_GROUP_TOKEN не задан.",
+    "ADMIN_HANDOFF_PROCESS_EXISTING": "0/1: обрабатывать старые события scanner до первого запуска модуля. По умолчанию 0, только новые события после старта.",
+    "ADMIN_HANDOFF_SALEBOT_LOOKUP_FALLBACK": "0/1: если OpenRouter не дал source=salebot, проверять VK ID через Salebot find_client_id_by_platform_id. По умолчанию 1.",
+    "ADMIN_HANDOFF_SCANNER_DB_PATH": "Необязательный путь к scanner.db, если автоопределение не подходит.",
+    "ADMIN_HANDOFF_OPENROUTER_DB_PATH": "Необязательный путь к openrouter.db, если автоопределение не подходит.",
+    "ADMIN_HANDOFF_SENLER_SUBSCRIPTION_ID": "ID группы/списка Senler для общения с администрацией, по умолчанию 3748755.",
+    "ADMIN_HANDOFF_SALEBOT_LIST_ID": "ID списка Salebot для общения с администрацией, по умолчанию 2427562.",
+    "VK_GROUP_ID": "ID VK-группы для ссылки перехода в диалог. Если не задан, используется SENLER_GROUP_ID или 225075265.",
+    "SENLER_ACCESS_TOKEN": "API токен Senler.",
+    "SENLER_GROUP_ID": "ID VK-группы/канала Senler.",
+    "SALEBOT_API_KEY": "API ключ Salebot с правом изменения клиентов.",
+    "SALEBOT_API_KEY_3": "Fallback API ключ Salebot, если SALEBOT_API_KEY не задан.",
+    "SALEBOT_GROUP_ID": "Необязательный ID бота Salebot для поиска client_id по platform_id."
+  },
+  "env_required": []
+}

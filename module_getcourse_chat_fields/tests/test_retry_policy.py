@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
 from module_getcourse_chat_fields import router as module
 
@@ -23,6 +24,142 @@ def _candidate(*, stream: str = "53", email: str = "dog@example.com", order_id: 
     }
 
 
+def test_sheet_chat_is_never_replaced_by_created_link() -> None:
+    sheet = {"stream_number": "54", "link": "https://vk.me/join/manual-250", "source": "flow_students_sheet"}
+    created = {"stream_number": "54", "link": "https://vk.me/join/generated", "title": "54. Новый"}
+
+    exact = module._prefer_sheet_chat(sheet, created, "54")
+    empty = module._prefer_sheet_chat({**sheet, "link": ""}, created, "54")
+
+    assert exact["link"] == "https://vk.me/join/manual-250"
+    assert exact["source"] == "flow_students_sheet"
+    assert empty == {**sheet, "link": ""}
+
+
+def test_latest_chats_returns_only_complete_same_stream_pair(tmp_path: Path) -> None:
+    db_path = tmp_path / "course-chat-creator.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY, platform TEXT, title TEXT,
+                stream_number TEXT, date_start TEXT, course_key TEXT,
+                test_mode INTEGER, status TEXT, link TEXT, chat_id TEXT,
+                created_at INTEGER
+            )
+            """
+        )
+        db.executemany(
+            "INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, "vk", "56 VK", "56", "22.07.2026", "puppy", 0, "ok", "https://vk.me/56", "1", 100),
+                (2, "telegram", "56 TG", "56", "22.07.2026", "puppy", 0, "ok", "https://t.me/56", "", 101),
+                (3, "vk", "1000 VK", "1000", "28.07.2026", "puppy", 0, "needs_members", "https://vk.me/1000", "2", 200),
+            ],
+        )
+
+    original = module._course_chat_db_path
+    module._course_chat_db_path = lambda: db_path
+    try:
+        result = asyncio.run(module._latest_chats())
+    finally:
+        module._course_chat_db_path = original
+
+    assert result["puppy"]["vk"]["stream_number"] == "56"
+    assert result["puppy"]["telegram"]["stream_number"] == "56"
+
+
+def test_active_flow_requires_manual_vk_and_telegram_pair() -> None:
+    result = module._active_chats_from_flows(
+        {
+            "items": [
+                {
+                    "course_key": "puppy",
+                    "stream": "56",
+                    "vk_title": "Щ56",
+                    "vk_link": "https://vk.me/join/manual-250",
+                    "tg_title": "Щ56",
+                    "tg_link": "https://t.me/puppy56",
+                },
+                {
+                    "course_key": "puppy",
+                    "stream": "57",
+                    "vk_title": "Щ57",
+                    "vk_link": "https://vk.me/join/manual-250-new",
+                    "tg_title": "Щ57",
+                    "tg_link": "",
+                },
+                {
+                    "course_key": "dog",
+                    "stream": "54",
+                    "vk_title": "С54",
+                    "vk_link": "https://vk.me/join/dog54",
+                    "tg_title": "С54",
+                    "tg_link": "https://t.me/dog54",
+                },
+            ]
+        }
+    )
+    assert result["puppy"]["vk"]["stream_number"] == "56"
+    assert result["puppy"]["telegram"]["link"] == "https://t.me/puppy56"
+    assert result["dog"]["vk"]["stream_number"] == "54"
+
+
+def test_chat_entitlement_accepts_positive_partial_premium_and_combo() -> None:
+    premium = module._chat_entitlement(
+        {
+            "title": "Первые шаги к воспитанию. Тариф Премиум",
+            "payment_state": "partial",
+            "payed_money": "13 300,00",
+            "status": "Новый",
+        }
+    )
+    combo = module._chat_entitlement(
+        {
+            "positions": "Первые шаги к воспитанию + Послушная собака 1/3",
+            "offer_tags": "Щ+С",
+            "payment_state": "partial",
+            "payed_money": "13300",
+        }
+    )
+    assert premium["eligible"] is True
+    assert premium["course_key"] == "puppy"
+    assert premium["payment"]["kind"] == "partial"
+    assert combo["eligible"] is True
+    assert combo["course_key"] == "puppy"
+    assert combo["product_kind"] == "combo"
+
+
+def test_chat_entitlement_rejects_standard_module_and_zero_partial() -> None:
+    standard = module._chat_entitlement(
+        {
+            "title": "Послушная собака. Тариф Стандарт",
+            "status": "Завершен",
+            "payment_state": "paid",
+        }
+    )
+    module_order = module._chat_entitlement(
+        {
+            "title": "Модуль курса Первые шаги к воспитанию. Тариф Премиум",
+            "status": "Завершен",
+            "payment_state": "paid",
+        }
+    )
+    unpaid = module._chat_entitlement(
+        {
+            "title": "Послушная собака. Тариф VIP",
+            "payment_state": "partial",
+            "payed_money": "0",
+        }
+    )
+    assert standard["eligible"] is False
+    assert standard["reason"] == "standard_no_chat"
+    assert module_order["eligible"] is False
+    assert module_order["reason"] == "excluded_product:module"
+    assert unpaid["eligible"] is False
+    assert unpaid["reason"] == "payment_not_entitled"
+
+
 def test_error_classification_and_exponential_backoff() -> None:
     settings = module.DEFAULT_SETTINGS.copy()
     assert module._gc_error_classification("Ошибка обновления заказа") == "terminal"
@@ -32,6 +169,22 @@ def test_error_classification_and_exponential_backoff() -> None:
     assert module._gc_retry_delay_seconds(settings, 2, "transient") == 600
     assert module._gc_retry_delay_seconds(settings, 20, "transient") == 21600
     assert module._gc_retry_delay_seconds(settings, 1, "quota") == 900
+
+
+def test_getcourse_payload_includes_required_resolved_identity() -> None:
+    fields = {"Поток": "53"}
+    user_payload = module._getcourse_user_payload(
+        "user-1", fields, email="duplicate@example.com", phone="79990000000"
+    )
+    deal_payload = module._getcourse_deal_payload(
+        "user-1", "deal-1", fields, email="duplicate@example.com", phone="79990000000"
+    )
+    assert user_payload["user"] == {
+        "id": "user-1",
+        "email": "duplicate@example.com",
+        "addfields": fields,
+    }
+    assert deal_payload["user"] == {"id": "user-1", "email": "duplicate@example.com"}
 
 
 def test_processed_state_waits_for_source_change_or_retry_time() -> None:

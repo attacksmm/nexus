@@ -392,14 +392,11 @@ def _normalize_module_access(value) -> list[str] | None:
 def _read_env_values() -> dict[str, str]:
     if not ENV_PATH.exists():
         return {}
+    ENV_PATH.chmod(0o600)
     return _parse_env_content(ENV_PATH.read_text(encoding="utf-8"))
 
 
 def _write_env_values(values: dict[str, str]) -> None:
-    if ENV_PATH.exists():
-        backup_path = ENV_PATH.parent / ".env.bak"
-        backup_path.write_text(ENV_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-        backup_path.chmod(0o600)
     tmp_path = ENV_PATH.parent / ".env.tmp"
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
@@ -407,6 +404,7 @@ def _write_env_values(values: dict[str, str]) -> None:
             f.write(f"{k}={_encode_env_value(str(v))}\n")
     tmp_path.replace(ENV_PATH)
     ENV_PATH.chmod(0o600)
+    (ENV_PATH.parent / ".env.bak").unlink(missing_ok=True)
 
 
 def _strip_inline_comment(s: str) -> str:

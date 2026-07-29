@@ -1,7 +1,12 @@
 import asyncio
 from typing import Any
 
-from orchestrator.vk_poll import SharedVkPollHub, VkPollSubscription
+from orchestrator.vk_poll import (
+    SharedVkPollHub,
+    VkPollSubscription,
+    _requires_manual_vk_intervention,
+    _VkPollWorker,
+)
 
 
 class FakeWorker:
@@ -189,3 +194,30 @@ def test_transport_errors_are_fanned_out_without_stopping_other_subscribers() ->
         await hub.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_vk_auth_and_account_challenges_require_manual_intervention() -> None:
+    assert _requires_manual_vk_intervention(
+        RuntimeError("[5] User authorization failed: user is blocked.")
+    )
+    assert _requires_manual_vk_intervention(RuntimeError("[17] Validation required"))
+    assert _requires_manual_vk_intervention(RuntimeError("invalid access_token (4)"))
+    assert not _requires_manual_vk_intervention(RuntimeError("temporary network failure"))
+
+
+def test_worker_halts_after_first_permanent_auth_error() -> None:
+    class BlockedLongPoll:
+        def listen(self):
+            raise RuntimeError("[5] User authorization failed: user is blocked.")
+
+    worker = _VkPollWorker("test-token-key", "test-token")
+    worker.vk = object()
+    worker._longpoll = BlockedLongPoll()
+
+    worker._run()
+
+    snapshot = worker.snapshot()
+    assert snapshot["poll_errors"] == 1
+    assert snapshot["reconnections"] == 0
+    assert snapshot["halted_at"]
+    assert "user is blocked" in snapshot["halt_reason"]

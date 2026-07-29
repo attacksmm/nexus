@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Senler → Telegram Events — документация</title>
+  <style>
+    :root{color-scheme:dark;font-family:"IBM Plex Sans","Segoe UI",Arial,sans-serif;background:#060606;color:#f2f2f2}*{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:#3a3a3a #101010}body{margin:0;padding:24px clamp(16px,4vw,48px) 50px;max-width:980px}h1{font-size:28px;letter-spacing:-.02em;margin:0 0 10px}h2{font-size:16px;margin:32px 0 12px;padding-top:18px;border-top:1px solid #2d2d2d}p,li{color:#bababa;font-size:13px;line-height:1.65}code,pre{font-family:"IBM Plex Mono",Consolas,monospace}code{color:#f2f2f2;overflow-wrap:anywhere}pre{max-height:280px;overflow:auto;background:#101010;border:1px solid #2d2d2d;border-radius:2px;padding:14px;color:#bababa;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.lead{max-width:760px;font-size:14px}.note{border-left:2px solid #5b8fd6;padding:2px 0 2px 14px}.warn{border-left-color:#d1a14d}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #2d2d2d;overflow-wrap:anywhere}th{color:#f2f2f2}td{color:#bababa}@media(max-width:600px){body{padding:18px 14px 40px}table,tbody,tr,td,th{display:block}th{display:none}td{padding:8px 0}}
+  </style>
+</head>
+<body>
+  <h1>Senler → Telegram Events</h1>
+  <p class="lead">Модуль принимает Telegram Update, которые Senler проксирует от подключённого бота, сохраняет полный JSON и формирует понятное описание каждого события.</p>
+
+  <h2>Подключение</h2>
+  <ol>
+    <li>Откройте вкладку <strong>Источники</strong> и создайте источник для бота.</li>
+    <li>Скопируйте URL, имя заголовка <code>X-Nexus-Senler-Secret</code> и одноразовый секрет.</li>
+    <li>В Senler откройте Telegram → Настройки → Проксирование → Серверы.</li>
+    <li>Добавьте сервер, вставьте URL и добавьте пользовательский заголовок с выданным секретом.</li>
+    <li>Активируйте сервер и отправьте сообщение боту. Событие появится в ленте Nexus обычно в течение пяти секунд.</li>
+  </ol>
+  <p class="note warn">Секрет показывается только при создании или перевыпуске. Nexus хранит только криптографический хеш. После перевыпуска старое значение перестаёт работать немедленно.</p>
+
+  <h2>Webhook</h2>
+  <pre>POST https://junior.sobakovod.pro/nexus/senler-telegram-events/api/webhook/{source_uuid}
+X-Nexus-Senler-Secret: {secret}
+Content-Type: application/json
+
+{ "update_id": 123, "message": { ... } }</pre>
+  <p>После сохранения модуль отвечает <code>HTTP 200</code>. Повтор того же <code>update_id</code> не создаёт вторую строку: в существующем событии увеличивается счётчик повторов.</p>
+
+  <h2>Что отображается</h2>
+  <p>Версия 1.1 явно распознаёт все 26 верхнеуровневых типов <code>Update</code> из Telegram Bot API 10.2: сообщения и их изменения, каналы, Telegram Business, реакции, inline-режим, callback-кнопки, платежи, опросы, изменения участников, заявки, бусты, управляемых ботов и подписки.</p>
+  <table><thead><tr><th>Тип</th><th>Пример описания</th></tr></thead><tbody>
+    <tr><td>Текст</td><td>Сообщение от @username: текст сообщения</td></tr>
+    <tr><td>Медиа</td><td>Фото, видео, документ, голосовое сообщение, стикер, геопозиция и подпись</td></tr>
+    <tr><td>Callback</td><td>Нажатие кнопки от @username: callback_data</td></tr>
+    <tr><td>Служебные</td><td>Редактирование, реакции, участники, заявки, платежи, опросы, бизнес-события</td></tr>
+    <tr><td>Новый тип Telegram</td><td>Неизвестное событие с сохранением полного исходного JSON</td></tr>
+  </tbody></table>
+
+  <h2>Хранение и приватность</h2>
+  <ul>
+    <li>По умолчанию события и полный JSON хранятся 30 дней.</li>
+    <li>Срок можно изменить от 1 до 365 дней.</li>
+    <li>Медиафайлы не скачиваются: сохраняются только данные Update, включая Telegram <code>file_id</code>.</li>
+    <li>Секретный заголовок не записывается в БД, интерфейс или модульный лог.</li>
+    <li>Панель и административные API доступны только администраторам Nexus.</li>
+  </ul>
+
+  <h2>Ответы и ошибки</h2>
+  <ul>
+    <li><code>200</code> — событие сохранено, является повтором, невалидно или источник выключен.</li>
+    <li><code>401</code> — неверный секрет; проверьте пользовательский заголовок в Senler.</li>
+    <li><code>404</code> — источник удалён или URL указан неверно.</li>
+    <li>JSON больше 5 МБ фиксируется как отклонённый, без сохранения тела.</li>
+  </ul>
+  <p class="note">Версия 1.1 только принимает и показывает события. Она не отвечает пользователям и не пересылает Update в другие системы. Если Telegram добавит новый тип раньше обновления модуля, событие всё равно попадёт в журнал как неизвестное с полным исходным JSON.</p>
+</body>
+</html>

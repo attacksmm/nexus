@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Токены — документация</title><style>*{box-sizing:border-box}body{max-width:880px;margin:32px auto;padding:0 20px;background:#0b0c0b;color:#e9eeea;font:14px/1.6 system-ui;overflow-wrap:anywhere}code{background:#1b1e1c;padding:2px 5px}@media(max-width:600px){body{margin:0;padding:16px}}</style></head>
+<body>
+<h1>Токены</h1>
+<p>Основное управление перенесено в настройки Nexus → «Подключения». Панель модуля сохранена для совместимости.</p>
+<p>Раздел VK ID использует Authorization Code с PKCE S256. Callback: <code>/nexus/token-vault/api/vk/callback</code>. Access token хранится как <code>VK_USER_TOKEN</code>; Refresh token, <code>device_id</code> и сроки действия хранятся в закрытом ENV Nexus.</p>
+<p>Access token обновляется за 10 минут до истечения. VK ID меняет Refresh token при каждом обновлении, поэтому новая пара сохраняется атомарно. После неоднозначной сетевой ошибки автоматические повторы блокируются до повторной авторизации.</p>
+<p>Запрашивайте только права, разрешённые в настройках приложения. VK не выдаёт право <code>messages</code> новым приложениям автоматически.</p>
+<h2>VK ID API</h2>
+<ul>
+  <li><code>GET /api/vk-id/status</code> — состояние без значений ключей.</li>
+  <li><code>POST /api/vk-id/config</code> — сохранить ID, ключи и scope.</li>
+  <li><code>POST /api/vk-id/start</code> — получить URL авторизации.</li>
+  <li><code>GET /api/vk/callback</code> — публичный callback с проверкой state.</li>
+  <li><code>POST /api/vk-id/refresh</code> — обновить токен вручную.</li>
+</ul>
+<p>Поддерживаемые автоматические проверки: VK user token через <code>users.get</code>, VK message/community token через <code>messages.getConversations</code>, Telegram bot token через <code>getMe</code>, OpenRouter через <code>/auth/key</code>, Senler через базовый API-запрос при наличии <code>SENLER_GROUP_ID</code>.</p>
+<p>Сохранение пишет значение в общий <code>.env</code> Nexus и применяет его к текущему процессу. Для сервисов, которые читают ENV только на старте, нужен перезапуск Nexus.</p>
+<p>На телефоне выберите ключ в списке. Откроется редактор с кнопкой возврата к токенам. Сохранение без проверки требует подтверждения.</p>
+</body>
+</html>

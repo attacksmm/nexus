@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
+  <title>Telegram → SaleBot Proxy — документация</title>
+  <style>
+    :root{color-scheme:dark;font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;--bg:#060606;--surface:#101010;--line:#2d2d2d;--text:#f2f2f2;--muted:#bababa;--accent:#f2f2f2;--amber:#ffe08a}*{box-sizing:border-box;scrollbar-color:#3a3a3a #101010}html,body{margin:0;background:var(--bg);color:var(--text);overflow-x:hidden}main{width:min(900px,100%);margin:auto;padding:clamp(22px,5vw,50px) clamp(16px,4vw,38px) 64px}h1{font-size:clamp(27px,4vw,40px);letter-spacing:-.025em;line-height:1.05;margin:0 0 12px}h2{font-size:18px;margin:34px 0 12px;padding-top:8px;border-top:1px solid var(--line)}h3{font-size:14px;margin:23px 0 8px}p,li{color:var(--muted);font-size:13px;line-height:1.65}.lead{font-size:15px;max-width:720px}.accent{color:var(--accent)}code,pre{font-family:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;font-size:12px}code{color:#d8d8d8}pre{background:var(--surface);border:1px solid var(--line);border-radius:0;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden;max-height:250px;overflow-y:auto}.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:center;padding:22px 0}.flow b{border-top:1px solid var(--line);padding-top:12px}.arrow{color:var(--accent)}.note{border-left:2px solid var(--amber);background:rgba(255,224,138,.06);padding:12px 14px;color:#ded1aa}a{color:var(--accent)}@media(max-width:560px){.flow{display:block}.flow b{display:block;margin:10px 0}.arrow{display:block;transform:rotate(90deg);width:18px;text-align:center}main{padding-top:28px}}
+  </style>
+</head>
+<body><main>
+  <p class="accent">Nexus module · 1.0.3</p>
+  <h1>Telegram → SaleBot Proxy</h1>
+  <p class="lead">Модуль делает Nexus единственным Telegram webhook и пересылает исходный Update в ранее обнаруженный приёмник SaleBot.</p>
+  <div class="flow"><b>Telegram</b><span class="arrow">→</span><b>Nexus</b><span class="arrow">→</span><b>SaleBot</b></div>
+
+  <h2>Быстрое подключение</h2>
+  <ol>
+    <li>Добавьте бота в панели модуля и вставьте актуальный token из BotFather.</li>
+    <li>Нажмите «Начать ожидание».</li>
+    <li>Подключите тот же token в SaleBot. Nexus опрашивает <code>getWebhookInfo</code> каждые пять секунд.</li>
+    <li>После обнаружения канала вставьте API-ключ этого SaleBot-проекта. Nexus проверит, что в проекте подключён тот же username бота.</li>
+    <li>Nexus включает long polling через глобальный Telegram proxy и передаёт сообщения в официальный SaleBot <code>tg_callback</code>.</li>
+    <li>Напишите тестовое сообщение боту и убедитесь, что событие получило статус «Доставлено».</li>
+  </ol>
+  <p class="note">Если бот уже подключён к SaleBot до добавления в Nexus, его webhook будет найден сразу. Рабочий webhook не меняется до отдельного включения ожидания или кнопки «Включить прокси».</p>
+  <p>Telegram API не раскрывает ранее установленный <code>secret_token</code>, а внутренний SaleBot <code>tg_webhook</code> не является публичным relay API. Поэтому надёжный режим использует <code>deleteWebhook(drop_pending_updates=false)</code>, <code>getUpdates</code> через глобальный Bot API proxy и поддерживаемый SaleBot <code>tg_callback</code>.</p>
+
+  <h2>Безопасность</h2>
+  <ul>
+    <li>Bot token и полный URL SaleBot шифруются ключом, производным от <code>NEXUS_SECRET</code>.</li>
+    <li>Панель и управляющее API доступны только администратору Nexus.</li>
+    <li>Автоматически принимаются только HTTPS-приёмники домена <code>salebot.pro</code> и его поддоменов.</li>
+    <li>Telegram-запрос проверяется одновременно по случайному секрету в URL и заголовку <code>X-Telegram-Bot-Api-Secret-Token</code>.</li>
+    <li>Тело успешно доставленного Update удаляется из журнала. Для ошибок оно временно хранится, чтобы разрешить повтор.</li>
+    <li>Команда отката возвращает прямой SaleBot webhook с <code>drop_pending_updates=false</code>.</li>
+  </ul>
+
+  <h2>Переменные окружения</h2>
+  <pre>NEXUS_SECRET=стабильный-длинный-секрет
+TG_SALEBOT_PROXY_PUBLIC_BASE=https://junior.sobakovod.pro/nexus</pre>
+  <p>Доступ к Telegram Bot API всегда использует глобальный маршрут из <strong>Nexus → Настройки → Telegram</strong>. Прямое подключение модуля к <code>api.telegram.org</code> не применяется.</p>
+  <p><code>NEXUS_SECRET</code> нельзя менять после добавления ботов: старые зашифрованные значения перестанут открываться. Если секрет всё же изменён, повторно введите bot token.</p>
+
+  <h2>Доставка и повтор</h2>
+  <p>Nexus передаёт SaleBot исходное JSON-тело без преобразования и возвращает Telegram HTTP-ответ SaleBot. При сетевой ошибке или не-2xx ответе Telegram повторит Update. Модуль также сохраняет неуспешное тело и позволяет выполнить ручной повтор из журнала. Повтор одного уже доставленного <code>update_id</code> подтверждается без второй отправки.</p>
+
+  <h2>Ограничения</h2>
+  <ul>
+    <li>У Telegram может быть только один активный webhook на один bot token.</li>
+    <li>Telegram не показывает установленный ранее <code>secret_token</code>. Поэтому модуль совместим со стандартной схемой SaleBot, где секрет находится в URL, но после первого подключения требуется реальное тестовое сообщение.</li>
+    <li>Если SaleBot начнёт постоянно перезаписывать webhook, получится конфликт владельцев. Автовосстановление можно выключить, затем выполнить откат.</li>
+    <li>Переадресации upstream не выполняются: SaleBot должен отвечать напрямую с HTTP 2xx.</li>
+  </ul>
+
+  <h2>Аварийный откат</h2>
+  <p>Откройте «Настройки бота» и нажмите «Откатить». Если Nexus недоступен, установите сохранённый SaleBot URL через Telegram <code>setWebhook</code>. Полный URL намеренно не отображается в панели; перед production-активацией храните резервную конфигурацию сервера.</p>
+</main></body></html>

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,14 +29,46 @@ _module_dir: Path | None = None
 _logger: logging.Logger | None = None
 _field_cache: dict[str, list[dict[str, Any]]] = {}
 _sync_task: asyncio.Task | None = None
+_sync_lock = asyncio.Lock()
+_order_process_lock = asyncio.Lock()
 
 MODULE_ID = "getcourse-amocrm"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+LEGACY_DEFAULT_NOTE_TEMPLATE = (
+    "ГЕТКУРС ЗАКАЗ №{payment_number}\n"
+    "Название тарифа {positions}\n"
+    "стоимость тарифа: {costMoney}\n"
+    "осталось оплатить: {leftCostMoney}\n"
+    "оплачено: {payedMoney}\n"
+    "статус платежа: {payment_status}\n"
+    "ссылка на оплату: {paymentLink}\n"
+    "Имя: {name} E-mail: {email}\n"
+    "Телефон: {phone}\n"
+    "\nТестовые примечания\n"
+    "{pay_field_user_ym_uid}\n"
+    "{reg_field_user_ym_uid}"
+)
+DEFAULT_NOTE_TEMPLATE = (
+    "ГЕТКУРС ЗАКАЗ №{payment_number}\n"
+    "ссылка на оплату: {paymentLink}\n"
+    "Название тарифа {positions}\n"
+    "стоимость тарифа: {costMoney}\n"
+    "осталось оплатить: {leftCostMoney}\n"
+    "оплачено: {payedMoney}\n"
+    "статус платежа: {payment_status}\n"
+    "Имя: {name} E-mail: {email}\n"
+    "Телефон: {phone}\n"
+    "\nТестовые примечания\n"
+    "{pay_field_user_ym_uid}\n"
+    "{reg_field_user_ym_uid}"
+)
 DEFAULT_SETTINGS = {
     "webhook_secret": "",
     "pipeline_id": "10566818",
     "status_id": "83350598",
     "responsible_user_id": "6269974",
+    "responsible_user_ids_json": "[]",
+    "round_robin_cursor": "0",
     "getcourse_base_url": "https://club.sobakovod.pro",
     "request_timeout": "15",
     "duplicate_policy": "update",
@@ -43,30 +77,75 @@ DEFAULT_SETTINGS = {
     "cdb_sync_enabled": "1",
     "cdb_poll_seconds": "10",
     "cdb_sync_bootstrapped": "0",
+    "sample_preset_json": "{}",
+    "lead_name_template": "ЗАКАЗ №{payment_number} | {name} | {date_add}",
+    "note_template": DEFAULT_NOTE_TEMPLATE,
+    "budget_source": "paid",
+    "minicourse_curator_mediums": "irina\nslava\nnastasia",
 }
+
+MINICOURSE_PIPELINE_ID = "8493006"
+MINICOURSE_PAID_STATUS_ID = "69046790"
+MINICOURSE_RESPONSIBLE_USER_ID = "6269974"
 
 DEFAULT_BINDINGS = [
     {
         "process": "created",
         "name": "Создан заказ",
-        "task_text": "Связаться по новому заказу GetCourse №{number}",
+        "status_id": "83350598",
+        "task_text": "Связаться заказ ГК",
     },
     {
         "process": "partial",
         "name": "Частично оплачен",
-        "task_text": "Проверить частичную оплату GetCourse №{number}",
+        "status_id": "83350598",
+        "task_text": "Связаться заказ ГК",
     },
     {
         "process": "paid",
         "name": "Оплачен",
-        "task_text": "Проверить оплаченный заказ GetCourse №{number}",
+        "status_id": "142",
+        "task_text": "Связаться заказ ГК",
+    },
+    {
+        "process": "surcharge_created",
+        "name": "Доплата создана",
+        "status_id": "83350598",
+        "responsible_user_id": "6269974",
+        "duplicate_policy": "create",
+        "task_enabled": 0,
+        "task_text": "",
+    },
+    {
+        "process": "surcharge_paid",
+        "name": "Доплата оплачена",
+        "status_id": "142",
+        "responsible_user_id": "6269974",
+        "duplicate_policy": "update",
+        "task_enabled": 0,
+        "task_text": "",
     },
 ]
 
 DEFAULT_DUPLICATE_SEARCH_RULES = [
     {"field": "№ ГК", "source": "number"},
-    {"field": "ГК ID Заказа", "source": "order_id"},
 ]
+
+CDB_VOLATILE_FIELDS = {
+    "chat_fields_updated_at",
+}
+
+CDB_FILE_IMPORT_SOURCES = {
+    "csv_export",
+    "csv_import",
+    "file_import",
+    "getcourse_csv_export",
+    "getcourse_csv_import",
+    "getcourse_file_import",
+}
+CDB_PAGE_SIZE = 1000
+
+DEFAULT_MOVABLE_STATUS_IDS = ["83350594", "83350598", "83350602", "83350606", "85041662", "143"]
 
 BINDING_ALIASES = {
     "": "created",
@@ -76,6 +155,10 @@ BINDING_ALIASES = {
     "partial": "partial",
     "partially_paid": "partial",
     "paid": "paid",
+    "surcharge_created": "surcharge_created",
+    "surcharge-created": "surcharge_created",
+    "surcharge_paid": "surcharge_paid",
+    "surcharge-paid": "surcharge_paid",
 }
 
 UTM_SPECS = [
@@ -106,6 +189,17 @@ def setup(ctx):
             _sync_task = loop.create_task(_customer_db_sync_loop())
     else:
         loop.run_until_complete(_init_db())
+
+
+async def shutdown() -> None:
+    global _sync_task
+    task, _sync_task = _sync_task, None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 async def _init_db() -> None:
@@ -147,6 +241,11 @@ async def _init_db() -> None:
                 error TEXT NOT NULL DEFAULT '',
                 last_synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS round_robin_cursors (
+                pool_key TEXT PRIMARY KEY,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
             CREATE TABLE IF NOT EXISTS bindings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 process TEXT UNIQUE NOT NULL DEFAULT 'created',
@@ -157,6 +256,7 @@ async def _init_db() -> None:
                 duplicate_policy TEXT NOT NULL DEFAULT 'update',
                 duplicate_search_entity TEXT NOT NULL DEFAULT 'leads',
                 duplicate_search_fields_json TEXT NOT NULL DEFAULT '',
+                move_from_statuses_json TEXT NOT NULL DEFAULT '',
                 task_enabled INTEGER NOT NULL DEFAULT 0,
                 task_text TEXT NOT NULL DEFAULT '',
                 task_due_minutes INTEGER NOT NULL DEFAULT 60,
@@ -170,31 +270,65 @@ async def _init_db() -> None:
         await _ensure_binding_columns(db)
         for key, value in DEFAULT_SETTINGS.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+        await db.execute(
+            "UPDATE settings SET value=? WHERE key=? AND value=?",
+            (DEFAULT_NOTE_TEMPLATE, "note_template", LEGACY_DEFAULT_NOTE_TEMPLATE),
+        )
         for item in DEFAULT_BINDINGS:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO bindings(
                     process,name,pipeline_id,status_id,responsible_user_id,duplicate_policy,
-                    duplicate_search_entity,duplicate_search_fields_json,
+                    duplicate_search_entity,duplicate_search_fields_json,move_from_statuses_json,
                     task_enabled,task_text,task_due_minutes,task_type_id,task_responsible_user_id,active
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
                 """,
                 (
                     item["process"],
                     item["name"],
                     DEFAULT_SETTINGS["pipeline_id"],
-                    DEFAULT_SETTINGS["status_id"],
-                    DEFAULT_SETTINGS["responsible_user_id"],
-                    DEFAULT_SETTINGS["duplicate_policy"],
+                    item.get("status_id") or DEFAULT_SETTINGS["status_id"],
+                    item.get("responsible_user_id", ""),
+                    item.get("duplicate_policy") or DEFAULT_SETTINGS["duplicate_policy"],
                     "leads",
                     _default_duplicate_rules_json(),
-                    0,
+                    json.dumps(DEFAULT_MOVABLE_STATUS_IDS, ensure_ascii=False),
+                    int(item.get("task_enabled", 1)),
                     item["task_text"],
                     60,
                     1,
                     "",
                 ),
+            )
+        cur = await db.execute("SELECT value FROM settings WHERE key='binding_responsible_override_v1'")
+        if not await cur.fetchone():
+            await db.execute(
+                "UPDATE bindings SET responsible_user_id='' "
+                "WHERE process IN ('created','partial','paid') AND responsible_user_id=?",
+                (DEFAULT_SETTINGS["responsible_user_id"],),
+            )
+            await db.execute(
+                "UPDATE bindings SET responsible_user_id=?, "
+                "task_due_minutes=CASE WHEN task_due_minutes<=1 THEN 60 ELSE task_due_minutes END "
+                "WHERE process IN ('surcharge_created','surcharge_paid')",
+                (MINICOURSE_RESPONSIBLE_USER_ID,),
+            )
+            await db.execute(
+                "INSERT INTO settings(key,value) VALUES('binding_responsible_override_v1','1')"
+            )
+        cur = await db.execute("SELECT value FROM settings WHERE key='binding_responsible_override_v2'")
+        if not await cur.fetchone():
+            cur = await db.execute("SELECT value FROM settings WHERE key='responsible_user_id'")
+            row = await cur.fetchone()
+            legacy_responsible = _clean(row[0] if row else "", 64)
+            await db.execute(
+                "UPDATE bindings SET responsible_user_id='' "
+                "WHERE process IN ('created','partial','paid') AND responsible_user_id IN (?,?)",
+                (legacy_responsible, DEFAULT_SETTINGS["responsible_user_id"]),
+            )
+            await db.execute(
+                "INSERT INTO settings(key,value) VALUES('binding_responsible_override_v2','1')"
             )
         if not _env()["webhook_secret"]:
             cur = await db.execute("SELECT value FROM settings WHERE key='webhook_secret'")
@@ -218,6 +352,8 @@ async def _ensure_binding_columns(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE bindings ADD COLUMN duplicate_search_entity TEXT NOT NULL DEFAULT 'leads'")
     if "duplicate_search_fields_json" not in columns:
         await db.execute("ALTER TABLE bindings ADD COLUMN duplicate_search_fields_json TEXT NOT NULL DEFAULT ''")
+    if "move_from_statuses_json" not in columns:
+        await db.execute("ALTER TABLE bindings ADD COLUMN move_from_statuses_json TEXT NOT NULL DEFAULT ''")
     await db.execute(
         """
         UPDATE bindings
@@ -233,6 +369,14 @@ async def _ensure_binding_columns(db: aiosqlite.Connection) -> None:
         """,
         (_default_duplicate_rules_json(),),
     )
+    await db.execute(
+        """
+        UPDATE bindings
+        SET move_from_statuses_json=?
+        WHERE move_from_statuses_json IS NULL OR move_from_statuses_json=''
+        """,
+        (json.dumps(DEFAULT_MOVABLE_STATUS_IDS, ensure_ascii=False),),
+    )
 
 
 def _log(level: str, message: str, *args: Any) -> None:
@@ -246,6 +390,28 @@ def _now() -> str:
 
 def _clean(value: Any, limit: int = 2000) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _customer_db_source_hash(value: Any) -> str:
+    fields: Any = value
+    if isinstance(value, str):
+        try:
+            fields = json.loads(value or "{}")
+        except Exception:
+            fields = value.strip()
+    if isinstance(fields, dict):
+        fields = {key: item for key, item in fields.items() if key not in CDB_VOLATILE_FIELDS}
+    canonical = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "v2:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _customer_db_file_import(fields: Any) -> bool:
+    if not isinstance(fields, dict):
+        return False
+    source = re.sub(r"[^a-z0-9]+", "_", _clean(fields.get("source"), 200).casefold()).strip("_")
+    return source in CDB_FILE_IMPORT_SOURCES or any(
+        marker in source for marker in ("csv_export", "csv_import", "file_import")
+    )
 
 
 def _env() -> dict[str, str]:
@@ -274,6 +440,67 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _selected_responsible_ids(settings: dict[str, str], binding: dict[str, Any] | None = None) -> list[str]:
+    binding_responsible = _int_or_none((binding or {}).get("responsible_user_id"))
+    if binding_responsible:
+        return [str(binding_responsible)]
+    if (binding or {}).get("fixed_responsible"):
+        return []
+    try:
+        raw = json.loads(settings.get("responsible_user_ids_json") or "[]")
+    except Exception:
+        raw = []
+    result: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        user_id = _int_or_none(item)
+        if user_id and str(user_id) not in result:
+            result.append(str(user_id))
+    fallback = _int_or_none(settings.get("responsible_user_id"))
+    if not result and fallback:
+        result.append(str(fallback))
+    return result
+
+
+def _active_amo_user_ids(users: list[dict[str, Any]]) -> set[str]:
+    result: set[str] = set()
+    for user in users:
+        rights = user.get("rights") if isinstance(user.get("rights"), dict) else {}
+        if rights.get("is_active", user.get("is_active", True)) and _int_or_none(user.get("id")):
+            result.add(str(user["id"]))
+    return result
+
+
+async def _new_responsible(settings: dict[str, str], binding: dict[str, Any]) -> str:
+    users = _selected_responsible_ids(settings, binding)
+    if not users:
+        return ""
+    body, error, _ = await _amo_request("GET", "/api/v4/users?limit=250", settings)
+    active = None if error else _active_amo_user_ids((((body or {}).get("_embedded") or {}).get("users") or []))
+    candidates = [user_id for user_id in users if active is None or user_id in active]
+    if not candidates:
+        return ""
+    pool_key = json.dumps(users, separators=(",", ":"))
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        cur = await db.execute("SELECT cursor FROM round_robin_cursors WHERE pool_key=?", (pool_key,))
+        row = await cur.fetchone()
+        cursor = int(row[0] or 0) if row else 0
+    return candidates[cursor % len(candidates)]
+
+
+async def _advance_responsible_cursor(settings: dict[str, str], binding: dict[str, Any]) -> None:
+    users = _selected_responsible_ids(settings, binding)
+    if not users:
+        return
+    pool_key = json.dumps(users, separators=(",", ":"))
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        await db.execute(
+            "INSERT INTO round_robin_cursors(pool_key,cursor,updated_at) VALUES(?,1,?) "
+            "ON CONFLICT(pool_key) DO UPDATE SET cursor=cursor+1,updated_at=excluded.updated_at",
+            (pool_key, _now()),
+        )
+        await db.commit()
+
+
 async def _settings_map() -> dict[str, str]:
     data = dict(DEFAULT_SETTINGS)
     async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
@@ -292,12 +519,17 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
         "pipeline_id",
         "status_id",
         "responsible_user_id",
+        "responsible_user_ids_json",
         "getcourse_base_url",
         "request_timeout",
         "duplicate_policy",
         "tags",
         "cdb_sync_enabled",
         "cdb_poll_seconds",
+        "lead_name_template",
+        "note_template",
+        "budget_source",
+        "minicourse_curator_mediums",
     }
     clean: dict[str, str] = {}
     for key in allowed:
@@ -306,6 +538,17 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
         value = _clean(data.get(key), 5000)
         if key in {"pipeline_id", "status_id", "responsible_user_id"}:
             value = str(_int_or_none(value) or "")
+        elif key == "responsible_user_ids_json":
+            try:
+                raw_users = json.loads(value) if isinstance(value, str) else value
+            except Exception:
+                raw_users = []
+            users = []
+            for item in raw_users if isinstance(raw_users, list) else []:
+                user_id = _int_or_none(item)
+                if user_id and str(user_id) not in users:
+                    users.append(str(user_id))
+            value = json.dumps(users, ensure_ascii=False)
         elif key == "request_timeout":
             value = str(int(_timeout({"request_timeout": value})))
         elif key == "duplicate_policy":
@@ -319,6 +562,8 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
                 value = DEFAULT_SETTINGS[key]
         elif key == "getcourse_base_url":
             value = value.rstrip("/") or DEFAULT_SETTINGS[key]
+        elif key == "budget_source":
+            value = value if value in {"paid", "cost", "none"} else "paid"
         clean[key] = value
     async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
         for key, value in clean.items():
@@ -327,12 +572,21 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
                 (key, value),
             )
         await db.commit()
-    return await get_settings()
+    return await _settings_map()
 
 
 def _binding_process(value: Any) -> str:
     raw = _clean(value, 80).casefold()
-    return BINDING_ALIASES.get(raw, raw if raw in {"created", "partial", "paid"} else "created")
+    allowed = {"created", "partial", "paid", "surcharge_created", "surcharge_paid", "minicourse_paid"}
+    return BINDING_ALIASES.get(raw, raw if raw in allowed else "created")
+
+
+def _is_created_process(value: Any) -> bool:
+    return _binding_process(value) in {"created", "surcharge_created"}
+
+
+def _is_paid_process(value: Any) -> bool:
+    return _binding_process(value) in {"partial", "paid", "surcharge_paid", "minicourse_paid"}
 
 
 def _clean_duplicate_policy(value: Any) -> str:
@@ -430,6 +684,23 @@ def _duplicate_rules_json_from_payload(data: dict[str, Any], existing: dict[str,
     return json.dumps(_duplicate_rules_from_payload(data, existing), ensure_ascii=False)
 
 
+def _status_ids_payload(value: Any, default: list[str] | None = None) -> list[str]:
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except Exception:
+            raw = re.split(r"[\s,;]+", raw)
+    if not isinstance(raw, list):
+        raw = default or []
+    result: list[str] = []
+    for item in raw:
+        status_id = _int_or_none(item)
+        if status_id and str(status_id) not in result:
+            result.append(str(status_id))
+    return result
+
+
 def _bool_int(value: Any) -> int:
     if isinstance(value, str):
         return 1 if value.strip().lower() in {"1", "true", "yes", "on", "да"} else 0
@@ -461,6 +732,13 @@ def _clean_binding_payload(data: dict[str, Any], existing: dict[str, Any] | None
         "duplicate_policy": _clean_duplicate_policy(data.get("duplicate_policy", existing.get("duplicate_policy"))),
         "duplicate_search_entity": _clean_duplicate_search_entity(data.get("duplicate_search_entity", existing.get("duplicate_search_entity"))),
         "duplicate_search_fields_json": _duplicate_rules_json_from_payload(data, existing),
+        "move_from_statuses_json": json.dumps(
+            _status_ids_payload(
+                data.get("move_from_statuses_json", existing.get("move_from_statuses_json")),
+                DEFAULT_MOVABLE_STATUS_IDS,
+            ),
+            ensure_ascii=False,
+        ),
         "task_enabled": _bool_int(data.get("task_enabled", existing.get("task_enabled"))),
         "task_text": _clean(data.get("task_text", existing.get("task_text")), 2000),
         "task_due_minutes": due_minutes,
@@ -476,18 +754,43 @@ async def _bindings() -> list[dict[str, Any]]:
         cur = await db.execute(
             """
             SELECT * FROM bindings
-            ORDER BY CASE process WHEN 'created' THEN 1 WHEN 'partial' THEN 2 WHEN 'paid' THEN 3 ELSE 4 END, id
+            ORDER BY CASE process
+                WHEN 'created' THEN 1 WHEN 'partial' THEN 2 WHEN 'paid' THEN 3
+                WHEN 'surcharge_created' THEN 4 WHEN 'surcharge_paid' THEN 5 ELSE 6 END, id
             """
         )
         rows = [dict(row) for row in await cur.fetchall()]
     for row in rows:
         row["duplicate_search_entity"] = _clean_duplicate_search_entity(row.get("duplicate_search_entity"))
         row["duplicate_search_fields"] = _duplicate_rules_payload(row.get("duplicate_search_fields_json")) or list(DEFAULT_DUPLICATE_SEARCH_RULES)
+        row["move_from_statuses"] = _status_ids_payload(row.get("move_from_statuses_json"), DEFAULT_MOVABLE_STATUS_IDS)
     return rows
 
 
 async def _binding_for_process(process: str, settings: dict[str, str]) -> dict[str, Any]:
     process = _binding_process(process)
+    if process == "minicourse_paid":
+        return {
+            "id": None,
+            "process": process,
+            "name": "Мини-курс оплачен",
+            "pipeline_id": MINICOURSE_PIPELINE_ID,
+            "status_id": MINICOURSE_PAID_STATUS_ID,
+            "responsible_user_id": MINICOURSE_RESPONSIBLE_USER_ID,
+            "fixed_responsible": 1,
+            "duplicate_policy": "update",
+            "duplicate_search_entity": "leads",
+            "duplicate_search_fields_json": _default_duplicate_rules_json(),
+            "duplicate_search_fields": list(DEFAULT_DUPLICATE_SEARCH_RULES),
+            "move_from_statuses_json": json.dumps([MINICOURSE_PAID_STATUS_ID], ensure_ascii=False),
+            "move_from_statuses": [MINICOURSE_PAID_STATUS_ID],
+            "task_enabled": 0,
+            "task_text": "",
+            "task_due_minutes": 60,
+            "task_type_id": 1,
+            "task_responsible_user_id": "",
+            "active": 1,
+        }
     rows = await _bindings()
     for row in rows:
         if row.get("process") == process and int(row.get("active") or 0):
@@ -498,11 +801,13 @@ async def _binding_for_process(process: str, settings: dict[str, str]) -> dict[s
         "name": process,
         "pipeline_id": settings.get("pipeline_id", ""),
         "status_id": settings.get("status_id", ""),
-        "responsible_user_id": settings.get("responsible_user_id", ""),
+        "responsible_user_id": "",
         "duplicate_policy": settings.get("duplicate_policy", "update"),
         "duplicate_search_entity": "leads",
         "duplicate_search_fields_json": _default_duplicate_rules_json(),
         "duplicate_search_fields": list(DEFAULT_DUPLICATE_SEARCH_RULES),
+        "move_from_statuses_json": json.dumps(DEFAULT_MOVABLE_STATUS_IDS),
+        "move_from_statuses": list(DEFAULT_MOVABLE_STATUS_IDS),
         "task_enabled": 0,
         "task_text": "",
         "task_due_minutes": 60,
@@ -529,7 +834,7 @@ async def _save_binding(data: dict[str, Any]) -> dict[str, Any]:
                 """
                 UPDATE bindings
                 SET process=?,name=?,pipeline_id=?,status_id=?,responsible_user_id=?,duplicate_policy=?,
-                    duplicate_search_entity=?,duplicate_search_fields_json=?,
+                    duplicate_search_entity=?,duplicate_search_fields_json=?,move_from_statuses_json=?,
                     task_enabled=?,task_text=?,task_due_minutes=?,task_type_id=?,task_responsible_user_id=?,
                     active=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
                 WHERE id=?
@@ -537,7 +842,7 @@ async def _save_binding(data: dict[str, Any]) -> dict[str, Any]:
                 (
                     clean["process"], clean["name"], clean["pipeline_id"], clean["status_id"],
                     clean["responsible_user_id"], clean["duplicate_policy"],
-                    clean["duplicate_search_entity"], clean["duplicate_search_fields_json"],
+                    clean["duplicate_search_entity"], clean["duplicate_search_fields_json"], clean["move_from_statuses_json"],
                     clean["task_enabled"], clean["task_text"], clean["task_due_minutes"], clean["task_type_id"],
                     clean["task_responsible_user_id"], clean["active"], binding_id,
                 ),
@@ -548,15 +853,16 @@ async def _save_binding(data: dict[str, Any]) -> dict[str, Any]:
                 """
                 INSERT INTO bindings(
                     process,name,pipeline_id,status_id,responsible_user_id,duplicate_policy,
-                    duplicate_search_entity,duplicate_search_fields_json,
+                    duplicate_search_entity,duplicate_search_fields_json,move_from_statuses_json,
                     task_enabled,task_text,task_due_minutes,task_type_id,task_responsible_user_id,active
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(process) DO UPDATE SET
                     name=excluded.name,pipeline_id=excluded.pipeline_id,status_id=excluded.status_id,
                     responsible_user_id=excluded.responsible_user_id,duplicate_policy=excluded.duplicate_policy,
                     duplicate_search_entity=excluded.duplicate_search_entity,
                     duplicate_search_fields_json=excluded.duplicate_search_fields_json,
+                    move_from_statuses_json=excluded.move_from_statuses_json,
                     task_enabled=excluded.task_enabled,task_text=excluded.task_text,
                     task_due_minutes=excluded.task_due_minutes,task_type_id=excluded.task_type_id,
                     task_responsible_user_id=excluded.task_responsible_user_id,active=excluded.active,
@@ -565,7 +871,7 @@ async def _save_binding(data: dict[str, Any]) -> dict[str, Any]:
                 (
                     clean["process"], clean["name"], clean["pipeline_id"], clean["status_id"],
                     clean["responsible_user_id"], clean["duplicate_policy"],
-                    clean["duplicate_search_entity"], clean["duplicate_search_fields_json"],
+                    clean["duplicate_search_entity"], clean["duplicate_search_fields_json"], clean["move_from_statuses_json"],
                     clean["task_enabled"], clean["task_text"], clean["task_due_minutes"], clean["task_type_id"],
                     clean["task_responsible_user_id"], clean["active"],
                 ),
@@ -652,6 +958,19 @@ def _phone_text(value: Any) -> str:
     return "+" + digits
 
 
+def _phone_identity(value: Any) -> str:
+    return re.sub(r"\D+", "", _phone_text(value))
+
+
+def _floating_identity_keys(order: dict[str, Any]) -> list[str]:
+    """Stable identity for the one mutable unpaid attempt per person."""
+    phone = _phone_identity(order.get("phone"))
+    if phone:
+        return [f"floating:phone:{phone}"]
+    email = _clean(order.get("email"), 500).casefold()
+    return [f"floating:email:{email}"] if email else []
+
+
 def _jsonish(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         return value
@@ -683,6 +1002,101 @@ def _deal_name_text(value: Any) -> str:
     return text
 
 
+def _tag_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, (bool, int, float)) and bool(item):
+                values.append(str(key))
+            else:
+                values.extend(_tag_names(item))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values = []
+        for item in value:
+            values.extend(_tag_names(item))
+        return values
+    return [item.strip() for item in re.split(r"[|,;\n]+", str(value)) if item.strip()]
+
+
+def _autopayment_match(payload: dict[str, Any], order: dict[str, Any]) -> tuple[bool, str]:
+    keyword = "автооплата"
+    title_values = (
+        order.get("title"),
+        payload.get("title"),
+        payload.get("order_name"),
+        payload.get("name_order"),
+        payload.get("positions"),
+    )
+    if any(keyword in _flatten_text(value).casefold() for value in title_values):
+        return True, "title"
+
+    tag_values = []
+    for key in ("tags", "order_tags", "tag_names", "deal_tags", "object.tags"):
+        tag_values.extend(_tag_names(payload.get(key)))
+    if any(name.casefold() == keyword for name in tag_values):
+        return True, "tag"
+
+    marker = _clean(payload.get("autopayment") or payload.get("is_autopayment"), 40).casefold()
+    if marker in {"1", "true", "yes", "on", "да", keyword}:
+        return True, "tag_condition"
+    return False, ""
+
+
+def _minicourse_match(order: dict[str, Any]) -> bool:
+    return bool(re.search(r"(?iu)\bмини[\s-]*курс", _clean(order.get("title"), 4000)))
+
+
+def _surcharge_match(order: dict[str, Any]) -> bool:
+    return bool(re.search(r"(?iu)\bдоплат\w*\s+до(?:\s+тарифа)?\s+(?:vip|вип)\b", _clean(order.get("title"), 4000)))
+
+
+def _medium_fragments(settings: dict[str, str]) -> list[str]:
+    raw = settings.get("minicourse_curator_mediums") or DEFAULT_SETTINGS["minicourse_curator_mediums"]
+    return [part.strip().casefold() for part in re.split(r"[\n,;]+", raw) if part.strip()]
+
+
+def _medium_has_curator(value: Any, settings: dict[str, str]) -> bool:
+    medium = _clean(value, 500).casefold()
+    return bool(medium and any(fragment in medium for fragment in _medium_fragments(settings)))
+
+
+def _route_order(order: dict[str, Any], requested_process: Any, settings: dict[str, str]) -> str:
+    requested = _binding_process(requested_process)
+    if _minicourse_match(order):
+        return "minicourse_paid" if requested in {"paid", "surcharge_paid", "minicourse_paid"} else "ignore_minicourse_unpaid"
+    if _surcharge_match(order):
+        if requested in {"paid", "surcharge_paid"}:
+            return "surcharge_paid"
+        if requested in {"created", "surcharge_created"}:
+            return "surcharge_created"
+        return "ignore_surcharge_partial"
+    if requested in {"surcharge_created", "surcharge_paid"}:
+        return "ignore_surcharge_title"
+    return requested
+
+
+def _apply_attribution(order: dict[str, Any], settings: dict[str, str]) -> None:
+    profile = dict(order.get("profile_utm") or {})
+    order_medium = _clean(order.get("order_utm_medium") or (order.get("order_utm") or {}).get("utm_medium"), 500)
+    process = _binding_process(order.get("process"))
+    selected = dict(profile)
+    if process in {"surcharge_created", "surcharge_paid"}:
+        selected["utm_medium"] = order_medium or profile.get("utm_medium", "")
+    elif process == "minicourse_paid" and _medium_has_curator(order_medium, settings):
+        selected["utm_medium"] = order_medium
+        order["curator_medium_match"] = True
+    else:
+        order["curator_medium_match"] = False
+    order["utm"] = {key: _clean(selected.get(key), 500) for key, _field, _code in UTM_SPECS}
+    order["vk_dialog"] = (
+        f"https://vk.com/gim225075265/convo/{quote(order['utm']['utm_term'])}"
+        if order["utm"].get("utm_term") else ""
+    )
+
+
 def _person_for_lead(payload: dict[str, Any]) -> str:
     name = _clean(payload.get("name"), 500)
     if name:
@@ -699,6 +1113,79 @@ def _person_for_contact(payload: dict[str, Any]) -> tuple[str, str, str]:
     return name, first, last
 
 
+def _payment_status_text(process: Any, raw_status: Any = "") -> str:
+    state = _binding_process(process)
+    return {
+        "created": "Создан заказ",
+        "partial": "Частично оплачен",
+        "paid": "Оплачен",
+        "surcharge_created": "Доплата создана",
+        "surcharge_paid": "Доплата оплачена",
+        "minicourse_paid": "Оплачен",
+    }.get(state, _clean(raw_status, 300))
+
+
+def _order_template_values(order: dict[str, Any]) -> dict[str, str]:
+    return {
+        "payment_number": _clean(order.get("number") or order.get("order_id"), 500),
+        "number": _clean(order.get("number") or order.get("order_id"), 500),
+        "name": _clean(order.get("contact_name"), 500),
+        "date_add": _clean(order.get("date_add"), 100),
+        "positions": _clean(order.get("title"), 2000),
+        "costMoney": _clean(order.get("cost_money"), 100),
+        "leftCostMoney": _clean(order.get("left_cost_money"), 100),
+        "payedMoney": _clean(order.get("payed_money"), 100),
+        "payment_status": _payment_status_text(order.get("process"), order.get("status")),
+        "paymentLink": _clean(order.get("payment_link"), 2000),
+        "email": _clean(order.get("email"), 500),
+        "phone": _clean(order.get("phone"), 100),
+        "pay_field_user_ym_uid": _clean(order.get("pay_field_user_ym_uid"), 500),
+        "reg_field_user_ym_uid": _clean(order.get("reg_field_user_ym_uid"), 500),
+    }
+
+
+def _format_order_template(template: Any, order: dict[str, Any], limit: int = 10000) -> str:
+    text = str(template or "").replace("\\n", "\n")
+    values = _order_template_values(order)
+    lines = []
+    for line in text.splitlines():
+        if line.strip().casefold() == "тестовые примечания" and not (
+            values.get("pay_field_user_ym_uid") or values.get("reg_field_user_ym_uid")
+        ):
+            continue
+        placeholders = re.findall(r"\{([A-Za-z0-9_]+)\}", line)
+        rendered = line
+        for key in placeholders:
+            rendered = rendered.replace("{" + key + "}", values.get(key, ""))
+        if placeholders and not any(values.get(key, "") for key in placeholders):
+            continue
+        if rendered.strip():
+            lines.append(rendered.rstrip())
+    return _clean("\n".join(lines), limit)
+
+
+def _budget_value(order: dict[str, Any], settings: dict[str, str]) -> int:
+    explicit = _money(order.get("budget_money"))
+    if explicit > 0:
+        return max(0, int(round(explicit)))
+    source = settings.get("budget_source") or "paid"
+    if source == "none":
+        return 0
+    value = order.get("cost_money") if source == "cost" else order.get("payed_money")
+    return max(0, int(round(_money(value))))
+
+
+def _payment_rank(process: Any) -> int:
+    return {
+        "created": 1,
+        "surcharge_created": 1,
+        "partial": 2,
+        "paid": 3,
+        "surcharge_paid": 3,
+        "minicourse_paid": 3,
+    }.get(_binding_process(process), 1)
+
+
 def _normalize_order(payload: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
     positions = _jsonish(payload.get("positions", ""))
     offers = _jsonish(payload.get("offers", ""))
@@ -712,21 +1199,30 @@ def _normalize_order(payload: dict[str, Any], settings: dict[str, str]) -> dict[
     user_link = f"{base_url}/user/control/user/update/id/{quote(gc_user_id)}" if base_url and gc_user_id else ""
     order_link = f"{base_url}/sales/control/deal/update/id/{quote(order_id)}" if base_url and order_id else ""
     person = _person_for_lead(payload)
-    today = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
-    lead_name = f"ЗАКАЗ №{number or order_id} | {person or 'Без имени'} | {today}"
-    utm = {
+    date_add = _clean(payload.get("date_add") or payload.get("created_at"), 100) or datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y")
+    profile_utm = {
         "utm_source": _clean(payload.get("utmS") or payload.get("utm_source") or payload.get("user_source"), 500),
-        "utm_medium": _clean(payload.get("utmM") or payload.get("utm_medium") or payload.get("user_medium"), 500),
+        "utm_medium": _clean(payload.get("utmM") or payload.get("profile_utm_medium") or payload.get("utm_medium") or payload.get("user_medium"), 500),
         "utm_campaign": _clean(payload.get("utmCa") or payload.get("utm_campaign") or payload.get("user_campaign"), 500),
         "utm_content": _clean(payload.get("utmCo") or payload.get("utm_content") or payload.get("user_content"), 500),
         "utm_term": _clean(payload.get("utmT") or payload.get("utm_term") or payload.get("user_term"), 500),
     }
+    order_utm = {
+        "utm_source": _clean(payload.get("orderUtmS") or payload.get("order_utm_source"), 500),
+        "utm_medium": _clean(
+            payload.get("orderUtmM") or payload.get("order_utm_medium") or payload.get("order_medium"),
+            500,
+        ),
+        "utm_campaign": _clean(payload.get("orderUtmCa") or payload.get("order_utm_campaign"), 500),
+        "utm_content": _clean(payload.get("orderUtmCo") or payload.get("order_utm_content"), 500),
+        "utm_term": _clean(payload.get("orderUtmT") or payload.get("order_utm_term"), 500),
+    }
     yclid = _clean(payload.get("user_yclid") or payload.get("yclid"), 500)
     ym_uid = _clean(payload.get("user_ym_uid") or payload.get("ym_uid") or payload.get("_ym_uid"), 500)
-    return {
+    order = {
         "order_id": order_id,
         "number": number,
-        "lead_name": lead_name,
+        "lead_name": "",
         "contact_name": _person_for_contact(payload)[0],
         "first_name": _person_for_contact(payload)[1],
         "last_name": _person_for_contact(payload)[2],
@@ -740,12 +1236,21 @@ def _normalize_order(payload: dict[str, Any], settings: dict[str, str]) -> dict[
         "left_cost_money": _money_value(payload.get("leftCostMoney") or payload.get("left_cost_money")),
         "payed_money": _money_value(payload.get("payedMoney") or payload.get("payed_money")),
         "status": _clean(payload.get("status"), 300),
-        "utm": utm,
+        "date_add": date_add,
+        "budget_money": _money_value(payload.get("budgetMoney") or payload.get("budget_money") or payload.get("netMoney") or payload.get("net_money")),
+        "pay_field_user_ym_uid": _clean(payload.get("pay_field_user_ym_uid"), 500),
+        "reg_field_user_ym_uid": _clean(payload.get("reg_field_user_ym_uid"), 500),
+        "profile_utm": profile_utm,
+        "order_utm": order_utm,
+        "order_utm_medium": order_utm["utm_medium"],
+        "utm": dict(profile_utm),
         "yclid": yclid,
         "ym_uid": ym_uid,
-        "vk_dialog": f"https://vk.com/gim225075265/convo/{quote(utm['utm_term'])}" if utm["utm_term"] else "",
+        "vk_dialog": f"https://vk.com/gim225075265/convo/{quote(profile_utm['utm_term'])}" if profile_utm["utm_term"] else "",
         "raw": _mask_secret(payload),
     }
+    order["lead_name"] = _format_order_template(settings.get("lead_name_template") or DEFAULT_SETTINGS["lead_name_template"], order, 500)
+    return order
 
 
 def _payload_from_customer_db(fields: dict[str, Any]) -> dict[str, Any]:
@@ -755,6 +1260,10 @@ def _payload_from_customer_db(fields: dict[str, Any]) -> dict[str, Any]:
         "order_id": fields.get("order_id"),
         "positions": fields.get("positions"),
         "offers": fields.get("offers"),
+        "tags": fields.get("tags"),
+        "order_tags": fields.get("order_tags"),
+        "tag_names": fields.get("tag_names"),
+        "autopayment": fields.get("autopayment") or fields.get("is_autopayment"),
         "costMoney": fields.get("cost_money"),
         "leftCostMoney": fields.get("left_cost_money"),
         "payedMoney": fields.get("payed_money"),
@@ -774,8 +1283,17 @@ def _payload_from_customer_db(fields: dict[str, Any]) -> dict[str, Any]:
         "utmCa": fields.get("utm_campaign"),
         "utmCo": fields.get("utm_content"),
         "utmT": fields.get("utm_term") or fields.get("vk_id"),
+        "orderUtmS": fields.get("order_utm_source"),
+        "orderUtmM": fields.get("order_utm_medium") or fields.get("order_medium"),
+        "orderUtmCa": fields.get("order_utm_campaign"),
+        "orderUtmCo": fields.get("order_utm_content"),
+        "orderUtmT": fields.get("order_utm_term"),
         "user_yclid": fields.get("user_yclid") or fields.get("yclid"),
         "user_ym_uid": fields.get("user_ym_uid") or fields.get("ym_uid"),
+        "pay_field_user_ym_uid": fields.get("pay_field_user_ym_uid"),
+        "reg_field_user_ym_uid": fields.get("reg_field_user_ym_uid"),
+        "budgetMoney": fields.get("budget_money") or fields.get("net_money"),
+        "date_add": fields.get("date_add") or fields.get("created_at") or fields.get("date_creation"),
         "user_source": fields.get("user_source"),
         "user_content": fields.get("user_content"),
         "user_campaign": fields.get("user_campaign"),
@@ -828,7 +1346,7 @@ async def _amo_request(method: str, path: str, settings: dict[str, str], payload
 async def _amo_fields(entity: str, settings: dict[str, str]) -> tuple[list[dict[str, Any]], str]:
     if entity in _field_cache:
         return _field_cache[entity], ""
-    body, error, _ = await _amo_request("GET", f"/api/v4/{entity}/custom_fields", settings)
+    body, error, _ = await _amo_request("GET", f"/api/v4/{entity}/custom_fields?limit=250", settings)
     if error:
         return [], error
     fields = ((body or {}).get("_embedded") or {}).get("custom_fields") or []
@@ -861,6 +1379,8 @@ def _lead_field_values(fields: list[dict[str, Any]], order: dict[str, Any]) -> l
             values.append(item)
 
     add("№ ГК", order["number"])
+    add("ГК ID Заказа", order["order_id"])
+    add("Дата создания", order["date_add"])
     add("Пользователь в ГК", order["user_link"])
     add("Ссылка на оплату", order["payment_link"])
     add("Заказ в ГК", order["order_link"])
@@ -868,6 +1388,18 @@ def _lead_field_values(fields: list[dict[str, Any]], order: dict[str, Any]) -> l
     add("Оплачено", order["payed_money"])
     add("Осталось оплатить", order["left_cost_money"])
     add("Стоимость тарифа", order["cost_money"])
+    if _binding_process(order.get("process")) == "minicourse_paid":
+        tariff_field = next(
+            (field for field in fields if _field_matches(field, "Тариф") and _clean(field.get("type")) == "select"),
+            None,
+        )
+        if tariff_field:
+            enum = next(
+                (item for item in (tariff_field.get("enums") or []) if _clean(item.get("value")).casefold() == "мини курс"),
+                None,
+            )
+            if enum and _int_or_none(enum.get("id")):
+                values.append({"field_id": int(tariff_field["id"]), "values": [{"enum_id": int(enum["id"])}]})
     for order_key, field_name, code in UTM_SPECS:
         value = order["utm"].get(order_key)
         add(field_name, value, "tracking_data", code)
@@ -891,13 +1423,70 @@ def _contact_field_values(fields: list[dict[str, Any]], order: dict[str, Any]) -
     return values
 
 
-def _tags(settings: dict[str, str]) -> list[dict[str, str]]:
+async def _find_contact_for_order(order: dict[str, Any], settings: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
+    checks = [
+        ("phone", _clean(order.get("phone"), 100), {"field_code": "PHONE"}),
+        ("email", _clean(order.get("email"), 500), {"field_code": "EMAIL"}),
+    ]
+    for _kind, query, rule in checks:
+        if not query:
+            continue
+        body, error, _ = await _amo_request("GET", f"/api/v4/contacts?query={quote(query)}&limit=50", settings)
+        if error:
+            return None, error
+        for contact in (((body or {}).get("_embedded") or {}).get("contacts") or []):
+            if any(_compare_value(value, query) for value in _entity_rule_values(contact, rule)):
+                return contact, ""
+    return None, ""
+
+
+async def _fill_empty_contact_fields(
+    contact: dict[str, Any],
+    order: dict[str, Any],
+    contact_fields: list[dict[str, Any]],
+    settings: dict[str, str],
+) -> tuple[dict[str, Any], str]:
+    contact_id = _int_or_none(contact.get("id"))
+    if not contact_id:
+        return {}, "Контакт amoCRM найден без ID"
+    existing_values = contact.get("custom_fields_values") or []
+    missing_order = dict(order)
+    if any(_entity_rule_values(contact, {"field_code": "PHONE"})):
+        missing_order["phone"] = ""
+    if any(_entity_rule_values(contact, {"field_code": "EMAIL"})):
+        missing_order["email"] = ""
+    custom_values = _contact_field_values(contact_fields, missing_order)
+    payload: dict[str, Any] = {}
+    if custom_values:
+        payload["custom_fields_values"] = custom_values
+    if not _clean(contact.get("name"), 500) and order.get("contact_name"):
+        payload["name"] = order["contact_name"]
+    if not payload:
+        return {"contact_id": str(contact_id), "updated": False}, ""
+    body, error, _ = await _amo_request("PATCH", f"/api/v4/contacts/{contact_id}", settings, payload)
+    return {"contact_id": str(contact_id), "updated": not bool(error), "response": body}, error
+
+
+def _tags(settings: dict[str, str], order: dict[str, Any] | None = None) -> list[dict[str, str]]:
     names = [item.strip() for item in re.split(r"[\n,;]+", settings.get("tags", "")) if item.strip()]
-    return [{"name": name} for name in names]
+    process = _binding_process((order or {}).get("process"))
+    if process in {"surcharge_created", "surcharge_paid", "minicourse_paid"}:
+        names = [name for name in names if name.casefold() != "автооплата"]
+    if process in {"surcharge_created", "surcharge_paid"}:
+        names.append("Доплата")
+    elif process == "minicourse_paid":
+        names.append("Мини-курс")
+    unique: list[str] = []
+    for name in names:
+        if name.casefold() not in {item.casefold() for item in unique}:
+            unique.append(name)
+    return [{"name": name} for name in unique]
 
 
 async def _mapped_lead_id(order: dict[str, Any]) -> str:
     keys = [f"order:{order['order_id']}", f"number:{order['number']}"]
+    if _binding_process(order.get("process")) == "created":
+        keys.extend(_floating_identity_keys(order))
     keys = [key for key in keys if not key.endswith(":")]
     if not keys:
         return ""
@@ -911,12 +1500,16 @@ async def _mapped_lead_id(order: dict[str, Any]) -> str:
     return _clean(row[0] if row else "", 64)
 
 
-async def _remember_lead(order: dict[str, Any], lead_id: str) -> None:
+async def _remember_lead(order: dict[str, Any], lead_id: str, replace_lead_orders: bool = False) -> None:
     pairs = [(f"order:{order['order_id']}", lead_id), (f"number:{order['number']}", lead_id)]
+    if _binding_process(order.get("process")) == "created":
+        pairs.extend((key, lead_id) for key in _floating_identity_keys(order))
     pairs = [(key, value) for key, value in pairs if not key.endswith(":") and value]
     if not pairs:
         return
     async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        if replace_lead_orders:
+            await db.execute("DELETE FROM order_map WHERE lead_id=?", (lead_id,))
         for key, value in pairs:
             await db.execute(
                 """
@@ -1020,14 +1613,119 @@ async def _contact_linked_lead_id(contact: dict[str, Any], settings: dict[str, s
     return ""
 
 
+async def _find_non_autopayment_duplicate_by_phone(
+    order: dict[str, Any],
+    settings: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    phone = _clean(order.get("phone"), 100)
+    if not phone:
+        return [], [], ""
+    body, error, _ = await _amo_request("GET", f"/api/v4/contacts?query={quote(phone)}&with=leads&limit=50", settings)
+    if error:
+        return [], [], error
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    phone_rule = {"field_code": "PHONE"}
+    for contact in (((body or {}).get("_embedded") or {}).get("contacts") or []):
+        if not any(_compare_value(value, phone) for value in _entity_rule_values(contact, phone_rule)):
+            continue
+        lead_ids = [_clean(item.get("id"), 64) for item in ((contact.get("_embedded") or {}).get("leads") or [])]
+        if not any(lead_ids):
+            contact_id = _clean(contact.get("id"), 64)
+            links, links_error, _ = await _amo_request(
+                "GET",
+                f"/api/v4/contacts/{contact_id}/links?filter[to_entity_type]=leads",
+                settings,
+            )
+            if links_error:
+                return [], [], links_error
+            lead_ids = [
+                _clean(item.get("to_entity_id"), 64)
+                for item in (((links or {}).get("_embedded") or {}).get("links") or [])
+            ]
+        for lead_id in [item for item in lead_ids if item]:
+            lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+            if lead_error:
+                return [], [], lead_error
+            if isinstance(lead, dict) and lead.get("id"):
+                candidates.append((lead, contact))
+    seen_candidate_ids = {_clean(pair[0].get("id"), 64) for pair in candidates}
+    for lead_id in await _customer_db_deal_ids_for_phone(phone):
+        if lead_id in seen_candidate_ids:
+            continue
+        lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+        if lead_error or not isinstance(lead, dict) or not lead.get("id"):
+            continue
+        candidates.append((lead, {}))
+        seen_candidate_ids.add(lead_id)
+    if not candidates:
+        return [], [], ""
+    candidates.sort(
+        key=lambda pair: (-int(pair[0].get("updated_at") or 0), -int(pair[0].get("id") or 0))
+    )
+    unique_leads: list[dict[str, Any]] = []
+    unique_contacts: list[dict[str, Any]] = []
+    seen_leads: set[str] = set()
+    seen_contacts: set[str] = set()
+    for lead, contact in candidates:
+        lead_id = _clean(lead.get("id"), 64)
+        contact_id = _clean(contact.get("id"), 64)
+        if lead_id and lead_id not in seen_leads:
+            seen_leads.add(lead_id)
+            unique_leads.append(lead)
+        if contact_id and contact_id not in seen_contacts:
+            seen_contacts.add(contact_id)
+            unique_contacts.append(contact)
+    return unique_leads, unique_contacts, ""
+
+
+async def _customer_db_deal_ids_for_phone(phone: Any) -> list[str]:
+    """Find every amo deal across duplicated contact cards by exact normalized phone."""
+    identity = _phone_identity(phone)
+    if not identity:
+        return []
+    try:
+        path = _customer_db_path()
+    except RuntimeError:
+        return []
+    if not path.exists():
+        return []
+
+    def scan() -> list[str]:
+        result: set[str] = set()
+        try:
+            with sqlite3.connect(path) as db:
+                rows = db.execute(
+                    "SELECT platform_id,custom_fields FROM cdb_amo_deals WHERE custom_fields LIKE ?",
+                    (f"%{identity[-10:]}%",),
+                ).fetchall()
+            for platform_id, raw in rows:
+                try:
+                    fields = json.loads(raw or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                phones = {_phone_identity(value) for value in (fields.get("phones") or [])}
+                if identity in phones:
+                    lead_id = _clean(platform_id, 64)
+                    if lead_id:
+                        result.add(lead_id)
+        except sqlite3.Error as exc:
+            _log("warning", "customer-db exact phone lookup failed: %s", exc)
+        return sorted(result, key=lambda value: int(value) if value.isdigit() else 0, reverse=True)
+
+    return await asyncio.to_thread(scan)
+
+
 async def _find_existing_lead(order: dict[str, Any], settings: dict[str, str], binding: dict[str, Any]) -> tuple[str, str]:
+    process = _binding_process(order.get("process"))
     mapped = await _mapped_lead_id(order)
     if mapped:
         body, error, _ = await _amo_request("GET", f"/api/v4/leads/{mapped}", settings)
         if body and not error:
-            return mapped, "local_map"
-    entity = _clean_duplicate_search_entity(binding.get("duplicate_search_entity"))
-    rules = _duplicate_rules_payload(binding.get("duplicate_search_fields") or binding.get("duplicate_search_fields_json"))
+            mapped_number = _lead_order_number(body)
+            if process == "created" or not mapped_number or _compare_value(mapped_number, order.get("number")):
+                return mapped, "local_map"
+    entity = "leads" if _is_paid_process(process) else _clean_duplicate_search_entity(binding.get("duplicate_search_entity"))
+    rules = list(DEFAULT_DUPLICATE_SEARCH_RULES) if _is_paid_process(process) else []
     for rule in rules:
         query = _order_source_value(order, rule.get("source"))
         if not query:
@@ -1043,6 +1741,8 @@ async def _find_existing_lead(order: dict[str, Any], settings: dict[str, str], b
             if not any(_compare_value(value, query) for value in _entity_rule_values(item, rule)):
                 continue
             if entity == "leads":
+                if str(item.get("pipeline_id") or "") != str(binding.get("pipeline_id") or settings.get("pipeline_id") or ""):
+                    continue
                 lead_id = _clean(item.get("id"), 64)
             else:
                 lead_id = await _contact_linked_lead_id(item, settings)
@@ -1050,34 +1750,93 @@ async def _find_existing_lead(order: dict[str, Any], settings: dict[str, str], b
                 await _remember_lead(order, lead_id)
                 field = rule.get("field_id") or rule.get("field_code") or rule.get("field")
                 return lead_id, f"{entity}:{field}"
-    return "", ""
+    if process != "created":
+        return "", ""
+    phone = _clean(order.get("phone"), 100)
+    if not phone:
+        return "", ""
+    body, error, _ = await _amo_request("GET", f"/api/v4/contacts?query={quote(phone)}&with=leads", settings)
+    if error:
+        return "", error
+    candidates: list[dict[str, Any]] = []
+    phone_rule = {"field_code": "PHONE", "source": "phone"}
+    target_pipeline = str(binding.get("pipeline_id") or settings.get("pipeline_id") or "")
+    for contact in (((body or {}).get("_embedded") or {}).get("contacts") or []):
+        if not any(_compare_value(value, phone) for value in _entity_rule_values(contact, phone_rule)):
+            continue
+        lead_ids = [_clean(item.get("id"), 64) for item in ((contact.get("_embedded") or {}).get("leads") or [])]
+        if not any(lead_ids):
+            contact_id = _clean(contact.get("id"), 64)
+            links, links_error, _ = await _amo_request("GET", f"/api/v4/contacts/{contact_id}/links?filter[to_entity_type]=leads", settings)
+            if not links_error:
+                lead_ids = [_clean(item.get("to_entity_id"), 64) for item in (((links or {}).get("_embedded") or {}).get("links") or [])]
+        for lead_id in [item for item in lead_ids if item]:
+            lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+            if (
+                not lead_error
+                and isinstance(lead, dict)
+                and str(lead.get("pipeline_id") or "") == target_pipeline
+                and _existing_payment_rank(lead) == 1
+            ):
+                candidates.append(lead)
+    seen_candidate_ids = {_clean(lead.get("id"), 64) for lead in candidates}
+    for lead_id in await _customer_db_deal_ids_for_phone(phone):
+        if lead_id in seen_candidate_ids:
+            continue
+        lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+        if (
+            not lead_error
+            and isinstance(lead, dict)
+            and str(lead.get("pipeline_id") or "") == target_pipeline
+            and _existing_payment_rank(lead) == 1
+        ):
+            candidates.append(lead)
+            seen_candidate_ids.add(lead_id)
+    if not candidates:
+        return "", ""
+    candidates.sort(key=lambda lead: (-int(lead.get("updated_at") or 0), -int(lead.get("id") or 0)))
+    lead_id = _clean(candidates[0].get("id"), 64)
+    await _remember_lead(order, lead_id)
+    return lead_id, "contacts:PHONE"
 
 
-async def _create_lead(order: dict[str, Any], settings: dict[str, str], binding: dict[str, Any]) -> tuple[dict[str, Any], str]:
+async def _create_lead(order: dict[str, Any], settings: dict[str, str], binding: dict[str, Any], responsible_user_id: str = "") -> tuple[dict[str, Any], str]:
     lead_fields, error = await _amo_fields("leads", settings)
     if error:
         return {}, error
     contact_fields, error = await _amo_fields("contacts", settings)
     if error:
         return {}, error
-    contact: dict[str, Any] = {"name": order["contact_name"] or order["lead_name"]}
-    if order["first_name"]:
-        contact["first_name"] = order["first_name"]
-    if order["last_name"]:
-        contact["last_name"] = order["last_name"]
-    contact_custom = _contact_field_values(contact_fields, order)
-    if contact_custom:
-        contact["custom_fields_values"] = contact_custom
+    existing_contact, contact_error = await _find_contact_for_order(order, settings)
+    if contact_error:
+        return {}, f"Поиск контакта: {contact_error}"
+    if existing_contact:
+        _contact_update, contact_error = await _fill_empty_contact_fields(existing_contact, order, contact_fields, settings)
+        if contact_error:
+            return {}, f"Дополнение контакта: {contact_error}"
+        contact = {"id": int(existing_contact["id"])}
+    else:
+        contact = {"name": order["contact_name"] or order["lead_name"]}
+        if order["first_name"]:
+            contact["first_name"] = order["first_name"]
+        if order["last_name"]:
+            contact["last_name"] = order["last_name"]
+        contact_custom = _contact_field_values(contact_fields, order)
+        if contact_custom:
+            contact["custom_fields_values"] = contact_custom
     lead: dict[str, Any] = {
         "name": order["lead_name"],
-        "price": 0,
+        "price": _budget_value(order, settings),
         "custom_fields_values": _lead_field_values(lead_fields, order),
-        "_embedded": {"tags": _tags(settings), "contacts": [contact]},
+        "_embedded": {"tags": _tags(settings, order), "contacts": [contact]},
     }
-    for setting_key in ("pipeline_id", "status_id", "responsible_user_id"):
+    for setting_key in ("pipeline_id", "status_id"):
         value = _int_or_none(binding.get(setting_key) or settings.get(setting_key))
         if value:
             lead[setting_key] = value
+    selected_responsible = _int_or_none(responsible_user_id)
+    if selected_responsible:
+        lead["responsible_user_id"] = selected_responsible
     body, error, _ = await _amo_request("POST", "/api/v4/leads/complex", settings, [lead])
     if error:
         return {}, error
@@ -1089,25 +1848,98 @@ async def _create_lead(order: dict[str, Any], settings: dict[str, str], binding:
     return {"lead_id": lead_id, "contact_id": contact_id, "response": body}, ""
 
 
-async def _update_lead(lead_id: str, order: dict[str, Any], settings: dict[str, str], binding: dict[str, Any]) -> tuple[dict[str, Any], str]:
+async def _update_lead(
+    lead_id: str,
+    order: dict[str, Any],
+    settings: dict[str, str],
+    binding: dict[str, Any],
+    existing: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
     lead_fields, error = await _amo_fields("leads", settings)
     if error:
         return {}, error
+    contact_fields, error = await _amo_fields("contacts", settings)
+    if error:
+        return {}, error
+    existing_contact, error = await _find_contact_for_order(order, settings)
+    if error:
+        return {}, f"Поиск контакта: {error}"
+    if existing_contact:
+        _contact_update, error = await _fill_empty_contact_fields(existing_contact, order, contact_fields, settings)
+        if error:
+            return {}, f"Дополнение контакта: {error}"
     payload: dict[str, Any] = {
         "name": order["lead_name"],
-        "price": 0,
+        "price": _budget_value(order, settings),
         "custom_fields_values": _lead_field_values(lead_fields, order),
-        "_embedded": {"tags": _tags(settings)},
+        "_embedded": {"tags": _tags(settings, order)},
     }
-    for setting_key in ("pipeline_id", "status_id", "responsible_user_id"):
-        value = _int_or_none(binding.get(setting_key) or settings.get(setting_key))
-        if value:
-            payload[setting_key] = value
+    target_status = _int_or_none(binding.get("status_id") or settings.get("status_id"))
+    existing_status = _int_or_none(existing.get("status_id"))
+    movable_statuses = set(_status_ids_payload(binding.get("move_from_statuses") or binding.get("move_from_statuses_json")))
+    if target_status and (existing_status == target_status or str(existing_status or "") in movable_statuses):
+        payload["status_id"] = target_status
     body, error, _ = await _amo_request("PATCH", f"/api/v4/leads/{lead_id}", settings, payload)
     if error:
         return {}, error
-    await _remember_lead(order, lead_id)
+    await _remember_lead(order, lead_id, replace_lead_orders=_binding_process(order.get("process")) == "created")
     return {"lead_id": lead_id, "response": body}, ""
+
+
+def _lead_order_number(lead: dict[str, Any]) -> str:
+    for field in lead.get("custom_fields_values") or []:
+        if int(field.get("field_id") or 0) == 1006689 or _clean(field.get("field_name"), 300).casefold() == "№ гк":
+            values = field.get("values") or []
+            return _clean((values[0] if values else {}).get("value"), 100)
+    return ""
+
+
+def _existing_payment_rank(lead: dict[str, Any]) -> int:
+    paid = 0.0
+    left = 0.0
+    for field in lead.get("custom_fields_values") or []:
+        field_id = int(field.get("field_id") or 0)
+        value = ((field.get("values") or [{}])[0]).get("value")
+        if field_id == 1006697:
+            paid = _money(value)
+        elif field_id == 1006699:
+            left = _money(value)
+    if paid > 0:
+        return 3 if left <= 0 else 2
+    if int(lead.get("status_id") or 0) == 142:
+        return 3
+    return 1
+
+
+def _duplicate_action(existing: dict[str, Any], order: dict[str, Any]) -> str:
+    same_order = bool(_lead_order_number(existing) and _compare_value(_lead_order_number(existing), order.get("number")))
+    incoming_rank = _payment_rank(order.get("process"))
+    existing_rank = _existing_payment_rank(existing)
+    if existing_rank >= 2 and not same_order:
+        if incoming_rank >= _payment_rank("partial"):
+            return "create_new_paid_order"
+        return "create_new_unpaid_attempt"
+    if existing_rank >= 2 and same_order:
+        if incoming_rank > existing_rank:
+            return "update_payment_transition"
+        return "note_only_locked_payment"
+    return "update"
+
+
+async def _add_order_note(lead_id: str, order: dict[str, Any], settings: dict[str, str]) -> tuple[dict[str, Any], str]:
+    text = _format_order_template(settings.get("note_template") or DEFAULT_NOTE_TEMPLATE, order, 10000)
+    existing, existing_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}/notes?limit=250", settings)
+    if not existing_error:
+        for note in (((existing or {}).get("_embedded") or {}).get("notes") or []):
+            if note.get("note_type") == "common" and _clean((note.get("params") or {}).get("text"), 10000) == text:
+                return {"skipped": True, "reason": "identical note already exists"}, ""
+    body, error, _ = await _amo_request(
+        "POST",
+        f"/api/v4/leads/{lead_id}/notes",
+        settings,
+        [{"note_type": "common", "params": {"text": text}}],
+    )
+    return {"text_length": len(text), "response": body}, error
 
 
 def _format_task_text(template: str, order: dict[str, Any]) -> str:
@@ -1130,11 +1962,24 @@ def _format_task_text(template: str, order: dict[str, Any]) -> str:
     return _clean(text, 2000)
 
 
+def _task_responsible_id(binding: dict[str, Any], deal_responsible_user_id: str = "") -> int | None:
+    return (
+        _int_or_none(binding.get("task_responsible_user_id"))
+        or _int_or_none(deal_responsible_user_id)
+        or _int_or_none(binding.get("responsible_user_id"))
+    )
+
+
+def _tasks_forbidden(process: Any) -> bool:
+    return _clean(process, 64) == "minicourse_paid"
+
+
 async def _create_task_for_lead(
     lead_id: str,
     order: dict[str, Any],
     settings: dict[str, str],
     binding: dict[str, Any],
+    responsible_user_id: str = "",
 ) -> tuple[dict[str, Any], str]:
     if not int(binding.get("task_enabled") or 0):
         return {"skipped": True, "reason": "task disabled"}, ""
@@ -1148,6 +1993,29 @@ async def _create_task_for_lead(
         due_minutes = max(1, min(60 * 24 * 30, int(binding.get("task_due_minutes") or 60)))
     except Exception:
         due_minutes = 60
+    existing, existing_error, _ = await _amo_request("GET", f"/api/v4/tasks?filter[entity_id]={lead_id_int}&limit=250", settings)
+    if not existing_error:
+        for task in (((existing or {}).get("_embedded") or {}).get("tasks") or []):
+            if not task.get("is_completed") and _clean(task.get("text"), 2000) == task_text:
+                return {"skipped": True, "reason": "open task already exists", "task_id": _clean(task.get("id"), 64)}, ""
+    for related_lead_id in await _customer_db_deal_ids_for_phone(order.get("phone")):
+        if related_lead_id == str(lead_id_int):
+            continue
+        related, related_error, _ = await _amo_request(
+            "GET",
+            f"/api/v4/tasks?filter[entity_id]={related_lead_id}&limit=250",
+            settings,
+        )
+        if related_error:
+            continue
+        for task in (((related or {}).get("_embedded") or {}).get("tasks") or []):
+            if not task.get("is_completed") and _clean(task.get("text"), 2000) == task_text:
+                return {
+                    "skipped": True,
+                    "reason": "open task already exists for the same phone",
+                    "task_id": _clean(task.get("id"), 64),
+                    "task_lead_id": related_lead_id,
+                }, ""
     task: dict[str, Any] = {
         "entity_id": lead_id_int,
         "entity_type": "leads",
@@ -1155,7 +2023,7 @@ async def _create_task_for_lead(
         "text": task_text,
         "complete_till": int(time.time()) + due_minutes * 60,
     }
-    responsible_id = _int_or_none(binding.get("task_responsible_user_id")) or _int_or_none(binding.get("responsible_user_id"))
+    responsible_id = _task_responsible_id(binding, responsible_user_id)
     if responsible_id:
         task["responsible_user_id"] = responsible_id
     body, error, _ = await _amo_request("POST", "/api/v4/tasks", settings, [task])
@@ -1186,10 +2054,23 @@ async def _process_order_payload(
     method: str,
     process: str = "",
 ) -> dict[str, Any]:
+    # Webhooks and Customer DB polling may deliver adjacent orders at once.
+    # Serialize the decision+write section so the persistent floating identity
+    # map is committed before the next order of the same person is evaluated.
+    async with _order_process_lock:
+        return await _process_order_payload_unlocked(payload, raw_payload, method, process)
+
+
+async def _process_order_payload_unlocked(
+    payload: dict[str, Any],
+    raw_payload: str,
+    method: str,
+    process: str = "",
+) -> dict[str, Any]:
     settings = await _settings_map()
     order = _normalize_order(payload, settings)
-    if process:
-        order["process"] = process
+    requested_process = process or payload.get("payment_state") or payload.get("status") or ""
+    order["process"] = _route_order(order, requested_process, settings)
     if _bindings_paused(settings):
         base_event = {
             "method": method,
@@ -1206,6 +2087,86 @@ async def _process_order_payload(
         }
         event_id = await _store_event(base_event)
         return {"ok": True, "stored": False, "event_id": event_id, "ignored": True, "error": "связки на паузе", "status_code": 200}
+    ignored_special = {
+        "ignore_minicourse_unpaid": "мини-курсы выгружаются только после полной оплаты",
+        "ignore_surcharge_partial": "для доплаты поддерживаются только создание и полная оплата",
+        "ignore_surcharge_title": "в названии заказа нет «Доплата до VIP»",
+    }
+    if order["process"] in ignored_special:
+        reason = ignored_special[order["process"]]
+        event_id = await _store_event({
+            "method": method,
+            "order_id": order["order_id"],
+            "number": order["number"],
+            "lead_id": "",
+            "contact_id": "",
+            "action": order["process"],
+            "success": 1,
+            "ignored": 1,
+            "error": "",
+            "details": json.dumps({"order": order, "reason": reason}, ensure_ascii=False),
+            "raw_payload": raw_payload,
+        })
+        return {
+            "ok": True,
+            "stored": False,
+            "event_id": event_id,
+            "ignored": True,
+            "action": order["process"],
+            "reason": reason,
+            "status_code": 200,
+        }
+    _apply_attribution(order, settings)
+    autopayment_ok, autopayment_source = _autopayment_match(payload, order)
+    special_order = order["process"] in {"surcharge_created", "surcharge_paid", "minicourse_paid"}
+    if not autopayment_ok and not special_order:
+        existing_leads, contacts, lookup_error = await _find_non_autopayment_duplicate_by_phone(order, settings)
+        if lookup_error:
+            result, process_error, action, ignored = {}, lookup_error, "non_autopayment_lookup_failed", 0
+        elif not existing_leads:
+            result, process_error, action, ignored = {}, "", "ignored_non_autopayment_no_duplicate", 1
+        else:
+            note_results: list[dict[str, Any]] = []
+            process_error = ""
+            for existing in existing_leads:
+                lead_id = _clean(existing.get("id"), 64)
+                note, note_error = await _add_order_note(lead_id, order, settings)
+                note_results.append({"lead_id": lead_id, "note": note, "error": note_error})
+                if note_error:
+                    process_error = note_error
+                    break
+            result = {
+                "lead_id": _clean(existing_leads[0].get("id"), 64),
+                "lead_ids": [_clean(item.get("id"), 64) for item in existing_leads],
+                "notes": note_results,
+                "preserved_all_fields": True,
+            }
+            action, ignored = "noted_non_autopayment_contact_deals", 0
+        base_event = {
+            "method": method,
+            "order_id": order["order_id"],
+            "number": order["number"],
+            "lead_id": _clean(result.get("lead_id"), 64),
+            "contact_id": _clean((contacts[0] if contacts else {}).get("id"), 64),
+            "action": action,
+            "success": 0 if process_error else 1,
+            "ignored": ignored,
+            "error": process_error,
+            "details": json.dumps({"order": order, "autopayment_match": "", "result": result}, ensure_ascii=False),
+            "raw_payload": raw_payload,
+        }
+        event_id = await _store_event(base_event)
+        return {
+            "ok": not bool(process_error),
+            "stored": bool(existing_leads and not process_error),
+            "event_id": event_id,
+            "ignored": bool(ignored),
+            "action": action,
+            "lead_id": _clean(result.get("lead_id"), 64),
+            "error": process_error,
+            "status_code": 200,
+        }
+    order["autopayment_match"] = autopayment_source if autopayment_ok else order["process"]
     binding = await _binding_for_process(order.get("process") or payload.get("payment_state") or payload.get("status") or "", settings)
     base_event = {
         "method": method,
@@ -1234,22 +2195,68 @@ async def _process_order_payload(
         existing_id, existing_source = await _find_existing_lead(order, settings, binding)
         if existing_id and not existing_source:
             existing_source = "unknown"
+    existing: dict[str, Any] | None = None
+    if existing_id:
+        existing_body, existing_error, _ = await _amo_request("GET", f"/api/v4/leads/{existing_id}", settings)
+        if existing_error:
+            result, error, action = {}, existing_error, "lookup_failed"
+        else:
+            existing = existing_body if isinstance(existing_body, dict) else None
     if existing_id and duplicate_policy == "skip":
         result, error = {"lead_id": existing_id, "skipped_duplicate": True}, ""
         action = "skipped_duplicate"
         base_event["ignored"] = 1
+    elif existing_id and existing:
+        duplicate_action = _duplicate_action(existing, order)
+        if duplicate_action in {"create_new_paid_order", "create_new_unpaid_attempt"}:
+            responsible = await _new_responsible(settings, binding)
+            if _selected_responsible_ids(settings, binding) and not responsible:
+                result, error, action = {}, "Нет активного выбранного ответственного amoCRM", "create_failed"
+            else:
+                result, error = await _create_lead(order, settings, binding, responsible)
+                action = "created_new_paid_order" if duplicate_action == "create_new_paid_order" else "created_new_unpaid_attempt"
+                if not error and result.get("lead_id"):
+                    await _advance_responsible_cursor(settings, binding)
+        elif duplicate_action.startswith("note_only"):
+            result, error = {"lead_id": existing_id, "preserved": {
+                "pipeline_id": existing.get("pipeline_id"),
+                "status_id": existing.get("status_id"),
+                "responsible_user_id": existing.get("responsible_user_id"),
+                "name": existing.get("name"),
+            }}, ""
+            action = duplicate_action
+        else:
+            result, error = await _update_lead(existing_id, order, settings, binding, existing)
+            action = "updated"
     elif existing_id:
-        result, error = await _update_lead(existing_id, order, settings, binding)
-        action = "updated"
+        result, error = {}, error or "Не удалось прочитать найденную сделку"
+        action = "lookup_failed"
     else:
-        result, error = await _create_lead(order, settings, binding)
-        action = "created"
+        responsible = await _new_responsible(settings, binding)
+        if _selected_responsible_ids(settings, binding) and not responsible:
+            result, error, action = {}, "Нет активного выбранного ответственного amoCRM", "create_failed"
+        else:
+            result, error = await _create_lead(order, settings, binding, responsible)
+            action = "created"
+            if not error and result.get("lead_id"):
+                await _advance_responsible_cursor(settings, binding)
+    lead_id = _clean((result or {}).get("lead_id") or existing_id, 64)
+    note_result: dict[str, Any] = {"skipped": True}
+    note_error = ""
+    if not error and lead_id and action != "skipped_duplicate":
+        note_result, note_error = await _add_order_note(lead_id, order, settings)
+        if note_error:
+            error = f"note: {note_error}"
     task_result: dict[str, Any] = {"skipped": True}
     task_error = ""
-    if not error and action != "skipped_duplicate":
-        task_result, task_error = await _create_task_for_lead(_clean(result.get("lead_id") or existing_id, 64), order, settings, binding)
+    task_forbidden = _tasks_forbidden(order["process"])
+    if not error and not task_forbidden and action in {"created", "created_new_paid_order", "created_new_unpaid_attempt"}:
+        created_responsible = _clean((result or {}).get("responsible_user_id") or responsible, 64)
+        task_result, task_error = await _create_task_for_lead(lead_id, order, settings, binding, created_responsible)
         if task_error:
             error = f"task: {task_error}"
+    elif task_forbidden:
+        task_result = {"skipped": True, "reason": "tasks are disabled for this order type"}
     base_event["action"] = action
     base_event["lead_id"] = _clean(result.get("lead_id") or existing_id, 64) if result else existing_id
     base_event["contact_id"] = _clean(result.get("contact_id"), 64) if result else ""
@@ -1263,6 +2270,7 @@ async def _process_order_payload(
             "duplicate_policy": duplicate_policy,
             "existing_source": existing_source,
             "amo": result,
+            "note": note_result,
             "task": task_result,
         },
         ensure_ascii=False,
@@ -1314,7 +2322,7 @@ def _bindings_paused(settings: dict[str, str]) -> bool:
     return str(settings.get("bindings_paused") or "0").strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
-async def _customer_db_rows(limit: int = 5000) -> list[dict[str, Any]]:
+async def _customer_db_rows(limit: int = CDB_PAGE_SIZE, offset: int = 0) -> list[dict[str, Any]]:
     db_path = _customer_db_path()
     if not db_path.exists():
         return []
@@ -1327,8 +2335,9 @@ async def _customer_db_rows(limit: int = 5000) -> list[dict[str, Any]]:
                 FROM cdb_getcourse_orders
                 ORDER BY updated_at ASC, id ASC
                 LIMIT ?
+                OFFSET ?
                 """,
-                (max(1, min(20000, int(limit))),),
+                (max(1, min(5000, int(limit))), max(0, int(offset))),
             )
             return [dict(row) for row in await cur.fetchall()]
     except Exception as exc:
@@ -1384,7 +2393,7 @@ async def _bootstrap_customer_db_sync(rows: list[dict[str, Any]]) -> int:
             record_id = int(row["id"])
             if record_id in states:
                 continue
-            source_hash = _clean(row.get("custom_fields"), 200000)
+            source_hash = _customer_db_source_hash(row.get("custom_fields"))
             await db.execute(
                 """
                 INSERT OR IGNORE INTO cdb_sync(source_record_id,source_updated_at,source_hash,success,error,last_synced_at)
@@ -1393,58 +2402,116 @@ async def _bootstrap_customer_db_sync(rows: list[dict[str, Any]]) -> int:
                 (record_id, _clean(row.get("updated_at"), 80), source_hash, 1, "bootstrapped without amo sync", _now()),
             )
             count += 1
-        await db.execute(
-            "INSERT INTO settings(key,value) VALUES('cdb_sync_bootstrapped','1') ON CONFLICT(key) DO UPDATE SET value='1'"
-        )
         await db.commit()
-    if count:
-        _log("info", "customer-db sync bootstrap marked %s existing GetCourse orders as seen", count)
     return count
 
 
+async def _bootstrap_all_customer_db_rows() -> tuple[int, int]:
+    offset = 0
+    source_rows = 0
+    bootstrapped = 0
+    while True:
+        rows = await _customer_db_rows(limit=CDB_PAGE_SIZE, offset=offset)
+        if not rows:
+            break
+        source_rows += len(rows)
+        bootstrapped += await _bootstrap_customer_db_sync(rows)
+        offset += len(rows)
+    await _set_setting("cdb_sync_bootstrapped", "1")
+    if bootstrapped:
+        _log("info", "customer-db sync bootstrap marked %s existing GetCourse orders as seen", bootstrapped)
+    return source_rows, bootstrapped
+
+
+async def _refresh_cdb_sync_fingerprint(record_id: int, updated_at: str, source_hash: str) -> None:
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        await db.execute(
+            "UPDATE cdb_sync SET source_updated_at=?,source_hash=? WHERE source_record_id=?",
+            (updated_at, source_hash, record_id),
+        )
+        await db.commit()
+
+
 async def _sync_customer_db_once(backfill: bool = False, limit: int = 200) -> dict[str, Any]:
+    async with _sync_lock:
+        return await _sync_customer_db_once_unlocked(backfill=backfill, limit=limit)
+
+
+async def _sync_customer_db_once_unlocked(backfill: bool = False, limit: int = 200) -> dict[str, Any]:
     settings = await _settings_map()
     if _bindings_paused(settings):
         return {"ok": True, "paused": True, "source_rows": 0, "processed": 0, "bootstrapped": 0}
-    rows = await _customer_db_rows()
-    if not rows:
-        if settings.get("cdb_sync_bootstrapped") != "1" and not backfill:
-            await _set_setting("cdb_sync_bootstrapped", "1")
-        return {"ok": True, "source_rows": 0, "processed": 0, "bootstrapped": 0}
     if settings.get("cdb_sync_bootstrapped") != "1" and not backfill:
-        bootstrapped = await _bootstrap_customer_db_sync(rows)
-        return {"ok": True, "source_rows": len(rows), "processed": 0, "bootstrapped": bootstrapped}
-    states = await _sync_state_for([int(row["id"]) for row in rows])
+        source_rows, bootstrapped = await _bootstrap_all_customer_db_rows()
+        return {"ok": True, "source_rows": source_rows, "processed": 0, "bootstrapped": bootstrapped}
+    process_limit = max(1, min(1000, int(limit)))
+    offset = 0
+    source_rows = 0
     processed = 0
+    import_skipped = 0
     errors = []
-    for row in rows:
-        if processed >= max(1, min(1000, int(limit))):
+    while processed < process_limit:
+        rows = await _customer_db_rows(limit=CDB_PAGE_SIZE, offset=offset)
+        if not rows:
             break
-        record_id = int(row["id"])
-        updated_at = _clean(row.get("updated_at"), 80)
-        source_hash = _clean(row.get("custom_fields"), 200000)
-        state = states.get(record_id)
-        if state and state.get("source_updated_at") == updated_at and state.get("source_hash") == source_hash:
-            continue
-        try:
-            fields = json.loads(row.get("custom_fields") or "{}")
-            if not isinstance(fields, dict):
-                raise ValueError("custom_fields is not an object")
-            payload = _payload_from_customer_db(fields)
-            raw_payload = json.dumps({"source": "customer-db", "record_id": record_id, "custom_fields": fields}, ensure_ascii=False)
-            process = _clean(fields.get("payment_state"), 80)
-            result = await _process_order_payload(payload, raw_payload, "customer-db", process)
-            await _mark_cdb_sync(record_id, updated_at, source_hash, result)
-            processed += 1
-            if not result.get("ok"):
-                errors.append({"record_id": record_id, "error": result.get("error")})
-        except Exception as exc:
-            error = str(exc)
-            await _mark_cdb_sync(record_id, updated_at, source_hash, {"ok": False, "error": error})
-            errors.append({"record_id": record_id, "error": error})
-            processed += 1
-            _log("warning", "customer-db GetCourse order %s sync failed: %s", record_id, error)
-    return {"ok": not errors, "source_rows": len(rows), "processed": processed, "errors": errors[:20]}
+        source_rows += len(rows)
+        states = await _sync_state_for([int(row["id"]) for row in rows])
+        for row in rows:
+            if processed >= process_limit:
+                break
+            record_id = int(row["id"])
+            updated_at = _clean(row.get("updated_at"), 80)
+            legacy_source_hash = _clean(row.get("custom_fields"), 200000)
+            source_hash = _customer_db_source_hash(row.get("custom_fields"))
+            state = states.get(record_id)
+            if state and int(state.get("success") or 0):
+                if state.get("source_hash") == source_hash:
+                    if state.get("source_updated_at") != updated_at:
+                        await _refresh_cdb_sync_fingerprint(record_id, updated_at, source_hash)
+                    continue
+                state_source_hash = _clean(state.get("source_hash"), 200000)
+                if not state_source_hash.startswith("v2:") and _customer_db_source_hash(state_source_hash) == source_hash:
+                    await _refresh_cdb_sync_fingerprint(record_id, updated_at, source_hash)
+                    continue
+                if state.get("source_updated_at") == updated_at and state.get("source_hash") == legacy_source_hash:
+                    await _refresh_cdb_sync_fingerprint(record_id, updated_at, source_hash)
+                    continue
+            try:
+                fields = json.loads(row.get("custom_fields") or "{}")
+                if not isinstance(fields, dict):
+                    raise ValueError("custom_fields is not an object")
+                if _customer_db_file_import(fields):
+                    await _mark_cdb_sync(
+                        record_id,
+                        updated_at,
+                        source_hash,
+                        {"ok": True, "error": "file import excluded from amo sync"},
+                    )
+                    processed += 1
+                    import_skipped += 1
+                    continue
+                payload = _payload_from_customer_db(fields)
+                raw_payload = json.dumps({"source": "customer-db", "record_id": record_id, "custom_fields": fields}, ensure_ascii=False)
+                process = _clean(fields.get("payment_state"), 80)
+                result = await _process_order_payload(payload, raw_payload, "customer-db", process)
+                await _mark_cdb_sync(record_id, updated_at, source_hash, result)
+                processed += 1
+                if not result.get("ok"):
+                    errors.append({"record_id": record_id, "error": result.get("error")})
+            except Exception as exc:
+                error = str(exc)
+                await _mark_cdb_sync(record_id, updated_at, source_hash, {"ok": False, "error": error})
+                errors.append({"record_id": record_id, "error": error})
+                processed += 1
+                _log("warning", "customer-db GetCourse order %s sync failed: %s", record_id, error)
+        offset += len(rows)
+    return {
+        "ok": not errors,
+        "source_rows": source_rows,
+        "processed": processed,
+        "import_skipped": import_skipped,
+        "errors": errors[:20],
+    }
 
 
 async def _customer_db_sync_loop() -> None:
@@ -1545,20 +2612,51 @@ async def amo_catalog(request: Request):
 async def amo_users(request: Request):
     await _require_panel_user(request)
     settings = await _settings_map()
-    body, error, _ = await _amo_request("GET", "/api/v4/users", settings)
+    body, error, _ = await _amo_request("GET", "/api/v4/users?limit=250", settings)
     if error:
         return JSONResponse({"error": error, "users": []}, status_code=502)
     users = []
     for user in (((body or {}).get("_embedded") or {}).get("users") or []):
         if not isinstance(user, dict):
             continue
+        rights = user.get("rights") if isinstance(user.get("rights"), dict) else {}
         users.append({
             "id": _clean(user.get("id"), 64),
             "name": _clean(user.get("name"), 300),
             "email": _clean(user.get("email"), 300),
-            "is_active": bool(user.get("is_active", True)),
+            "is_active": bool(rights.get("is_active", user.get("is_active", True))),
         })
     return {"users": users}
+
+
+@router.post("/amo/preset-from-leads")
+async def amo_preset_from_leads(request: Request):
+    await _require_panel_user(request)
+    data = await request.json()
+    lead_ids = data.get("lead_ids") if isinstance(data, dict) else []
+    if not isinstance(lead_ids, list) or not 1 <= len(lead_ids) <= 10:
+        raise HTTPException(400, "Укажите от 1 до 10 lead_ids")
+    settings = await _settings_map()
+    samples = []
+    for raw_id in lead_ids:
+        lead_id = _int_or_none(raw_id)
+        if not lead_id:
+            continue
+        lead, error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}?with=contacts", settings)
+        if error:
+            samples.append({"lead_id": lead_id, "error": error})
+            continue
+        samples.append({
+            "lead_id": lead_id,
+            "pipeline_id": lead.get("pipeline_id"),
+            "status_id": lead.get("status_id"),
+            "responsible_user_id": lead.get("responsible_user_id"),
+            "tag_names": [item.get("name") for item in ((lead.get("_embedded") or {}).get("tags") or [])],
+            "custom_field_ids": [item.get("field_id") for item in lead.get("custom_fields_values") or []],
+        })
+    preset = {"source_lead_ids": lead_ids, "samples": samples, "created_at": _now()}
+    await _set_setting("sample_preset_json", json.dumps(preset, ensure_ascii=False))
+    return preset
 
 
 @router.get("/bindings")
@@ -1716,6 +2814,7 @@ def _getcourse_url_params(secret: str) -> str:
         ("payedMoney", "{object.payed_money}"),
         ("status", "{object.status}"),
         ("paymentLink", "{object.payment_link}"),
+        ("date_add", "{date_add}"),
         ("firstName", "{object.user.first_name}"),
         ("lastName", "{object.user.last_name}"),
         ("name", "{object.user.name}"),
@@ -1733,10 +2832,17 @@ def _getcourse_url_params(secret: str) -> str:
         ("utmT", "{object.user.create_session.utm_term}"),
         ("user_yclid", "{object.user.yclid}"),
         ("user_ym_uid", "{object.user.ym_uid}"),
+        ("pay_field_user_ym_uid", "{pay_field_user_ym_uid}"),
+        ("reg_field_user_ym_uid", "{reg_field_user_ym_uid}"),
         ("user_source", "{object.user.source}"),
         ("user_content", "{object.user.content}"),
         ("user_campaign", "{object.user.campaign}"),
         ("user_term", "{object.user.term}"),
         ("user_medium", "{object.user.medium}"),
+        ("orderUtmS", "{object.create_session.utm_source}"),
+        ("orderUtmM", "{object.create_session.utm_medium}"),
+        ("orderUtmCa", "{object.create_session.utm_campaign}"),
+        ("orderUtmCo", "{object.create_session.utm_content}"),
+        ("orderUtmT", "{object.create_session.utm_term}"),
     ]
     return urlencode(pairs)

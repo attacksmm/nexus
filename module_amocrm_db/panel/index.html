@@ -18,6 +18,7 @@
     .filters{display:grid;grid-template-columns:180px 180px minmax(180px,1fr) auto auto;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);background:#0d0d0d;align-items:end}
     label{display:block;color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.08em;margin:0 0 4px}
     .input,.select,.textarea{width:100%;min-height:32px;border:1px solid var(--line2);background:#070707;color:var(--text);padding:6px 8px;outline:none}.textarea{min-height:160px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .check{display:flex;align-items:center;gap:8px;min-height:32px;color:var(--soft);text-transform:none;font-size:13px;letter-spacing:0;margin:0}.check input{width:16px;height:16px}
     .input:focus,.select:focus,.textarea:focus{border-color:var(--accent)}
     .btn{min-height:32px;border:1px solid var(--line2);background:#141414;color:var(--text);padding:6px 10px}.btn:hover{border-color:#666}.btn.primary{background:#fff;color:#000;border-color:#fff}.btn.danger{background:#2a1010;border-color:#612020;color:#ffbdbd}
     .workspace{display:grid;grid-template-columns:minmax(0,1fr) 360px;height:100%;min-height:0}
@@ -117,11 +118,20 @@
             <div><label>Request timeout, сек</label><input id="timeoutInput" class="input mono"></div>
             <div><label>Debounce, сек</label><input id="debounceInput" class="input mono"></div>
             <div><label>customer-db path</label><input id="dbPath" class="input mono" readonly></div>
+            <div><label>Reconcile</label><label class="check"><input id="reconcileEnabled" type="checkbox"> Автосверка amoCRM</label></div>
+            <div><label>Lookback, дней</label><input id="reconcileLookbackInput" class="input mono"></div>
+            <div><label>Interval, минут</label><input id="reconcileIntervalInput" class="input mono"></div>
+            <div><label>Delay, сек</label><input id="reconcileDelayInput" class="input mono"></div>
+            <div><label>amoCRM interval, сек</label><input id="amoIntervalInput" class="input mono"></div>
+            <div><label>Быстрых повторов</label><input id="amoRetryInput" class="input mono"></div>
           </div>
           <div class="actions" style="margin-top:10px">
             <button id="saveSettingsBtn" class="btn primary" type="button">Сохранить</button>
+            <button id="runReconcileBtn" class="btn" type="button">Сверить сейчас</button>
             <span id="settingsStatus" class="status"></span>
           </div>
+          <div id="reconcileStatus" class="status" style="margin-top:10px"></div>
+          <div id="queueStatus" class="status" style="margin-top:6px"></div>
         </div>
       </div>
     </section>
@@ -166,8 +176,16 @@ async function loadSettings(){
   $('secretInput').value = settings.webhook_secret || '';
   $('timeoutInput').value = settings.request_timeout || '12';
   $('debounceInput').value = settings.debounce_seconds || '3';
+  $('reconcileEnabled').checked = String(settings.reconcile_enabled ?? '1') !== '0';
+  $('reconcileLookbackInput').value = settings.reconcile_lookback_days || '14';
+  $('reconcileIntervalInput').value = settings.reconcile_interval_minutes || '360';
+  $('reconcileDelayInput').value = settings.reconcile_delay_seconds || '0.35';
+  $('amoIntervalInput').value = settings.amo_min_interval_seconds || '0.5';
+  $('amoRetryInput').value = settings.amo_retry_attempts || '5';
   $('dbPath').value = settings.customer_db_path || '';
   renderWebhookUrl();
+  await loadReconcileStatus();
+  await loadQueueStatus();
 }
 
 async function loadEnv(){
@@ -329,6 +347,28 @@ async function loadEvents(){
   </tr>`).join('') || '<tr><td colspan="5" class="status">Событий нет</td></tr>';
 }
 
+async function loadReconcileStatus(){
+  const data = await fetchJson(API + '/reconcile/status').catch(e => ({error:e.message}));
+  if (data.error) {
+    $('reconcileStatus').textContent = data.error;
+    return;
+  }
+  const last = data.last_finished_at || data.last_started_at || 'еще не запускалась';
+  const suffix = data.running ? ' · выполняется' : '';
+  $('reconcileStatus').textContent = `Сверка: ${last}; найдено ${data.last_missing || 0}, синхр. ${data.last_synced || 0}, ошибок ${data.last_failed || 0}${data.last_error ? '; ' + data.last_error : ''}${suffix}`;
+}
+
+async function loadQueueStatus(){
+  const data = await fetchJson(API + '/queue/status').catch(e => ({error:e.message}));
+  if (data.error) {
+    $('queueStatus').textContent = data.error;
+    return;
+  }
+  const queue = data.queue || {};
+  const amo = data.amo_requests || {};
+  $('queueStatus').textContent = `Очередь: ожидает ${Number(queue.pending || 0) + Number(queue.retry || 0)}, выполняется ${queue.processing || 0}; worker ${data.worker ? 'работает' : 'остановлен'}; 429 после запуска: ${amo.rate_limit_responses || 0}`;
+}
+
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === btn));
   document.querySelectorAll('.view').forEach(x => x.classList.toggle('active', x.id === 'view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)));
@@ -352,9 +392,28 @@ $('eventFilter').addEventListener('change', loadEvents);
 $('loadEventsBtn').addEventListener('click', loadEvents);
 $('saveSettingsBtn').addEventListener('click', async () => {
   $('settingsStatus').textContent='Сохранение...';
-  settings = await fetchJson(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({webhook_secret:$('secretInput').value.trim(), request_timeout:$('timeoutInput').value.trim(), debounce_seconds:$('debounceInput').value.trim()})});
+  settings = await fetchJson(API + '/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+    webhook_secret:$('secretInput').value.trim(),
+    request_timeout:$('timeoutInput').value.trim(),
+    debounce_seconds:$('debounceInput').value.trim(),
+    reconcile_enabled:$('reconcileEnabled').checked ? '1' : '0',
+    reconcile_lookback_days:$('reconcileLookbackInput').value.trim(),
+    reconcile_interval_minutes:$('reconcileIntervalInput').value.trim(),
+    reconcile_delay_seconds:$('reconcileDelayInput').value.trim(),
+    amo_min_interval_seconds:$('amoIntervalInput').value.trim(),
+    amo_retry_attempts:$('amoRetryInput').value.trim()
+  })});
   $('settingsStatus').textContent='Сохранено';
   renderWebhookUrl();
+  await loadReconcileStatus();
+  await loadQueueStatus();
+});
+$('runReconcileBtn').addEventListener('click', async () => {
+  $('settingsStatus').textContent='Сверка...';
+  const data = await fetchJson(API + '/reconcile/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({lookback_days:Number($('reconcileLookbackInput').value || 14), max_sync:1000})}).catch(e => ({ok:false,error:e.message}));
+  $('settingsStatus').textContent = data.ok ? `Готово: найдено ${data.missing || 0}, синхр. ${data.synced || 0}` : (data.error || 'Ошибка');
+  await loadReconcileStatus();
+  await loadDeals();
 });
 $('secretInput').addEventListener('input', renderWebhookUrl);
 

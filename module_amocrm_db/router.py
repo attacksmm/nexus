@@ -6,7 +6,9 @@ import logging
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,19 +24,60 @@ router = APIRouter()
 _db_path: str | None = None
 _module_dir: Path | None = None
 _logger: logging.Logger | None = None
-_sync_tasks: dict[str, tuple[asyncio.Task, int]] = {}
+_startup_task: asyncio.Task | None = None
+_queue_task: asyncio.Task | None = None
+_reconcile_task: asyncio.Task | None = None
+_customer_write_lock = asyncio.Lock()
+_amo_rate_lock = asyncio.Lock()
+_amo_next_request_at = 0.0
+_amo_state: dict[str, Any] = {
+    "requests": 0,
+    "rate_limit_responses": 0,
+    "retries": 0,
+    "last_429_at": "",
+    "last_error": "",
+}
+_reconcile_state: dict[str, Any] = {
+    "running": False,
+    "last_started_at": "",
+    "last_finished_at": "",
+    "last_error": "",
+    "last_missing": 0,
+    "last_synced": 0,
+    "last_failed": 0,
+    "last_days": [],
+}
 
 MODULE_ID = "amocrm-db"
 TABLE_NAME = "amo_deals"
 TABLE_DISPLAY_NAME = "Сделки amoCRM"
+LEGACY_REPLAY_SINCE = "2026-07-15T21:00:00Z"
 
 DEFAULT_SETTINGS = {
     "webhook_secret": "",
     "request_timeout": "12",
     "debounce_seconds": "3",
+    "reconcile_enabled": "1",
+    "reconcile_interval_minutes": "360",
+    "reconcile_lookback_days": "14",
+    "reconcile_delay_seconds": "0.35",
+    "amo_min_interval_seconds": "0.5",
+    "amo_retry_attempts": "5",
 }
 
 LEAD_KEY_RE = re.compile(r"^leads\[(?P<action>[^\]]+)\]\[(?P<idx>\d+)\]\[(?P<field>[^\]]+)\]$")
+
+
+@asynccontextmanager
+async def _module_db():
+    if not _db_path:
+        raise RuntimeError("amocrm-db is not initialized")
+    db = await aiosqlite.connect(_db_path, timeout=60)
+    try:
+        await db.execute("PRAGMA busy_timeout=60000")
+        yield db
+    finally:
+        await db.close()
 
 
 async def _require_panel_user(request: Request) -> dict:
@@ -45,21 +88,51 @@ async def _require_panel_user(request: Request) -> dict:
 
 
 def setup(ctx):
-    global _db_path, _module_dir, _logger
+    global _db_path, _module_dir, _logger, _startup_task
     _db_path = ctx.db_path
     _module_dir = Path(ctx.module_dir)
     _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.amocrm-db"))
     loop = asyncio.get_event_loop()
     if loop.is_running():
-        loop.create_task(_init_db())
+        if _startup_task is None or _startup_task.done():
+            _startup_task = loop.create_task(_start_background_tasks())
     else:
         loop.run_until_complete(_init_db())
+
+
+async def shutdown() -> None:
+    global _startup_task, _queue_task, _reconcile_task
+    tasks = [_startup_task, _queue_task, _reconcile_task]
+    for task in tasks:
+        if task and not task.done():
+            task.cancel()
+    for task in tasks:
+        if not task:
+            continue
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    _startup_task = None
+    _queue_task = None
+    _reconcile_task = None
+
+
+async def _start_background_tasks() -> None:
+    global _queue_task, _reconcile_task
+    await _init_db()
+    if _queue_task is None or _queue_task.done():
+        _queue_task = asyncio.create_task(_queue_worker_loop())
+    if _reconcile_task is None or _reconcile_task.done():
+        _reconcile_task = asyncio.create_task(_reconcile_loop())
 
 
 async def _init_db() -> None:
     if not _db_path:
         return
-    async with aiosqlite.connect(_db_path) as db:
+    async with _module_db() as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -79,7 +152,11 @@ async def _init_db() -> None:
                 ignored INTEGER NOT NULL DEFAULT 0,
                 error TEXT NOT NULL DEFAULT '',
                 details TEXT NOT NULL DEFAULT '',
-                raw_payload TEXT NOT NULL DEFAULT ''
+                raw_payload TEXT NOT NULL DEFAULT '',
+                queue_status TEXT NOT NULL DEFAULT 'completed',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
             CREATE INDEX IF NOT EXISTS idx_events_deal ON events(deal_id);
             CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
@@ -90,6 +167,21 @@ async def _init_db() -> None:
             );
             """
         )
+        columns = {str(row[1]) for row in await (await db.execute("PRAGMA table_info(events)")).fetchall()}
+        migrations = {
+            "queue_status": "ALTER TABLE events ADD COLUMN queue_status TEXT NOT NULL DEFAULT 'completed'",
+            "attempts": "ALTER TABLE events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            "next_attempt_at": "ALTER TABLE events ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''",
+            "updated_at": "ALTER TABLE events ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        }
+        for column, sql in migrations.items():
+            if column not in columns:
+                await db.execute(sql)
+        await db.execute(
+            "UPDATE events SET queue_status='retry',next_attempt_at=?,updated_at=? WHERE queue_status='processing'",
+            (_now(), _now()),
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_queue ON events(queue_status,next_attempt_at,id)")
         for key, value in DEFAULT_SETTINGS.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
         if not _env()["webhook_secret"]:
@@ -100,8 +192,9 @@ async def _init_db() -> None:
                     "INSERT INTO settings(key,value) VALUES('webhook_secret',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (secrets.token_urlsafe(24),),
                 )
+        requeued = await _requeue_unrecovered_rate_limits(db)
         await db.commit()
-    _log("info", "amocrm-db initialized")
+    _log("info", "amocrm-db initialized legacy_429_requeued=%s", requeued)
 
 
 def _log(level: str, message: str, *args: Any) -> None:
@@ -111,6 +204,12 @@ def _log(level: str, message: str, *args: Any) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _after(seconds: float) -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=max(0.0, seconds))
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _clean(value: Any, limit: int = 1000) -> str:
@@ -161,11 +260,32 @@ def _debounce_seconds(settings: dict[str, str]) -> float:
         return 3.0
 
 
+def _setting_bool(settings: dict[str, str], key: str, default: bool = False) -> bool:
+    value = _clean(settings.get(key), 20).lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "да"}
+
+
+def _setting_int(settings: dict[str, str], key: str, default: int, *, min_value: int, max_value: int) -> int:
+    try:
+        return max(min_value, min(max_value, int(float(settings.get(key) or default))))
+    except Exception:
+        return default
+
+
+def _setting_float(settings: dict[str, str], key: str, default: float, *, min_value: float, max_value: float) -> float:
+    try:
+        return max(min_value, min(max_value, float(settings.get(key) or default)))
+    except Exception:
+        return default
+
+
 async def _settings_map() -> dict[str, str]:
     data = dict(DEFAULT_SETTINGS)
     if not _db_path:
         return data
-    async with aiosqlite.connect(_db_path) as db:
+    async with _module_db() as db:
         async with db.execute("SELECT key,value FROM settings") as cur:
             async for key, value in cur:
                 data[str(key)] = str(value or "")
@@ -176,8 +296,18 @@ async def _settings_map() -> dict[str, str]:
 
 
 async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"webhook_secret", "request_timeout", "debounce_seconds"}
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    allowed = {
+        "webhook_secret",
+        "request_timeout",
+        "debounce_seconds",
+        "reconcile_enabled",
+        "reconcile_interval_minutes",
+        "reconcile_lookback_days",
+        "reconcile_delay_seconds",
+        "amo_min_interval_seconds",
+        "amo_retry_attempts",
+    }
+    async with _module_db() as db:
         for key in allowed:
             if key in data:
                 await db.execute(
@@ -185,7 +315,16 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
                     (key, _clean(data.get(key), 300)),
                 )
         await db.commit()
-    return await get_settings()
+    return await _settings_payload()
+
+
+async def _settings_payload() -> dict[str, Any]:
+    settings = await _settings_map()
+    return {
+        **settings,
+        "webhook_secret_source": "env" if _env()["webhook_secret"] else "db",
+        "customer_db_path": str(_customer_db_path()),
+    }
 
 
 def _secret_ok(request: Request, settings: dict[str, str]) -> bool:
@@ -291,11 +430,25 @@ def _iter_lead_events(payload: dict[str, Any]) -> list[dict[str, str]]:
 
 
 async def _store_event(data: dict[str, Any]) -> int:
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    queue_status = _clean(data.get("queue_status"), 32)
+    if not queue_status:
+        if data.get("ignored"):
+            queue_status = "ignored"
+        elif data.get("success"):
+            queue_status = "completed"
+        elif data.get("error"):
+            queue_status = "failed"
+        else:
+            queue_status = "pending"
+    async with _module_db() as db:
         cur = await db.execute(
             """
-            INSERT INTO events(action,deal_id,pipeline_id,status_id,old_status_id,responsible_user_id,success,ignored,error,details,raw_payload)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO events(
+                action,deal_id,pipeline_id,status_id,old_status_id,responsible_user_id,
+                success,ignored,error,details,raw_payload,
+                queue_status,attempts,next_attempt_at,updated_at
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 _clean(data.get("action"), 64),
@@ -309,6 +462,10 @@ async def _store_event(data: dict[str, Any]) -> int:
                 _clean(data.get("error"), 2000),
                 data.get("details") if isinstance(data.get("details"), str) else json.dumps(data.get("details") or {}, ensure_ascii=False),
                 data.get("raw_payload") if isinstance(data.get("raw_payload"), str) else json.dumps(data.get("raw_payload") or {}, ensure_ascii=False),
+                queue_status,
+                int(data.get("attempts") or 0),
+                _clean(data.get("next_attempt_at"), 64),
+                _now(),
             ),
         )
         await db.commit()
@@ -318,42 +475,276 @@ async def _store_event(data: dict[str, Any]) -> int:
 async def _update_event(event_id: int, **data: Any) -> None:
     assignments = []
     values: list[Any] = []
-    for key in ("success", "ignored", "error", "details"):
+    for key in ("success", "ignored", "error", "details", "queue_status", "attempts", "next_attempt_at"):
         if key not in data:
             continue
         assignments.append(f"{key}=?")
         value = data[key]
         if key in {"success", "ignored"}:
             values.append(1 if value else 0)
+        elif key == "attempts":
+            values.append(int(value or 0))
         elif key == "details" and not isinstance(value, str):
             values.append(json.dumps(value or {}, ensure_ascii=False))
         else:
-            values.append(_clean(value, 2000) if key == "error" else value)
+            values.append(_clean(value, 2000) if key == "error" else _clean(value, 64) if key in {"queue_status", "next_attempt_at"} else value)
     if not assignments:
         return
+    assignments.append("updated_at=?")
+    values.append(_now())
     values.append(int(event_id))
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _module_db() as db:
         await db.execute(f"UPDATE events SET {', '.join(assignments)} WHERE id=?", values)
         await db.commit()
 
 
-async def _amo_get(path: str, settings: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
+async def _requeue_unrecovered_rate_limits(db: aiosqlite.Connection) -> int:
+    await db.execute(
+        """
+        UPDATE events
+        SET queue_status='retry',success=0,ignored=0,attempts=0,
+            next_attempt_at=?,updated_at=?
+        WHERE id IN (
+            SELECT failed.id
+            FROM events AS failed
+            WHERE failed.deal_id<>''
+              AND failed.received_at>=?
+              AND failed.error LIKE 'amoCRM HTTP 429:%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM events AS ok
+                  WHERE ok.deal_id=failed.deal_id
+                    AND ok.success=1
+                    AND ok.received_at>failed.received_at
+              )
+              AND failed.id=(
+                  SELECT MAX(newer.id)
+                  FROM events AS newer
+                  WHERE newer.deal_id=failed.deal_id
+                    AND newer.error LIKE 'amoCRM HTTP 429:%'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM events AS later_ok
+                        WHERE later_ok.deal_id=newer.deal_id
+                          AND later_ok.success=1
+                          AND later_ok.received_at>newer.received_at
+                    )
+              )
+        )
+        """,
+        (_now(), _now(), LEGACY_REPLAY_SINCE),
+    )
+    row = await (await db.execute("SELECT changes()" )).fetchone()
+    return int(row[0] if row else 0)
+
+
+async def _enqueue_event(event_id: int, deal_id: str, settings: dict[str, str]) -> None:
+    next_attempt_at = _after(_debounce_seconds(settings))
+    async with _module_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            UPDATE events
+            SET queue_status='ignored',ignored=1,error='superseded by newer webhook',
+                next_attempt_at='',updated_at=?
+            WHERE deal_id=? AND id<>? AND queue_status IN ('pending','retry')
+            """,
+            (_now(), deal_id, event_id),
+        )
+        await db.execute(
+            """
+            UPDATE events
+            SET queue_status='pending',success=0,ignored=0,error='',attempts=0,
+                next_attempt_at=?,updated_at=?
+            WHERE id=?
+            """,
+            (next_attempt_at, _now(), event_id),
+        )
+        await db.commit()
+
+
+async def _claim_event() -> dict[str, Any] | None:
+    async with _module_db() as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            SELECT * FROM events
+            WHERE queue_status IN ('pending','retry')
+              AND (next_attempt_at='' OR next_attempt_at<=?)
+            ORDER BY next_attempt_at ASC,id ASC
+            LIMIT 1
+            """,
+            (_now(),),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await db.commit()
+            return None
+        attempts = int(row["attempts"] or 0) + 1
+        await db.execute(
+            "UPDATE events SET queue_status='processing',attempts=?,updated_at=? WHERE id=?",
+            (attempts, _now(), int(row["id"])),
+        )
+        await db.commit()
+        item = dict(row)
+        item["attempts"] = attempts
+        item["queue_status"] = "processing"
+        return item
+
+
+def _is_transient_amo_error(error: str) -> bool:
+    text = _clean(error, 2000).lower()
+    if re.search(r"amocrm http (408|409|425|429|5\d\d)\b", text):
+        return True
+    return any(marker in text for marker in ("timeout", "timed out", "transport", "connection", "network", "temporar"))
+
+
+def _queue_retry_delay(attempts: int) -> int:
+    return min(3600, 30 * (2 ** min(max(0, attempts - 1), 7)))
+
+
+async def _process_queue_event(event: dict[str, Any]) -> None:
+    event_id = int(event["id"])
+    deal_id = _clean(event.get("deal_id"), 64)
+    source_event = {
+        "action": _clean(event.get("action"), 64),
+        "deal_id": deal_id,
+        "pipeline_id": _clean(event.get("pipeline_id"), 64),
+        "status_id": _clean(event.get("status_id"), 64),
+        "old_status_id": _clean(event.get("old_status_id"), 64),
+        "responsible_user_id": _clean(event.get("responsible_user_id"), 64),
+    }
+    result = await _sync_deal(deal_id, source_event=source_event)
+    if result.get("ok"):
+        await _update_event(
+            event_id,
+            success=True,
+            ignored=False,
+            error="",
+            details={"storage": result.get("storage") or {}, "status": (result.get("record") or {}).get("status_name")},
+            queue_status="completed",
+            next_attempt_at="",
+        )
+        return
+    error = _clean(result.get("error") or "amoCRM sync failed", 2000)
+    attempts = int(event.get("attempts") or 1)
+    if _is_transient_amo_error(error) or attempts < 5:
+        delay = _queue_retry_delay(attempts)
+        await _update_event(
+            event_id,
+            success=False,
+            ignored=False,
+            error=error,
+            details={"deal_id": deal_id, "retry_in_seconds": delay},
+            queue_status="retry",
+            next_attempt_at=_after(delay),
+        )
+        _log("warning", "amocrm-db queued retry deal_id=%s attempts=%s delay=%s error=%s", deal_id, attempts, delay, error[:300])
+        return
+    await _update_event(
+        event_id,
+        success=False,
+        ignored=False,
+        error=error,
+        details={"deal_id": deal_id},
+        queue_status="failed",
+        next_attempt_at="",
+    )
+
+
+async def _queue_worker_loop() -> None:
+    while True:
+        try:
+            event = await _claim_event()
+            if event:
+                await _process_queue_event(event)
+                continue
+            await asyncio.sleep(0.25)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("error", "amocrm-db queue worker error: %s", exc)
+            await asyncio.sleep(1)
+
+
+def _retry_after_seconds(value: str, fallback: float) -> float:
+    text = _clean(value, 200)
+    if text:
+        try:
+            return max(0.0, min(300.0, float(text)))
+        except Exception:
+            try:
+                moment = parsedate_to_datetime(text)
+                if moment.tzinfo is None:
+                    moment = moment.replace(tzinfo=timezone.utc)
+                return max(0.0, min(300.0, (moment - datetime.now(timezone.utc)).total_seconds()))
+            except Exception:
+                pass
+    return max(0.5, min(300.0, fallback))
+
+
+async def _amo_get(
+    path: str,
+    settings: dict[str, str],
+    *,
+    params: dict[str, str] | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    global _amo_next_request_at
     env = _env()
     if not env["amo_base_url"] or not env["amo_token"]:
         return None, "AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы"
-    try:
-        async with httpx.AsyncClient(timeout=_timeout(settings)) as client:
-            resp = await client.get(
-                env["amo_base_url"] + path,
-                headers={"Authorization": f"Bearer {env['amo_token']}"},
-            )
-        if resp.status_code >= 400:
-            return None, f"amoCRM HTTP {resp.status_code}: {resp.text[:500]}"
-        if not resp.text.strip():
-            return {}, ""
-        return resp.json(), ""
-    except Exception as exc:
-        return None, str(exc)
+    min_interval = _setting_float(settings, "amo_min_interval_seconds", 0.5, min_value=0.1, max_value=10.0)
+    max_attempts = _setting_int(settings, "amo_retry_attempts", 5, min_value=1, max_value=10)
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with _amo_rate_lock:
+                loop = asyncio.get_running_loop()
+                wait_for = max(0.0, _amo_next_request_at - loop.time())
+                if wait_for:
+                    await asyncio.sleep(wait_for)
+                async with httpx.AsyncClient(timeout=_timeout(settings)) as client:
+                    resp = await client.get(
+                        env["amo_base_url"] + path,
+                        params=params,
+                        headers={"Authorization": f"Bearer {env['amo_token']}"},
+                    )
+                _amo_state["requests"] = int(_amo_state.get("requests") or 0) + 1
+                if resp.status_code == 429:
+                    fallback = min(30.0, float(2 ** min(attempt - 1, 5)))
+                    cooldown = _retry_after_seconds(resp.headers.get("Retry-After", ""), fallback)
+                    _amo_next_request_at = loop.time() + cooldown
+                    _amo_state["rate_limit_responses"] = int(_amo_state.get("rate_limit_responses") or 0) + 1
+                    _amo_state["last_429_at"] = _now()
+                elif resp.status_code >= 500:
+                    _amo_next_request_at = loop.time() + min(30.0, float(2 ** min(attempt - 1, 5)))
+                else:
+                    _amo_next_request_at = loop.time() + min_interval
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = f"amoCRM HTTP {resp.status_code}: {resp.text[:500]}"
+                if attempt < max_attempts:
+                    _amo_state["retries"] = int(_amo_state.get("retries") or 0) + 1
+                    continue
+                _amo_state["last_error"] = last_error
+                return None, last_error
+            if resp.status_code >= 400:
+                last_error = f"amoCRM HTTP {resp.status_code}: {resp.text[:500]}"
+                _amo_state["last_error"] = last_error
+                return None, last_error
+            if not resp.text.strip():
+                _amo_state["last_error"] = ""
+                return {}, ""
+            _amo_state["last_error"] = ""
+            return resp.json(), ""
+        except Exception as exc:
+            last_error = f"amoCRM transport {type(exc).__name__}: {exc}"
+            _amo_state["last_error"] = last_error
+            if attempt >= max_attempts:
+                return None, last_error
+            _amo_state["retries"] = int(_amo_state.get("retries") or 0) + 1
+            async with _amo_rate_lock:
+                loop = asyncio.get_running_loop()
+                _amo_next_request_at = max(_amo_next_request_at, loop.time() + min(30.0, float(2 ** min(attempt - 1, 5))))
+    return None, last_error or "amoCRM request failed"
 
 
 async def _load_pipelines(settings: dict[str, str], *, allow_cache: bool = True) -> tuple[list[dict[str, Any]], str]:
@@ -401,7 +792,7 @@ def _normalize_pipelines(body: dict[str, Any]) -> list[dict[str, Any]]:
 async def _read_pipeline_cache() -> list[dict[str, Any]]:
     if not _db_path:
         return []
-    async with aiosqlite.connect(_db_path) as db:
+    async with _module_db() as db:
         cur = await db.execute("SELECT payload FROM pipeline_cache WHERE id=1")
         row = await cur.fetchone()
     payload = _json_loads(row[0] if row else "", {})
@@ -413,7 +804,7 @@ async def _write_pipeline_cache(pipelines: list[dict[str, Any]]) -> None:
     if not _db_path:
         return
     payload = json.dumps({"pipelines": pipelines}, ensure_ascii=False)
-    async with aiosqlite.connect(_db_path) as db:
+    async with _module_db() as db:
         await db.execute(
             """
             INSERT INTO pipeline_cache(id,payload,updated_at) VALUES(1,?,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -625,38 +1016,42 @@ def _deal_url(deal_id: str) -> str:
 async def _upsert_customer_deal(deal_id: str, custom_fields: dict[str, Any]) -> dict[str, Any]:
     db_path = _customer_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(db_path) as db:
-        db.row_factory = aiosqlite.Row
-        await _ensure_customer_table(db)
-        cur = await db.execute(f"SELECT id, custom_fields FROM cdb_{TABLE_NAME} WHERE platform_id=? ORDER BY id ASC", (deal_id,))
-        rows = await cur.fetchall()
-        duplicate_ids = [int(row["id"]) for row in rows[1:]]
-        if rows:
-            record_id = int(rows[0]["id"])
-            merged = _json_loads(rows[0]["custom_fields"], {})
-            for row in rows[1:]:
-                merged = _deep_merge(merged, _json_loads(row["custom_fields"], {}))
-            merged = _deep_merge(merged, custom_fields)
-            await db.execute(
-                f"UPDATE cdb_{TABLE_NAME} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
-                (json.dumps(merged, ensure_ascii=False), record_id),
-            )
-            for duplicate_id in duplicate_ids:
-                await db.execute(f"DELETE FROM cdb_{TABLE_NAME} WHERE id=?", (duplicate_id,))
-            action = "updated"
-        else:
-            cur = await db.execute(
-                f"INSERT INTO cdb_{TABLE_NAME}(platform_id,custom_fields) VALUES(?,?)",
-                (deal_id, json.dumps(custom_fields, ensure_ascii=False)),
-            )
-            record_id = int(cur.lastrowid)
-            action = "created"
-        await db.commit()
+    async with _customer_write_lock:
+        async with aiosqlite.connect(db_path, timeout=60) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout=60000")
+            await _ensure_customer_table(db)
+            cur = await db.execute(f"SELECT id, custom_fields FROM cdb_{TABLE_NAME} WHERE platform_id=? ORDER BY id ASC", (deal_id,))
+            rows = await cur.fetchall()
+            duplicate_ids = [int(row["id"]) for row in rows[1:]]
+            if rows:
+                record_id = int(rows[0]["id"])
+                merged = _json_loads(rows[0]["custom_fields"], {})
+                for row in rows[1:]:
+                    merged = _deep_merge(merged, _json_loads(row["custom_fields"], {}))
+                merged = _deep_merge(merged, custom_fields)
+                await db.execute(
+                    f"UPDATE cdb_{TABLE_NAME} SET custom_fields=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (json.dumps(merged, ensure_ascii=False), record_id),
+                )
+                for duplicate_id in duplicate_ids:
+                    await db.execute(f"DELETE FROM cdb_{TABLE_NAME} WHERE id=?", (duplicate_id,))
+                action = "updated"
+            else:
+                cur = await db.execute(
+                    f"INSERT INTO cdb_{TABLE_NAME}(platform_id,custom_fields) VALUES(?,?)",
+                    (deal_id, json.dumps(custom_fields, ensure_ascii=False)),
+                )
+                record_id = int(cur.lastrowid)
+                action = "created"
+            await db.commit()
     return {"action": action, "record_id": record_id, "deduped": len(duplicate_ids), "db_path": str(db_path)}
 
 
 async def _build_deal_record(deal: dict[str, Any], settings: dict[str, str], *, source_event: dict[str, Any] | None = None) -> dict[str, Any]:
-    pipelines, _ = await _load_pipelines(settings, allow_cache=True)
+    pipelines = await _read_pipeline_cache()
+    if not pipelines:
+        pipelines, _ = await _load_pipelines(settings, allow_cache=True)
     lookup = _status_lookup(pipelines)
     pipeline_id = _clean(deal.get("pipeline_id"), 64)
     status_id = _clean(deal.get("status_id"), 64)
@@ -732,37 +1127,6 @@ async def _sync_deal(deal_id: str, *, source_event: dict[str, Any] | None = None
     return {"ok": True, "deal_id": deal_id, "storage": storage, "record": record}
 
 
-async def _delayed_sync(deal_id: str, event: dict[str, Any], event_id: int, delay: float) -> None:
-    try:
-        if delay > 0:
-            await asyncio.sleep(delay)
-        await _sync_deal(deal_id, source_event=event, event_id=event_id)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        _log("error", "amocrm-db background sync error deal_id=%s error=%s", deal_id, exc)
-        await _update_event(event_id, success=False, ignored=False, error=str(exc), details={"deal_id": deal_id})
-    finally:
-        current = _sync_tasks.get(deal_id)
-        if current and current[1] == event_id:
-            _sync_tasks.pop(deal_id, None)
-
-
-def _schedule_sync(deal_id: str, event: dict[str, Any], event_id: int, settings: dict[str, str]) -> None:
-    previous = _sync_tasks.pop(deal_id, None)
-    if previous and not previous[0].done():
-        previous[0].cancel()
-        asyncio.create_task(_update_event(
-            previous[1],
-            success=False,
-            ignored=True,
-            error="superseded by newer webhook",
-            details={"next_event_id": event_id, "deal_id": deal_id},
-        ))
-    task = asyncio.create_task(_delayed_sync(deal_id, event, event_id, _debounce_seconds(settings)))
-    _sync_tasks[deal_id] = (task, event_id)
-
-
 def _deal_from_row(row: aiosqlite.Row) -> dict[str, Any]:
     fields = _json_loads(row["custom_fields"], {})
     return {
@@ -774,9 +1138,187 @@ def _deal_from_row(row: aiosqlite.Row) -> dict[str, Any]:
     }
 
 
+async def _amo_lead_ids_created_between(start_ts: int, end_ts: int, settings: dict[str, str]) -> tuple[list[str], str]:
+    ids: list[str] = []
+    for page in range(1, 51):
+        body, error = await _amo_get(
+            "/api/v4/leads",
+            settings,
+            params={
+                "limit": "250",
+                "page": str(page),
+                "filter[created_at][from]": str(start_ts),
+                "filter[created_at][to]": str(end_ts),
+                "order[created_at]": "asc",
+            },
+        )
+        if error:
+            return ids, error
+        batch = (((body or {}).get("_embedded") or {}).get("leads") or [])
+        ids.extend(_clean(item.get("id"), 64) for item in batch if isinstance(item, dict) and _clean(item.get("id"), 64))
+        next_href = ((((body or {}).get("_links") or {}).get("next") or {}).get("href") or "")
+        if len(batch) < 250 or not next_href:
+            break
+    return ids, ""
+
+
+async def _indexed_deal_ids(deal_ids: list[str]) -> set[str]:
+    clean_ids = [deal_id for deal_id in dict.fromkeys(_clean(item, 64) for item in deal_ids) if deal_id]
+    if not clean_ids:
+        return set()
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return set()
+    result: set[str] = set()
+    async with aiosqlite.connect(db_path, timeout=60) as db:
+        await db.execute("PRAGMA busy_timeout=60000")
+        await _ensure_customer_table(db)
+        for idx in range(0, len(clean_ids), 500):
+            chunk = clean_ids[idx:idx + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = await db.execute(f"SELECT platform_id FROM cdb_{TABLE_NAME} WHERE platform_id IN ({placeholders})", chunk)
+            result.update(str(row[0]) for row in await cur.fetchall())
+    return result
+
+
+def _utc_day_bounds(day: datetime) -> tuple[int, int]:
+    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    start_ts = int(start.timestamp())
+    return start_ts, start_ts + 86400 - 1
+
+
+async def _reconcile_once(*, lookback_days: int | None = None, max_sync: int | None = None) -> dict[str, Any]:
+    settings = await _settings_map()
+    days = lookback_days if lookback_days is not None else _setting_int(settings, "reconcile_lookback_days", 14, min_value=1, max_value=90)
+    days = max(1, min(90, int(days)))
+    delay = _setting_float(settings, "reconcile_delay_seconds", 0.35, min_value=0.0, max_value=5.0)
+    limit = max_sync if max_sync is not None else 500
+    limit = max(1, min(2000, int(limit)))
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    started_at = _now()
+    _reconcile_state.update({
+        "running": True,
+        "last_started_at": started_at,
+        "last_finished_at": "",
+        "last_error": "",
+        "last_missing": 0,
+        "last_synced": 0,
+        "last_failed": 0,
+        "last_days": [],
+    })
+    day_results: list[dict[str, Any]] = []
+    all_missing: list[str] = []
+    try:
+        for offset in range(days - 1, -1, -1):
+            day = today - timedelta(days=offset)
+            start_ts, end_ts = _utc_day_bounds(day)
+            ids, error = await _amo_lead_ids_created_between(start_ts, end_ts, settings)
+            if error:
+                raise RuntimeError(f"{day.date()}: {error}")
+            indexed = await _indexed_deal_ids(ids)
+            missing = [deal_id for deal_id in ids if deal_id not in indexed]
+            all_missing.extend(missing)
+            day_results.append({
+                "day": day.date().isoformat(),
+                "amo_count": len(ids),
+                "indexed_count": len(indexed),
+                "missing_count": len(missing),
+            })
+            await asyncio.sleep(0.2)
+        synced = 0
+        failed: list[dict[str, str]] = []
+        for deal_id in all_missing[:limit]:
+            result = await _sync_deal(deal_id, source_event={"action": "scheduled-reconcile", "started_at": started_at})
+            if result.get("ok"):
+                synced += 1
+            else:
+                failed.append({"deal_id": deal_id, "error": _clean(result.get("error"), 300)})
+            if delay:
+                await asyncio.sleep(delay)
+        remaining = max(0, len(all_missing) - limit)
+        finished_at = _now()
+        payload = {
+            "ok": not failed and remaining == 0,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "lookback_days": days,
+            "missing": len(all_missing),
+            "synced": synced,
+            "failed": failed,
+            "remaining": remaining,
+            "days": day_results,
+        }
+        _reconcile_state.update({
+            "running": False,
+            "last_finished_at": finished_at,
+            "last_missing": len(all_missing),
+            "last_synced": synced,
+            "last_failed": len(failed),
+            "last_days": day_results,
+            "last_error": "" if payload["ok"] else f"failed={len(failed)} remaining={remaining}",
+        })
+        _log("info", "amocrm-db reconcile finished missing=%s synced=%s failed=%s remaining=%s", len(all_missing), synced, len(failed), remaining)
+        return payload
+    except Exception as exc:
+        finished_at = _now()
+        _reconcile_state.update({
+            "running": False,
+            "last_finished_at": finished_at,
+            "last_error": str(exc),
+            "last_missing": len(all_missing),
+            "last_days": day_results,
+        })
+        _log("error", "amocrm-db reconcile failed: %s", exc)
+        return {
+            "ok": False,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "lookback_days": days,
+            "missing": len(all_missing),
+            "synced": 0,
+            "failed": [],
+            "remaining": len(all_missing),
+            "days": day_results,
+            "error": str(exc),
+        }
+
+
+async def _reconcile_loop() -> None:
+    await asyncio.sleep(120)
+    while True:
+        try:
+            settings = await _settings_map()
+            interval = _setting_int(settings, "reconcile_interval_minutes", 360, min_value=15, max_value=10080)
+            if _setting_bool(settings, "reconcile_enabled", True) and not _reconcile_state.get("running"):
+                await _reconcile_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("error", "amocrm-db reconcile loop error: %s", exc)
+        await asyncio.sleep(max(900, interval * 60))
+
+
+async def _queue_counts() -> dict[str, int]:
+    if not _db_path:
+        return {}
+    async with _module_db() as db:
+        rows = await (await db.execute("SELECT queue_status,COUNT(*) FROM events GROUP BY queue_status")).fetchall()
+    return {str(status): int(count) for status, count in rows}
+
+
 @router.get("/health")
 async def health():
-    return {"ok": True, "module": MODULE_ID}
+    try:
+        queue = await _queue_counts()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "module": MODULE_ID, "error": str(exc)}, status_code=503)
+    return {
+        "ok": True,
+        "module": MODULE_ID,
+        "worker": bool(_queue_task and not _queue_task.done()),
+        "queue": queue,
+        "amo_requests": dict(_amo_state),
+    }
 
 
 @router.get("/env-status")
@@ -799,12 +1341,7 @@ async def env_status(request: Request):
 @router.get("/settings")
 async def get_settings(request: Request):
     await _require_panel_user(request)
-    settings = await _settings_map()
-    return {
-        **settings,
-        "webhook_secret_source": "env" if _env()["webhook_secret"] else "db",
-        "customer_db_path": str(_customer_db_path()),
-    }
+    return await _settings_payload()
 
 
 @router.post("/settings")
@@ -847,8 +1384,8 @@ async def webhook(request: Request):
                 await _update_event(event_id, ignored=True, error="deal_id not found", details=event)
                 results.append({"ok": True, "ignored": True, "event_id": event_id})
                 continue
-            _schedule_sync(deal_id, event, event_id, settings)
-            results.append({"ok": True, "scheduled": True, "deal_id": deal_id, "event_id": event_id})
+            await _enqueue_event(event_id, deal_id, settings)
+            results.append({"ok": True, "queued": True, "deal_id": deal_id, "event_id": event_id})
         return {"ok": True, "processed": len(results), "results": results}
     except Exception as exc:
         _log("error", "webhook error: %s", exc)
@@ -958,10 +1495,10 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
     if result == "ok":
         where = "WHERE success=1"
     elif result == "error":
-        where = "WHERE success=0 AND ignored=0 AND error != ''"
+        where = "WHERE success=0 AND ignored=0 AND error != '' AND queue_status NOT IN ('pending','processing','retry')"
     elif result == "ignored":
         where = "WHERE ignored=1"
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _module_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?", (limit,))
         rows = [dict(row) for row in await cur.fetchall()]
@@ -969,6 +1506,43 @@ async def list_events(request: Request, limit: int = 200, result: str = "all"):
         row["details"] = _json_loads(row.get("details"), {})
         row["raw_payload"] = _json_loads(row.get("raw_payload"), {})
     return rows
+
+
+@router.get("/reconcile/status")
+async def reconcile_status(request: Request):
+    await _require_panel_user(request)
+    settings = await _settings_map()
+    return {
+        **_reconcile_state,
+        "enabled": _setting_bool(settings, "reconcile_enabled", True),
+        "interval_minutes": _setting_int(settings, "reconcile_interval_minutes", 360, min_value=15, max_value=10080),
+        "lookback_days": _setting_int(settings, "reconcile_lookback_days", 14, min_value=1, max_value=90),
+    }
+
+
+@router.get("/queue/status")
+async def queue_status(request: Request):
+    await _require_panel_user(request)
+    return {
+        "worker": bool(_queue_task and not _queue_task.done()),
+        "queue": await _queue_counts(),
+        "amo_requests": dict(_amo_state),
+    }
+
+
+@router.post("/reconcile/run")
+async def reconcile_run(request: Request):
+    await _require_panel_user(request)
+    if _reconcile_state.get("running"):
+        return JSONResponse({"ok": False, "error": "reconcile already running", **_reconcile_state}, status_code=409)
+    data = {}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    lookback_days = _safe_int(data.get("lookback_days")) if isinstance(data, dict) else None
+    max_sync = _safe_int(data.get("max_sync")) if isinstance(data, dict) else None
+    return await _reconcile_once(lookback_days=lookback_days, max_sync=max_sync)
 
 
 @router.get("/stats")
@@ -980,8 +1554,8 @@ async def stats(request: Request):
         async with aiosqlite.connect(db_path) as db:
             await _ensure_customer_table(db)
             deals = (await (await db.execute(f"SELECT COUNT(*) FROM cdb_{TABLE_NAME}")).fetchone())[0]
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _module_db() as db:
         events = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
-        errors = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=0 AND ignored=0 AND error != ''")).fetchone())[0]
+        errors = (await (await db.execute("SELECT COUNT(*) FROM events WHERE success=0 AND ignored=0 AND error != '' AND queue_status NOT IN ('pending','processing','retry')")).fetchone())[0]
         ignored = (await (await db.execute("SELECT COUNT(*) FROM events WHERE ignored=1")).fetchone())[0]
-    return {"deals": deals, "events": events, "errors": errors, "ignored": ignored}
+    return {"deals": deals, "events": events, "errors": errors, "ignored": ignored, "queue": await _queue_counts()}

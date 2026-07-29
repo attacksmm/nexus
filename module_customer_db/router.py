@@ -3,6 +3,7 @@ customer-db v2.0.0
 Структура: id, platform_id, custom_fields (JSON)
 Поддерживает несколько именованных таблиц.
 """
+import hashlib
 import json
 import logging
 import os
@@ -323,23 +324,50 @@ def _token_from_payload(payload: dict | None) -> str:
     return ""
 
 
+def _token_fingerprint(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return "none"
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_auth_rejection(request: Request, candidates: list[str], sources: list[str]) -> None:
+    client = request.client.host if request.client else "-"
+    fingerprints = ",".join(_token_fingerprint(value) for value in candidates) or "none"
+    _log(
+        "warning",
+        "customer_db auth rejected client=%s method=%s path=%s token_sources=%s token_fingerprints=%s user_agent=%s",
+        client,
+        request.method,
+        request.url.path,
+        ",".join(sources) or "none",
+        fingerprints,
+        str(request.headers.get("user-agent") or "-").strip()[:200],
+    )
+
+
 async def _require_bearer(request: Request, payload: dict | None = None) -> None:
     expected = _external_api_token()
     if not expected:
         raise HTTPException(503, "customer-db API token is not configured")
     header = request.headers.get("authorization", "")
     prefix = "Bearer "
-    candidates = []
+    candidates: list[str] = []
+    sources: list[str] = []
     if header.startswith(prefix):
         candidates.append(header[len(prefix):].strip())
+        sources.append("header")
     for key in ("token", "api_token", "secret"):
         value = str(request.query_params.get(key) or "").strip()
         if value:
             candidates.append(value)
+            sources.append(f"query:{key}")
     payload_token = _token_from_payload(payload)
     if payload_token:
         candidates.append(payload_token)
+        sources.append("payload")
     if not any(secrets.compare_digest(candidate, expected) for candidate in candidates):
+        _log_auth_rejection(request, candidates, sources)
         raise HTTPException(401, "unauthorized")
 
 
@@ -1028,7 +1056,11 @@ class BatchRecordsIn(BaseModel):
 
 @router.post("/tables/{table}/records", status_code=201)
 async def create_record(table: str, data: RecordIn, request: Request):
-    await _require_panel_or_bearer(request)
+    # FastAPI has already parsed the body into RecordIn, but Starlette keeps
+    # the raw body cached on the request. Inspect it as well so webhook clients
+    # that cannot set headers may authenticate with a top-level token field.
+    payload = await _request_payload(request)
+    await _require_panel_or_bearer(request, payload)
     _check_name(table)
     record = _clean_record(data)
     async with _connect_db() as db:
@@ -1131,7 +1163,8 @@ async def table_upsert_record(table: str, request: Request):
 
 @router.post("/tables/{table}/records/batch-upsert")
 async def batch_upsert_records(table: str, data: BatchRecordsIn, request: Request):
-    await _require_panel_or_bearer(request)
+    payload = await _request_payload(request)
+    await _require_panel_or_bearer(request, payload)
     _check_name(table)
     if len(data.records) > 1000:
         raise HTTPException(400, "batch-upsert принимает максимум 1000 записей за запрос")

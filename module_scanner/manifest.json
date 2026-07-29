@@ -1,0 +1,21 @@
+{
+  "id": "scanner",
+  "name": "Сканер",
+  "version": "1.0.1",
+  "ui_hidden": true,
+  "description": "Сканирует неотвеченные VK-диалоги сообщества, показывает проблемные обращения и отдельную очередь диалогов, где уже было общение с админом.",
+  "env_vars": {
+    "VK_GROUP_TOKEN": "Токен VK сообщества для чтения неотвеченных диалогов.",
+    "VK_USER_TOKEN": "Fallback пользовательский VK token, если VK_GROUP_TOKEN не задан.",
+    "VK_GROUP_ID": "ID VK сообщества для ссылок на диалоги.",
+    "SCANNER_ENABLED": "0/1: включить фоновый сканер, по умолчанию включен при наличии VK token.",
+    "SCANNER_POLL_SECONDS": "Интервал фоновой проверки VK, по умолчанию 120.",
+    "SCANNER_SLA_SECONDS": "Через сколько секунд без OpenRouter/Senler ответа считать обращение проблемой, по умолчанию 600.",
+    "SCANNER_HUMAN_REPLY_SLA_SECONDS": "Через сколько секунд после найденной заявки/сделки ждать ручной ответ ОП, по умолчанию 7200.",
+    "SCANNER_VK_COUNT": "Сколько диалогов VK unanswered читать за проход, по умолчанию 100.",
+    "SCANNER_RETENTION_DAYS": "Сколько дней хранить события сканера, по умолчанию 14.",
+    "SCANNER_OPENROUTER_DB_PATH": "Необязательный путь к openrouter.db для сверки Senler-ответов.",
+    "SCANNER_CUSTOMER_DB_PATH": "Необязательный путь к customer-db.db для сверки GetCourse/amoCRM/форм."
+  },
+  "env_required": []
+}

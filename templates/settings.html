@@ -14,6 +14,49 @@
     .stat-bar__fill { height:100%; background:var(--ok); transition:width .4s; }
     .stat-bar__fill--warn { background:var(--warn); }
     .stat-bar__fill--bad  { background:var(--bad); }
+    .telegram-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; max-width:920px; }
+    .telegram-route { padding:14px; display:grid; gap:10px; }
+    .telegram-route__status { color:var(--text-muted); font-family:"IBM Plex Mono",monospace; font-size:.8rem; overflow-wrap:anywhere; }
+    .telegram-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .telegram-check { display:flex; align-items:center; gap:7px; color:var(--text-muted); font-size:.8rem; }
+    .telegram-test-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; max-width:920px; }
+    .credentials-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(280px,360px); gap:12px; }
+    .credentials-list { min-width:0; }
+    .credentials-tools { display:grid; grid-template-columns:minmax(0,1fr) 150px; gap:8px; margin-bottom:8px; }
+    .credentials-table tr { cursor:pointer; }
+    .credentials-table tr:hover,.credentials-table tr.is-active { background:var(--panel-soft); }
+    .credentials-key { font-family:"IBM Plex Mono",monospace; overflow-wrap:anywhere; }
+    .credentials-editor { padding:14px; align-self:start; position:sticky; top:58px; }
+    .credentials-editor textarea { min-height:150px; resize:vertical; }
+    .credentials-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .credential-pill { display:inline-flex; border:1px solid var(--border); padding:2px 7px; font-size:.72rem; color:var(--text-muted); }
+    .credential-pill--ok { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 40%,var(--border)); }
+    .credential-pill--bad { color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,var(--border)); }
+    .credential-pill--warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,var(--border)); }
+    .vkid-panel { padding:14px; margin-bottom:12px; display:grid; gap:12px; }
+    .vkid-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .vkid-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .vkid-callback { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
+    .vkid-meta { display:flex; flex-wrap:wrap; gap:6px 16px; color:var(--text-muted); font-size:.8rem; }
+    .vkid-note { margin:0; color:var(--warn); font-size:.8rem; }
+    @media(max-width:760px){
+      .workspace--settings{display:flex;flex-direction:column;overflow:visible}
+      .workspace--settings .sidebar{position:static;transform:none;width:100%;min-height:auto;box-shadow:none;border-right:0;border-bottom:1px solid var(--border);overflow-x:auto}
+      .workspace--settings .sidebar__head{display:none}
+      .workspace--settings .module-list{flex:none;flex-direction:row;overflow-x:auto;padding:6px}
+      .workspace--settings .module-item{width:auto;min-height:38px;flex:0 0 auto;padding:7px 10px}
+      .telegram-grid,.telegram-test-grid,.credentials-layout,.vkid-grid{grid-template-columns:1fr}
+      .vkid-callback{grid-template-columns:1fr}
+      .vkid-callback .btn{min-height:40px}
+      .credentials-tools{grid-template-columns:1fr}
+      .credentials-editor{position:static}
+      .credentials-table{overflow:visible}
+      .credentials-table table,.credentials-table tbody,.credentials-table tr,.credentials-table td{display:block;width:100%}
+      .credentials-table thead{display:none}
+      .credentials-table tbody{display:grid;gap:8px}
+      .credentials-table tr{border:1px solid var(--border);padding:10px}
+      .credentials-table td{border:0;padding:3px 0}
+    }
   </style>
 </head>
 <body>
@@ -43,6 +86,12 @@
         </button>
         <button class="module-item" data-tab="users" type="button">
           <span class="module-item__name">Пользователи</span>
+        </button>
+        <button class="module-item" data-tab="credentials" type="button">
+          <span class="module-item__name">Подключения</span>
+        </button>
+        <button class="module-item" data-tab="telegram" type="button">
+          <span class="module-item__name">Telegram</span>
         </button>
         <button class="module-item" data-tab="env" type="button">
           <span class="module-item__name">Окружение</span>
@@ -81,6 +130,127 @@
         </div>
       </section>
 
+      <!-- Telegram -->
+      <section id="tabTelegram" class="settings-section" hidden>
+        <div class="settings-header">
+          <div><p class="eyebrow">Общая сеть</p><h2>Telegram-прокси</h2></div>
+          <button id="telegramRefreshBtn" class="btn btn--sm btn--ghost" type="button">↻ Обновить</button>
+        </div>
+        <div class="env-info panel">
+          <p class="env-info__text">Эти маршруты используются <strong>всеми модулями Nexus</strong>. Bot API работает через HTTP/SOCKS proxy, а Telethon — через отдельный MTProto proxy. Секреты и логины обратно в браузер не передаются.</p>
+        </div>
+        <label class="form-label" style="max-width:920px">Telegram Bot API base
+          <input id="telegramBotApiBase" class="form-input" type="url" value="https://api.telegram.org" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="telegram-grid">
+          <div class="telegram-route panel">
+            <div><p class="eyebrow">Bot API</p><strong>HTTP / SOCKS proxy</strong></div>
+            <div id="telegramBotProxyCurrent" class="telegram-route__status">Загружаю…</div>
+            <label class="form-label">Новый адрес
+              <input id="telegramBotProxy" class="form-input" type="password" autocomplete="new-password" spellcheck="false" placeholder="http://host:port или socks5://host:port">
+            </label>
+            <div class="telegram-check">Пустое поле сохраняет текущий адрес</div>
+          </div>
+          <div class="telegram-route panel">
+            <div><p class="eyebrow">Telethon</p><strong>MTProto proxy</strong></div>
+            <div id="telegramMtprotoCurrent" class="telegram-route__status">Загружаю…</div>
+            <label class="form-label">Новый адрес
+              <input id="telegramMtprotoProxy" class="form-input" type="password" autocomplete="new-password" spellcheck="false" placeholder="https://t.me/proxy?server=…&port=…&secret=…">
+            </label>
+            <div class="telegram-check">Пустое поле сохраняет текущий адрес</div>
+          </div>
+        </div>
+        <div class="telegram-test-grid">
+          <div id="telegramBotTest" class="stat-card"><p class="eyebrow">Bot API</p><div class="status-line">Проверка не запускалась</div></div>
+          <div id="telegramMtprotoTest" class="stat-card"><p class="eyebrow">MTProto</p><div class="status-line">Проверка не запускалась</div></div>
+        </div>
+        <div class="telegram-actions">
+          <button id="telegramTestBtn" class="btn btn--ghost" type="button">Проверить маршруты</button>
+          <button id="telegramSaveBtn" class="btn btn--primary" type="button">Проверить и применить ко всем модулям</button>
+          <span id="telegramStatus" class="status-line"></span>
+        </div>
+      </section>
+
+      <section id="tabCredentials" class="settings-section" hidden>
+        <div class="settings-header">
+          <div><p class="eyebrow">Авторизация</p><h2>Подключения</h2></div>
+          <div class="telegram-actions">
+            <button id="credentialsValidateAll" class="btn btn--sm btn--ghost" type="button">Проверить</button>
+            <button id="credentialsRefresh" class="btn btn--sm btn--ghost" type="button">Обновить</button>
+          </div>
+        </div>
+        <div class="panel vkid-panel">
+          <div class="vkid-head">
+            <div><p class="eyebrow">VK ID</p><h3>Пользовательский токен</h3></div>
+            <span id="vkIdStatusPill" class="credential-pill credential-pill--warn">не настроен</span>
+          </div>
+          <div class="vkid-grid">
+            <label class="form-label">ID приложения
+              <input id="vkIdAppId" class="form-input credentials-key" inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="form-label">Доступы
+              <input id="vkIdScopes" class="form-input credentials-key" autocomplete="off" spellcheck="false" value="vkid.personal_info">
+            </label>
+            <label class="form-label">Защищённый ключ
+              <input id="vkIdClientSecret" class="form-input" type="password" autocomplete="new-password" spellcheck="false">
+            </label>
+            <label class="form-label">Сервисный ключ
+              <input id="vkIdServiceToken" class="form-input" type="password" autocomplete="new-password" spellcheck="false">
+            </label>
+          </div>
+          <div class="vkid-callback">
+            <label class="form-label">Доверенный Redirect URL
+              <input id="vkIdCallback" class="form-input credentials-key" readonly>
+            </label>
+            <button id="vkIdCopyCallback" class="btn btn--ghost" type="button">Копировать</button>
+          </div>
+          <div class="credentials-actions">
+            <button id="vkIdSave" class="btn btn--ghost" type="button">Сохранить</button>
+            <button id="vkIdAuthorize" class="btn btn--primary" type="button">Авторизовать VK</button>
+            <button id="vkIdRefresh" class="btn btn--ghost" type="button">Обновить токен</button>
+          </div>
+          <div id="vkIdMeta" class="vkid-meta"></div>
+          <p id="vkIdScopeNote" class="vkid-note" hidden><code>messages</code>: для нового приложения нужен ранее сохранённый или согласованный VK доступ.</p>
+          <p id="vkIdStatus" class="status-line"></p>
+        </div>
+        <div class="credentials-layout">
+          <div class="credentials-list">
+            <div class="credentials-tools">
+              <input id="credentialsSearch" class="form-input" placeholder="Ключ или модуль">
+              <select id="credentialsFilter" class="form-input">
+                <option value="">Все</option>
+                <option value="bad">Проблемные</option>
+                <option value="present">Заданные</option>
+                <option value="missing">Пустые</option>
+              </select>
+            </div>
+            <div class="table-wrap credentials-table">
+              <table>
+                <thead><tr><th>Ключ</th><th>Состояние</th><th>Модули</th></tr></thead>
+                <tbody id="credentialsTable"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel credentials-editor">
+            <p class="eyebrow">Ключ</p>
+            <h3 id="credentialTitle">Не выбран</h3>
+            <p id="credentialMeta" class="status-line"></p>
+            <label class="form-label">ENV
+              <input id="credentialKey" class="form-input credentials-key" placeholder="VK_USER_TOKEN">
+            </label>
+            <label class="form-label">Значение
+              <textarea id="credentialValue" class="form-input" autocomplete="off" spellcheck="false"></textarea>
+            </label>
+            <div class="credentials-actions">
+              <button id="credentialValidate" class="btn btn--ghost" type="button">Проверить</button>
+              <button id="credentialSave" class="btn btn--primary" type="button">Сохранить</button>
+              <button id="credentialForce" class="btn btn--danger" type="button">Без проверки</button>
+            </div>
+            <p id="credentialStatus" class="status-line"></p>
+          </div>
+        </div>
+      </section>
+
       <!-- Документация -->
       <section id="tabDocs" class="settings-section" hidden style="overflow-y:auto">
         <div class="docs-body" style="max-width:860px;padding-bottom:32px">
@@ -94,6 +264,7 @@
 ├── orchestrator/
 │   ├── core.py               # ModuleManager — установка/удаление/монтирование
 │   ├── auth.py               # JWT-авторизация, роли, управление пользователями, ENV
+│   ├── credentials.py        # Инвентаризация, проверка и применение подключений
 │   └── db.py                 # SQLite (nexus.db): modules, users
 ├── templates/
 │   ├── login.html            # Страница входа
@@ -191,7 +362,6 @@ const API = parts.slice(0, panelIdx).join('/') + '/api';
             <tr><td>POST</td><td><code>/nexus/api/modules/upload</code></td><td>admin</td><td>Установить ZIP</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/modules/{id}/pause</code></td><td>editor+</td><td>Пауза</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/modules/{id}/resume</code></td><td>editor+</td><td>Возобновить</td></tr>
-            <tr><td>POST</td><td><code>/nexus/api/modules/{id}/unload</code></td><td>admin</td><td>Выгрузить (удалить)</td></tr>
             <tr><td>GET</td><td><code>/nexus/api/server/stats</code></td><td>все</td><td>CPU/RAM/Disk/Uptime</td></tr>
             <tr><td>GET</td><td><code>/nexus/api/settings/users</code></td><td>admin</td><td>Список пользователей</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/settings/users</code></td><td>admin</td><td>Создать пользователя</td></tr>
@@ -199,12 +369,15 @@ const API = parts.slice(0, panelIdx).join('/') + '/api';
             <tr><td>DELETE</td><td><code>/nexus/api/settings/users/{id}</code></td><td>admin</td><td>Удалить пользователя</td></tr>
             <tr><td>GET</td><td><code>/nexus/api/settings/env</code></td><td>admin</td><td>Ключи ENV (без значений)</td></tr>
             <tr><td>POST</td><td><code>/nexus/api/settings/env/upload</code></td><td>admin</td><td>Загрузить .env файл</td></tr>
+            <tr><td>GET</td><td><code>/nexus/api/settings/credentials</code></td><td>admin</td><td>Подключения без значений</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/settings/credentials/validate</code></td><td>admin</td><td>Проверить подключение</td></tr>
+            <tr><td>POST</td><td><code>/nexus/api/settings/credentials</code></td><td>admin</td><td>Сохранить и применить</td></tr>
           </table>
 
           <h2>Роли пользователей</h2>
           <table>
             <tr><th>Роль</th><th>Права</th></tr>
-            <tr><td><code>admin</code></td><td>Полный доступ: управление пользователями, ENV, выгрузка модулей</td></tr>
+            <tr><td><code>admin</code></td><td>Полный доступ: управление пользователями, ENV и модулями</td></tr>
             <tr><td><code>editor</code></td><td>Пауза/возобновление разрешённых модулей</td></tr>
             <tr><td><code>viewer</code></td><td>Только просмотр разрешённых модулей</td></tr>
           </table>
@@ -253,7 +426,7 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
             <li>Все async операции в <code>setup()</code> должны запускаться через <code>asyncio.get_event_loop().create_task()</code></li>
             <li>Модуль получает изолированную SQLite БД в <code>ctx.db_path</code></li>
             <li>Логи модуля: <code>ctx.logger</code> → файл <code>data/logs/module.log</code> (ротация 5MB×3)</li>
-            <li>При выгрузке удаляется вся папка <code>modules/{id}/</code> включая данные</li>
+            <li>Обновление модуля сохраняет его каталог <code>data/</code></li>
           </ul>
         </div>
       </section>
@@ -372,6 +545,8 @@ document.querySelectorAll(".module-item[data-tab]").forEach(btn => {
     if (tabEl) tabEl.hidden = false;
     if (btn.dataset.tab === "env") loadEnvKeys();
     if (btn.dataset.tab === "server") loadServerStats();
+    if (btn.dataset.tab === "telegram") loadTelegramSettings();
+    if (btn.dataset.tab === "credentials") loadCredentials();
   });
 });
 
@@ -597,6 +772,358 @@ document.getElementById("userDialogSave").addEventListener("click", async () => 
   loadUsers();
 });
 
+// ── Telegram proxy ───────────────────────────────────────────────────────────
+
+function telegramPayload() {
+  return {
+    bot_api_base: document.getElementById("telegramBotApiBase").value.trim(),
+    bot_api_proxy: document.getElementById("telegramBotProxy").value.trim(),
+    mtproto_proxy: document.getElementById("telegramMtprotoProxy").value.trim(),
+  };
+}
+
+function renderTelegramTest(id, data) {
+  const box = document.getElementById(id);
+  const ok = !!data?.ok;
+  const ms = Number(data?.duration_ms || 0);
+  box.innerHTML = `<p class="eyebrow">${id === "telegramBotTest" ? "Bot API" : "MTProto"}</p><div class="status-line ${ok ? "status-line--ok" : "status-line--err"}">${esc(data?.message || "Нет результата")}${ms ? ` · ${ms} мс` : ""}</div>`;
+}
+
+async function loadTelegramSettings(statusMessage = "Текущая конфигурация загружена") {
+  const st = document.getElementById("telegramStatus");
+  st.textContent = "Загружаю…"; st.className = "status-line";
+  const res = await fetch(RP + "/api/settings/telegram");
+  const data = await res.json();
+  if (!res.ok) { st.textContent = data.error || `HTTP ${res.status}`; st.className = "status-line status-line--err"; return; }
+  document.getElementById("telegramBotApiBase").value = data.bot_api_base || "https://api.telegram.org";
+  document.getElementById("telegramBotProxyCurrent").textContent = `${data.bot_api_proxy?.masked || "не задан"}${data.bot_api_proxy?.aliases_synced ? " · синхронизирован" : " · legacy-ключи расходятся"}`;
+  document.getElementById("telegramMtprotoCurrent").textContent = `${data.mtproto_proxy?.masked || "не задан"}${data.mtproto_proxy?.aliases_synced ? " · синхронизирован" : " · legacy-ключи расходятся"}`;
+  st.textContent = statusMessage; st.className = "status-line status-line--ok";
+}
+
+async function runTelegramAction(save) {
+  const st = document.getElementById("telegramStatus");
+  const testBtn = document.getElementById("telegramTestBtn");
+  const saveBtn = document.getElementById("telegramSaveBtn");
+  testBtn.disabled = saveBtn.disabled = true;
+  st.textContent = save ? "Проверяю и применяю…" : "Проверяю маршруты…"; st.className = "status-line";
+  try {
+    const res = await fetch(RP + "/api/settings/telegram" + (save ? "" : "/test"), {
+      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(telegramPayload())
+    });
+    const data = await res.json();
+    const tests = data.tests || {};
+    renderTelegramTest("telegramBotTest", tests.bot_api);
+    renderTelegramTest("telegramMtprotoTest", tests.mtproto);
+    if (!res.ok || data.ok === false) throw new Error(data.error || "Один из маршрутов недоступен");
+    st.textContent = save ? `Применено ко всем модулям${data.hooks?.length ? `; переподключено: ${data.hooks.map(x=>x.module).join(", ")}` : ""}` : "Оба маршрута доступны";
+    st.className = "status-line status-line--ok";
+    if (save) {
+      document.getElementById("telegramBotProxy").value = "";
+      document.getElementById("telegramMtprotoProxy").value = "";
+      const hookFailures = (data.hooks || []).filter(item => !item.ok);
+      await loadTelegramSettings(hookFailures.length
+        ? `Маршруты сохранены, но не переподключились: ${hookFailures.map(x=>x.module).join(", ")}`
+        : `Применено ко всем модулям${data.hooks?.length ? `; переподключено: ${data.hooks.map(x=>x.module).join(", ")}` : ""}`);
+    }
+  } catch (error) {
+    st.textContent = error.message; st.className = "status-line status-line--err";
+  } finally {
+    testBtn.disabled = saveBtn.disabled = false;
+  }
+}
+
+document.getElementById("telegramRefreshBtn").addEventListener("click", loadTelegramSettings);
+document.getElementById("telegramTestBtn").addEventListener("click", () => runTelegramAction(false));
+document.getElementById("telegramSaveBtn").addEventListener("click", () => runTelegramAction(true));
+
+// ── Credentials ───────────────────────────────────────────────────────────────
+
+const credentialsState = {items: [], selected: ""};
+let vkIdState = null;
+
+function setVkIdBusy(busy) {
+  ["vkIdSave", "vkIdAuthorize", "vkIdRefresh"].forEach(id => { document.getElementById(id).disabled = busy; });
+  if (!busy && vkIdState) document.getElementById("vkIdRefresh").disabled = !vkIdState.refresh_present || vkIdState.needs_reauthorization;
+}
+
+async function vkIdRequest(path, options) {
+  const response = await fetch(RP + "/token-vault/api/vk-id" + path, options);
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (response.status === 401) { location.href = RP + "/login"; throw new Error("Требуется вход"); }
+  if (!response.ok) throw new Error(data.detail || data.message || `HTTP ${response.status}`);
+  return data;
+}
+
+function durationText(seconds) {
+  const value = Number(seconds || 0);
+  if (value <= 0) return "истёк";
+  const days = Math.floor(value / 86400);
+  if (days) return `${days} дн.`;
+  const hours = Math.floor(value / 3600);
+  if (hours) return `${hours} ч.`;
+  return `${Math.max(1, Math.floor(value / 60))} мин.`;
+}
+
+function renderVkId(data) {
+  vkIdState = data;
+  const appId = document.getElementById("vkIdAppId");
+  const scopes = document.getElementById("vkIdScopes");
+  if (document.activeElement !== appId) appId.value = data.app_id || "";
+  if (document.activeElement !== scopes) scopes.value = data.scopes || "vkid.personal_info";
+  document.getElementById("vkIdClientSecret").placeholder = data.client_secret_present ? "Сохранён" : "";
+  document.getElementById("vkIdServiceToken").placeholder = data.service_token_present ? "Сохранён" : "";
+  document.getElementById("vkIdCallback").value = data.callback_url || "";
+  const pill = document.getElementById("vkIdStatusPill");
+  const healthy = data.connected && Number(data.refresh_expires_in || 0) > 0;
+  pill.textContent = data.needs_reauthorization ? "нужен вход" : healthy ? "подключён" : data.configured ? "не авторизован" : "не настроен";
+  pill.className = `credential-pill ${healthy ? "credential-pill--ok" : data.needs_reauthorization ? "credential-pill--bad" : "credential-pill--warn"}`;
+  const meta = [];
+  if (data.user_id) meta.push(`VK ID ${data.user_id}`);
+  if (data.access_present) meta.push(`Access: ${durationText(data.access_expires_in)}`);
+  if (data.refresh_present) meta.push(`Refresh: ${durationText(data.refresh_expires_in)}`);
+  if (data.granted_scopes) meta.push(`Доступы: ${data.granted_scopes}`);
+  document.getElementById("vkIdMeta").textContent = meta.join(" · ");
+  document.getElementById("vkIdScopeNote").hidden = !(data.scopes || "").split(/\s+/).includes("messages");
+  document.getElementById("vkIdRefresh").disabled = !data.refresh_present || data.needs_reauthorization;
+  const result = new URLSearchParams(location.search).get("vk_id");
+  const status = document.getElementById("vkIdStatus");
+  status.textContent = data.last_error || (result === "connected" ? "VK подключён" : result === "error" ? "Авторизация не завершена" : "");
+  status.className = `status-line ${data.last_error || result === "error" ? "status-line--err" : result === "connected" ? "status-line--ok" : ""}`;
+}
+
+async function loadVkId() {
+  try {
+    renderVkId(await vkIdRequest("/status"));
+  } catch (error) {
+    const status = document.getElementById("vkIdStatus");
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+  }
+}
+
+async function saveVkIdConfig() {
+  const status = document.getElementById("vkIdStatus");
+  const body = {
+    app_id: document.getElementById("vkIdAppId").value.trim(),
+    scopes: document.getElementById("vkIdScopes").value.trim(),
+    client_secret: document.getElementById("vkIdClientSecret").value.trim(),
+    service_token: document.getElementById("vkIdServiceToken").value.trim(),
+  };
+  setVkIdBusy(true);
+  status.textContent = "Сохраняю…";
+  status.className = "status-line";
+  try {
+    const data = await vkIdRequest("/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    document.getElementById("vkIdClientSecret").value = "";
+    document.getElementById("vkIdServiceToken").value = "";
+    renderVkId(data);
+    const credentials = await credentialRequest("");
+    credentialsState.items = credentials.items || [];
+    renderCredentials();
+    status.textContent = "Сохранено";
+    status.className = "status-line status-line--ok";
+    return data;
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+    throw error;
+  } finally {
+    setVkIdBusy(false);
+  }
+}
+
+async function authorizeVkId() {
+  const status = document.getElementById("vkIdStatus");
+  try {
+    await saveVkIdConfig();
+    setVkIdBusy(true);
+    status.textContent = "Открываю VK…";
+    const data = await vkIdRequest("/start", {method: "POST"});
+    location.assign(data.authorization_url);
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+    setVkIdBusy(false);
+  }
+}
+
+async function refreshVkId() {
+  const status = document.getElementById("vkIdStatus");
+  setVkIdBusy(true);
+  status.textContent = "Обновляю…";
+  try {
+    const data = await vkIdRequest("/refresh", {method: "POST"});
+    await loadVkId();
+    status.textContent = data.refreshed ? "Токен обновлён" : data.message || "Без изменений";
+    status.className = `status-line ${data.ok ? "status-line--ok" : "status-line--err"}`;
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+  } finally {
+    setVkIdBusy(false);
+  }
+}
+
+function credentialModules(item) {
+  return (item.modules || []).map(module => module.name).join(", ");
+}
+
+function credentialPill(item) {
+  const status = item.validation?.status || (item.present ? "present" : "missing");
+  const bad = ["invalid", "error"].includes(status) || (status === "missing" && item.required);
+  const css = status === "ok" ? "credential-pill--ok" : bad ? "credential-pill--bad" : "credential-pill--warn";
+  return `<span class="credential-pill ${css}">${esc(status)}</span>`;
+}
+
+function visibleCredentials() {
+  const query = document.getElementById("credentialsSearch").value.trim().toLowerCase();
+  const filter = document.getElementById("credentialsFilter").value;
+  return credentialsState.items.filter(item => {
+    const status = item.validation?.status || "";
+    const haystack = [item.key, item.description, item.provider, credentialModules(item)].join(" ").toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (filter === "present" && !item.present) return false;
+    if (filter === "missing" && item.present) return false;
+    if (filter === "bad" && !["invalid", "error"].includes(status) && !(status === "missing" && item.required)) return false;
+    return true;
+  });
+}
+
+function renderCredentials() {
+  const rows = visibleCredentials().map(item => `
+    <tr data-credential-key="${escAttr(item.key)}" class="${credentialsState.selected === item.key ? "is-active" : ""}">
+      <td><strong class="credentials-key">${esc(item.key)}</strong><br><span class="status-line">${esc(item.description || "")}</span></td>
+      <td>${credentialPill(item)}<br><span class="status-line">${esc(item.masked || "не задано")}</span></td>
+      <td class="status-line">${esc(credentialModules(item) || "—")}</td>
+    </tr>`).join("");
+  document.getElementById("credentialsTable").innerHTML = rows || '<tr><td colspan="3">Нет ключей</td></tr>';
+  document.querySelectorAll("[data-credential-key]").forEach(row => {
+    row.addEventListener("click", () => selectCredential(row.dataset.credentialKey));
+  });
+}
+
+function selectCredential(key) {
+  const item = credentialsState.items.find(candidate => candidate.key === key) || {key};
+  credentialsState.selected = key;
+  document.getElementById("credentialTitle").textContent = key;
+  document.getElementById("credentialKey").value = key;
+  document.getElementById("credentialValue").value = "";
+  document.getElementById("credentialMeta").textContent = [item.provider, credentialModules(item)].filter(Boolean).join(" · ");
+  document.getElementById("credentialStatus").textContent = "";
+  renderCredentials();
+}
+
+function setCredentialsBusy(busy) {
+  ["credentialsValidateAll", "credentialsRefresh", "credentialValidate", "credentialSave", "credentialForce"]
+    .forEach(id => { document.getElementById(id).disabled = busy; });
+}
+
+async function credentialRequest(path, options) {
+  const response = await fetch(RP + "/api/settings/credentials" + path, options);
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (response.status === 401) { location.href = RP + "/login"; throw new Error("Требуется вход"); }
+  if (!response.ok) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  return data;
+}
+
+async function loadCredentials(validate=false) {
+  if (!validate) loadVkId();
+  const status = document.getElementById("credentialStatus");
+  setCredentialsBusy(true);
+  status.textContent = validate ? "Проверяю…" : "Загружаю…";
+  status.className = "status-line";
+  try {
+    const data = await credentialRequest(validate ? "?validate=1" : "");
+    credentialsState.items = data.items || [];
+    renderCredentials();
+    status.textContent = data.updated_at || "";
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+  } finally {
+    setCredentialsBusy(false);
+  }
+}
+
+async function validateSelectedCredential() {
+  const key = document.getElementById("credentialKey").value.trim();
+  const value = document.getElementById("credentialValue").value.trim();
+  if (!key) return;
+  const status = document.getElementById("credentialStatus");
+  status.textContent = "Проверяю…";
+  try {
+    const data = await credentialRequest("/validate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({key, value}),
+    });
+    status.textContent = `${data.validation.status}: ${data.validation.message || ""}`;
+    status.className = `status-line ${["invalid", "error"].includes(data.validation.status) ? "status-line--err" : "status-line--ok"}`;
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+  }
+}
+
+async function saveSelectedCredential(force=false) {
+  const key = document.getElementById("credentialKey").value.trim();
+  const value = document.getElementById("credentialValue").value.trim();
+  const status = document.getElementById("credentialStatus");
+  if (!key || !value) { status.textContent = "Укажите ключ и значение"; return; }
+  setCredentialsBusy(true);
+  status.textContent = "Применяю…";
+  status.className = "status-line";
+  try {
+    const data = await credentialRequest("", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({key, value, validate: !force, force}),
+    });
+    if (data.saved === false) {
+      status.textContent = `${data.validation.status}: ${data.validation.message || ""}`;
+      status.className = "status-line status-line--err";
+      return;
+    }
+    const failed = Number(data.restart?.failed || 0);
+    const restarted = Number(data.restart?.restarted || 0);
+    document.getElementById("credentialValue").value = "";
+    await loadCredentials(false);
+    selectCredential(key);
+    status.textContent = failed ? `Сохранено. Перезапущено: ${restarted}; ошибок: ${failed}` : `Сохранено. Перезапущено: ${restarted}`;
+    status.className = `status-line ${failed ? "status-line--err" : "status-line--ok"}`;
+  } catch (error) {
+    status.textContent = error.message;
+    status.className = "status-line status-line--err";
+  } finally {
+    setCredentialsBusy(false);
+  }
+}
+
+document.getElementById("credentialsRefresh").addEventListener("click", () => loadCredentials(false));
+document.getElementById("credentialsValidateAll").addEventListener("click", () => loadCredentials(true));
+document.getElementById("credentialsSearch").addEventListener("input", renderCredentials);
+document.getElementById("credentialsFilter").addEventListener("change", renderCredentials);
+document.getElementById("credentialValidate").addEventListener("click", validateSelectedCredential);
+document.getElementById("credentialSave").addEventListener("click", () => saveSelectedCredential(false));
+document.getElementById("credentialForce").addEventListener("click", () => {
+  if (confirm("Сохранить без проверки?")) saveSelectedCredential(true);
+});
+document.getElementById("vkIdSave").addEventListener("click", () => saveVkIdConfig().catch(() => {}));
+document.getElementById("vkIdAuthorize").addEventListener("click", authorizeVkId);
+document.getElementById("vkIdRefresh").addEventListener("click", refreshVkId);
+document.getElementById("vkIdCopyCallback").addEventListener("click", async () => {
+  const value = document.getElementById("vkIdCallback").value;
+  await navigator.clipboard.writeText(value);
+  document.getElementById("vkIdStatus").textContent = "Redirect URL скопирован";
+});
+
 // ── ENV ───────────────────────────────────────────────────────────────────────
 
 let envFile = null;
@@ -677,6 +1204,9 @@ function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
 
 // init
 loadUsers();
+const initialTab = new URLSearchParams(location.search).get("tab");
+const initialButton = document.querySelector(`.module-item[data-tab="${initialTab || ""}"]`);
+if (initialButton) initialButton.click();
 </script>
 </body>
 </html>

@@ -31,9 +31,11 @@
     .run-head,.run-row{grid-template-columns:90px minmax(220px,1fr) 80px 110px 80px 110px minmax(160px,1fr) 130px}
     .broadcast-head,.broadcast-row{grid-template-columns:36px 88px minmax(260px,1fr) 90px 90px 90px 120px}
     .history-head,.history-row{grid-template-columns:70px minmax(220px,1fr) 110px 110px minmax(160px,1fr) 130px}
+    .vk-chat-head,.vk-chat-row{grid-template-columns:minmax(240px,1fr) 90px 100px 360px}
+    a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
     .check-cell{display:flex;align-items:center;justify-content:center}.check-cell input{width:18px;min-height:18px}.check-cell--head{justify-content:center}.check-cell--head input{accent-color:#f2f2f2}
     .cell-main{font-weight:600}.cell-sub{margin-top:2px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.pill{width:max-content;max-width:100%;border:1px solid var(--line2);padding:2px 6px;color:var(--muted);font-size:12px}.on{color:var(--ok)}.off{color:var(--bad)}.warn{color:var(--warn)}
-    @media(max-width:900px){body{height:auto;overflow:auto}.shell{height:auto}.create-grid,.auth-grid,.grid,.grid3{grid-template-columns:1fr}.people-head,.people-row,.course-head,.course-row,.run-head,.run-row,.broadcast-head,.broadcast-row,.history-head,.history-row{grid-template-columns:1fr}.table-head{display:none}.tabs{position:sticky;top:0;z-index:2}.tab{width:104px}}
+    @media(max-width:900px){body{height:auto;overflow:auto}.shell{height:auto}.create-grid,.auth-grid,.grid,.grid3{grid-template-columns:1fr}.people-head,.people-row,.course-head,.course-row,.run-head,.run-row,.broadcast-head,.broadcast-row,.history-head,.history-row,.vk-chat-head,.vk-chat-row{grid-template-columns:1fr}.table-head{display:none}.tabs{position:sticky;top:0;z-index:2}.tab{width:104px}}
   </style>
 </head>
 <body>
@@ -44,8 +46,7 @@
     <button class="tab" data-view="courses" type="button">Курсы</button>
     <button class="tab" data-view="templates" type="button">Шаблоны</button>
     <button class="tab" data-view="telegram" type="button">Telegram</button>
-    <button class="tab" data-view="vk-auth" type="button">VK Авторизация</button>
-    <button class="tab" data-view="remove" type="button">Удаление</button>
+    <button class="tab" data-view="remove" type="button">Участники</button>
     <button class="tab" data-view="broadcast" type="button">Рассылки</button>
     <button class="tab" data-view="runs" type="button">История</button>
   </nav>
@@ -55,7 +56,6 @@
       <div class="head">
         <div>
           <h1>Создание учебных чатов</h1>
-          <p class="muted">VK и Telegram чаты создаются по номеру потока, дате старта и выбранному курсу.</p>
         </div>
         <span class="pill" id="envPill">Проверка ENV...</span>
       </div>
@@ -66,13 +66,13 @@
               <select id="platform"><option value="vk">VK</option><option value="telegram">Telegram</option></select>
             </label>
             <label>Режим
-              <select id="testMode"><option value="false">Боевой: добавить сотрудников</option><option value="true">Проверка: без сотрудников</option></select>
+              <select id="testMode"><option value="false">Боевой</option><option value="true">Проверка: техподдержка</option></select>
             </label>
             <label>Номер потока
               <input id="stream" value="51" inputmode="numeric">
             </label>
             <label>Дата старта
-              <input id="date" value="01.06.2026">
+              <input id="date">
             </label>
             <label>Курс
               <select id="course"></select>
@@ -167,42 +167,24 @@
       </div>
     </section>
 
-    <section class="view" id="view-vk-auth" hidden>
-      <div class="head">
-        <div>
-          <h1>Авторизация ВКонтакте</h1>
-          <p class="muted">Серверная VK Web-сессия используется только для автоматической выдачи админок при создании VK-чата.</p>
-        </div>
-        <span class="pill" id="vkAuthPill">Не проверено</span>
-      </div>
-      <div class="auth-grid">
-        <div class="surface">
-          <div class="actions">
-            <button class="btn" id="vkAuthOpenBtn" type="button">Открыть VK</button>
-            <button class="btn ghost" id="vkAuthRefreshBtn" type="button">Обновить</button>
-            <button class="btn ghost" id="vkAuthLiveBtn" type="button">Live: выкл</button>
-            <button class="btn ghost" id="vkAdminsRetryBtn" type="button">Довыдать админки</button>
-            <button class="btn ghost" id="vkAuthCloseBtn" type="button">Закрыть браузер</button>
-            <button class="btn danger" id="vkAuthResetBtn" type="button">Сбросить профиль</button>
-          </div>
-          <div class="auth-tools">
-            <label>Ввод в серверный браузер<input id="vkAuthText" autocomplete="off" placeholder="код, телефон или текст"></label>
-            <button class="btn ghost" id="vkAuthTypeBtn" type="button">Ввести</button>
-            <button class="btn ghost" id="vkAuthEnterBtn" type="button">Enter</button>
-          </div>
-          <p class="muted">Клик по скриншоту отправляет клик в серверный браузер. Так можно нажать проверку VK или поле ввода.</p>
-          <pre id="vkAuthStatus">Нажмите «Открыть VK». Если появится QR, код или проверка, действуйте прямо по скриншоту.</pre>
-        </div>
-        <div class="surface">
-          <h2>Скрин серверного браузера</h2>
-          <img id="vkAuthShot" class="auth-shot" alt="VK auth screenshot">
-        </div>
-      </div>
-    </section>
-
     <section class="view" id="view-remove" hidden>
-      <div class="head"><h1>Удаление из учебных чатов</h1><p class="muted">Проверяет только чаты потоков с учебным названием.</p></div>
+      <div class="head"><h1>Участники учебных чатов</h1><button class="btn ghost" id="vkChatsBtn" type="button">Показать VK-чаты</button></div>
+      <div class="table" id="vkChatsTable" hidden>
+        <div class="table-head vk-chat-head"><span>Чат</span><span>Участники</span><span>Статус</span><span></span></div>
+        <div id="vkChatsList"></div>
+      </div>
       <div class="surface">
+        <h2>Роли VK</h2>
+        <div class="grid3">
+          <label>Аккаунт<input id="vkManageTarget" value="https://vk.ru/tehpod_sobakovodpro"></label>
+          <label>Действие<select id="vkManageAction"><option value="grant_admin">Выдать админку</option><option value="revoke_admin">Снять админку</option><option value="remove">Удалить</option></select></label>
+          <label>Режим<select id="vkManageDryRun"><option value="true">Проверить</option><option value="false">Выполнить</option></select></label>
+        </div>
+        <div class="actions"><button class="btn" id="vkManageBtn" type="button">Выполнить</button></div>
+        <pre id="vkManageResult" hidden></pre>
+      </div>
+      <div class="surface">
+        <h2>Удаление</h2>
         <div class="grid3">
           <label>Платформа<select id="removePlatform"><option value="telegram">Telegram</option><option value="vk">VK</option></select></label>
           <label>Кого удалить<input id="removeTarget" placeholder="@username или ссылка"></label>
@@ -276,7 +258,6 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;'
 const show = (el, data) => { el.hidden = false; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
 const hide = el => { el.hidden = true; el.textContent = ""; };
 let people = [], courses = [], templates = [], broadcastChats = [], broadcastHistory = [], editPersonId = null;
-let vkAuthLiveTimer = null, vkAdminsRetrying = false, vkAdminsAutoRetried = false;
 const roleLabels = {admin:"Админ", author:"Автор курса", kurator:"Куратор", tech:"Техподдержка"};
 const parityLabels = {any:"Все", even:"Четные", odd:"Нечетные"};
 const enabledLabel = value => value ? "Да" : "Нет";
@@ -437,108 +418,45 @@ $("tgConfirmBtn").onclick = async () => {
   } catch(e) { show($("tgAuthStatus"), e); }
 };
 
-function renderVkAuth(data) {
-  const state = data.vk_web || data;
-  const status = state.status || "unknown";
-  $("vkAuthPill").textContent = state.authorized ? "Авторизовано" : (status === "waiting_auth" ? "Жду вход" : status);
-  $("vkAuthPill").className = "pill " + (state.authorized ? "on" : status === "error" ? "off" : "warn");
-  show($("vkAuthStatus"), state);
-  if (state.screenshot || state.browser_open) {
-    $("vkAuthShot").src = `${api}/vk-web/auth/screenshot?t=${Date.now()}`;
-  }
-}
-function refreshVkShot() {
-  if ($("vkAuthShot").getAttribute("src")) {
-    $("vkAuthShot").src = `${api}/vk-web/auth/screenshot?t=${Date.now()}`;
-  }
-}
-function setVkLive(enabled) {
-  if (vkAuthLiveTimer) {
-    clearInterval(vkAuthLiveTimer);
-    vkAuthLiveTimer = null;
-  }
-  $("vkAuthLiveBtn").textContent = enabled ? "Live: вкл" : "Live: выкл";
-  $("vkAuthLiveBtn").className = "btn ghost" + (enabled ? " on" : "");
-  if (enabled) {
-    vkAuthLiveTimer = setInterval(refreshVkShot, 2000);
-  }
-}
-async function retryPendingVkAdmins(auto=false) {
-  if (vkAdminsRetrying || (auto && vkAdminsAutoRetried)) return;
-  vkAdminsRetrying = true;
-  if (auto) vkAdminsAutoRetried = true;
-  $("vkAdminsRetryBtn").disabled = true;
-  show($("vkAuthStatus"), auto ? "Авторизация есть. Автоматически довыдаю админки для последнего незавершённого VK-чата..." : "Довыдаю админки для последнего незавершённого VK-чата...");
-  try {
-    const data = await postJson("/vk-web/admins/retry-pending", {});
-    show($("vkAuthStatus"), data);
-    await loadRuns();
-    refreshVkShot();
-  } catch(e) {
-    show($("vkAuthStatus"), e);
-  } finally {
-    vkAdminsRetrying = false;
-    $("vkAdminsRetryBtn").disabled = false;
-  }
-}
-async function loadVkAuth(openBrowser=false) {
-  try {
-    const data = openBrowser ? await postJson("/vk-web/auth/open", {}) : await getJson("/vk-web/auth/status");
-    renderVkAuth(data);
-    await loadStatus();
-    if ((data.vk_web || data).authorized) {
-      retryPendingVkAdmins(true);
-    }
-  } catch(e) { show($("vkAuthStatus"), e); $("vkAuthPill").textContent = "Ошибка"; $("vkAuthPill").className = "pill off"; }
-}
-$("vkAuthOpenBtn").onclick = () => { setVkLive(true); loadVkAuth(true); };
-$("vkAuthRefreshBtn").onclick = () => loadVkAuth(false);
-$("vkAuthLiveBtn").onclick = () => setVkLive(!vkAuthLiveTimer);
-$("vkAdminsRetryBtn").onclick = () => retryPendingVkAdmins(false);
-$("vkAuthCloseBtn").onclick = async () => {
-  try { setVkLive(false); renderVkAuth(await postJson("/vk-web/auth/close", {})); await loadStatus(); }
-  catch(e) { show($("vkAuthStatus"), e); }
-};
-$("vkAuthResetBtn").onclick = async () => {
-  if (!confirm("Сбросить VK Web профиль? Рабочая авторизованная сессия не будет сброшена сервером.")) return;
-  try { renderVkAuth(await postJson("/vk-web/auth/reset", {})); $("vkAuthShot").removeAttribute("src"); await loadStatus(); }
-  catch(e) { show($("vkAuthStatus"), e); }
-};
-$("vkAuthShot").addEventListener("click", async event => {
-  const img = $("vkAuthShot");
-  if (!img.getAttribute("src")) return;
-  const rect = img.getBoundingClientRect();
-  const scaleX = img.naturalWidth / Math.max(1, rect.width);
-  const scaleY = img.naturalHeight / Math.max(1, rect.height);
-  const payload = {
-    x: (event.clientX - rect.left) * scaleX,
-    y: (event.clientY - rect.top) * scaleY,
-    image_width: img.naturalWidth,
-    image_height: img.naturalHeight,
-  };
-  try { renderVkAuth(await postJson("/vk-web/auth/click", payload)); await loadStatus(); }
-  catch(e) { show($("vkAuthStatus"), e); }
-});
-$("vkAuthTypeBtn").onclick = async () => {
-  try { renderVkAuth(await postJson("/vk-web/auth/type", {text:$("vkAuthText").value})); $("vkAuthText").value = ""; await loadStatus(); }
-  catch(e) { show($("vkAuthStatus"), e); }
-};
-$("vkAuthEnterBtn").onclick = async () => {
-  try { renderVkAuth(await postJson("/vk-web/auth/key", {key:"Enter"})); await loadStatus(); }
-  catch(e) { show($("vkAuthStatus"), e); }
-};
-$("vkAuthText").addEventListener("keydown", event => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    $("vkAuthTypeBtn").click();
-  }
-});
-
 $("removeBtn").onclick = async () => {
   const dry = $("removeDryRun").value === "true";
   if (!dry && !confirm("Удалить человека из найденных учебных чатов?")) return;
   try { show($("removeResult"), await postJson("/members/remove", {platform:$("removePlatform").value, target:$("removeTarget").value, dry_run:dry})); }
   catch(e) { show($("removeResult"), e); }
+};
+
+$("vkChatsBtn").onclick = async () => {
+  try {
+    const data = await getJson("/vk-course-chats");
+    const chats = (data.items || []).filter(item => item.accessible);
+    $("vkChatsList").innerHTML = chats.length ? chats.map(item => `<div class="row vk-chat-row">
+      <span><span class="cell-main">${esc(item.title)}</span><span class="cell-sub">peer ${esc(item.peer_id)}</span></span>
+      <span>${esc(item.members_count ?? "")}</span>
+      <span class="on">Доступен</span>
+      <span class="actions"><a class="btn" href="${esc(item.url)}" target="_blank" rel="noopener">Открыть от сообщества</a><button class="btn ghost" type="button" data-vk-pin-restore="${esc(item.peer_id)}">Вернуть закреп</button></span>
+    </div>`).join("") : `<div class="row"><span class="muted">Доступных чатов нет</span></div>`;
+    $("vkChatsTable").hidden = false;
+    show($("vkManageResult"), {accessible:data.accessible, legacy_inaccessible:data.inaccessible});
+  }
+  catch(e) { show($("vkManageResult"), e); }
+};
+$('vkChatsList').addEventListener('click', async event => {
+  const btn = event.target.closest('button[data-vk-pin-restore]');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    show($('vkManageResult'), await postJson('/vk-course-chats/pin/restore', {peer_id:btn.dataset.vkPinRestore, dry_run:false}));
+    $('vkChatsBtn').click();
+  }
+  catch(e) { show($('vkManageResult'), e); }
+  finally { btn.disabled = false; }
+});
+$("vkManageBtn").onclick = async () => {
+  const dry = $("vkManageDryRun").value === "true";
+  const action = $("vkManageAction").value;
+  if (!dry && !confirm("Применить действие во всех доступных учебных VK-чатах?")) return;
+  try { show($("vkManageResult"), await postJson("/vk-members/manage", {target:$("vkManageTarget").value, action, dry_run:dry})); }
+  catch(e) { show($("vkManageResult"), e); }
 };
 
 function selectedBroadcastKeys() {
@@ -695,17 +613,21 @@ function formatElapsed(ms) {
   const sec = String(total % 60).padStart(2, "0");
   return `${min}:${sec}`;
 }
+function runDestination(link) {
+  const value = String(link || "").trim();
+  return /^https:\/\//i.test(value) ? value : "";
+}
 $("previewBtn").onclick = async () => {
-  try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}&curator_id=${encodeURIComponent($("curator").value)}`)); }
+  try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}&curator_id=${encodeURIComponent($("curator").value)}&test_mode=${encodeURIComponent($("testMode").value)}`)); }
   catch(e) { show($("previewResult"), e); }
 };
 $("createBtn").onclick = async () => {
   const btn = $("createBtn");
   const started = Date.now();
   btn.disabled = true;
-  show($("createResult"), `Создание началось: 00:00\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка без сотрудников" : "боевой запуск"}`);
+  show($("createResult"), `Создание началось: 00:00\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка" : "боевой"}`);
   const timer = setInterval(() => {
-    show($("createResult"), `Создание идет: ${formatElapsed(Date.now() - started)}\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка без сотрудников" : "боевой запуск"}`);
+    show($("createResult"), `Создание идет: ${formatElapsed(Date.now() - started)}\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка" : "боевой"}`);
   }, 1000);
   try {
     const result = await postJson("/chats/create", createPayload());
@@ -723,19 +645,23 @@ $("createBtn").onclick = async () => {
 async function loadRuns() {
   try {
     const data = await getJson("/runs?limit=50");
-    $("runsList").innerHTML = data.items.map(r => `<div class="row run-row">
+    $("runsList").innerHTML = data.items.map(r => {
+      const destination = runDestination(r.link);
+      const linkCell = destination ? `<a class="btn ghost" href="${esc(destination)}" target="_blank" rel="noopener">Перейти</a>` : esc(r.error || "");
+      return `<div class="row run-row">
       <span>${esc(r.platform === "telegram" ? "Telegram" : "VK")}</span><span>${esc(r.title)}</span><span>${esc(r.stream_number)}</span><span>${esc(r.date_start)}</span>
-      <span>${r.test_mode ? "Проверка" : "Боевой"}</span><span class="${r.status === "ok" ? "on" : r.status && r.status.startsWith("needs_") ? "warn" : "off"}">${r.status === "ok" ? "Готово" : r.status === "needs_vk_web_admins" ? "Нужны админки" : r.status === "needs_members" ? "Нужны участники" : "Ошибка"}</span>
-      <span class="cell-sub">${esc(r.link || r.error || "")}</span>
-      <span>${r.platform === "vk" && r.status === "needs_vk_web_admins" ? '<button class="btn ghost" type="button" data-run-action="retry-vk-admins" data-id="' + esc(r.id) + '">Довыдать</button>' : ""}</span>
-    </div>`).join("");
+      <span>${r.test_mode ? "Проверка" : "Боевой"}</span><span class="${r.status === "ok" ? "on" : ["waiting_for_message", "needs_bootstrap"].includes(r.status) || r.status && r.status.startsWith("needs_") ? "warn" : "off"}">${r.status === "ok" ? "Готово" : r.status === "waiting_for_message" ? "Ждёт сообщение" : r.status === "needs_bootstrap" ? "Нужно оформление" : ["needs_admins", "needs_vk_web_admins"].includes(r.status) ? "Нужны админки" : r.status === "needs_members" ? "Нужны участники" : r.status === "needs_invite_link" ? "Нет ссылки" : "Ошибка"}</span>
+      <span class="cell-sub">${linkCell}</span>
+      <span>${r.platform === "vk" && ["needs_admins", "needs_members", "needs_vk_web_admins"].includes(r.status) ? '<button class="btn ghost" type="button" data-run-action="retry-vk-admins" data-id="' + esc(r.id) + '">Проверить</button>' : ""}</span>
+    </div>`;
+    }).join("");
   } catch(e) { $("runsList").innerHTML = `<div class="row run-row"><span>${esc(JSON.stringify(e))}</span></div>`; }
 }
 async function retryVkAdminsRun(runId) {
   if (!runId) return;
   show($("createResult"), `Довыдаю VK-админки для запуска #${runId}...`);
   try {
-    const data = await postJson("/vk-web/admins/retry", {run_id: runId});
+    const data = await postJson("/vk/admins/retry", {run_id: runId});
     show($("createResult"), data);
     await loadRuns();
     refreshVkShot();
@@ -755,6 +681,7 @@ $("runsClear").onclick = async () => {
 };
 
 async function init() {
+  $("date").value = new Intl.DateTimeFormat("ru-RU", {timeZone:"Europe/Moscow", day:"2-digit", month:"2-digit", year:"numeric"}).format(new Date());
   $("tgPassword").value = ""; $("tgCode").value = "";
   await loadStatus(); await loadCourses(); await loadPeople(); await loadTemplates(); await loadTelegramAuth(); await loadRuns(); await loadBroadcastStatus(); await loadBroadcastHistory();
 }

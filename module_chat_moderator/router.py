@@ -20,7 +20,12 @@ import uuid
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from orchestrator.vk_poll import VkPollSubscription, shared_vk_poll_hub
+from orchestrator.telegram_proxy import telegram_bot_api_proxy_url as global_telegram_bot_api_proxy_url
+from orchestrator.vk_group_poll import (
+    VkGroupPollSubscription,
+    adapt_group_message_event,
+    shared_vk_group_poll_hub,
+)
 
 try:
     from orchestrator.auth import can_access_module, verify_token_from_request
@@ -223,10 +228,16 @@ SECRET_SPECS = {
         "kind": "token",
         "default": "",
     },
-    "vk_user_token": {
-        "env": "VK_USER_TOKEN",
-        "label": "VK пользовательский токен",
+    "vk_group_token": {
+        "env": "VK_GROUP_TOKEN",
+        "label": "VK токен сообщества",
         "kind": "token",
+        "default": "",
+    },
+    "vk_group_id": {
+        "env": "VK_GROUP_ID",
+        "label": "VK ID сообщества",
+        "kind": "text",
         "default": "",
     },
     "vk_log_chat_id": {
@@ -338,6 +349,16 @@ async def shutdown() -> None:
     runtime, _runtime = _runtime, None
     if runtime is not None:
         await runtime.stop("all")
+
+
+async def on_telegram_proxy_changed() -> dict[str, Any]:
+    runtime = _runtime
+    if runtime is None or not runtime.telegram.running:
+        return {"reconnected": False, "reason": "telegram runtime is not running"}
+    await runtime.stop("telegram")
+    result = await runtime.start("telegram")
+    _log("info", "telegram runtime reconnected after global proxy change")
+    return {"reconnected": True, "result": result}
 
 
 def _log(level: str, message: str, *args: Any, **kwargs: Any) -> None:
@@ -1034,6 +1055,16 @@ def _int_set_csv(value: Any) -> set[int]:
     return result
 
 
+def _vk_member_is_admin(member: dict[str, Any]) -> bool:
+    role = _clean(member.get("role") or member.get("member_role"), 40).lower()
+    return bool(
+        member.get("is_admin")
+        or member.get("is_owner")
+        or member.get("rank") == 100
+        or role in {"admin", "administrator", "creator", "owner"}
+    )
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(str(value or "").strip())
@@ -1263,7 +1294,7 @@ def _mask_secret(value: str, *, kind: str = "token") -> str:
 
 
 def _secret_validation(key: str) -> dict[str, str]:
-    if key != "vk_user_token":
+    if key != "vk_group_token":
         return {"status": "unchecked", "error": ""}
     invalid_markers = ("invalid access_token", "User authorization failed")
     try:
@@ -1885,11 +1916,7 @@ class TelegramModeratorRuntime:
         runtime = self
         dry_run = _truthy(settings.get("dry_run"))
         allowed_adders = _int_set_csv(settings.get("tg_allowed_adders"))
-        bot_api_proxy_url = _clean(
-            settings.get("telegram_bot_api_proxy_url")
-            or os.environ.get("TELEGRAM_BOT_API_PROXY_URL")
-            or os.environ.get("TELEGRAM_HTTPS_PROXY_URL")
-        )
+        bot_api_proxy_url = global_telegram_bot_api_proxy_url(settings.get("telegram_bot_api_proxy_url"))
         telegram_log_chat_id = _safe_int(
             settings.get("telegram_log_chat_id")
             or os.environ.get("TELEGRAM_LOG_CHAT_ID")
@@ -2008,6 +2035,7 @@ class TelegramModeratorRuntime:
                     user_id=user.id,
                     error=str(error),
                 )
+                return True
             return False
 
         async def handle_message(update: Any, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2300,7 +2328,7 @@ class VKModeratorRuntime:
         self.analyzer = analyzer
         self.vk: Any | None = None
         self.own_id = 0
-        self.subscription: VkPollSubscription | None = None
+        self.subscription: VkGroupPollSubscription | None = None
         self.log_chat_id = _safe_int(_secret_value("vk_log_chat_id"), 2000000041)
         self.chat_title_cache: dict[int, dict[str, Any]] = {}
         self.user_admin_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2315,12 +2343,16 @@ class VKModeratorRuntime:
             return
         self.settings = settings
         self.log_chat_id = _safe_int(_secret_value("vk_log_chat_id"), 2000000041)
-        token = str(_secret_value("vk_user_token") or "").strip()
+        token = str(_secret_value("vk_group_token") or "").strip()
+        group_id = _safe_int(_secret_value("vk_group_id"), 0)
         if not token:
-            raise RuntimeError("VK_USER_TOKEN is not configured")
-        self.subscription = await shared_vk_poll_hub.subscribe(
+            raise RuntimeError("VK_GROUP_TOKEN is not configured")
+        if group_id <= 0:
+            raise RuntimeError("VK_GROUP_ID is not configured")
+        self.subscription = await shared_vk_group_poll_hub.subscribe(
             subscriber_id=MODULE_ID,
             token=token,
+            group_id=group_id,
             on_event=self._handle_shared_event,
             on_error=self._handle_shared_error,
         )
@@ -2331,13 +2363,13 @@ class VKModeratorRuntime:
             platform="vk",
             action="runtime_token_selected",
             status="ok",
-            request_json={"source": "shared_vk_poll", "own_id": self.own_id},
+            request_json={"source": "shared_vk_group_poll", "own_id": self.own_id, "group_id": group_id},
         )
         _record_action(
             platform="vk",
             action="runtime_loop_started",
             status="ok",
-            request_json={"own_id": self.own_id, "transport": "shared_vk_poll"},
+            request_json={"own_id": self.own_id, "group_id": group_id, "transport": "bots_long_poll"},
         )
 
     async def stop(self) -> None:
@@ -2349,19 +2381,16 @@ class VKModeratorRuntime:
 
     async def _handle_shared_event(self, event: Any) -> None:
         try:
-            event_type = str(getattr(event, "type", ""))
-            if event_type.endswith("MESSAGE_NEW") or getattr(event, "type", None) == self._vk_event_type("MESSAGE_NEW"):
-                if not bool(getattr(event, "from_me", False)):
-                    await self.process_message(event)
-            elif event_type.endswith("CHAT_UPDATE") or getattr(event, "type", None) == self._vk_event_type("CHAT_UPDATE"):
-                await self.process_chat_update(event)
+            message_event = adapt_group_message_event(event)
+            if message_event is not None and not bool(getattr(message_event, "from_me", False)):
+                await self.process_message(message_event)
         except Exception as error:
             _record_action(platform="vk", action="runtime_event_error", status="error", error=str(error))
             _log("error", "Shared VK event handler failed: %s", error, exc_info=True)
 
     async def _handle_shared_error(self, error: Exception) -> None:
         _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
-        _log("warning", "Shared VK longpoll error: %s", error)
+        _log("warning", "Shared VK Bots Long Poll error: %s", error)
 
     def _vk_event_type(self, name: str) -> Any:
         try:
@@ -2439,20 +2468,20 @@ class VKModeratorRuntime:
         cache_key = (int(peer_id), int(user_id))
         now = time.time()
         cached = self.user_admin_cache.get(cache_key)
-        if cached and now - float(cached["ts"]) < 300:
+        if cached and now - float(cached["ts"]) < (300 if cached.get("is_admin") else 30):
             return bool(cached["is_admin"])
         try:
             members = self.vk.messages.getConversationMembers(peer_id=int(peer_id))
             is_admin = False
             for member in members.get("items", []):
                 if int(member.get("member_id") or 0) == int(user_id):
-                    is_admin = bool(member.get("is_admin") or member.get("is_owner") or member.get("rank") == 100)
+                    is_admin = _vk_member_is_admin(member)
                     break
             self.user_admin_cache[cache_key] = {"is_admin": is_admin, "ts": now}
             return is_admin
         except Exception as error:
             _record_action(platform="vk", action="resolve_admin_failed", status="error", peer_id=peer_id, user_id=user_id, error=str(error))
-            return False
+            return bool(cached["is_admin"]) if cached else True
 
     def _should_bypass_regular_moderation(self, *, from_id: int, text: str) -> bool:
         if not TRUSTED_MODERATOR_RESOURCE_RE.search(text or ""):
@@ -2557,7 +2586,7 @@ class VKModeratorRuntime:
             return
         payload: dict[str, Any] = {"delete_for_all": 1, "peer_id": int(peer_id)}
         if cmid is not None:
-            payload["conversation_message_ids"] = [int(cmid)]
+            payload["cmids"] = [int(cmid)]
         elif message_id:
             payload["message_ids"] = [int(message_id)]
         else:
@@ -2590,22 +2619,37 @@ class VKModeratorRuntime:
         except Exception as error:
             _record_action(platform="vk", zone=zone, action="send_welcome", status="error", peer_id=peer_id, user_id=user_id, user_name=user_name, error=str(error), text=message)
 
-    async def forward_to_log(self, user_id: int, peer_id: int, category: str, message_id: Any) -> None:
+    async def forward_to_log(
+        self, user_id: int, peer_id: int, category: str, message_id: Any, *, cmid: Any = None
+    ) -> None:
         try:
             name = self._get_user_name(int(user_id))
             chat_name = self._get_chat_title(int(peer_id)) or f"Chat {peer_id}"
-            msg_link = f"https://vk.com/im?sel=c{int(peer_id) - 2000000000}&msgid={message_id}"
+            msg_link = f"https://vk.com/im?sel=c{int(peer_id) - 2000000000}"
             log_text = (
                 f"🚨 [VK MODERATOR]\n"
                 f"Type: {category.upper()}\n"
                 f"User: {name} (id{user_id})\n"
                 f"Chat: {chat_name}\n"
+                f"CMID: {cmid or '—'}\n"
                 f"Link: {msg_link}"
             )
             if _truthy(self.settings.get("dry_run")):
                 _record_action(platform="vk", action="would_forward_to_log", category=category, status="dry_run", peer_id=peer_id, user_id=user_id, user_name=name, text=log_text)
                 return
-            self.vk.messages.send(peer_id=int(self.log_chat_id), message=log_text, forward_messages=[int(message_id)], random_id=0)
+            params: dict[str, Any] = {
+                "peer_id": int(self.log_chat_id),
+                "message": log_text,
+                "random_id": 0,
+            }
+            if cmid:
+                params["forward"] = json.dumps(
+                    {"peer_id": int(peer_id), "conversation_message_ids": [int(cmid)]},
+                    ensure_ascii=False,
+                )
+            elif message_id:
+                params["forward_messages"] = [int(message_id)]
+            self.vk.messages.send(**params)
             _record_action(platform="vk", action="forward_to_log", category=category, status="ok", peer_id=peer_id, user_id=user_id, user_name=name, text=log_text)
         except Exception as error:
             _record_action(platform="vk", action="forward_to_log", category=category, status="error", peer_id=peer_id, user_id=user_id, error=str(error))
@@ -2652,7 +2696,7 @@ class VKModeratorRuntime:
             return
         if peer_id < 2000000000:
             return
-        full_msg = self._get_message_payload(message_id)
+        full_msg = getattr(event, "message_payload", None) or self._get_message_payload(message_id)
         zone = self.get_chat_zone(peer_id)
         title = self._get_chat_title(peer_id)
         if zone != "club":
@@ -2680,13 +2724,22 @@ class VKModeratorRuntime:
         _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
         if isinstance(full_msg.get("action"), dict):
             action = full_msg.get("action") or {}
-            if action.get("type") in {"chat_invite_user", "chat_invite_user_by_link"}:
+            if action.get("type") == "chat_invite_user_by_link":
                 user_id = int(action.get("member_id") or self._extract_from_id(event) or 0)
                 if user_id > 0:
                     if not _template_enabled("vk_welcome"):
                         _record_action(platform="vk", zone=zone, action="skip_template_disabled", status="ok", peer_id=peer_id, user_id=user_id, request_json={"template": "vk_welcome"})
                     elif self._should_send_join_greeting(peer_id, user_id):
                         await self._send_welcome_message(peer_id, user_id, zone)
+            elif action.get("type") == "chat_invite_user":
+                _record_action(
+                    platform="vk",
+                    zone=zone,
+                    action="skip_initial_member_welcome",
+                    status="ok",
+                    peer_id=peer_id,
+                    user_id=int(action.get("member_id") or 0),
+                )
             return
         text = str(getattr(event, "text", "") or "").strip()
         if not text:
@@ -2866,7 +2919,7 @@ class VKModeratorRuntime:
             user_name = "Участник"
             user_mention = "Участник"
         if category in {"негатив", "скам", "удалить"}:
-            await self.forward_to_log(from_id, peer_id, category, message_id)
+            await self.forward_to_log(from_id, peer_id, category, message_id, cmid=cmid)
             try:
                 self._delete_chat_message(peer_id=peer_id, message_id=message_id, cmid=cmid)
                 _record_action(platform="vk", zone=zone, action="delete", category=category, status="ok" if not _truthy(self.settings.get("dry_run")) else "dry_run", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, text=text)
@@ -2972,7 +3025,7 @@ async def status(request: Request):
         "secrets": _secret_status(),
         "prompt": _prompt_status(),
         "runtime": runtime_snapshot,
-        "vk_poll": shared_vk_poll_hub.snapshot(),
+        "vk_poll": shared_vk_group_poll_hub.snapshot(),
         "runtime_state": _runtime_state(),
         "templates": _templates(),
         "stats": {

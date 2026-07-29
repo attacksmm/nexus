@@ -1,8 +1,8 @@
 {
   "id": "amocrm-db",
   "name": "amoCRM → DB",
-  "version": "1.0.0",
-  "description": "Принимает webhook amoCRM по сделкам, догружает snapshot через amoCRM API и пишет его в Базу клиентов, лист «Сделки amoCRM».",
+  "version": "1.0.3",
+  "description": "Принимает webhook amoCRM по сделкам, надёжно обрабатывает их через очередь с защитой от 429 и пишет snapshot в Базу клиентов, лист «Сделки amoCRM».",
   "env_vars": {
     "AMO_BASE_URL": "Базовый URL аккаунта amoCRM, например https://example.amocrm.ru",
     "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с доступом к сделкам, контактам и воронкам",
