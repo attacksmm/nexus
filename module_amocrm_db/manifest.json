@@ -1,7 +1,7 @@
 {
   "id": "amocrm-db",
   "name": "amoCRM → DB",
-  "version": "1.0.3",
+  "version": "1.0.8",
   "description": "Принимает webhook amoCRM по сделкам, надёжно обрабатывает их через очередь с защитой от 429 и пишет snapshot в Базу клиентов, лист «Сделки amoCRM».",
   "env_vars": {
     "AMO_BASE_URL": "Базовый URL аккаунта amoCRM, например https://example.amocrm.ru",

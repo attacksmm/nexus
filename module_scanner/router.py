@@ -469,7 +469,7 @@ async def _openrouter_answer_after(vk_user_id: str, message_at: str) -> tuple[st
                 """
                 SELECT created_at, conversation_id
                 FROM messages
-                WHERE platform_id=? AND source='senler' AND role='assistant' AND created_at>=?
+                WHERE platform_id=? AND source IN ('senler','senler_retry_delivered') AND role='assistant' AND created_at>=?
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,

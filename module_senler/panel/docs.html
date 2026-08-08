@@ -4,7 +4,7 @@
 *{box-sizing:border-box}html,body{margin:0;max-width:100%;background:var(--bg);color:var(--text)}body{padding:20px;line-height:1.55}h2{margin:22px 0 8px;font-size:1.08rem}h2:first-child{margin-top:0}p,li{color:var(--muted)}code{color:var(--ok);overflow-wrap:anywhere}pre{margin:10px 0;padding:12px;border:1px solid var(--border);background:#030303;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:hidden}table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}th,td{padding:7px 9px;border:1px solid var(--border);text-align:left;vertical-align:top;min-width:120px}th{background:var(--panel);color:var(--text)}@media(max-width:640px){body{padding:12px}ol{padding-left:22px}h2{font-size:1rem}table{font-size:.82rem}}
 </style></head>
 <body>
-<h2>Списки Сенлер v1.0.6</h2>
+<h2>Списки Сенлер v1.3.2</h2>
 <p>Модуль автоматически добавляет пользователей в основной список рассылки и отдельный список посещения Senler при посещении ими страниц со встроенным JS-трекером.</p>
 
 <h2>Принцип работы</h2>
@@ -34,6 +34,20 @@
   <tr><td>GET</td><td><code>/visits</code></td><td>Журнал визитов (limit=200)</td></tr>
   <tr><td>GET</td><td><code>/settings</code></td><td>Настройки API (без значений токенов)</td></tr>
   <tr><td>POST</td><td><code>/settings</code></td><td><code>{access_token, group_id}</code></td></tr>
+  <tr><td>POST</td><td><code>/telegram-attribution</code></td><td>Создать короткий маркер для UTM сайта</td></tr>
+  <tr><td>POST</td><td><code>/telegram-attribution/claim</code></td><td>Связать маркер с Telegram-подписчиком</td></tr>
+</table>
+
+<h2>Telegram-атрибуция</h2>
+<p>Атрибуция сайта хранится 30 дней и связывается с Telegram-подписчиком по короткому маркеру. Данные страницы и <code>/start</code> принимаются в любом порядке. Nexus записывает исходные UTM как метки Senler и в переменные <code>nexus.source</code>, <code>nexus.medium</code>, <code>nexus.campaign</code>, <code>nexus.content</code>, <code>nexus.term</code>. ClientID и <code>yclid</code> сохраняются в <code>nexus.ym_uid</code> и <code>nexus.yclid</code>. Пропущенные вебхуки восстанавливаются по журналу подписок Senler.</p>
+
+<h2>Цель Яндекс Метрики</h2>
+<p>После успешной регистрации Senler модуль один раз отправляет цель <code>subscribe</code> в счётчик <code>96682515</code>, если сохранён ClientID и настроен Measurement Protocol. Повторный webhook для того же Telegram ID не отправляет цель повторно. Неоднозначные сетевые ошибки автоматически не повторяются.</p>
+<table>
+  <tr><th>ENV</th><th>Назначение</th></tr>
+  <tr><td><code>YANDEX_METRIKA_MEASUREMENT_TOKEN</code></td><td>Секретный токен Measurement Protocol. Обязателен для отправки.</td></tr>
+  <tr><td><code>YANDEX_METRIKA_COUNTER_ID</code></td><td>ID счётчика, по умолчанию <code>96682515</code>.</td></tr>
+  <tr><td><code>YANDEX_METRIKA_SUBSCRIBE_GOAL</code></td><td>Идентификатор цели, по умолчанию <code>subscribe</code>.</td></tr>
 </table>
 
 <h2>Трекинг-запрос</h2>

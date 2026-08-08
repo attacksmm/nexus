@@ -13,6 +13,8 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -47,7 +49,10 @@ _scan_lock = asyncio.Lock()
 _students_cache_lock = asyncio.Lock()
 _gc_lookup_lock = asyncio.Lock()
 _gc_write_lock = asyncio.Lock()
+_registry_write_lock = asyncio.Lock()
 _chat_flows_cache: dict[str, Any] = {"key": "", "expires": 0.0, "data": None}
+_gc_access_groups_cache: dict[str, Any] = {"expires": 0.0, "items": []}
+_gc_pending_exports: dict[str, tuple[str, float]] = {}
 
 MACHINE_PREFIX = "chat_fields_"
 CHAT_ENTITLEMENT_VERSION = 2
@@ -64,6 +69,8 @@ DEFAULT_USER_FIELD_IDS = {
     "user_field_curator_id": "13834169",
 }
 DEFAULT_CURATOR_MAP = "Ирина=Куратор 1;Слава=Куратор 2;Настасья=Куратор 3"
+REGISTRY_CURATOR_SYNC_CACHE_KEY = "registry-curator-sync-v1"
+ACCESS_SNAPSHOT_CACHE_PREFIX = "getcourse-access-v1:"
 DEFAULT_SETTINGS = {
     "enabled": "1",
     "dry_run": "0",
@@ -100,6 +107,7 @@ DEFAULT_SETTINGS = {
     "gc_fields_write_retry_base_seconds": "300",
     "gc_fields_write_retry_max_seconds": "21600",
     "gc_api_new_job_reserve_requests": "10",
+    "access_snapshot_minutes": "60",
     **DEFAULT_USER_FIELD_IDS,
     **DEFAULT_FIELD_NAMES,
 }
@@ -122,6 +130,16 @@ def setup(ctx):
         _gc_write_task = loop.create_task(_gc_write_loop())
     else:
         loop.run_until_complete(_init_db())
+
+
+async def shutdown():
+    global _poll_task, _gc_lookup_task, _gc_write_task
+    tasks = [task for task in (_poll_task, _gc_lookup_task, _gc_write_task) if task]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _poll_task = _gc_lookup_task = _gc_write_task = None
 
 
 def _log(level: str, message: str, *args: Any) -> None:
@@ -706,6 +724,89 @@ def _sheet_title_matches(title: Any, course_key: str, stream: str) -> bool:
     return bool(re.match(rf"^{re.escape(prefix)}0*{re.escape(str(stream))}(?!\d)", normalized))
 
 
+def _date_value(value: Any) -> datetime | None:
+    text = _clean(value, 100)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", text)
+        if not match:
+            return None
+        year = int(match.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            return datetime(year, int(match.group(2)), int(match.group(1)), tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+
+def _business_order_date_text(fields: dict[str, Any]) -> str:
+    for key in ("paid_at", "payed_at", "payment_date", "received_at", "date_creation"):
+        value = _clean(fields.get(key), 100)
+        if value:
+            return value
+    return ""
+
+
+def _business_order_date(fields: dict[str, Any]) -> datetime | None:
+    return _date_value(_business_order_date_text(fields))
+
+
+def _add_flow_start_dates(items: list[dict[str, Any]], now: datetime | None = None) -> None:
+    today = (now or datetime.now(timezone.utc)).date()
+    for course_key in ("puppy", "dog"):
+        dated: list[tuple[dict[str, Any], int, int, int | None]] = []
+        flows = sorted(
+            (item for item in items if _clean(item.get("course_key"), 50) == course_key),
+            key=lambda item: _bounded_int(item.get("stream"), 0, 100000, 0),
+            reverse=True,
+        )
+        for item in flows:
+            match = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", _clean(item.get("curator_sheet"), 300))
+            if not match:
+                continue
+            year = int(match.group(3)) if match.group(3) else None
+            if year is not None and year < 100:
+                year += 2000
+            dated.append((item, int(match.group(1)), int(match.group(2)), year))
+        if not dated:
+            continue
+        first_item, first_day, first_month, first_year = dated[0]
+        if first_year is None:
+            candidates = [datetime(year, first_month, first_day).date() for year in (today.year - 1, today.year, today.year + 1)]
+            first_year = min(candidates, key=lambda value: abs((value - today).days)).year
+        first_item["date_start"] = f"{first_year:04d}-{first_month:02d}-{first_day:02d}"
+        previous = (first_month, first_day)
+        year = first_year
+        for item, day, month, explicit_year in dated[1:]:
+            if explicit_year is not None:
+                year = explicit_year
+            elif (month, day) > previous:
+                year -= 1
+            item["date_start"] = f"{year:04d}-{month:02d}-{day:02d}"
+            previous = (month, day)
+
+
+def _dated_flow_for_order(data: dict[str, Any], course_key: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    order_date = _business_order_date(fields)
+    if not order_date:
+        return None
+    candidates = []
+    for flow in data.get("items") or []:
+        start = _date_value(flow.get("date_start"))
+        if _clean(flow.get("course_key"), 50) != course_key or not start or start.date() > order_date.date():
+            continue
+        if not re.match(r"^https?://", _clean(flow.get("vk_link"), 2000), flags=re.IGNORECASE):
+            continue
+        if not re.match(r"^https?://", _clean(flow.get("tg_link"), 2000), flags=re.IGNORECASE):
+            continue
+        candidates.append((start, _bounded_int(flow.get("stream"), 0, 100000, 0), flow))
+    return max(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
+
+
 def _curator_name_map(settings: dict[str, str] | None = None) -> tuple[tuple[str, str], ...]:
     raw_map = _clean((settings or {}).get("curator_map") or DEFAULT_CURATOR_MAP, 5000)
     items: list[tuple[str, str]] = []
@@ -829,9 +930,12 @@ def _sheet_student_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
         "date": ("дата",),
         "course": ("курс",),
         "tariff": ("тариф",),
-        "responsible_curator": ("ответственный куратор", "куратор"),
-        "tg_account": ("tg аккаунт", "telegram", "телеграм"),
+        "enrollment": ("оформлен",),
+        "manager": ("менеджер",),
+        "responsible_curator": ("ответственный куратор", "ответсвенный куратор", "отвественный куратор", "куратор"),
+        "tg_account": ("tg аккаунт", "tg/vk аккаунт", "tg/вк аккаунт", "вк аккаунт", "telegram", "телеграм"),
         "email": ("почта", "email", "e-mail"),
+        "buyers": ("доб. в купивших", "добавлен в купивших"),
     }
     best_idx = 6 if len(rows) > 6 else 0
     best_map: dict[str, int] = {"name": 0, "date": 1, "course": 2, "tariff": 3, "responsible_curator": 4, "tg_account": 5, "email": 6}
@@ -913,6 +1017,7 @@ def _student_items_from_rows(
                 "gc_user_id": order.get("gc_user_id", ""),
                 "user_url": order.get("user_url", ""),
                 "order_id": order.get("order_id", ""),
+                "deal_number": order.get("deal_number", ""),
                 "order_url": order.get("order_url", ""),
                 "order_status": order.get("status", ""),
                 "payment_state": order.get("payment_state", ""),
@@ -955,6 +1060,7 @@ async def _customer_order_index(settings: dict[str, str]) -> dict[str, dict[str,
             "source_record_id": int(row.get("id") or 0),
             "platform_id": _clean(row.get("platform_id"), 100),
             "order_id": order_id,
+            "deal_number": _clean(fields.get("number") or fields.get("deal_number") or fields.get("order_number") or order_id, 100),
             "gc_user_id": gc_user_id,
             "user_url": f"{web_base}/user/control/user/update/id/{urllib.parse.quote(gc_user_id)}" if gc_user_id else "",
             "order_url": f"{web_base}/sales/control/deal/update/id/{urllib.parse.quote(order_id)}" if order_id else "",
@@ -994,6 +1100,19 @@ def _extract_export_id(data: Any) -> str:
                 if found and re.fullmatch(r"\d+", found):
                     return found
     return ""
+
+
+def _getcourse_response_error(data: dict[str, Any]) -> str:
+    if data.get("success") is not False and data.get("error") in (None, False, "", 0):
+        return ""
+    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    return _clean(
+        data.get("error_message") or info.get("error_message") or result.get("error_message")
+        or (data.get("error") if isinstance(data.get("error"), str) else "")
+        or "GetCourse временно не принял запрос",
+        500,
+    )
 
 
 def _extract_export_rows(data: Any) -> list[dict[str, Any]]:
@@ -1079,7 +1198,11 @@ async def _gc_export_calls_used() -> int:
     assert _db_path is not None
     async with _db_connect(_db_path) as db:
         cur = await db.execute(
-            "SELECT COUNT(*) FROM gc_export_api_calls WHERE datetime(requested_at) >= datetime('now','-2 hours')"
+            """
+            SELECT COUNT(*) FROM gc_export_api_calls
+            WHERE datetime(requested_at) >= datetime('now','-2 hours')
+              AND purpose NOT IN ('getcourse-import','students-fields:user','students-fields:deal','student-transfer:curator-order')
+            """
         )
         row = await cur.fetchone()
     return int((row or [0])[0] or 0)
@@ -1176,6 +1299,7 @@ async def _gc_export_next_budget_at(settings: dict[str, str], needed: int = 4) -
             SELECT datetime(requested_at,'+2 hours')
             FROM gc_export_api_calls
             WHERE datetime(requested_at) >= datetime('now','-2 hours')
+              AND purpose NOT IN ('getcourse-import','students-fields:user','students-fields:deal','student-transfer:curator-order')
             ORDER BY datetime(requested_at) ASC, id ASC
             LIMIT 1 OFFSET ?
             """,
@@ -1214,21 +1338,31 @@ async def _getcourse_export_get(path: str, params: dict[str, Any], settings: dic
             body = {"text": resp.text[:2000]}
         if resp.status_code >= 400:
             return False, body if isinstance(body, dict) else {"response": body}, f"HTTP {resp.status_code}"
-        return True, body if isinstance(body, dict) else {"response": body}, ""
+        parsed = body if isinstance(body, dict) else {"response": body}
+        api_error = _getcourse_response_error(parsed)
+        if api_error:
+            return False, parsed, api_error
+        return True, parsed, ""
     except Exception as exc:
         return False, {}, str(exc)
 
 
 async def _getcourse_export_rows(path: str, params: dict[str, Any], settings: dict[str, str], purpose: str) -> tuple[list[dict[str, Any]], str]:
-    ok, data, error = await _getcourse_export_get(path, params, settings, f"{purpose}:start")
-    if not ok:
-        return [], error
-    export_id = _extract_export_id(data)
-    direct_rows = _extract_export_rows(data)
-    if direct_rows:
-        return direct_rows, ""
+    pending_key = json.dumps([path, params], ensure_ascii=False, sort_keys=True, default=str)
+    pending = _gc_pending_exports.get(pending_key)
+    export_id = pending[0] if pending and pending[1] > time.monotonic() else ""
     if not export_id:
-        return [], "export_id not found in GetCourse response"
+        _gc_pending_exports.pop(pending_key, None)
+        ok, data, error = await _getcourse_export_get(path, params, settings, f"{purpose}:start")
+        if not ok:
+            return [], error
+        export_id = _extract_export_id(data)
+        direct_rows = _extract_export_rows(data)
+        if direct_rows:
+            return direct_rows, ""
+        if not export_id:
+            return [], "GetCourse ещё формирует выгрузку"
+        _gc_pending_exports[pending_key] = (export_id, time.monotonic() + 2 * 3600)
     attempts = _bounded_int(settings.get("gc_export_lookup_poll_attempts"), 1, 5, 2)
     delay = _bounded_int(settings.get("gc_export_lookup_poll_delay_seconds"), 0, 20, 2)
     last_error = ""
@@ -1238,9 +1372,12 @@ async def _getcourse_export_rows(path: str, params: dict[str, Any], settings: di
         ok, export_data, error = await _getcourse_export_get(f"/pl/api/account/exports/{urllib.parse.quote(export_id)}", {}, settings, f"{purpose}:poll")
         if not ok:
             last_error = error
+            if "404" in error or "не найден" in _norm(error):
+                _gc_pending_exports.pop(pending_key, None)
             continue
         rows = _extract_export_rows(export_data)
         if rows:
+            _gc_pending_exports.pop(pending_key, None)
             return rows, ""
         last_error = _clean(export_data.get("status") or export_data.get("state") or "export is not ready", 300)
     return [], last_error or "export is not ready"
@@ -1820,6 +1957,8 @@ async def _curator_change_write_candidates(
 
 
 async def _fields_write_reconciliation_candidates(settings: dict[str, str], limit: int = 500) -> list[dict[str, Any]]:
+    if await _load_flow_students_cache(REGISTRY_CURATOR_SYNC_CACHE_KEY, 15):
+        return []
     ttl = _bounded_int(settings.get("students_cache_minutes"), 1, 1440, 30)
     cache = await _load_flow_students_cache(_flow_students_cache_key(settings), ttl, allow_stale=True)
     if not cache:
@@ -2899,6 +3038,7 @@ async def _chat_flows(settings: dict[str, str]) -> dict[str, Any]:
         item["curator_status"] = curator.get("status") or ""
         item["curator_sheet"] = curator.get("worksheet_title") or ""
         item["curator_url"] = curator.get("url") or ""
+    _add_flow_start_dates(items)
     data = {"items": items, "errors": errors, "ok": not errors}
     if items:
         _chat_flows_cache.update({"key": cache_key, "expires": time.monotonic() + 600, "data": data})
@@ -3651,13 +3791,10 @@ async def _post_getcourse_import(path: str, action: str, payload: dict[str, Any]
     env = _env()
     if not env["account_name"] or not env["api_token"]:
         return False, "GETCOURSE_ACCOUNT_NAME/GETCOURSE_API_TOKEN не настроены", {}
-    if await _gc_export_budget_left(settings) <= 0:
-        return False, "лимит GetCourse API для модуля исчерпан", {}
     encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
     url = f"https://{env['account_name']}.getcourse.ru{path}"
     form = {"action": action, "key": env["api_token"], "params": encoded}
     timeout = _bounded_int(settings.get("request_timeout"), 5, 60, 20)
-    await _record_gc_export_call(purpose, {"path": path, "action": action})
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, data=form)
     body: Any
@@ -3954,8 +4091,7 @@ async def _defer_gc_fields_write_job(job_id: int, error: str = "", delay_seconds
 
 async def _process_gc_fields_write_job(job: dict[str, Any], settings: dict[str, str]) -> None:
     budget_left = await _gc_export_budget_left(settings)
-    is_retry = int(job.get("attempts") or 0) > 0
-    reserve = _gc_new_job_reserve(settings) if is_retry else 0
+    reserve = _gc_new_job_reserve(settings)
     if budget_left < 2 + reserve:
         await _defer_gc_fields_write_job(
             int(job["id"]),
@@ -4074,7 +4210,7 @@ async def _gc_write_loop() -> None:
             if not _truthy(settings.get("gc_fields_write_enabled")):
                 await asyncio.sleep(sleep_seconds)
                 continue
-            async with _gc_write_lock:
+            async with _gc_write_lock, _gc_lookup_lock:
                 exhausted = await _mark_exhausted_gc_fields_write_jobs(settings)
                 if exhausted:
                     _log("warning", "gc fields write marked %s exhausted jobs", exhausted)
@@ -4155,6 +4291,7 @@ async def _process_row(
     state: dict[str, Any] | None,
     force: bool = False,
     student_snapshot: dict[str, Any] | None = None,
+    flow_catalog: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fields = _json_dict(row.get("custom_fields"))
     source_hash = _source_hash(fields, settings)
@@ -4230,24 +4367,20 @@ async def _process_row(
         vk_chat = _prefer_sheet_chat(sheet_vk_chat, course_chats.get("vk"), stream)
         tg_chat = _prefer_sheet_chat(sheet_tg_chat, course_chats.get("telegram"), stream)
     else:
-        vk_chat = course_chats.get("vk")
-        tg_chat = course_chats.get("telegram")
-        if not vk_chat or not tg_chat:
+        dated_flow = _dated_flow_for_order(flow_catalog or {}, course_key, fields)
+        if not dated_flow:
             await _mark_processed({
                 **base,
-                "status": "pending_chat_links",
+                "status": "pending_flow_date",
                 "course_key": course_key,
                 "tariff": tariff,
-                "error": "active VK/TG chat pair not found",
-                "details": {"active_chats": course_chats, "entitlement": entitlement},
+                "error": "flow not found for payment date",
+                "details": {"payment_date": _business_order_date_text(fields), "entitlement": entitlement},
             })
-            return {"action": "pending_chat_links"}
-        stream = _stream_number(
-            vk_chat.get("stream_number") if vk_chat else "",
-            tg_chat.get("stream_number") if tg_chat else "",
-            vk_chat.get("title") if vk_chat else "",
-            tg_chat.get("title") if tg_chat else "",
-        )
+            return {"action": "pending_flow_date"}
+        stream = _clean(dated_flow.get("stream"), 100)
+        vk_chat = {"platform": "vk", "title": _clean(dated_flow.get("vk_title"), 300), "stream_number": stream, "link": _clean(dated_flow.get("vk_link"), 2000), "course_key": course_key, "source": "chat_links_sheet_dated"}
+        tg_chat = {"platform": "telegram", "title": _clean(dated_flow.get("tg_title"), 300), "stream_number": stream, "link": _clean(dated_flow.get("tg_link"), 2000), "course_key": course_key, "source": "chat_links_sheet_dated"}
     curator_value = _clean(student_item.get("responsible_curator") or (student_flow or {}).get("curator_value"), 100)
     if curator_value:
         curator = {
@@ -4456,11 +4589,11 @@ async def _scan_once(*, force_failed: bool = False, limit: int = 200) -> dict[st
                 summary["students_cache_updated_at"] = _clean(student_snapshot.get("cache_updated_at") or student_snapshot.get("updated_at"), 40)
                 summary["students_cache_age_seconds"] = int(student_snapshot.get("cache_age_seconds") or 0)
             for row in rows:
-                result = await _process_row(row, chats, settings, states.get(int(row["id"])), force=force_failed, student_snapshot=student_snapshot)
+                result = await _process_row(row, chats, settings, states.get(int(row["id"])), force=force_failed, student_snapshot=student_snapshot, flow_catalog=flow_catalog)
                 action = result.get("action")
                 if action in {"processed", "dry_run", "customer_only"}:
                     summary["processed"] += 1
-                elif action in {"skipped", "skipped_state", "pending_curator", "pending_chat_links"}:
+                elif action in {"skipped", "skipped_state", "pending_curator", "pending_chat_links", "pending_flow_date"}:
                     summary["skipped"] += 1
                 elif action in {"failed", "quarantined"}:
                     summary["failed"] += 1
@@ -4519,6 +4652,1954 @@ async def _poll_loop() -> None:
         except Exception as exc:
             _log("warning", "poll loop failed: %s", exc)
         await asyncio.sleep(sleep_seconds)
+
+
+async def service_transfer_snapshot(*, refresh: bool = False) -> dict[str, Any]:
+    settings = await _settings_map()
+    data = await _flow_students(settings, refresh=refresh)
+    if data.get("needs_refresh") and not refresh:
+        data = await _flow_students(settings, refresh=True)
+    return data
+
+
+async def service_flow_catalog() -> dict[str, Any]:
+    """Return chat-link flows without reading the legacy student registry."""
+
+    settings = await _settings_map()
+    data = await _chat_flows(settings)
+    if data.get("ok"):
+        return data
+    cached = await _load_flow_students_cache(_flow_students_cache_key(settings), 1, allow_stale=True)
+    if not cached or not cached.get("items"):
+        return data
+    return {
+        "ok": True,
+        "stale": True,
+        "items": cached["items"],
+        "errors": data.get("errors") or [],
+    }
+
+
+async def service_entitled_orders(
+    *, after_source_record_id: int = 0, after_updated_at: str = "", limit: int = 1000
+) -> dict[str, Any]:
+    """Return new customer-db orders using the module's existing entitlement rules."""
+
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {"ok": False, "items": [], "cursor": int(after_source_record_id), "max_source_record_id": 0, "error": "customer-db not found"}
+    bounded_limit = max(1, min(5000, int(limit)))
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        max_row = await (
+            await db.execute(
+                "SELECT id,COALESCE(updated_at,created_at) FROM cdb_getcourse_orders ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC LIMIT 1"
+            )
+        ).fetchone()
+        max_source_record_id = int((await (await db.execute("SELECT COALESCE(MAX(id),0) FROM cdb_getcourse_orders")).fetchone())[0])
+        if after_updated_at:
+            where = "datetime(COALESCE(updated_at,created_at))>datetime(?) OR (COALESCE(updated_at,created_at)=? AND id>?)"
+            params = (_clean(after_updated_at, 100), _clean(after_updated_at, 100), max(0, int(after_source_record_id)), bounded_limit)
+            order_by = "datetime(COALESCE(updated_at,created_at)),id"
+        else:
+            where = "id>?"
+            params = (max(0, int(after_source_record_id)), bounded_limit)
+            order_by = "id"
+        rows = [
+            dict(row)
+            for row in await (
+                await db.execute(
+                    """
+                    SELECT id,platform_id,custom_fields,created_at,updated_at
+                    FROM cdb_getcourse_orders
+                    WHERE {where}
+                    ORDER BY {order_by}
+                    LIMIT ?
+                    """.format(where=where, order_by=order_by),
+                    params,
+                )
+            ).fetchall()
+        ]
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        fields = _json_dict(row.get("custom_fields"))
+        entitlement = _chat_entitlement(fields)
+        if not entitlement.get("eligible"):
+            continue
+        email = _clean(fields.get("email") or fields.get("user_email"), 300)
+        if not _valid_email(email):
+            continue
+        course_key = _clean(entitlement.get("course_key"), 50)
+        tariff = _clean(entitlement.get("tariff"), 100)
+        order_id = _clean(fields.get("order_id") or row.get("platform_id"), 100)
+        items.append(
+            {
+                "source_record_id": int(row.get("id") or 0),
+                "order_id": order_id,
+                "deal_number": _clean(fields.get("number") or fields.get("deal_number") or fields.get("order_number") or order_id, 100),
+                "gc_user_id": _clean(fields.get("gc_user_id"), 100),
+                "name": _clean(fields.get("name") or fields.get("user_name") or fields.get("full_name") or fields.get("fio"), 300),
+                "email": email,
+                "phone": _clean(fields.get("phone") or fields.get("user_phone"), 100),
+                "tg_account": _clean(fields.get("tg_account") or fields.get("telegram") or fields.get("user_telegram"), 500),
+                "date": _business_order_date_text(fields),
+                "course_key": course_key,
+                "course": "Щенок" if course_key == "puppy" else "Собака",
+                "tariff": tariff.upper() if tariff == "vip" else tariff.capitalize(),
+                "status": _clean(fields.get("status"), 100),
+                "payment_state": _clean(fields.get("payment_state"), 100),
+                "created_at": _clean(row.get("created_at"), 100),
+                "updated_at": _clean(row.get("updated_at") or row.get("created_at"), 100),
+                "entitlement": entitlement,
+            }
+        )
+    return {
+        "ok": True,
+        "items": items,
+        "cursor": int(rows[-1]["id"]) if rows else int(after_source_record_id),
+        "cursor_updated_at": _clean((rows[-1] if rows else {}).get("updated_at") or (rows[-1] if rows else {}).get("created_at") or after_updated_at, 100),
+        "max_source_record_id": max_source_record_id,
+        "max_updated_id": int((max_row or [0, ""])[0] or 0),
+        "max_updated_at": _clean((max_row or [0, ""])[1], 100),
+        "has_more": bool(rows and (
+            _clean(rows[-1].get("updated_at") or rows[-1].get("created_at"), 100), int(rows[-1]["id"])
+        ) < (_clean((max_row or [0, ""])[1], 100), int((max_row or [0, ""])[0] or 0))),
+    }
+
+
+async def service_order_identities(*, identities: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return phones and tariffs from existing GetCourse orders without using the GetCourse API."""
+
+    requested: dict[str, set[str]] = {}
+    source_ids: list[int] = []
+    order_ids: list[str] = []
+    gc_user_ids: list[str] = []
+    emails: list[str] = []
+    for item in identities[:250]:
+        key = _clean(item.get("key"), 100)
+        if not key:
+            continue
+        values: set[str] = set()
+        try:
+            source_id = int(item.get("source_record_id") or 0)
+        except (TypeError, ValueError):
+            source_id = 0
+        order_id = _clean(item.get("order_id"), 100)
+        gc_user_id = _clean(item.get("gc_user_id"), 100)
+        email = _clean(item.get("email"), 300).casefold()
+        if source_id > 0:
+            values.add(f"source:{source_id}")
+            source_ids.append(source_id)
+        if order_id:
+            values.add(f"order:{order_id}")
+            order_ids.append(order_id)
+        if gc_user_id:
+            values.add(f"gc:{gc_user_id}")
+            gc_user_ids.append(gc_user_id)
+        if email:
+            values.add(f"email:{email}")
+            emails.append(email)
+        requested[key] = values
+    if not requested:
+        return {"ok": True, "items": []}
+    where: list[str] = []
+    params: list[Any] = []
+    for column, values in (
+        ("id", sorted(set(source_ids))),
+        ("platform_id", sorted(set(order_ids))),
+        ("CAST(json_extract(custom_fields,'$.gc_user_id') AS TEXT)", sorted(set(gc_user_ids))),
+        ("lower(json_extract(custom_fields,'$.email'))", sorted(set(emails))),
+    ):
+        if values:
+            where.append(f"{column} IN ({','.join('?' for _ in values)})")
+            params.extend(values)
+    db_path = _customer_db_path()
+    if not db_path.exists() or not where:
+        return {"ok": False, "items": [], "error": "customer-db not found"}
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT id,platform_id,custom_fields,updated_at,created_at
+                FROM cdb_getcourse_orders
+                WHERE json_valid(custom_fields) AND ({' OR '.join(where)})
+                ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC
+                """,
+                params,
+            )
+        ).fetchall()
+    found: dict[str, tuple[int, dict[str, Any]]] = {}
+    for row in rows:
+        fields = _json_dict(row["custom_fields"])
+        row_keys = {
+            f"source:{int(row['id'])}",
+            f"order:{_clean(fields.get('order_id') or row['platform_id'], 100)}",
+            f"gc:{_clean(fields.get('gc_user_id'), 100)}",
+            f"email:{_clean(fields.get('email') or fields.get('user_email'), 300).casefold()}",
+        }
+        entitlement = _chat_entitlement(fields)
+        tariff = _clean(entitlement.get("tariff"), 100)
+        value = {
+            "phone": _clean(fields.get("phone") or fields.get("user_phone"), 100),
+            "tariff": tariff.upper() if tariff == "vip" else tariff.capitalize(),
+            "utm_term": _clean(fields.get("utm_term"), 1000),
+            "product_kind": _clean(entitlement.get("product_kind"), 50),
+            "assignment": {
+                "course_key": _clean(fields.get("chat_fields_course_key"), 50),
+                "stream": _clean(fields.get(DEFAULT_FIELD_NAMES["field_stream"]), 100),
+                "vk_link": _clean(fields.get(DEFAULT_FIELD_NAMES["field_vk"]), 2000),
+                "tg_link": _clean(fields.get(DEFAULT_FIELD_NAMES["field_tg"]), 2000),
+                "curator": _clean(fields.get(DEFAULT_FIELD_NAMES["field_curator"]), 100),
+            },
+        }
+        for key, identity_keys in requested.items():
+            matches = identity_keys & row_keys
+            score = max(
+                (4 if item.startswith("source:") else 3 if item.startswith("order:") else 2 if item.startswith("gc:") else 1)
+                for item in matches
+            ) if matches else 0
+            if score > (found.get(key) or (0, {}))[0]:
+                found[key] = (score, {"key": key, **value})
+    return {"ok": True, "items": [item for _, item in found.values()]}
+
+
+def _access_group_pairs(value: Any) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for chunk in _clean(value, 20000).split(","):
+        group_id, _, added_at = chunk.strip().partition(":")
+        group_id = _clean(group_id, 30)
+        if group_id.isdigit() and group_id not in seen:
+            seen.add(group_id)
+            result.append({"group_id": group_id, "added_at": _clean(added_at, 40)})
+    return result
+
+
+def _access_groups_from_row(row: dict[str, Any]) -> list[dict[str, str]]:
+    for key, value in row.items():
+        normalized = _norm(key)
+        if "idgrouplist" in normalized or "id групп" in normalized or "group list" in normalized:
+            groups = _access_group_pairs(value)
+            if groups:
+                return groups
+    return []
+
+
+async def _cached_user_access(gc_user_id: str, email: str) -> dict[str, Any]:
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {"ok": False, "groups": [], "source": "cache", "error": "customer-db not found"}
+    clauses: list[str] = []
+    params: list[Any] = []
+    if gc_user_id:
+        clauses.append("platform_id=?")
+        params.append(gc_user_id)
+    if email:
+        clauses.append("lower(json_extract(custom_fields,'$.email'))=lower(?)")
+        params.append(email)
+    if not clauses:
+        return {"ok": False, "groups": [], "source": "cache", "error": "GetCourse ID или email не найден"}
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                f"""
+                SELECT platform_id,custom_fields,updated_at,created_at
+                FROM cdb_getcourse_users
+                WHERE json_valid(custom_fields) AND ({' OR '.join(clauses)})
+                ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC
+                LIMIT 1
+                """,
+                params,
+            )
+        ).fetchone()
+    if not row:
+        return {"ok": False, "groups": [], "source": "cache", "error": "Снимок доступов не найден"}
+    fields = _json_dict(row["custom_fields"])
+    return {
+        "ok": True,
+        "gc_user_id": _clean(row["platform_id"], 100),
+        "email": _clean(fields.get("email"), 300),
+        "groups": _access_group_pairs(fields.get("getcourse_group_membership")),
+        "source": "cache",
+        "updated_at": _clean(row["updated_at"] or row["created_at"], 40),
+    }
+
+
+def _access_snapshot_cache_key(gc_user_id: str, email: str) -> str:
+    identity = f"id:{_clean(gc_user_id, 100)}" if _clean(gc_user_id, 100) else f"email:{_norm(email)}"
+    return ACCESS_SNAPSHOT_CACHE_PREFIX + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+async def _load_access_snapshot(
+    gc_user_id: str, email: str, *, max_age_minutes: int, allow_stale: bool = False
+) -> dict[str, Any] | None:
+    cached = await _load_flow_students_cache(
+        _access_snapshot_cache_key(gc_user_id, email), max_age_minutes, allow_stale=allow_stale
+    )
+    if not cached:
+        return None
+    cached["source"] = "cache"
+    cached["refresh_due"] = int(cached.get("cache_age_seconds") or 0) > max_age_minutes * 60
+    return cached
+
+
+async def _save_access_snapshots(items: list[dict[str, Any]]) -> int:
+    if not items:
+        return 0
+    assert _db_path is not None
+    values = []
+    for item in items:
+        updated_at = _clean(item.get("updated_at") or _now(), 40)
+        values.append(
+            (
+                _access_snapshot_cache_key(_clean(item.get("gc_user_id"), 100), _clean(item.get("email"), 300)),
+                json.dumps(item, ensure_ascii=False),
+                updated_at,
+            )
+        )
+    async with _db_connect(_db_path) as db:
+        await db.executemany(
+            """
+            INSERT INTO flow_students_cache(key,value_json,updated_at) VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at
+            """,
+            values,
+        )
+        await db.commit()
+    return len(values)
+
+
+async def _live_access_group_catalog(settings: dict[str, str]) -> list[dict[str, str]]:
+    now = time.monotonic()
+    if now < float(_gc_access_groups_cache.get("expires") or 0) and _gc_access_groups_cache.get("items"):
+        return list(_gc_access_groups_cache["items"])
+    ok, data, error = await _getcourse_export_get("/pl/api/account/groups", {}, settings, "access-groups")
+    if not ok:
+        raise RuntimeError(error or "Не удалось получить группы GetCourse")
+    info = data.get("info") if isinstance(data, dict) else None
+    rows = info if isinstance(info, list) else _extract_export_rows(data)
+    items: list[dict[str, str]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        group_id = _clean(row.get("id") or row.get("group_id"), 30)
+        name = _clean(row.get("name") or row.get("title"), 500)
+        if group_id.isdigit() and name:
+            items.append({"group_id": group_id, "name": name})
+    if not items:
+        raise RuntimeError("GetCourse вернул пустой каталог групп")
+    _gc_access_groups_cache.update({"expires": now + 3600, "items": items})
+    return list(items)
+
+
+async def service_getcourse_access_snapshot(
+    *, gc_user_id: str = "", email: str = "", live: bool = False, force: bool = False
+) -> dict[str, Any]:
+    """Read exact GetCourse group IDs; live reads share the module's 2-hour API budget."""
+
+    gc_user_id = _clean(gc_user_id, 100)
+    email = _clean(email, 300)
+    settings = await _settings_map()
+    ttl = _bounded_int(settings.get("access_snapshot_minutes"), 15, 240, 60)
+    fresh = await _load_access_snapshot(gc_user_id, email, max_age_minutes=ttl)
+    if fresh and (not live or not force):
+        fresh["requests_left_2h"] = await _gc_export_budget_left(settings)
+        return fresh
+    stale = await _load_access_snapshot(gc_user_id, email, max_age_minutes=ttl, allow_stale=True)
+    legacy = await _cached_user_access(gc_user_id, email)
+    fallback = stale or (legacy if legacy.get("ok") else None)
+    if not live:
+        if fallback:
+            return {**fallback, "stale": True, "refresh_due": True, "requests_left_2h": await _gc_export_budget_left(settings)}
+        return {
+            "ok": False,
+            "groups": [],
+            "source": "cache",
+            "refresh_due": True,
+            "error": "Снимок доступов не найден",
+            "requests_left_2h": await _gc_export_budget_left(settings),
+        }
+    needed = 6 + (0 if _gc_access_groups_cache.get("items") else 1)
+    if await _gc_export_budget_left(settings) < needed:
+        if fallback:
+            return {
+                **fallback,
+                "stale": True,
+                "refresh_due": True,
+                "warning": "Лимит GetCourse API: показан последний снимок",
+                "requests_left_2h": await _gc_export_budget_left(settings),
+                "next_at": await _gc_export_next_budget_at(settings, needed=needed),
+            }
+        return {
+            "ok": False,
+            "groups": [],
+            "source": "live",
+            "error": "Лимит GetCourse API: недостаточно запросов для проверки",
+            "requests_left_2h": await _gc_export_budget_left(settings),
+            "next_at": await _gc_export_next_budget_at(settings, needed=needed),
+        }
+    async with _gc_lookup_lock:
+        try:
+            if not force:
+                fresh = await _load_access_snapshot(gc_user_id, email, max_age_minutes=ttl)
+                if fresh:
+                    fresh["requests_left_2h"] = await _gc_export_budget_left(settings)
+                    return fresh
+            catalog = await _live_access_group_catalog(settings)
+            lookup_settings = dict(settings)
+            lookup_settings["gc_export_lookup_poll_attempts"] = "5"
+            lookup_settings["gc_export_lookup_poll_delay_seconds"] = "5"
+            params: dict[str, Any] = {"idgrouplist": "id_date"}
+            if email:
+                params["email"] = email
+            elif gc_user_id:
+                params["id"] = gc_user_id
+            else:
+                raise RuntimeError("GetCourse ID или email не найден")
+            rows, error = await _getcourse_export_rows("/pl/api/account/users", params, lookup_settings, "access-user")
+            if error:
+                raise RuntimeError(error)
+            chosen = next(
+                (
+                    row
+                    for row in rows
+                    if (gc_user_id and _user_id_from_export_row(row) == gc_user_id)
+                    or (email and _norm(_email_from_export_row(row)) == _norm(email))
+                ),
+                rows[0] if len(rows) == 1 else None,
+            )
+            if not chosen:
+                raise RuntimeError("Пользователь GetCourse не найден")
+            names = {item["group_id"]: item["name"] for item in catalog}
+            groups = _access_groups_from_row(chosen)
+            for group in groups:
+                group["name"] = names.get(group["group_id"], "")
+            if any(not item.get("name") for item in groups):
+                raise RuntimeError("В GetCourse найдена группа без имени; изменение отменено")
+            result = {
+                "ok": True,
+                "gc_user_id": _user_id_from_export_row(chosen) or gc_user_id,
+                "email": _email_from_export_row(chosen) or email,
+                "groups": groups,
+                "catalog": catalog,
+                "source": "live",
+                "updated_at": _now(),
+                "requests_left_2h": await _gc_export_budget_left(settings),
+            }
+            await _save_access_snapshots([result])
+            return result
+        except Exception as exc:
+            message = _clean(exc, 1000)
+            if "export is not ready" in _norm(message):
+                message = "GetCourse ещё формирует выгрузку"
+            export_busy = "уже запущен один экспорт" in _norm(message)
+            next_at = (
+                (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if export_busy else ""
+            )
+            if export_busy:
+                message = "Обновление отложено"
+            if fallback:
+                return {
+                    **fallback,
+                    "stale": True,
+                    "refresh_due": True,
+                    "warning": message,
+                    "next_at": next_at,
+                    "requests_left_2h": await _gc_export_budget_left(settings),
+                }
+            return {
+                "ok": False,
+                "groups": [],
+                "source": "live",
+                "error": message,
+                "refresh_due": export_busy,
+                "next_at": next_at,
+                "requests_left_2h": await _gc_export_budget_left(settings),
+            }
+
+
+async def service_sync_getcourse_access_snapshots(
+    *, identities: list[dict[str, Any]], catalog: list[dict[str, Any]], root_group_ids: list[str]
+) -> dict[str, Any]:
+    """Refresh many enrolled users through course-group exports without blocking the UI."""
+
+    requested_by_id: dict[str, dict[str, str]] = {}
+    requested_by_email: dict[str, dict[str, str]] = {}
+    for raw in identities[:5000]:
+        item = {"gc_user_id": _clean(raw.get("gc_user_id"), 100), "email": _clean(raw.get("email"), 300)}
+        if item["gc_user_id"]:
+            requested_by_id[item["gc_user_id"]] = item
+        if _valid_email(item["email"]):
+            requested_by_email[_norm(item["email"])] = item
+    roots = list(dict.fromkeys(_clean(value, 30) for value in root_group_ids if _clean(value, 30).isdigit()))[:4]
+    if not roots or not (requested_by_id or requested_by_email):
+        return {"ok": True, "updated": 0, "matched": 0, "groups": 0}
+    names = {
+        _clean(item.get("group_id"), 30): _clean(item.get("name"), 500)
+        for item in catalog
+        if _clean(item.get("group_id"), 30).isdigit() and _clean(item.get("name"), 500)
+    }
+    settings = await _settings_map()
+    needed = len(roots) * 6
+    reserve = _gc_new_job_reserve(settings)
+    budget = await _gc_export_budget_left(settings)
+    if budget < needed + reserve:
+        return {
+            "ok": False,
+            "updated": 0,
+            "error": "Лимит GetCourse API: пакетная синхронизация отложена",
+            "requests_left_2h": budget,
+            "next_at": await _gc_export_next_budget_at(settings, needed=needed + reserve),
+        }
+    snapshots: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    lookup_settings = dict(settings)
+    lookup_settings["gc_export_lookup_poll_attempts"] = "5"
+    lookup_settings["gc_export_lookup_poll_delay_seconds"] = "5"
+    async with _gc_lookup_lock:
+        for group_id in roots:
+            rows, error = await _getcourse_export_rows(
+                f"/pl/api/account/groups/{group_id}/users",
+                {"added_at[from]": "2000-01-01", "idgrouplist": "id_date"},
+                lookup_settings,
+                f"access-batch-{group_id}",
+            )
+            if error:
+                errors.append(f"{group_id}: {_clean(error, 300)}")
+                continue
+            for row in rows:
+                gc_id = _user_id_from_export_row(row)
+                email_value = _email_from_export_row(row)
+                identity = requested_by_id.get(gc_id) or requested_by_email.get(_norm(email_value))
+                if not identity:
+                    continue
+                groups = _access_groups_from_row(row)
+                for group in groups:
+                    group["name"] = names.get(group["group_id"], "")
+                if any(not group.get("name") for group in groups):
+                    continue
+                key = _access_snapshot_cache_key(identity["gc_user_id"] or gc_id, identity["email"] or email_value)
+                snapshots[key] = {
+                    "ok": True,
+                    "gc_user_id": gc_id or identity["gc_user_id"],
+                    "email": email_value or identity["email"],
+                    "groups": groups,
+                    "catalog": catalog,
+                    "source": "batch",
+                    "updated_at": _now(),
+                }
+    updated = await _save_access_snapshots(list(snapshots.values()))
+    return {
+        "ok": bool(updated) or not errors,
+        "updated": updated,
+        "matched": len(snapshots),
+        "groups": len(roots),
+        "errors": errors,
+        "requests_left_2h": await _gc_export_budget_left(settings),
+    }
+
+
+async def service_getcourse_access_budget() -> dict[str, Any]:
+    settings = await _settings_map()
+    return {
+        "requests_left_2h": await _gc_export_budget_left(settings),
+        "needed_for_verification": 6,
+        "next_at": await _gc_export_next_budget_at(settings, needed=6),
+    }
+
+
+def _registry_lesson_columns(rows: list[list[Any]], header_idx: int) -> list[dict[str, Any]]:
+    width = max((len(row) for row in rows), default=0)
+    result: list[dict[str, Any]] = []
+    for col_idx in range(7, min(width, _column_number("AC"))):
+        values = [row[col_idx] for row in rows[header_idx + 1 :] if col_idx < len(row)]
+        has_checkbox = any(isinstance(value, bool) or _norm(value) in {"true", "false"} for value in values)
+        labels = [
+            _clean(row[col_idx], 200)
+            for row in rows[: header_idx + 1]
+            if col_idx < len(row) and _clean(row[col_idx], 200)
+        ]
+        label = labels[-1] if labels else ""
+        if not has_checkbox and not re.search(r"(?:урок|модул|занят|недел)\s*\d*", _norm(label)):
+            continue
+        letters = ""
+        number = col_idx + 1
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            letters = chr(65 + remainder) + letters
+        result.append({"key": letters, "label": label or letters, "column": col_idx})
+    return result
+
+
+def _registry_lesson_values(row: list[Any], lesson_columns: list[dict[str, Any]]) -> dict[str, bool]:
+    return {
+        lesson["key"]: (
+            row[lesson["column"]]
+            if lesson["column"] < len(row) and isinstance(row[lesson["column"]], bool)
+            else lesson["column"] < len(row) and _norm(row[lesson["column"]]) == "true"
+        )
+        for lesson in lesson_columns
+    }
+
+
+def _registry_batch_rows(session: Any, spreadsheet_id: str, titles: list[str]) -> list[list[list[Any]]]:
+    result: list[list[list[Any]]] = []
+    for offset in range(0, len(titles), 3):
+        chunk = titles[offset : offset + 3]
+        response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchGet",
+            params=[("ranges", _a1_range(title, "A1:AC300")) for title in chunk]
+            + [("majorDimension", "ROWS"), ("valueRenderOption", "UNFORMATTED_VALUE")],
+            timeout=60,
+        )
+        response.raise_for_status()
+        value_ranges = (response.json() or {}).get("valueRanges") or []
+        if len(value_ranges) != len(chunk):
+            raise RuntimeError("Google Sheets returned incomplete registry ranges")
+        result.extend((value_range or {}).get("values") or [] for value_range in value_ranges)
+    return result
+
+
+def _registry_xlsx_rows(content: bytes) -> dict[str, list[list[Any]]]:
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rel_ns = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared = ["".join(node.text or "" for node in item.findall(".//x:t", ns)) for item in root.findall("x:si", ns)]
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        targets = {item.attrib["Id"]: item.attrib["Target"] for item in relationships.findall("r:Relationship", rel_ns)}
+        result: dict[str, list[list[Any]]] = {}
+        for sheet in workbook.findall(".//x:sheet", ns):
+            relation_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+            target = targets.get(relation_id, "").lstrip("/")
+            path = target if target.startswith("xl/") else f"xl/{target}"
+            if path not in archive.namelist():
+                continue
+            rows: list[list[Any]] = []
+            root = ET.fromstring(archive.read(path))
+            for row_node in root.findall(".//x:sheetData/x:row", ns):
+                row: list[Any] = []
+                for cell in row_node.findall("x:c", ns):
+                    match = re.match(r"([A-Z]+)", cell.attrib.get("r", ""))
+                    if not match:
+                        continue
+                    column = _column_number(match.group(1)) - 1
+                    if column < 0 or column >= _column_number("AC"):
+                        continue
+                    value_node = cell.find("x:v", ns)
+                    raw = value_node.text if value_node is not None else ""
+                    kind = cell.attrib.get("t", "")
+                    if kind == "s" and raw.isdigit() and int(raw) < len(shared):
+                        value: Any = shared[int(raw)]
+                    elif kind == "b":
+                        value = raw == "1"
+                    elif kind == "inlineStr":
+                        value = "".join(node.text or "" for node in cell.findall(".//x:t", ns))
+                    else:
+                        try:
+                            value = float(raw) if "." in raw else int(raw)
+                        except (TypeError, ValueError):
+                            value = raw
+                    if len(row) <= column:
+                        row.extend([""] * (column + 1 - len(row)))
+                    row[column] = value
+                rows.append(row)
+                if len(rows) >= 300:
+                    break
+            result[str(sheet.attrib.get("name") or "")[:300]] = rows
+    return result
+
+
+def _registry_sheet_snapshot_sync(
+    spreadsheet_id: str,
+    credentials_path: Path,
+    flows: list[dict[str, Any]],
+    known_layouts: list[dict[str, Any]],
+    curator_cell: str,
+    curator_map: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    credentials = Credentials.from_service_account_file(
+        str(credentials_path),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly", "https://www.googleapis.com/auth/drive.readonly"],
+    )
+    session = AuthorizedSession(credentials)
+    metadata: dict[str, Any] = {}
+    exported_rows: dict[str, list[list[Any]]] | None = None
+
+    def export_rows() -> dict[str, list[list[Any]]]:
+        response = session.get(
+            f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
+            params={"format": "xlsx"}, timeout=120,
+        )
+        response.raise_for_status()
+        return _registry_xlsx_rows(response.content)
+
+    try:
+        metadata_response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            params={"fields": "properties.title,sheets.properties(sheetId,title,index)"},
+            timeout=30,
+        )
+        metadata_response.raise_for_status()
+        metadata = metadata_response.json() or {}
+        sheets = [sheet.get("properties") or {} for sheet in metadata.get("sheets") or []]
+    except Exception as exc:
+        if not any(code in str(exc) for code in ("400", "429")):
+            raise
+        exported_rows = export_rows()
+        known = {
+            (_clean(item.get("course_key"), 50), _clean(item.get("stream"), 50)): int(item.get("sheet_id") or 0)
+            for item in known_layouts
+        }
+        sheets = [
+            {"title": title, "sheetId": known.get((course_key, stream), 0), "index": index}
+            for index, flow in enumerate(flows)
+            for course_key, stream in [(_clean(flow.get("course_key"), 50), _clean(flow.get("stream"), 50))]
+            for title in [next((name for name in exported_rows if _sheet_title_matches(name, course_key, stream)), "")]
+            if title
+        ]
+    prepared: list[dict[str, Any]] = []
+    for flow in flows:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 50)
+        props = next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None)
+        if not props:
+            prepared.append({"course_key": course_key, "stream": stream, "props": None, "rows": []})
+            continue
+        title = str(props.get("title") or "")[:300]
+        prepared.append({"course_key": course_key, "stream": stream, "props": props, "title": title, "rows": (exported_rows or {}).get(title, [])})
+    readable = [item for item in prepared if item["props"]]
+    if readable and exported_rows is None:
+        try:
+            rows_by_item = _registry_batch_rows(session, spreadsheet_id, [item["title"] for item in readable])
+        except Exception as exc:
+            if not any(code in str(exc) for code in ("400", "429")):
+                raise
+            exported_rows = export_rows()
+            rows_by_item = [(exported_rows or {}).get(item["title"], []) for item in readable]
+        for item, rows in zip(readable, rows_by_item):
+            item["rows"] = rows
+    items: list[dict[str, Any]] = []
+    curator_match = re.fullmatch(r"([A-Z]+)(\d+)", curator_cell.upper())
+    curator_column = _column_number(curator_match.group(1)) - 1 if curator_match else 10
+    curator_row = int(curator_match.group(2)) - 1 if curator_match else 1
+    for item in prepared:
+        course_key, stream, props = item["course_key"], item["stream"], item["props"]
+        if not props:
+            items.append({"course_key": course_key, "stream": stream, "status": "sheet_not_found", "students": [], "lesson_columns": []})
+            continue
+        title, rows = item["title"], item["rows"]
+        header_idx, columns = _sheet_student_header(rows)
+        lesson_columns = _registry_lesson_columns(rows, header_idx)
+        raw_curator = _row_value(rows[curator_row] if curator_row < len(rows) else [], curator_column, 300)
+        students: list[dict[str, Any]] = []
+        for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
+            email = _row_value(row, columns.get("email"), 300)
+            if not _valid_email(email):
+                continue
+            lessons = _registry_lesson_values(row, lesson_columns)
+            raw_responsible_curator = _row_value(row, columns.get("responsible_curator"), 200)
+            students.append({
+                "row": row_number,
+                "email": email,
+                "responsible_curator": _map_curator(raw_responsible_curator, curator_map),
+                "responsible_curator_raw": raw_responsible_curator,
+                "lessons": lessons,
+            })
+        items.append(
+            {
+                "course_key": course_key,
+                "stream": stream,
+                "status": "ok",
+                "sheet_id": int(props.get("sheetId") or 0),
+                "sheet_title": title,
+                "curator_value": _map_curator(raw_curator, curator_map),
+                "curator_raw": raw_curator,
+                "header_row": header_idx + 1,
+                "lesson_columns": [{"key": item["key"], "label": item["label"]} for item in lesson_columns],
+                "students": students,
+            }
+        )
+    return {"ok": True, "spreadsheet_id": spreadsheet_id, "spreadsheet_title": _clean((metadata.get("properties") or {}).get("title"), 300), "items": items}
+
+
+async def service_registry_sheet_snapshot(
+    *, flows: list[dict[str, Any]], known_layouts: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        return {"ok": False, "items": [], "error": "Google Sheets is not configured"}
+    return await asyncio.to_thread(
+        _registry_sheet_snapshot_sync,
+        spreadsheet_id,
+        credentials_path,
+        flows,
+        known_layouts or [],
+        _clean(settings.get("curator_cell") or "K2", 20).upper(),
+        _curator_name_map(settings),
+    )
+
+
+def _set_registry_flow_curator_sync(
+    spreadsheet_id: str, credentials_path: Path, sheet_title: str, cell: str, curator_raw: str
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(
+        Credentials.from_service_account_file(
+            str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+    )
+    response = session.put(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(sheet_title, cell)}",
+        params={"valueInputOption": "RAW"},
+        json={"majorDimension": "ROWS", "values": [[curator_raw]]},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return {"ok": True, "sheet_title": sheet_title, "cell": cell}
+
+
+async def service_set_registry_flow_curator(*, course_key: str, stream: str, curator: str) -> dict[str, Any]:
+    settings = await _settings_map()
+    curator_raw = _transfer_curator_raw(settings, curator)
+    if not curator_raw:
+        raise ValueError("Куратор не поддерживается")
+    flow = next(
+        (
+            item for item in (await _chat_flows(settings)).get("items") or []
+            if _clean(item.get("course_key"), 50) == _clean(course_key, 50)
+            and _clean(item.get("stream"), 50) == _clean(stream, 50)
+        ),
+        None,
+    )
+    sheet_title = _clean((flow or {}).get("curator_sheet"), 300)
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not sheet_title or not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Лист потока не найден")
+    result = await asyncio.to_thread(
+        _set_registry_flow_curator_sync,
+        spreadsheet_id,
+        credentials_path,
+        sheet_title,
+        _clean(settings.get("curator_cell") or "K2", 20).upper(),
+        curator_raw,
+    )
+    _chat_flows_cache.clear()
+    return {**result, "curator": curator}
+
+
+async def service_reconcile_registry_curators(*, flows: list[dict[str, Any]], limit: int = 500) -> dict[str, Any]:
+    settings = await _settings_map()
+    await _save_flow_students_cache(
+        REGISTRY_CURATOR_SYNC_CACHE_KEY,
+        {"ok": True, "updated_at": _now(), "items": [], "source": "student-transfer"},
+    )
+    allowed = {value for _, value in _curator_name_map(settings)}
+    assert _db_path is not None
+    async with _db_connect(_db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = [dict(row) for row in await (await db.execute(
+            "SELECT source_record_id,platform_id,order_id,gc_user_id,details_json FROM processed_orders ORDER BY datetime(updated_at) DESC,id DESC"
+        )).fetchall()]
+    by_identity: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for value in (row.get("source_record_id"), row.get("platform_id"), row.get("order_id")):
+            if _clean(value, 100):
+                by_identity.setdefault(_clean(value, 100), row)
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    maximum = max(1, min(2000, int(limit or 500)))
+    for flow in flows:
+        stream = _clean(flow.get("stream"), 100)
+        vk_link = _clean(flow.get("vk_link"), 2000)
+        tg_link = _clean(flow.get("tg_link"), 2000)
+        if not stream or not vk_link or not tg_link:
+            continue
+        for student in flow.get("students") or []:
+            curator = _clean(student.get("teacher_code") or student.get("responsible_curator") or flow.get("teacher_code"), 100)
+            if curator not in allowed:
+                continue
+            processed = next(
+                (by_identity.get(_clean(student.get(key), 100)) for key in ("source_record_id", "order_id") if _clean(student.get(key), 100)),
+                None,
+            )
+            if not processed:
+                continue
+            current = _json_dict(_json_dict(processed.get("details_json")).get("output_fields"))
+            if _clean(current.get(settings["field_curator"]), 100) == curator:
+                continue
+            email = _norm(student.get("email"))
+            order_id = _clean(student.get("order_id") or processed.get("platform_id") or processed.get("order_id"), 100)
+            gc_user_id = _clean(student.get("gc_user_id") or processed.get("gc_user_id"), 100)
+            deal_number = _clean(student.get("deal_number") or order_id, 100)
+            key = (email, order_id)
+            if not _valid_email(email) or not order_id or not gc_user_id or key in seen:
+                continue
+            seen.add(key)
+            output_fields = {
+                settings["field_stream"]: stream,
+                settings["field_vk"]: vk_link,
+                settings["field_tg"]: tg_link,
+                settings["field_curator"]: curator,
+            }
+            candidates.append({
+                "email": email,
+                "gc_user_id": gc_user_id,
+                "order_id": order_id,
+                "deal_number": deal_number,
+                "fields": output_fields,
+                "user_fields": _getcourse_user_addfields(output_fields, settings),
+                "flow": {
+                    "course": flow.get("course"),
+                    "course_key": flow.get("course_key"),
+                    "stream": stream,
+                    "sheet_title": flow.get("sheet_title"),
+                    "change_reason": "registry_curator_reconciliation",
+                    "previous_curator": _clean(current.get(settings["field_curator"]), 100),
+                    "new_curator": curator,
+                },
+            })
+            if len(candidates) >= maximum:
+                break
+        if len(candidates) >= maximum:
+            break
+    result = await _enqueue_gc_fields_write_items(candidates, force=True)
+    result["enabled"] = _truthy(settings.get("gc_fields_write_enabled"))
+    result["requests_left_2h"] = await _gc_export_budget_left(settings)
+    result["reserved_requests"] = _gc_new_job_reserve(settings)
+    return result
+
+
+def _registry_sheet_mirror_sync(
+    spreadsheet_id: str,
+    credentials_path: Path,
+    flows: list[dict[str, Any]],
+    curator_cell: str,
+    layouts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(
+        Credentials.from_service_account_file(
+            str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+    )
+
+    def metadata() -> list[dict[str, Any]]:
+        response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            params={"fields": "sheets.properties(sheetId,title,index)"}, timeout=30,
+        )
+        response.raise_for_status()
+        return [sheet.get("properties") or {} for sheet in (response.json() or {}).get("sheets") or []]
+
+    sheets = [
+        {"sheetId": int(item.get("sheet_id") or 0), "title": str(item.get("sheet_title") or "")[:300], "index": index}
+        for index, item in enumerate(layouts)
+        if int(item.get("sheet_id") or 0) and _clean(item.get("sheet_title"), 300)
+    ]
+    if any(
+        not next((item for item in sheets if _sheet_title_matches(item.get("title"), flow.get("course_key"), flow.get("stream"))), None)
+        for flow in flows
+    ):
+        sheets = metadata()
+    created: list[str] = []
+    for flow in flows:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 50)
+        if next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None):
+            continue
+        templates = [item for item in sheets if _sheet_title_matches(item.get("title"), course_key, _stream_number(item.get("title")))]
+        templates = [item for item in templates if _stream_number(item.get("title"))]
+        if not templates:
+            continue
+        source = max(templates, key=lambda item: int(_stream_number(item.get("title")) or 0))
+        new_title = f"{_course_sheet_prefix(course_key)}{stream}"
+        duplicate_response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [{"duplicateSheet": {"sourceSheetId": int(source["sheetId"]), "newSheetName": new_title}}]},
+            timeout=30,
+        )
+        duplicate_response.raise_for_status()
+        created.append(new_title)
+        sheets = metadata()
+
+    layout_map = {
+        (_clean(item.get("course_key"), 50), _clean(item.get("stream"), 50)): item
+        for item in layouts
+        if item.get("status") == "ok"
+    }
+    prepared: list[dict[str, Any]] = []
+    for flow in flows:
+        course_key = _clean(flow.get("course_key"), 50)
+        stream = _clean(flow.get("stream"), 50)
+        props = next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None)
+        if props:
+            prepared.append({
+                "flow": flow,
+                "props": props,
+                "title": str(props.get("title") or "")[:300],
+                "layout": layout_map.get((course_key, stream)),
+                "rows": [],
+            })
+    unresolved = [item for item in prepared if not item["layout"]]
+    if unresolved:
+        for item, rows in zip(unresolved, _registry_batch_rows(session, spreadsheet_id, [item["title"] for item in unresolved])):
+            item["rows"] = rows
+
+    writes: list[dict[str, Any]] = []
+    tail_clears: list[str] = []
+    mirrored = 0
+    for item in prepared:
+        flow, title, rows = item["flow"], item["title"], item["rows"]
+        layout = item["layout"]
+        if layout:
+            header_idx = max(0, int(layout.get("header_row") or 1) - 1)
+            lesson_columns = layout.get("lesson_columns") or []
+        else:
+            header_idx, _columns = _sheet_student_header(rows)
+            lesson_columns = _registry_lesson_columns(rows, header_idx)
+        start_row = header_idx + 2
+        escaped = title.replace("'", "''")
+        teacher = _clean(flow.get("teacher"), 200)
+        if teacher:
+            writes.append({"range": _a1_range(title, curator_cell), "majorDimension": "ROWS", "values": [[teacher]]})
+        students = flow.get("students") or []
+        if students:
+            writes.append({
+                "range": f"'{escaped}'!A{start_row}:G{start_row + len(students) - 1}",
+                "majorDimension": "ROWS",
+                "values": [[
+                _clean(student.get("name"), 300), _clean(student.get("date"), 100),
+                _clean(student.get("course"), 100), _clean(student.get("tariff"), 100),
+                _clean(student.get("teacher"), 200), _clean(student.get("tg_account"), 500),
+                _clean(student.get("email"), 300),
+                ] for student in students],
+            })
+            for lesson in lesson_columns:
+                writes.append({
+                    "range": f"'{escaped}'!{lesson['key']}{start_row}:{lesson['key']}{start_row + len(students) - 1}",
+                    "majorDimension": "ROWS",
+                    "values": [[bool((student.get("lessons") or {}).get(lesson["key"], False))] for student in students],
+                })
+        tail_start = start_row + len(students)
+        if tail_start <= 300:
+            tail_clears.append(f"'{escaped}'!A{tail_start}:G300")
+            tail_clears.extend(f"'{escaped}'!{item['key']}{tail_start}:{item['key']}300" for item in lesson_columns)
+        mirrored += len(students)
+    for offset in range(0, len(writes), 500):
+        response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+            json={"valueInputOption": "RAW", "data": writes[offset : offset + 500]}, timeout=60,
+        )
+        response.raise_for_status()
+    for offset in range(0, len(tail_clears), 500):
+        clear_response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchClear",
+            json={"ranges": tail_clears[offset : offset + 500]}, timeout=45,
+        )
+        if not clear_response.ok:
+            raise RuntimeError(
+                f"Google batchClear {clear_response.status_code}: {_clean(clear_response.text, 1000)}; "
+                f"ranges={tail_clears[offset : offset + 3]}"
+            )
+    return {"ok": True, "created_sheets": created, "mirrored_students": mirrored, "writes": len(writes)}
+
+
+def _latest_stream_sheets(sheets: list[dict[str, Any]], per_course: int) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for course_key in ("dog", "puppy"):
+        matches: list[tuple[int, dict[str, Any]]] = []
+        for sheet in sheets:
+            props = sheet.get("properties") if isinstance(sheet.get("properties"), dict) else {}
+            stream = _stream_number(props.get("title"))
+            if stream and _sheet_title_matches(props.get("title"), course_key, stream):
+                matches.append((int(stream), sheet))
+        selected.extend(sheet for _, sheet in sorted(matches, key=lambda item: item[0])[-per_course:])
+    return selected
+
+
+def _is_tariff_conditional_rule(rule: dict[str, Any]) -> bool:
+    boolean_rule = rule.get("booleanRule") if isinstance(rule.get("booleanRule"), dict) else {}
+    condition = boolean_rule.get("condition") if isinstance(boolean_rule.get("condition"), dict) else {}
+    values = condition.get("values") if isinstance(condition.get("values"), list) else []
+    text = " ".join(_clean(item.get("userEnteredValue"), 500) for item in values if isinstance(item, dict)).casefold()
+    return any(marker in text for marker in (
+        "стандарт", "standard", "премиум", "premium", "вип", '"vip"', "щенок+собака", "щенок + собака",
+    ))
+
+
+def _sheet_column_name(index: int) -> str:
+    value = max(0, int(index)) + 1
+    result = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def _registry_tariff_format_plan(
+    sheets: list[dict[str, Any]], rows_by_title: dict[str, list[list[Any]]], per_course: int,
+) -> dict[str, Any]:
+    requests: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    colors = {
+        "standard": {"red": 0.95686275, "green": 0.78039217, "blue": 0.7647059},
+        "vip": {"red": 0.8509804, "green": 0.91764706, "blue": 0.827451},
+        "combo": {"red": 0.7882353, "green": 0.854902, "blue": 0.972549},
+    }
+    for sheet in _latest_stream_sheets(sheets, max(1, min(int(per_course), 20))):
+        props = sheet.get("properties") if isinstance(sheet.get("properties"), dict) else {}
+        title = _clean(props.get("title"), 300)
+        sheet_id = int(props.get("sheetId") or 0)
+        grid = props.get("gridProperties") if isinstance(props.get("gridProperties"), dict) else {}
+        rows = rows_by_title.get(title) or []
+        header_idx, columns = _sheet_student_header(rows)
+        tariff_column = int(columns.get("tariff", 3))
+        course_column = columns.get("course")
+        first_data_row = header_idx + 2
+        row_count = max(first_data_row, int(grid.get("rowCount") or len(rows) or first_data_row))
+        column_count = max(tariff_column + 1, int(grid.get("columnCount") or 29))
+        rules = sheet.get("conditionalFormats") if isinstance(sheet.get("conditionalFormats"), list) else []
+        removed = [index for index, rule in enumerate(rules) if isinstance(rule, dict) and _is_tariff_conditional_rule(rule)]
+        for index in reversed(removed):
+            requests.append({"deleteConditionalFormatRule": {"sheetId": sheet_id, "index": index}})
+        cell = f"${_sheet_column_name(tariff_column)}{first_data_row}"
+        range_ = {
+            "sheetId": sheet_id,
+            "startRowIndex": header_idx + 1,
+            "endRowIndex": row_count,
+            "startColumnIndex": 0,
+            "endColumnIndex": column_count,
+        }
+        requests.append({"repeatCell": {
+            "range": range_,
+            "cell": {"userEnteredFormat": {}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.backgroundColorStyle",
+        }})
+        formulas = []
+        if course_column is not None:
+            course_cell = f"${_sheet_column_name(int(course_column))}{first_data_row}"
+            formulas.extend((
+                (f'={course_cell}="Щенок+Собака"', colors["combo"]),
+                (f'={course_cell}="Щенок + Собака"', colors["combo"]),
+            ))
+        formulas.extend((
+            (f'={cell}="ВИП"', colors["vip"]),
+            (f'={cell}="Стандарт"', colors["standard"]),
+        ))
+        for index, (formula, color) in enumerate(formulas):
+            requests.append({"addConditionalFormatRule": {
+                "index": index,
+                "rule": {
+                    "ranges": [range_],
+                    "booleanRule": {
+                        "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                        "format": {"backgroundColor": color},
+                    },
+                },
+            }})
+        items.append({
+            "sheet_id": sheet_id,
+            "sheet_title": title,
+            "header_row": header_idx + 1,
+            "tariff_column": tariff_column + 1,
+            "course_column": int(course_column) + 1 if course_column is not None else None,
+            "removed_rules": len(removed),
+            "added_rules": len(formulas),
+            "backgrounds_cleared": True,
+        })
+    return {"requests": requests, "items": items}
+
+
+def _registry_format_tariffs_sync(
+    spreadsheet_id: str, credentials_path: Path, *, per_course: int = 10, apply: bool = False,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    ))
+    response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)),conditionalFormats)"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    sheets = (response.json() or {}).get("sheets") or []
+    selected = _latest_stream_sheets(sheets, max(1, min(int(per_course), 20)))
+    titles = [_clean((sheet.get("properties") or {}).get("title"), 300) for sheet in selected]
+    rows_by_title = {title: rows for title, rows in zip(titles, _registry_batch_rows(session, spreadsheet_id, titles))}
+    plan = _registry_tariff_format_plan(sheets, rows_by_title, per_course)
+    if apply and plan["requests"]:
+        update = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": plan["requests"]}, timeout=60,
+        )
+        if not update.ok:
+            raise RuntimeError(f"Google tariff formatting {update.status_code}: {_clean(update.text, 2000)}")
+    return {
+        "ok": True,
+        "applied": bool(apply),
+        "sheets": len(plan["items"]),
+        "removed_rules": sum(int(item["removed_rules"]) for item in plan["items"]),
+        "added_rules": sum(int(item["added_rules"]) for item in plan["items"]),
+        "items": plan["items"],
+    }
+
+
+async def service_registry_sheet_mirror(
+    *, flows: list[dict[str, Any]], layouts: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    return {"ok": True, "paused": True, "reason": "legacy sheet recovery"}
+
+
+def _registry_date(value: Any) -> str:
+    text = _clean(value, 100)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%d.%m.%Y")
+    except ValueError:
+        return text
+
+
+def _registry_tariff(value: Any) -> str:
+    text = _clean(value, 100)
+    return {
+        "premium": "Премиум",
+        "vip": "ВИП",
+        "вип": "ВИП",
+        "standard": "Стандарт",
+        "mentorship": "Наставничество",
+        "module_standard": "Помодульно",
+    }.get(_norm(text), text)
+
+
+def _registry_manager(value: Any) -> str:
+    return re.sub(r"\s*\((?:auto|авто)\)\s*$", "", _clean(value, 300), flags=re.IGNORECASE).strip()
+
+
+def _registry_sheet_context(
+    session: Any, spreadsheet_id: str, course_key: str, stream: str
+) -> tuple[dict[str, Any], str, list[list[Any]], int, dict[str, int], list[dict[str, Any]]]:
+    metadata_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets.properties(sheetId,title,index)"},
+        timeout=30,
+    )
+    metadata_response.raise_for_status()
+    sheets = [sheet.get("properties") or {} for sheet in (metadata_response.json() or {}).get("sheets") or []]
+    props = next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None)
+    if not props:
+        raise RuntimeError("Лист потока не найден")
+    title = _clean(props.get("title"), 300)
+    values_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, 'A1:AC300')}",
+        params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"},
+        timeout=30,
+    )
+    values_response.raise_for_status()
+    rows = (values_response.json() or {}).get("values") or []
+    header_idx, columns = _sheet_student_header(rows)
+    if "email" not in columns or "name" not in columns:
+        raise RuntimeError("В листе не найдены колонки ФИО и почты")
+    return props, title, rows, header_idx, columns, _registry_lesson_columns(rows, header_idx)
+
+
+def _registry_ensure_student_sync(
+    *, spreadsheet_id: str, credentials_path: Path, course_key: str, stream: str,
+    student: dict[str, Any],
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    email = _clean(student.get("email"), 300)
+    if not _valid_email(email):
+        raise RuntimeError("У ученика не найдена почта")
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    ))
+    props, title, rows, header_idx, columns, lesson_columns = _registry_sheet_context(
+        session, spreadsheet_id, course_key, stream
+    )
+    matches = [
+        row_number
+        for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2)
+        if _norm(_row_value(row, columns["email"], 300)) == _norm(email)
+    ]
+    if len(matches) > 1:
+        raise RuntimeError("В листе найдено несколько строк ученика")
+    if matches:
+        return {
+            "ok": True, "status": "already_exists", "row": matches[0],
+            "sheet_id": int(props.get("sheetId") or 0), "sheet_title": title,
+            "lesson_columns": [{"key": item["key"], "label": item["label"]} for item in lesson_columns],
+        }
+    identity_columns = set(columns.values())
+    target_row = next(
+        (
+            row_number
+            for row_number in range(header_idx + 2, 301)
+            if not any(
+                _row_value(rows[row_number - 1] if row_number <= len(rows) else [], column, 1000)
+                for column in identity_columns
+            )
+        ),
+        0,
+    )
+    if not target_row:
+        raise RuntimeError("В листе потока нет свободной строки")
+    template_row = next(
+        (
+            row_number
+            for row_number in range(target_row - 1, header_idx + 1, -1)
+            if _valid_email(_row_value(rows[row_number - 1] if row_number <= len(rows) else [], columns["email"], 300))
+        ),
+        0,
+    )
+    if not template_row:
+        template_row = next(
+            (
+                row_number
+                for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2)
+                if _valid_email(_row_value(row, columns["email"], 300))
+            ),
+            0,
+        )
+    if template_row:
+        copy_response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [
+                {"copyPaste": {
+                    "source": {"sheetId": int(props["sheetId"]), "startRowIndex": template_row - 1, "endRowIndex": template_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
+                    "destination": {"sheetId": int(props["sheetId"]), "startRowIndex": target_row - 1, "endRowIndex": target_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
+                    "pasteType": paste_type,
+                }}
+                for paste_type in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION")
+            ]},
+            timeout=45,
+        )
+        copy_response.raise_for_status()
+    values = {
+        "name": _clean(student.get("name"), 300),
+        "date": _registry_date(student.get("date")),
+        "course": _clean(student.get("course"), 100),
+        "tariff": _registry_tariff(student.get("tariff")),
+        "enrollment": _clean(student.get("enrollment") or "Геткурс", 100),
+        "manager": _registry_manager(student.get("manager_name")),
+        "tg_account": _clean(student.get("tg_account"), 500),
+        "email": email,
+    }
+    writes = [
+        {"range": _a1_range(title, f"{_column_letters(columns[key] + 1)}{target_row}"), "values": [[value]]}
+        for key, value in values.items()
+        if key in columns and value
+    ]
+    writes.extend(
+        {"range": _a1_range(title, f"{item['key']}{target_row}"), "values": [[False]]}
+        for item in lesson_columns
+    )
+    write_response = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+        json={"valueInputOption": "USER_ENTERED", "data": writes},
+        timeout=45,
+    )
+    write_response.raise_for_status()
+    verify_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, f'A{target_row}:AC{target_row}')}",
+        params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30,
+    )
+    verify_response.raise_for_status()
+    verify_row = ((verify_response.json() or {}).get("values") or [[]])[0]
+    if _norm(_row_value(verify_row, columns["email"], 300)) != _norm(email):
+        raise RuntimeError("Google не подтвердил созданную строку")
+    if any(_registry_lesson_values(verify_row, lesson_columns).values()):
+        raise RuntimeError("Google не очистил отметки новой строки")
+    return {
+        "ok": True, "status": "created", "row": target_row,
+        "sheet_id": int(props.get("sheetId") or 0), "sheet_title": title,
+        "lesson_columns": [{"key": item["key"], "label": item["label"]} for item in lesson_columns],
+    }
+
+
+def _column_letters(number: int) -> str:
+    result = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+async def service_registry_ensure_student(
+    *, course_key: str, stream: str, student: dict[str, Any]
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Google Sheets не настроен")
+    async with _registry_write_lock:
+        return await asyncio.to_thread(
+            _registry_ensure_student_sync,
+            spreadsheet_id=spreadsheet_id, credentials_path=credentials_path,
+            course_key=_clean(course_key, 50), stream=_clean(stream, 50), student=student,
+        )
+
+
+def _registry_write_lesson_sync(
+    *, spreadsheet_id: str, credentials_path: Path, course_key: str, stream: str,
+    email: str, source_row: int, lesson_key: str, value: bool, expected_value: bool,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    ))
+    _props, title, rows, header_idx, columns, lesson_columns = _registry_sheet_context(
+        session, spreadsheet_id, course_key, stream
+    )
+    lesson = next((item for item in lesson_columns if item["key"] == _clean(lesson_key, 5).upper()), None)
+    if not lesson:
+        raise RuntimeError("Колонка прогресса не найдена")
+    matches = [
+        row_number
+        for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2)
+        if _norm(_row_value(row, columns["email"], 300)) == _norm(email)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("Строка ученика изменилась; обновите данные")
+    row_number = matches[0]
+    if source_row and row_number != int(source_row):
+        raise RuntimeError("Строка ученика изменилась; обновите данные")
+    row = rows[row_number - 1] if row_number <= len(rows) else []
+    current = bool(_registry_lesson_values(row, [lesson])[lesson["key"]])
+    if current != bool(expected_value):
+        raise RuntimeError("Таблица уже изменена; обновите данные")
+    if current == bool(value):
+        return {"ok": True, "status": "already_updated", "row": row_number, "value": current}
+    cell = f"{lesson['key']}{row_number}"
+    response = session.put(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, cell)}",
+        params={
+            "valueInputOption": "RAW", "includeValuesInResponse": "true",
+            "responseValueRenderOption": "UNFORMATTED_VALUE",
+        },
+        json={"majorDimension": "ROWS", "values": [[bool(value)]]}, timeout=30,
+    )
+    response.raise_for_status()
+    updated = (((response.json() or {}).get("updatedData") or {}).get("values") or [[None]])[0][0]
+    confirmed = _registry_lesson_values([updated], [{"key": "value", "column": 0}])["value"]
+    if confirmed != bool(value):
+        raise RuntimeError("Google не подтвердил изменение")
+    return {"ok": True, "status": "updated", "row": row_number, "value": bool(value)}
+
+
+async def service_registry_write_lesson(
+    *, course_key: str, stream: str, email: str, source_row: int,
+    lesson_key: str, value: bool, expected_value: bool,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Google Sheets не настроен")
+    async with _registry_write_lock:
+        return await asyncio.to_thread(
+            _registry_write_lesson_sync,
+            spreadsheet_id=spreadsheet_id, credentials_path=credentials_path,
+            course_key=_clean(course_key, 50), stream=_clean(stream, 50),
+            email=_clean(email, 300), source_row=int(source_row or 0),
+            lesson_key=_clean(lesson_key, 5).upper(), value=bool(value), expected_value=bool(expected_value),
+        )
+
+
+def _transfer_student_matches(snapshot: dict[str, Any], email: str) -> list[dict[str, Any]]:
+    email_key = _norm(email)
+    matches: list[dict[str, Any]] = []
+    for flow in snapshot.get("items") or []:
+        for student in flow.get("students") or []:
+            if _norm(student.get("email")) == email_key:
+                matches.append({"flow": flow, "student": student})
+    return matches
+
+
+def _transfer_sheet_move_sync(
+    *,
+    spreadsheet_id: str,
+    credentials_path: Path,
+    source_sheet_id: int,
+    source_sheet_title: str,
+    source_row: int,
+    target_sheet_id: int,
+    target_sheet_title: str,
+    students_range: str,
+    email: str,
+    target_course: str,
+    target_curator: str,
+    student: dict[str, Any] | None = None,
+    move: bool = True,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    credentials = Credentials.from_service_account_file(
+        str(credentials_path),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    session = AuthorizedSession(credentials)
+    end_row_match = re.search(r":?[A-Z]{1,3}(\d+)$", students_range)
+    end_row = int(end_row_match.group(1)) if end_row_match else 300
+    end_column = _column_number("AC")
+    source_range = _a1_range(source_sheet_title, students_range)
+    target_range = _a1_range(target_sheet_title, students_range)
+    values_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchGet",
+        params=[("majorDimension", "ROWS"), ("ranges", source_range), ("ranges", target_range)],
+        timeout=30,
+    )
+    values_response.raise_for_status()
+    value_ranges = (values_response.json() or {}).get("valueRanges") or []
+    source_rows = (value_ranges[0] or {}).get("values") or [] if value_ranges else []
+    target_rows = (value_ranges[1] or {}).get("values") or [] if len(value_ranges) > 1 else []
+    source_header_idx, source_columns = _sheet_student_header(source_rows)
+    header_idx, columns = _sheet_student_header(target_rows)
+    source_email_col = source_columns.get("email", 6)
+    email_col = columns.get("email", 6)
+    existing_target_rows = [
+        index
+        for index, row in enumerate(target_rows[header_idx + 1 :], start=header_idx + 2)
+        if _norm(_row_value(row, email_col, 300)) == _norm(email)
+    ]
+    source_values = source_rows[source_row - 1] if 0 < source_row <= len(source_rows) else []
+    source_has_email = _norm(_row_value(source_values, source_email_col, 300)) == _norm(email)
+    delete_source_row = {
+        "deleteDimension": {
+            "range": {
+                "sheetId": int(source_sheet_id),
+                "dimension": "ROWS",
+                "startIndex": int(source_row) - 1,
+                "endIndex": int(source_row),
+            }
+        }
+    }
+    if existing_target_rows:
+        if len(existing_target_rows) > 1:
+            raise RuntimeError("В целевом потоке несколько строк ученика")
+        if move and source_has_email and not (
+            source_sheet_id == target_sheet_id and source_row in existing_target_rows
+        ):
+            response = session.post(
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+                json={"requests": [delete_source_row]}, timeout=30,
+            )
+            response.raise_for_status()
+            return {
+                "ok": True, "status": "duplicate_removed", "target_row": existing_target_rows[0],
+                "source_row_deleted": True,
+            }
+        return {
+            "ok": True,
+            "status": "already_moved" if move else "already_copied",
+            "target_row": existing_target_rows[0],
+            "source_row_deleted": False,
+        }
+    if not source_has_email:
+        raise RuntimeError("Исходная строка изменилась; обновите данные ученика")
+    target_row = next(
+        (
+            row_number
+            for row_number in range(header_idx + 2, end_row + 1)
+            if not any(
+                _row_value(
+                    target_rows[row_number - 1] if row_number <= len(target_rows) else [],
+                    column,
+                    1000,
+                )
+                for column in set(columns.values())
+                if column not in {columns.get("buyers")}
+            )
+        ),
+        0,
+    )
+    if not target_row:
+        raise RuntimeError("В целевом потоке нет свободной строки")
+    template_row = next(
+        (
+            row_number for row_number in range(target_row - 1, header_idx + 1, -1)
+            if _valid_email(_row_value(target_rows[row_number - 1], email_col, 300))
+        ),
+        0,
+    )
+    if template_row:
+        response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [
+                {"copyPaste": {
+                    "source": {
+                        "sheetId": int(target_sheet_id), "startRowIndex": template_row - 1,
+                        "endRowIndex": template_row, "startColumnIndex": 0, "endColumnIndex": end_column,
+                    },
+                    "destination": {
+                        "sheetId": int(target_sheet_id), "startRowIndex": target_row - 1,
+                        "endRowIndex": target_row, "startColumnIndex": 0, "endColumnIndex": end_column,
+                    },
+                    "pasteType": paste_type,
+                }}
+                for paste_type in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION")
+            ]},
+            timeout=45,
+        )
+        response.raise_for_status()
+
+    source_lessons = {
+        _norm(item.get("label")): bool(_registry_lesson_values(source_values, [item])[item["key"]])
+        for item in _registry_lesson_columns(source_rows, source_header_idx)
+        if _norm(item.get("label"))
+    }
+    supplied = student if isinstance(student, dict) else {}
+    semantic_values: dict[str, Any] = {
+        "name": _row_value(source_values, source_columns.get("name"), 300),
+        "date": source_values[source_columns["date"]] if source_columns.get("date") is not None and source_columns["date"] < len(source_values) else "",
+        "course": target_course,
+        "tariff": _registry_tariff(_row_value(source_values, source_columns.get("tariff"), 100)),
+        "enrollment": _row_value(source_values, source_columns.get("enrollment"), 100) or "Геткурс",
+        "manager": _registry_manager(supplied.get("manager_name") or _row_value(source_values, source_columns.get("manager"), 300)),
+        "tg_account": _clean(supplied.get("tg_account") or _row_value(source_values, source_columns.get("tg_account"), 500), 500),
+        "email": email,
+    }
+    writes = [
+        {
+            "range": _a1_range(target_sheet_title, f"{_column_letters(columns[key] + 1)}{target_row}"),
+            "values": [[value]],
+        }
+        for key, value in semantic_values.items()
+        if key in columns and value != ""
+    ]
+    if columns.get("buyers") is not None:
+        source_buyers = source_columns.get("buyers")
+        value = bool(source_values[source_buyers]) if source_buyers is not None and source_buyers < len(source_values) else False
+        writes.append({
+            "range": _a1_range(target_sheet_title, f"{_column_letters(columns['buyers'] + 1)}{target_row}"),
+            "values": [[value]],
+        })
+    for item in _registry_lesson_columns(target_rows, header_idx):
+        writes.append({
+            "range": _a1_range(target_sheet_title, f"{item['key']}{target_row}"),
+            "values": [[source_lessons.get(_norm(item.get("label")), False)]],
+        })
+    response = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+        json={"valueInputOption": "USER_ENTERED", "data": writes}, timeout=45,
+    )
+    response.raise_for_status()
+    verify = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(target_sheet_title, f'A{target_row}:AC{target_row}')}",
+        params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30,
+    )
+    verify.raise_for_status()
+    verified = ((verify.json() or {}).get("values") or [[]])[0]
+    if _norm(_row_value(verified, email_col, 300)) != _norm(email):
+        raise RuntimeError("Google не подтвердил строку в целевом потоке")
+    if move:
+        response = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [delete_source_row]}, timeout=30,
+        )
+        response.raise_for_status()
+    return {
+        "ok": True,
+        "status": "moved" if move else "copied",
+        "target_row": target_row,
+        "source_row_deleted": move,
+    }
+
+
+async def service_transfer_move_student(
+    *, email: str, source_course_key: str, source_stream: str, source_row: int,
+    target_course_key: str, target_stream: str, student: dict[str, Any] | None = None,
+    move: bool = True,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    snapshot = await _flow_students(settings, refresh=False)
+    if not snapshot.get("ok"):
+        raise RuntimeError("Не удалось обновить таблицу потоков")
+    matches = _transfer_student_matches(snapshot, email)
+    source = next(
+        (
+            item for item in matches
+            if _clean(item["flow"].get("course_key")) == _clean(source_course_key)
+            and _clean(item["flow"].get("stream")) == _clean(source_stream)
+            and int(item["student"].get("row") or 0) == int(source_row)
+        ),
+        None,
+    )
+    target = next(
+        (
+            flow for flow in snapshot.get("items") or []
+            if _clean(flow.get("course_key")) == _clean(target_course_key)
+            and _clean(flow.get("stream")) == _clean(target_stream)
+        ),
+        None,
+    )
+    already_target = next(
+        (
+            item for item in matches
+            if _clean(item["flow"].get("course_key")) == _clean(target_course_key)
+            and _clean(item["flow"].get("stream")) == _clean(target_stream)
+        ),
+        None,
+    )
+    if not target:
+        raise RuntimeError("Целевой поток не найден")
+    if already_target and not source:
+        return {"ok": True, "status": "already_moved", "target": target, "student": already_target["student"]}
+    if not source:
+        raise RuntimeError("Исходное назначение ученика изменилось")
+    if source_course_key == target_course_key and str(source_stream) == str(target_stream):
+        return {"ok": True, "status": "already_in_target", "target": target, "student": source["student"]}
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Google Sheets не настроен")
+    async with _registry_write_lock:
+        result = await asyncio.to_thread(
+            _transfer_sheet_move_sync,
+            spreadsheet_id=spreadsheet_id,
+            credentials_path=credentials_path,
+            source_sheet_id=int(source["flow"].get("sheet_id") or 0),
+            source_sheet_title=_clean(source["flow"].get("sheet_title"), 300),
+            source_row=int(source["student"].get("row") or 0),
+            target_sheet_id=int(target.get("sheet_id") or 0),
+            target_sheet_title=_clean(target.get("sheet_title"), 300),
+            students_range=_students_sheet_range(settings),
+            email=_clean(email, 300),
+            target_course=_clean(target.get("course"), 100),
+            target_curator=_clean(target.get("curator_raw") or target.get("curator_value"), 200),
+            student=student,
+            move=move,
+        )
+    return {
+        **result,
+        "target": target,
+        "student": {**source["student"], "row": int(result.get("target_row") or 0)},
+    }
+
+
+def _transfer_curator_raw(settings: dict[str, str], curator: str) -> str:
+    raw_map = _clean(settings.get("curator_map") or DEFAULT_CURATOR_MAP, 5000)
+    for part in re.split(r"[;\n]+", raw_map):
+        separator = "=>" if "=>" in part else ("=" if "=" in part else (":" if ":" in part else ""))
+        if not separator:
+            continue
+        marker, value = part.split(separator, 1)
+        if _clean(value, 100) == _clean(curator, 100):
+            return _clean(marker, 200)
+    return ""
+
+
+def _transfer_sheet_curator_sync(
+    *, spreadsheet_id: str, credentials_path: Path, sheet_id: int, sheet_title: str,
+    students_range: str, source_row: int, email: str, curator_raw: str,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    credentials = Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    session = AuthorizedSession(credentials)
+    values_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(sheet_title, students_range)}",
+        params={"majorDimension": "ROWS"}, timeout=30,
+    )
+    values_response.raise_for_status()
+    rows = (values_response.json() or {}).get("values") or []
+    _, columns = _sheet_student_header(rows)
+    start_match = re.match(r"[A-Z]{1,3}(\d+)", students_range)
+    start_row = int(start_match.group(1)) if start_match else 1
+    row_index = int(source_row) - start_row
+    if row_index < 0 or row_index >= len(rows):
+        raise RuntimeError("Исходная строка изменилась; обновите таблицу")
+    email_col = columns.get("email", 6)
+    curator_col = columns.get("responsible_curator")
+    if curator_col is None:
+        raise RuntimeError("В таблице не найдена колонка куратора")
+    row = rows[row_index]
+    if _norm(_row_value(row, email_col, 300)) != _norm(email):
+        raise RuntimeError("Исходная строка изменилась; обновите таблицу")
+    if _norm(_row_value(row, curator_col, 200)) == _norm(curator_raw):
+        return {"ok": True, "status": "already_updated", "row": int(source_row), "curator": curator_raw}
+    response = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+        json={"requests": [{"updateCells": {
+            "range": {
+                "sheetId": int(sheet_id),
+                "startRowIndex": int(source_row) - 1,
+                "endRowIndex": int(source_row),
+                "startColumnIndex": int(curator_col),
+                "endColumnIndex": int(curator_col) + 1,
+            },
+            "rows": [{"values": [{"userEnteredValue": {"stringValue": curator_raw}}]}],
+            "fields": "userEnteredValue",
+        }}]}, timeout=45,
+    )
+    response.raise_for_status()
+    return {"ok": True, "status": "updated", "row": int(source_row), "curator": curator_raw}
+
+
+async def service_transfer_update_student_curator(
+    *, email: str, source_course_key: str, source_stream: str, source_row: int, curator: str,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    allowed = {value for _, value in _curator_name_map(settings)}
+    if curator not in allowed:
+        raise RuntimeError("Куратор не поддерживается")
+    snapshot = await _flow_students(settings, refresh=True)
+    source = next(
+        (
+            item for item in _transfer_student_matches(snapshot, email)
+            if _clean(item["flow"].get("course_key")) == _clean(source_course_key)
+            and _clean(item["flow"].get("stream")) == _clean(source_stream)
+            and int(item["student"].get("row") or 0) == int(source_row)
+        ),
+        None,
+    )
+    if not source:
+        raise RuntimeError("Исходное назначение ученика изменилось")
+    if _clean(source["student"].get("responsible_curator"), 100) == curator:
+        return {"ok": True, "status": "already_updated", "row": int(source_row), "curator": curator}
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    curator_raw = _transfer_curator_raw(settings, curator)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists() or not curator_raw:
+        raise RuntimeError("Google Sheets или соответствие куратора не настроено")
+    result = await asyncio.to_thread(
+        _transfer_sheet_curator_sync,
+        spreadsheet_id=spreadsheet_id,
+        credentials_path=credentials_path,
+        sheet_id=int(source["flow"].get("sheet_id") or 0),
+        sheet_title=_clean(source["flow"].get("sheet_title"), 300),
+        students_range=_students_sheet_range(settings),
+        source_row=int(source_row),
+        email=_clean(email, 300),
+        curator_raw=curator_raw,
+    )
+    await _flow_students(settings, refresh=True)
+    return {**result, "curator_value": curator}
+
+
+async def service_transfer_write_getcourse(
+    *, email: str, gc_user_id: str, order_id: str, deal_number: str,
+    target_course_key: str, target_stream: str,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    snapshot = await _flow_students(settings, refresh=False)
+    target = next(
+        (
+            flow for flow in snapshot.get("items") or []
+            if _clean(flow.get("course_key")) == _clean(target_course_key)
+            and _clean(flow.get("stream")) == _clean(target_stream)
+        ),
+        None,
+    )
+    if not target:
+        raise RuntimeError("Целевой поток не найден")
+    output_fields = {
+        settings["field_stream"]: _clean(target_stream, 100),
+        settings["field_vk"]: _clean(target.get("vk_link"), 2000),
+        settings["field_tg"]: _clean(target.get("tg_link"), 2000),
+        settings["field_curator"]: _clean(target.get("curator_value"), 100),
+    }
+    if not output_fields[settings["field_curator"]] or not (
+        output_fields[settings["field_vk"]] or output_fields[settings["field_tg"]]
+    ):
+        raise RuntimeError("В целевом потоке не заполнены куратор или ссылки")
+    user_ok, user_error, user_details = await _write_getcourse_user(
+        _clean(gc_user_id, 100),
+        _getcourse_user_addfields(output_fields, settings),
+        settings,
+        email=_clean(email, 300),
+    )
+    deal_ok, deal_error, deal_details = await _write_getcourse_deal(
+        _clean(gc_user_id, 100),
+        _clean(deal_number or order_id, 100),
+        output_fields,
+        settings,
+        email=_clean(email, 300),
+    )
+    error = "; ".join(part for part in (user_error and f"user: {user_error}", deal_error and f"deal: {deal_error}") if part)
+    synced = await _sync_gc_fields_write_customer_state(
+        {"email": email, "gc_user_id": gc_user_id, "order_id": order_id},
+        output_fields,
+        {**target, "change_reason": "student_transfer"},
+        getcourse_ok=bool(user_ok and deal_ok),
+        error=error,
+    )
+    return {
+        "ok": bool(user_ok and deal_ok),
+        "error": error,
+        "fields": output_fields,
+        "user": user_details,
+        "deal": deal_details,
+        "customer_sync": synced,
+        "target": target,
+    }
+
+
+async def service_transfer_write_curator(
+    *, email: str, gc_user_id: str, order_id: str, deal_number: str, curator: str,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    if curator not in {value for _, value in _curator_name_map(settings)}:
+        raise RuntimeError("Куратор не поддерживается")
+    output_fields = {settings["field_curator"]: _clean(curator, 100)}
+    user_ok, user_error, user_details = await _write_getcourse_user(
+        _clean(gc_user_id, 100),
+        _getcourse_user_addfields(output_fields, settings),
+        settings,
+        email=_clean(email, 300),
+    )
+    deal_ok, deal_error, deal_details = await _write_getcourse_deal(
+        _clean(gc_user_id, 100),
+        _clean(deal_number or order_id, 100),
+        output_fields,
+        settings,
+        email=_clean(email, 300),
+    )
+    error = "; ".join(part for part in (user_error and f"user: {user_error}", deal_error and f"deal: {deal_error}") if part)
+    synced = await _sync_gc_fields_write_customer_state(
+        {"email": email, "gc_user_id": gc_user_id, "order_id": order_id},
+        output_fields,
+        {"curator_value": curator, "change_reason": "curator_change"},
+        getcourse_ok=bool(user_ok and deal_ok),
+        error=error,
+    )
+    return {
+        "ok": bool(user_ok and deal_ok),
+        "error": error,
+        "fields": output_fields,
+        "user": user_details,
+        "deal": deal_details,
+        "customer_sync": synced,
+        "target": {"curator_value": curator},
+    }
 
 
 @router.get("/health")

@@ -12,7 +12,7 @@
       font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:13px
     }
     *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
-    html,body{width:100%;height:100%;margin:0;background:var(--bg);color:var(--text);overflow:hidden}
+    html,body{width:100%;height:100%;margin:0;background:var(--bg);color:var(--text);overflow:hidden}*{scrollbar-width:none}*::-webkit-scrollbar{width:0;height:0}
     button,input,select{font:inherit}button{cursor:pointer}*{scrollbar-width:thin;scrollbar-color:#3a3a3a #060606}
     .shell{height:100svh;display:grid;grid-template-rows:52px minmax(0,1fr);overflow:hidden}
     .topbar{display:flex;align-items:center;gap:13px;padding:0 14px;border-bottom:1px solid var(--line);background:rgba(16,16,16,.98);min-width:0}
@@ -43,6 +43,7 @@
     @keyframes spin{to{transform:rotate(360deg)}}@keyframes flow-in{from{opacity:0;transform:scaleX(.35);transform-origin:left}to{opacity:1;transform:scaleX(1);transform-origin:left}}
     @media(max-width:760px){html,body{overflow-y:auto;overflow-x:hidden}.shell{height:auto;min-height:100svh;grid-template-rows:54px auto;overflow:visible}.workspace{display:block;overflow:visible}.chart-panel{height:310px;border-right:0!important;border-bottom:1px solid var(--line)!important}.chart-panel:last-child{border-bottom:0!important}.topbar{position:sticky;top:0;z-index:15;padding:0 8px;gap:7px}.brand{font-size:12px}.brand-prefix{display:none}.period,.sync-pill{display:none}.view-switch{margin-left:0}.view-switch button{padding:0 7px}.top-spacer{min-width:0}.chart-note{max-width:44%}.drawer{grid-template-rows:52px minmax(0,1fr) auto}.utm-grid{grid-template-columns:1fr}.utm-grid .field:last-child:nth-child(odd){grid-column:auto}.funnel-workspace{padding:14px 10px}.funnel-kicker{align-items:flex-start;flex-direction:column;gap:8px}.coverage{text-align:left}.funnel-scroll{overflow-x:auto;margin-right:-10px;padding-right:10px}.funnel-flow{min-width:900px;grid-template-columns:minmax(112px,1fr) 92px minmax(112px,1fr) 92px minmax(112px,1fr) 92px minmax(112px,1fr) 92px minmax(112px,1fr)}.funnel-stage{min-height:112px;padding:15px 13px}.stage-value{font-size:24px}.flow-arrow{width:50px}.conversion-rate{font-size:8px}.source-head,.source-row{grid-template-columns:minmax(92px,1.2fr) repeat(5,minmax(43px,1fr));min-width:0;gap:4px;padding-left:6px;padding-right:6px;font-size:9px}.source-head{font-size:7px;letter-spacing:0}.source-metric small{font-size:7px}.source-section{overflow:visible}.insights{grid-template-columns:1fr}.insight{border-right:0;border-bottom:1px solid var(--line)}.insight:last-child{border-bottom:0}}
     @media(max-width:430px){.period{max-width:120px}.checks{grid-template-columns:1fr}.custom-dates{grid-template-columns:1fr}.drawer-body{padding-left:13px;padding-right:13px}.chart-total{font-size:16px}.chart-panel{height:290px}}
+    @media(max-width:760px){.view-switch button,.funnel-mode button,.segmented button,.btn,.gear,.close{min-height:40px}.input{min-height:40px}}
     @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
   </style>
 </head>
@@ -112,7 +113,7 @@ function compact(v,money=false){const n=Number(v||0),a=Math.abs(n);let s;if(a>=1
 function formatDate(v,long=false){return new Intl.DateTimeFormat('ru-RU',long?{day:'numeric',month:'long',year:'numeric'}:{day:'2-digit',month:'2-digit'}).format(new Date(v+'T00:00:00'))}
 function periodText(p){return p.preset==='7d'?'последние 7 дней':p.preset==='30d'?'последние 30 дней':p.preset==='365d'?'последние 365 дней':`${formatDate(p.date_from)} — ${formatDate(p.date_to)}`}
 function notify(message,level='warn'){if(window.parent&&window.parent!==window&&typeof window.parent.notify==='function')window.parent.notify(message,level);else console[level==='error'?'error':'warn'](message)}
-async function fetchJson(url,options){const response=await fetch(url,options),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||body.error||`HTTP ${response.status}`);return body}
+async function fetchJson(url,options){const response=await fetch(url,{credentials:'same-origin',...(options||{})}),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||body.error||`HTTP ${response.status}`);return body}
 
 function createUtmFields(id,prefix){$(id).innerHTML=UTM_FIELDS.map(field=>{const key=prefix?`order_${field}`:field,inputId=`${prefix||'profile'}-${field}`;return `<div class="field"><label for="${inputId}">${UTM_LABELS[field]}</label><input id="${inputId}" class="input utm-input" data-group="${prefix?'order_utm':'profile_utm'}" data-field="${key}" list="list-${inputId}" placeholder="Любое"><datalist id="list-${inputId}"></datalist></div>`}).join('')}
 createUtmFields('profileUtm','');createUtmFields('orderUtm','order');

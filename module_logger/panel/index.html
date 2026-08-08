@@ -18,10 +18,8 @@
     *,*::before,*::after{box-sizing:border-box;}[hidden]{display:none!important;}
     html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-size:13px;}
     button,input,select{font:inherit;}
-    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin;}
-    ::-webkit-scrollbar{width:8px;height:8px;}
-    ::-webkit-scrollbar-track{background:#080808;}
-    ::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808;}
+    *{scrollbar-width:none;}
+    ::-webkit-scrollbar{width:0;height:0;}
 
     .shell{height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr);}
 
@@ -86,6 +84,7 @@
     .busy__spin{width:13px;height:13px;border:2px solid var(--border-strong);border-top-color:var(--text);
       border-radius:50%;animation:spin .75s linear infinite;}
     @keyframes spin{to{transform:rotate(360deg);}}
+    @media(max-width:760px){.tabbar__actions{overflow-x:auto}.search{min-width:140px}.btn{min-height:40px}.tab{height:40px}.terminal{padding:8px 10px 44px}}
   </style>
 </head>
 <body>
@@ -297,6 +296,12 @@ searchInput.addEventListener('input', () => {
 function startLive() {
   if (ws) { ws.close(); ws = null; }
   if (!activeTab) return;
+  if (window.top !== window) {
+    live = true; liveDot.classList.remove('live-dot--off');
+    document.getElementById('liveBtn').textContent = 'Stop';
+    loadLogs();
+    return;
+  }
   liveReplayUntil = Date.now() + 1500;
   ws = new WebSocket(`${WS_BASE}/ws/${activeTab}`);
   ws.onmessage = e => { if (e.data) appendLine(e.data.replace(/\n$/, '')); };
@@ -420,6 +425,7 @@ window.addEventListener('hashchange', () => {
 });
 loadModules();
 setInterval(loadModules, 15000);
+setInterval(() => { if (window.top !== window && live && activeTab) loadLogs(); }, 15000);
 </script>
 </body>
 </html>

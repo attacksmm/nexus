@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 
 from module_amocrm_db import router as module
@@ -225,3 +226,108 @@ def test_transient_error_classification_and_queue_backoff() -> None:
     assert module._queue_retry_delay(1) == 30
     assert module._queue_retry_delay(2) == 60
     assert module._queue_retry_delay(99) == 3600
+
+
+def test_successful_manager_lookup_uses_only_won_deals(tmp_path, monkeypatch) -> None:
+    customer_db = tmp_path / "customer-db.db"
+    with sqlite3.connect(customer_db) as db:
+        db.execute(
+            """
+            CREATE TABLE cdb_amo_deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform_id TEXT NOT NULL DEFAULT '',
+                custom_fields TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db.executemany(
+            "INSERT INTO cdb_amo_deals(platform_id,custom_fields,updated_at) VALUES(?,?,?)",
+            [
+                (
+                    "won-1",
+                    json.dumps({
+                        "status_id": "142",
+                        "responsible_user_id": "42",
+                        "emails": ["student@example.com"],
+                        "phones": ["+7 999 111-22-33"],
+                        "deal_url": "https://amo.invalid/leads/detail/won-1",
+                    }),
+                    "2026-08-01T10:00:00Z",
+                ),
+                (
+                    "lost-newer",
+                    json.dumps({
+                        "status_id": "143",
+                        "responsible_user_id": "99",
+                        "emails": ["student@example.com"],
+                    }),
+                    "2026-08-02T10:00:00Z",
+                ),
+                (
+                    "won-history",
+                    json.dumps({
+                        "status_name": "Успешно реализовано",
+                        "responsible_user_name": "Каракчиев Андрей Владимирович",
+                        "emails": ["history@example.com"],
+                        "deal_url": "https://amo.invalid/leads/detail/won-history",
+                    }),
+                    "2026-08-03T10:00:00Z",
+                ),
+            ],
+        )
+
+    async def user_names():
+        return {"42": "Татьяна Воробьева", "99": "Не брать"}
+
+    monkeypatch.setattr(module, "_customer_db_path", lambda: customer_db)
+    monkeypatch.setattr(module, "_amo_user_names", user_names)
+    _reset_runtime(tmp_path)
+    asyncio.run(module._init_db())
+    assert module._rebuild_successful_manager_index_sync(module._db_path, customer_db) == 3
+    result = asyncio.run(module.service_successful_managers(identities=[
+        {"key": "student-1", "email": "student@example.com", "phone": ""},
+        {"key": "student-2", "email": "history@example.com", "phone": ""},
+    ]))
+    assert result == {
+        "ok": True,
+        "items": [{
+            "key": "student-1",
+            "deal_id": "won-1",
+            "deal_url": "https://amo.invalid/leads/detail/won-1",
+            "manager_id": "42",
+            "manager_name": "Татьяна Воробьева",
+        }, {
+            "key": "student-2",
+            "deal_id": "won-history",
+            "deal_url": "https://amo.invalid/leads/detail/won-history",
+            "manager_id": "",
+            "manager_name": "Каракчиев Андрей Владимирович",
+        }],
+    }
+
+
+def test_manager_name_removes_technical_auto_suffix() -> None:
+    assert module._manager_name("Татьяна Воробьева (Авто)") == "Татьяна Воробьева"
+    assert module._manager_name("Татьяна Воробьева(Auto)") == "Татьяна Воробьева"
+
+
+def test_manager_index_updates_when_deal_status_changes(tmp_path) -> None:
+    _reset_runtime(tmp_path)
+    asyncio.run(module._init_db())
+    won = {
+        "status_id": "142",
+        "responsible_user_id": "42",
+        "emails": ["student@example.com"],
+        "deal_url": "https://amo.invalid/leads/detail/10",
+        "updated_at": "2026-08-03T10:00:00Z",
+    }
+    asyncio.run(module._refresh_successful_manager_deal("10", won))
+    with sqlite3.connect(module._db_path) as db:
+        assert db.execute("SELECT identity,deal_id FROM successful_manager_identities").fetchall() == [
+            ("email:student@example.com", "10")
+        ]
+    asyncio.run(module._refresh_successful_manager_deal("10", {**won, "status_id": "143"}))
+    with sqlite3.connect(module._db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM successful_manager_identities").fetchone()[0] == 0

@@ -1,7 +1,7 @@
 {
   "id": "chat-moderators",
   "name": "Куратор чатов",
-  "version": "0.1.34",
+  "version": "0.1.50",
   "description": "VK/TG куратор учебных чатов Sobakovod с историей действий, управлением токенами в модуле и безопасным отключенным runtime по умолчанию.",
   "env_required": [],
   "env_vars": {
@@ -17,6 +17,9 @@
     "VK_GROUP_TOKEN": "Официальный токен сообщества с правом messages.",
     "VK_GROUP_ID": "Идентификатор сообщества для Bots Long Poll.",
     "VK_LOG_CHAT_ID": "VK peer_id чата логов модератора.",
+    "SENLER_ACCESS_TOKEN": "Токен Senler для списка участников учебных чатов.",
+    "SENLER_GROUP_ID": "VK ID сообщества в Senler.",
+    "SENLER_COURSE_CHAT_SUBSCRIPTION_ID": "ID группы Senler для участников учебных чатов. По умолчанию 3801272.",
     "OPENROUTER_API_KEY": "OpenRouter API key для AI-классификации сообщений. Модель берётся из модуля OpenRouter."
   }
 }

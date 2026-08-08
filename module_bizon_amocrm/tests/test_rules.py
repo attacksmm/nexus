@@ -47,6 +47,12 @@ router = load_router()
 
 
 class BizonAmoRulesTest(unittest.TestCase):
+    def test_panel_submits_the_supported_note_only_action(self):
+        panel = (Path(__file__).resolve().parents[1] / "panel" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<option value="note_only">Добавить примечание</option>', panel)
+        self.assertNotIn('<option value="merge_empty">Дополнить последнюю сделку', panel)
+        self.assertIn("parent!==window&&typeof parent.notify==='function'", panel)
+
     def test_all_rooms_binding_matches_without_room_value(self):
         self.assertTrue(router._binding_matches(
             {"match_type": "all", "match_value": ""},

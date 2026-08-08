@@ -397,10 +397,7 @@ async function loadRecords() {
     $("prevBtn").disabled = offset === 0;
     $("nextBtn").disabled = offset + LIMIT >= total;
 
-    const statsRes = await fetch(API + `/tables/${currentTable}/stats`);
-    const stats = await statsRes.json().catch(() => ({}));
-    if (requestId !== recordsRequest) return;
-    $("statsLine").textContent = statsRes.ok && stats.total !== undefined ? `Всего: ${stats.total} · Сегодня: ${stats.today}` : `Всего: ${total}`;
+    $("statsLine").textContent = `Всего: ${total}`;
   } catch (error) {
     if (requestId !== recordsRequest) return;
     $("tableBody").innerHTML = `<tr><td class="record-empty" colspan="5" style="color:var(--bad)">${esc(error.message)}</td></tr>`;

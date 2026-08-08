@@ -20,3 +20,6 @@ module_*/logs/
 .playwright-cli/
 output/
 backups/
+artifacts/
+tmp/
+NUL

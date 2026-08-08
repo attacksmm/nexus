@@ -1,6 +1,6 @@
 {
   "id": "salebot-senler-button",
   "name": "Salebot → Senler кнопка",
-  "version": "1.0.4",
-  "description": "Публичный скрипт для Tilda: заменяет VK-кнопку Salebot на официальный web-widget Senler и оставляет Telegram-кнопку без изменений."
+  "version": "1.3.2",
+  "description": "Генерирует автономные inline-кнопки Senler с локальным токеном и полной атрибуцией."
 }

@@ -769,16 +769,32 @@ def test_first_message_bootstrap_uses_test_welcome_and_pins_once() -> None:
     async def scenario() -> None:
         calls: list[tuple[str, dict]] = []
         updates: list[tuple[str, dict, str]] = []
+        history_reads = 0
 
         async def vk_method(method: str, params: dict, token: str):
+            nonlocal history_reads
             calls.append((method, dict(params)))
             assert token == "group-token"
             if method == "messages.send" and "attachment" in params:
-                return {"message_id": 80, "conversation_message_id": 8}
+                return 0
             if method == "messages.send":
                 return {"message_id": 81, "conversation_message_id": 9}
             if method == "messages.getByConversationMessageId":
-                return {"count": 0, "items": []}
+                history_reads += 1
+                if history_reads < 6:
+                    return {"count": 0, "items": []}
+                return {
+                    "count": 1,
+                    "items": [
+                        {
+                            "id": 0,
+                            "conversation_message_id": 8,
+                            "from_id": -225075265,
+                            "text": "Добро пожаловать [id866850402|@nastasyaeggert]",
+                            "attachments": [{"type": "photo"}],
+                        }
+                    ],
+                }
             if method == "messages.pin":
                 return 1
             raise AssertionError(f"unexpected VK method: {method}")
@@ -800,6 +816,7 @@ def test_first_message_bootstrap_uses_test_welcome_and_pins_once() -> None:
                 "peer_id": 2000000017,
                 "owner_group_id": 225075265,
                 "bootstrap_status": "waiting_for_message",
+                "bootstrap_error": "previous delayed history lookup",
             },
         }
         previous_token = os.environ.get("VK_GROUP_TOKEN")
@@ -816,9 +833,14 @@ def test_first_message_bootstrap_uses_test_welcome_and_pins_once() -> None:
                 ),
                 patch.object(module, "_asset_path", return_value=module.Path("welcome.jpg")),
                 patch.object(module, "_upload_vk_message_photo", side_effect=upload_photo),
-                patch.object(module, "_render_template", return_value="Добро пожаловать") as render_template,
+                patch.object(
+                    module,
+                    "_render_template",
+                    return_value="Добро пожаловать @nastasyaeggert",
+                ) as render_template,
                 patch.object(module, "_update_run", side_effect=update_run),
                 patch.object(module, "_vk_method", side_effect=vk_method),
+                patch.object(module.asyncio, "sleep", return_value=None),
             ):
                 result = await module._initialize_vk_chat_from_run(row)
         finally:
@@ -833,19 +855,18 @@ def test_first_message_bootstrap_uses_test_welcome_and_pins_once() -> None:
 
         assert result["bootstrap_status"] == "ready"
         assert result["welcome_photo_sent"] is True
-        assert result["welcome_message_id"] == 80
+        assert result["welcome_message_id"] is None
         assert result["welcome_cmid"] == 8
         assert result["welcome_photo_cmid"] == 8
         assert result["welcome_message_has_photo"] is True
         assert result["welcome_pinned"] is True
+        assert "bootstrap_error" not in result
         assert render_template.call_args.args[0] == "vk_test_welcome"
         actual_methods = [method for method, _params in calls]
-        assert actual_methods == [
-            "messages.getByConversationMessageId",
-            "messages.send",
-            "messages.pin",
-        ], actual_methods
-        assert calls[1][1]["message"] == "Добро пожаловать"
+        assert actual_methods.count("messages.getByConversationMessageId") == 6
+        assert actual_methods[1] == "messages.send"
+        assert actual_methods[-1] == "messages.pin"
+        assert calls[1][1]["message"] == "Добро пожаловать @nastasyaeggert"
         assert calls[1][1]["attachment"] == "photo-1_2"
         assert calls[-1][1] == {"peer_id": 2000000017, "cmid": 8}
         assert updates[-1][0] == "ok"
@@ -854,9 +875,8 @@ def test_first_message_bootstrap_uses_test_welcome_and_pins_once() -> None:
     asyncio.run(scenario())
 
 
-def test_join_service_event_waits_for_first_message() -> None:
+def test_join_service_event_retries_pending_bootstrap() -> None:
     async def scenario() -> None:
-        persisted: list[tuple[str, dict]] = []
         event = SimpleNamespace(
             type="message_new",
             object={
@@ -877,23 +897,65 @@ def test_join_service_event_waits_for_first_message() -> None:
             },
         }
 
-        def persist(_row, response, status, *, error=""):
-            assert not error
-            persisted.append((status, dict(response)))
-
         with (
             patch.object(module, "_vk_owned_run", return_value=row),
             patch.object(module, "_pending_vk_bootstrap_run", return_value=row),
-            patch.object(module, "_persist_vk_bootstrap", side_effect=persist),
             patch.object(module, "_initialize_vk_chat_from_run") as initialize,
+            patch.object(module, "_sync_vk_users_to_senler") as sync_senler,
         ):
             await module._handle_vk_bootstrap_event(event)
 
-        assert len(persisted) == 1
-        assert persisted[0][0] == "waiting_for_message"
-        assert persisted[0][1]["peer_id"] == 2000000017
-        assert persisted[0][1]["bootstrap_status"] == "waiting_for_message"
-        initialize.assert_not_called()
+        initialize.assert_awaited_once_with(row)
+        sync_senler.assert_awaited_once_with([1105209997])
+
+    asyncio.run(scenario())
+
+
+def test_senler_course_chat_sync_deduplicates_users_and_batches() -> None:
+    async def scenario() -> None:
+        calls: list[dict] = []
+
+        async def request(payload: dict) -> dict:
+            calls.append(dict(payload))
+            return {"success": True}
+
+        previous_token = os.environ.get("SENLER_ACCESS_TOKEN")
+        previous_group = os.environ.get("SENLER_GROUP_ID")
+        previous_subscription = os.environ.get("SENLER_COURSE_CHAT_SUBSCRIPTION_ID")
+        os.environ["SENLER_ACCESS_TOKEN"] = "senler-token"
+        os.environ["SENLER_GROUP_ID"] = "917877"
+        os.environ["SENLER_COURSE_CHAT_SUBSCRIPTION_ID"] = "3801272"
+        try:
+            with (
+                patch.object(module, "_senler_course_chat_request", side_effect=request),
+                patch.object(module, "_senler_course_chat_members", return_value={2, 3, 5}),
+            ):
+                result = await module._sync_vk_users_to_senler([5, 2, 5, -1, 3])
+        finally:
+            for key, value in (
+                ("SENLER_ACCESS_TOKEN", previous_token),
+                ("SENLER_GROUP_ID", previous_group),
+                ("SENLER_COURSE_CHAT_SUBSCRIPTION_ID", previous_subscription),
+            ):
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        assert result["ok"] is True
+        assert result["users"] == 3
+        assert result["accepted"] == 3
+        assert result["verified"] == 3
+        assert result["unresolved_vk_ids"] == []
+        assert calls == [
+            {
+                "access_token": "senler-token",
+                "group_id": "917877",
+                "subscription_id": "3801272",
+                "vk_user_id": [2, 3, 5],
+                "v": "2",
+            }
+        ]
 
     asyncio.run(scenario())
 
@@ -958,6 +1020,7 @@ def test_joined_staff_uses_current_configuration_for_automatic_promotion() -> No
                     "_vk_admin_state",
                     return_value={"ok": True, "admins": [1105209997], "members": [], "missing_admins": []},
                 ),
+                patch.object(module, "_sync_vk_users_to_senler"),
                 patch.object(module, "_update_run", side_effect=update_run),
             ):
                 await module._handle_vk_bootstrap_event(event)
@@ -1439,5 +1502,5 @@ def test_manual_pin_restore_upgrades_legacy_split_photo_and_text() -> None:
     asyncio.run(scenario())
 
 
-def test_vk_invite_fallback_default_points_to_tech_support() -> None:
-    assert "https://vk.me/tehpod_sobakovodpro" in module.VK_INVITE_FALLBACK_TEMPLATE
+def test_vk_invite_fallback_points_to_community_dialog() -> None:
+    assert "https://vk.me/ssobakovod" in module.VK_INVITE_FALLBACK_TEMPLATE

@@ -30,8 +30,8 @@
     .status{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metric{padding:8px;background:#101010;border-color:var(--line);border-radius:0}.metric b{font-size:16px}
     .rule-grid{gap:6px;margin-bottom:6px}.hint{font-size:11px;margin-top:4px}
     pre{padding:8px;background:#090909;border-color:var(--line);border-radius:0;max-height:220px}.table-wrap{width:100%;max-width:100%;border-color:var(--line);border-radius:0}table{min-width:820px}th,td{padding:7px 8px}th{position:sticky;top:0;background:#101010;font-size:11px}.hint{overflow-wrap:anywhere}
-    *::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:0;border:0}*{scrollbar-color:#3a3a3a #090909}
-    @media(max-width:780px){.shell{grid-template-rows:38px 36px minmax(0,1fr)}.top{height:38px;padding:0 8px}.top h1{font-size:11px;white-space:nowrap}.top .btn{padding:5px 7px;min-height:28px}.tabs{padding:0 6px}.panel{padding:9px}.grid,.status,.rule-grid,.people{grid-template-columns:1fr}.full{grid-column:auto}table{min-width:720px}}
+    *::-webkit-scrollbar{display:none}*{scrollbar-width:none}
+    @media(max-width:780px){.shell{grid-template-rows:44px 40px minmax(0,1fr)}.top{height:44px;padding:0 8px}.top h1{font-size:11px;white-space:nowrap}.top .btn{min-height:40px;padding:6px 8px}.tabs{height:40px;padding:0 6px}.tab{height:39px}.panel{padding:9px}.input,textarea,select,.btn{min-height:40px}.people{grid-template-columns:1fr}.person{min-height:40px}.grid,.status,.rule-grid{grid-template-columns:1fr}.full{grid-column:auto}table{min-width:720px}}
   </style>
 </head>
 <body>
@@ -399,10 +399,11 @@ async function loadEvents(){
   </tr>`).join('') || '<tr><td colspan="6" class="muted">Пока нет событий</td></tr>';
 }
 async function retryFailedEvents(){
+  if(!confirm('Повторить до 10 ошибок синхронизации?')) return;
   const state = $('retryState');
   state.textContent = 'Повторяю...';
   try {
-    const result = await fetchJson('/sync/customer-db/run?limit=200', {method:'POST'});
+    const result = await fetchJson('/sync/customer-db/run?limit=10', {method:'POST'});
     state.textContent = `Обработано: ${Number(result.processed || 0)}, ошибок: ${(result.errors || []).length}`;
     await Promise.all([loadStatus(), loadEvents()]);
   } catch (error) {

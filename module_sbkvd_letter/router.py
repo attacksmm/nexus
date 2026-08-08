@@ -3104,6 +3104,26 @@ async def _send_remote(
     raise PermanentDeliveryError("Неизвестный канал")
 
 
+async def service_send_direct(*, channel: str, recipient_id: str, content: str, operation_id: str) -> dict[str, Any]:
+    channel = str(channel or "").strip().lower()
+    recipient_id = str(recipient_id or "").strip()
+    content = str(content or "").strip()
+    operation_id = str(operation_id or "").strip()
+    if channel not in {"vk", "telegram"} or not recipient_id or not content or not operation_id:
+        return {"ok": False, "status": "invalid", "error": "channel, recipient_id, content and operation_id are required"}
+    row = {
+        "channel": channel,
+        "recipient_id": recipient_id,
+        "campaign_id": f"student-transfer:{operation_id}:{channel}",
+        "rendered_content": content,
+    }
+    try:
+        message_id, details = await _send_remote(row, {"parse_mode": "", "attachment_ids": []})
+        return {"ok": True, "status": "sent", "channel": channel, "message_id": message_id, "details": details}
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "channel": channel, "error": _delivery_error_text(exc)}
+
+
 def _api_error(data: Any, channel: str) -> Exception:
     if channel == "vk":
         error = data.get("error") if isinstance(data, dict) else None

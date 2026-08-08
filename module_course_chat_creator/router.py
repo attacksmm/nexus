@@ -39,6 +39,8 @@ router = APIRouter()
 VK_API_VERSION = "5.199"
 VK_INITIAL_USER_LIMIT = 450
 VK_TEST_STAFF_ID = 1105209997
+SENLER_API_BASE = "https://senler.ru/api"
+SENLER_COURSE_CHAT_SUBSCRIPTION_ID = "3801272"
 DEFAULT_MODULE_ID = "course-chat-creator"
 DEFAULT_CHAT_LINKS_SPREADSHEET_ID = "1zu1__XcKxJH8yC9ForDvibaUnKFCS1pxWHEjLgqlVXA"
 CHAT_LINK_SHEETS = {
@@ -93,9 +95,9 @@ PEOPLE_DEFAULTS = [
     {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
 ]
 
-VK_WELCOME_TEMPLATE = "🐾 Добро пожаловать в закрытый чат курса «{course_full_name}»! 🐾\n\nЯ очень рада, что вы здесь. Вы уже сделали важный шаг на пути к осознанному воспитанию вашей собаки.\n\n🗓 Поток №{stream_number}: Обучение стартует {date_start}\nВпереди у нас 11 недель практического обучения, поддержки и маленьких побед! 💪🏼🐶\n\n📍 ПЕРВЫЙ ШАГ — ЗНАКОМСТВО (ВИЗИТКА)\nПожалуйста, расскажите о себе и своем питомце в ОДНОМ сообщении по форме:\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода/фенотип/дворняжка\n3️⃣ С какими трудностями пришли и какой результат хотите получить (ваша точка В)?\n\n✅ ОБЯЗАТЕЛЬСТВО НА КУРС:\nВ конце своего сообщения обязательно добавьте фразу:\n«Я обязуюсь внимательно изучать материалы курса, если я что-то не понял(а) — посмотреть урок еще раз. Выполнять практику, задавать вопросы Анне и кураторам. Быть терпеливым(ой) к себе и своей любимой собаке и идти к результату шаг за шагом».\n\n🎓 КАК ПРОХОДИТ ОБУЧЕНИЕ:\n• Модули открываются еженедельно в субботу в 12:00 (МСК) на платформе.\n• Все вопросы по урокам, разборы и обратную связь пишем прямо в этот чат.\n• Обязательно отмечайте нас, чтобы мы не пропустили вопрос!\n\n👩‍🏫 Создатель курса: Анна - [id765938|@timofeevapodbordog]\n🛡 Кураторы-кинологи: {kurators_text}\n❤️ Руководитель отдела заботы: Андрей - [id11335495|@id11335495]\n🛠 Технические специалисты: Техническая поддержка - [id1105209997|@tehpod_sobakovodpro], Никита - [id741919467|@attackpng]\n📢 Наше сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat\n\n⚖ ПРАВИЛА ЧАТА:\n— Общаемся культурно, ненормативная лексика и спам запрещены.\n— Аудиосообщения запрещены (их используют только кураторы).\n— Сообщения, нарушающие правила, удаляются автоматически.\n\nНу что, начинаем наше путешествие в новый мир! ❤️"
+VK_WELCOME_TEMPLATE = "🐾 Добро пожаловать в закрытый чат курса «{course_full_name}»! 🐾\n\nЯ очень рада, что вы здесь. Вы уже сделали важный шаг на пути к осознанному воспитанию вашей собаки.\n\n🗓 Поток №{stream_number}: Обучение стартует {date_start}\nВпереди у нас 11 недель практического обучения, поддержки и маленьких побед! 💪🏼🐶\n\n📍 ПЕРВЫЙ ШАГ — ЗНАКОМСТВО (ВИЗИТКА)\nПожалуйста, расскажите о себе и своем питомце в ОДНОМ сообщении по форме:\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода/фенотип/дворняжка\n3️⃣ С какими трудностями пришли и какой результат хотите получить (ваша точка В)?\n\n✅ ОБЯЗАТЕЛЬСТВО НА КУРС:\nВ конце своего сообщения обязательно добавьте фразу:\n«Я обязуюсь внимательно изучать материалы курса, если я что-то не понял(а) — посмотреть урок еще раз. Выполнять практику, задавать вопросы Анне и кураторам. Быть терпеливым(ой) к себе и своей любимой собаке и идти к результату шаг за шагом».\n\n🎓 КАК ПРОХОДИТ ОБУЧЕНИЕ:\n• Модули открываются еженедельно в субботу в 12:00 (МСК) на платформе.\n• Все вопросы по урокам, разборы и обратную связь пишем прямо в этот чат.\n• Обязательно отмечайте нас, чтобы мы не пропустили вопрос!\n\n👩‍🏫 Создатель курса: Анна - [id765938|@timofeevapodbordog]\n🛡 Кураторы-кинологи: {kurators_text}\n❤️ Руководитель отдела заботы: Андрей - [id11335495|@id11335495]\n🛠 Техническая поддержка: https://vk.me/ssobakovod\n📢 Наше сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat\n\n⚖ ПРАВИЛА ЧАТА:\n— Общаемся культурно, ненормативная лексика и спам запрещены.\n— Аудиосообщения запрещены (их используют только кураторы).\n— Сообщения, нарушающие правила, удаляются автоматически.\n\nНу что, начинаем наше путешествие в новый мир! ❤️"
 VK_TEST_WELCOME_TEMPLATE = "Проверка учебного VK-чата\n\nПроверьте ссылку, закреп, приветствие модератора и права администратора.\n\nСотрудник: [id1105209997|Техническая поддержка]"
-VK_INVITE_FALLBACK_TEMPLATE = "Здравствуйте! Вас не удалось добавить в учебный чат автоматически.\n\nВступите по ссылке: {invite_link}\n\nЕсли войти не получилось, напишите в техническую поддержку: https://vk.me/tehpod_sobakovodpro"
+VK_INVITE_FALLBACK_TEMPLATE = "Здравствуйте! Вас не удалось добавить в учебный чат автоматически.\n\nВступите по ссылке: {invite_link}\n\nЕсли войти не получилось, напишите в техническую поддержку: https://vk.me/ssobakovod"
 TG_WELCOME_TEMPLATE = "<b>Всем привет и добро пожаловать в закрытый чат курса «{course_name}»!🐾</b>\n\n<i>Я очень рада, что вы здесь. Вы уже сделали важный шаг, а именно решили осознанно выстраивать жизнь со своей собакой, а не терпеть, надеяться, что перерастёт или бороться в одиночку.\n\nВпереди у нас <b>11 недель практического обучения</b>, поддержки, вопросов, открытий и маленьких (а иногда и очень больших) побед💪🏼🐶\n\nЗдесь находится ваше новое окружение, которые всегда помогут вам, подскажут и поддержат! Этого же они ждут и с вашей стороны. Поэтому открытость и общительность всегда приветствуется🙏🏼</i>\n\n🗓Обучение стартует: {date_start}\n\n<b>А пока несколько ВАЖНЫХ организационных моментов, чтобы ваше пребывание на курсе стало еще удобнее и продуктивнее⤵️</b>\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_info_id}\">Главный чат (вы сейчас здесь)</a></u>\nЭто наш навигатор. Здесь мы с командой будем писать важные объявления, делиться новостями курса, напоминать про эфиры и обновления.\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_vizitka_id}\">Подчат «🤝 Визитка»</a></u>\nМесто, где мы знакомимся. После прочтения этого сообщения обязательно перейдите в подчат «Визитка» и расскажите о себе по заданной форме. \nТак мы с командой сможем узнать вас и вашего питомца поближе, а соответственно точнее помочь вам с вашей ситуацией. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_obuchenie_id}\">Подчат «🎓 Обучение»</a></u>\nСвоего рода наш рабочий кабинет. Здесь все, что касается самого обучения: вопросы по урокам, разборы, обратная связь. \nЕсли что-то не получается - это сюда. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_boltalka_id}\">Подчат «💬 Болталка»</a></u>\nПросто по-человечески поделиться радостью, сомнениями, успехами, поддержать друг друга, выдохнуть, обсудить - в общем, все что угодно (в рамках правил, разумеется😁)\n_________________________________\n\n<b>ПРАВИЛА ЗАКРЫТОГО ЧАТА</b>\n\n1️⃣ Вопросы <u>по рассрочкам и оплатам</u> курса адресуются <u>в службу заботы</u> @andrew_karakchiev\n\n2️⃣ Если вы <u>хотите задать вопрос</u> мне или моим кураторам, то <u>обязательно упоминайте нас в сообщении</u>, чтобы мы точно не пропустили ваш вопрос. \n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\n\nКураторы-кинологи в чате: {kurators_list}\n\n❗️Только обязательно делайте это в чате, не пишите нам в личные сообщения❗️\n\n3️⃣ По <u>техническим вопросам или проблемам</u> обращайтесь <u>к тех.поддержке</u> школы @tech_sobakovod_pro\n\n\n<b>В ЧАТЕ ЗАПРЕЩЕНО</b> (сообщения нарушающие правила, будут удалены ботом-модератором автоматически)\n\n• Ненормативная лексика\n• Видео, ссылки НЕ относящиеся к теме обучения\n• Аудио сообщения. Их размещаю я и кураторы\n_________________________________\n\nНу что, начинаем путешествие в новый мир!❤️"
 TG_VIZITKA_TEMPLATE = "<b>Место, где мы начинаем знакомство 💛</b>\n\nЗдесь вы можете чуть больше рассказать о себе и своей собаке, а мы сможем лучше понять вашу ситуацию и помочь максимально точно.\n\nОчень прошу не пропускать этот шаг!\n\n✍️ <u>Пожалуйста, напишите ОДНО сообщение по следующей форме:</u>\n\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода / метис / дворняжка\n3️⃣ С какими трудностями вы пришли на курс? Какой результат вы хотите получить к концу обучения? Что должно измениться в жизни с собакой?\n\n И в конце обязательно добавьте фразу:\n\n<blockquote>«Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым(ой) к себе и своей собаке и идти к результату шаг за шагом».\n</blockquote>\n\nЭто не формальность. Это ваш личный путь из точки А в точку Б и настрой на 100% результат 😉\n\n<u>Пример сообщения, которое у вас должно получится:</u>\n\n<i>Меня зовут Ольга, г. Москва. У меня Лабрадор-ретривер, 3 года.\n\nХочу, чтобы моя собака перестала тянуть поводок и слышала меня на прогулке. Очень нервничаю каждый выход на улицу, потому что первая проезжающая машина сводит ее с ума.\n\nЯ обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливой к себе и своей собаке и идти к результату шаг за шагом!</i>\n\n<b>Ждем ваших визиток🙌🏼</b>"
 TG_OBUCHENIE_TEMPLATE = "<b>Наш рабочий кабинет🎓</b>\n\nСамое важное пространство курса. Всё, что касается обучения, живёт здесь.\n\n👩‍🎓 На обучающей платформе уже доступен нулевой модуль в котором есть первые задания.\n\nДоступ должен был прийти вам на почту, если вы не смогли найти письмо с доступом в кабинет, напишите куратору @Tech_kurator\n\n<b>Модули будут открываться еженедельно в субботу в 12:00 по московскому времени</b>. Не забывайте выполнять задания после видеоуроков, я и мои кураторы проверим каждый ответ лично и дадим развернутую обратную связь.\n\nКроме того, за выполнения заданий, вам <b>будут начисляться бонусные баллы</b>. <b>В нулевом модуле об этом рассказано подробнее.</b>\n\n✅ <u>В этом чате вы можете и даже нужно:</u>\n\n• Задавать вопросы по урокам и заданиям\n• Писать, если что-то не получается или вызывает сомнения\n• Делиться наблюдениями и результатами практики\n• Получать обратную связь от меня и кураторов\n• Разбирать конкретные ситуации с вашей собакой\n\n<b>❗️Здесь нет глупых вопросов. </b>\n\nЛучше спросить, чем делать «на авось». Мы рядом, чтобы поддержать вас на каждом этапе🤍\n\n<u>Как задавать вопросы, чтобы помощь была максимально точной</u>👇🏼\n\nПожалуйста, старайтесь сразу прописать:\n- в каком уроке или задании возник вопрос\n- что именно не получается\n- что уже пробовали делать\n- поведение собаки в этот момент (спокойна / возбуждена / отвлекается и т.д.)\n\nИ <b>обязательно отмечайте нас в сообщении</b>, чтобы мы точно не пропустили вопрос🙌🏼\n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\nКураторы-кинологи: #{kurators_list}\n\nПомните: результат складывается из маленьких шагов!"
@@ -376,6 +378,7 @@ def _init_db() -> None:
                 vk_id TEXT NOT NULL DEFAULT '',
                 vk_mention TEXT NOT NULL DEFAULT '',
                 tg_ref TEXT NOT NULL DEFAULT '',
+                offer_id INTEGER NOT NULL DEFAULT 0,
                 parity TEXT NOT NULL DEFAULT 'any',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 note TEXT NOT NULL DEFAULT '',
@@ -447,6 +450,9 @@ def _init_db() -> None:
             );
             """
         )
+        people_columns = {row[1] for row in db.execute("PRAGMA table_info(people)").fetchall()}
+        if "offer_id" not in people_columns:
+            db.execute("ALTER TABLE people ADD COLUMN offer_id INTEGER NOT NULL DEFAULT 0")
         db.execute("DELETE FROM people WHERE name IN ('Екатерина','ТГ куратор 1','ТГ куратор 2')")
         db.execute("UPDATE people SET kind='author',parity='any',updated_at=strftime('%s','now') WHERE name='Анна'")
         db.execute("UPDATE people SET kind='kurator',parity='any',updated_at=strftime('%s','now') WHERE name='Ирина'")
@@ -475,6 +481,11 @@ def _init_db() -> None:
                        VALUES(:kind,:name,:vk_id,:vk_mention,:tg_ref,COALESCE(:parity,'any'),:enabled,COALESCE(:note,''))""",
                     row,
                 )
+        for name, offer_id in (("Ирина", 8593080), ("Слава", 8593081), ("Настасья", 8593084)):
+            db.execute(
+                "UPDATE people SET offer_id=? WHERE kind='kurator' AND name=? AND COALESCE(offer_id,0)=0",
+                (offer_id, name),
+            )
         for row in COURSE_DEFAULTS:
             db.execute(
                 """INSERT INTO courses(key,choice,title,vk_title,tg_title,enabled)
@@ -1178,6 +1189,7 @@ async def _find_vk_community_chat_message(
     group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
     if group_id <= 0:
         return None, None
+    expected_text = re.sub(r"\[(?:id|club)-?\d+\|([^\]]+)\]", r"\1", text)
     response = await _vk_method(
         "messages.getByConversationMessageId",
         {
@@ -1189,12 +1201,15 @@ async def _find_vk_community_chat_message(
     if not isinstance(response, dict) or "error" in response:
         return None, None
     items = response.get("items") or []
-    for item in reversed(items):
+    for item in items:
         if not isinstance(item, dict) or int(item.get("from_id") or 0) != -group_id:
             continue
         if item.get("action"):
             continue
-        if text and str(item.get("text") or "") != text:
+        actual_text = re.sub(
+            r"\[(?:id|club)-?\d+\|([^\]]+)\]", r"\1", str(item.get("text") or "")
+        )
+        if text and actual_text != expected_text:
             continue
         if attachment_type and not any(
             isinstance(attachment, dict) and attachment.get("type") == attachment_type
@@ -1327,8 +1342,8 @@ async def _initialize_vk_chat_from_run(row: dict[str, Any]) -> dict[str, Any]:
                 _vk_require_success("messages.send welcome", welcome_response)
                 message_id, cmid = _vk_message_reference(welcome_response)
                 if not message_id and not cmid:
-                    for _attempt in range(3):
-                        await asyncio.sleep(0.3)
+                    for _attempt in range(20):
+                        await asyncio.sleep(0.5)
                         message_id, cmid = await _find_vk_community_chat_message(
                             peer_id,
                             token,
@@ -1355,6 +1370,7 @@ async def _initialize_vk_chat_from_run(row: dict[str, Any]) -> dict[str, Any]:
             pin_response = await _vk_method("messages.pin", pin_params, token)
             _vk_require_success("messages.pin", pin_response)
             response["welcome_pinned"] = True
+        response.pop("bootstrap_error", None)
         _persist_vk_bootstrap(row, response, "ok")
         _log("info", "VK community chat bootstrap completed peer_id=%s run_id=%s", peer_id, row["id"])
         return response
@@ -1723,18 +1739,16 @@ async def _handle_vk_bootstrap_event(event: Any) -> None:
             await _promote_joined_vk_staff(owned_row, message)
             if message["action_type"]:
                 await _restore_vk_course_pin(owned_row, message)
+                if not bool(owned_row.get("test_mode")) and message["action_type"] in {
+                    "chat_invite_user",
+                    "chat_invite_user_by_link",
+                }:
+                    member_id = int(message.get("action_member_id") or message["from_id"] or 0)
+                    await _sync_vk_users_to_senler([member_id])
         except Exception as exc:
             _log("error", "VK community chat event automation failed peer_id=%s: %s", message["peer_id"], exc)
     row = _pending_vk_bootstrap_run(message["peer_id"])
     if row is None:
-        return
-    # A join service event arrives before VK grants the community message-history
-    # access. Wait for the participant's first ordinary message instead of
-    # recording a false send success or duplicating the welcome on retry.
-    if message["action_type"]:
-        response = dict(row.get("response") or {})
-        response.pop("bootstrap_error", None)
-        _persist_vk_bootstrap(row, response, "waiting_for_message")
         return
     try:
         await _initialize_vk_chat_from_run(row)
@@ -2384,6 +2398,8 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
     }
     try:
         prepared = await _initialize_vk_chat_from_run(row)
+        if not test_mode:
+            prepared["senler_chat_members"] = await _sync_vk_course_chat_members_to_senler([peer_id])
         link_sync = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=test_mode)
         prepared["student_invites"] = {
             "initial_added": len(added_student_ids),
@@ -3068,7 +3084,7 @@ def _recorded_vk_course_chats() -> list[dict[str, Any]]:
         rows = [
             dict(row)
             for row in db.execute(
-                "SELECT id,title,chat_id,response_json,test_mode,status FROM runs WHERE platform=? ORDER BY id DESC",
+                "SELECT id,title,chat_id,response_json,test_mode,status,course_key,stream_number FROM runs WHERE platform=? ORDER BY id DESC",
                 ("vk",),
             ).fetchall()
         ]
@@ -3095,6 +3111,8 @@ def _recorded_vk_course_chats() -> list[dict[str, Any]]:
                 "title": title,
                 "test_mode": bool(row.get("test_mode")),
                 "run_status": _clean(row.get("status")),
+                "course_key": _clean(row.get("course_key")),
+                "stream_number": _clean(row.get("stream_number")),
                 "community_owned": int(response.get("owner_group_id") or 0) == group_id,
                 "welcome_cmid": int(response.get("welcome_cmid") or 0),
                 "pin_watchdog_suspended": bool(
@@ -3105,6 +3123,136 @@ def _recorded_vk_course_chats() -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _senler_course_chat_config() -> dict[str, str] | None:
+    token = _clean(os.environ.get("SENLER_ACCESS_TOKEN"))
+    group_id = _clean(os.environ.get("SENLER_GROUP_ID"))
+    subscription_id = _clean(
+        os.environ.get("SENLER_COURSE_CHAT_SUBSCRIPTION_ID") or SENLER_COURSE_CHAT_SUBSCRIPTION_ID
+    )
+    if not token or not group_id or not subscription_id.isdigit():
+        return None
+    return {"token": token, "group_id": group_id, "subscription_id": subscription_id}
+
+
+async def _senler_course_chat_request(payload: dict[str, Any]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(f"{SENLER_API_BASE}/subscribers/add", json=payload)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.is_success or not isinstance(body, dict) or not body.get("success"):
+        raise RuntimeError(_clean(body.get("error") if isinstance(body, dict) else "") or "Senler subscribers/add failed")
+    return body
+
+
+async def _senler_course_chat_members(payload: dict[str, Any]) -> set[int]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(f"{SENLER_API_BASE}/subscribers/get", json=payload)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.is_success or not isinstance(body, dict) or not body.get("success"):
+        raise RuntimeError(_clean(body.get("error") if isinstance(body, dict) else "") or "Senler subscribers/get failed")
+    return {int(item.get("vk_user_id") or 0) for item in body.get("items", []) if int(item.get("vk_user_id") or 0) > 0}
+
+
+async def _sync_vk_users_to_senler(vk_user_ids: list[int] | set[int]) -> dict[str, Any]:
+    ids = sorted({int(value) for value in vk_user_ids if int(value) > 0})
+    config = _senler_course_chat_config()
+    if not ids:
+        return {"ok": True, "status": "empty", "users": 0}
+    if config is None:
+        return {"ok": False, "status": "not_configured", "users": len(ids)}
+    accepted = 0
+    errors: list[str] = []
+    for index in range(0, len(ids), 100):
+        batch = ids[index : index + 100]
+        try:
+            await _senler_course_chat_request(
+                {
+                    "access_token": config["token"],
+                    "group_id": config["group_id"],
+                    "subscription_id": config["subscription_id"],
+                    "vk_user_id": batch,
+                    "v": "2",
+                }
+            )
+            accepted += len(batch)
+        except Exception as exc:
+            errors.append(_exc_text(exc))
+    verified: set[int] = set()
+    if not errors:
+        try:
+            verified = await _senler_course_chat_members(
+                {
+                    "access_token": config["token"],
+                    "group_id": config["group_id"],
+                    "subscription_id": [int(config["subscription_id"])],
+                    "vk_user_id": ids,
+                    "v": "2",
+                    "count": 100,
+                }
+            )
+        except Exception as exc:
+            errors.append(_exc_text(exc))
+    missing = sorted(set(ids) - verified)
+    result = {
+        "ok": not errors and not missing,
+        "status": "synced" if not errors and not missing else "partial_error",
+        "users": len(ids),
+        "accepted": accepted,
+        "verified": len(verified),
+        "unresolved_vk_ids": missing,
+        "subscription_id": config["subscription_id"],
+        "errors": errors,
+    }
+    if errors or missing:
+        _log("warning", "Senler course-chat sync incomplete users=%s verified=%s missing=%s errors=%s", len(ids), len(verified), missing, errors)
+    return result
+
+
+async def _vk_course_chat_member_ids(peer_ids: list[int] | None = None) -> dict[str, Any]:
+    token = _vk_group_token()
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    if not token or group_id <= 0:
+        return {"ok": False, "status": "not_configured", "users": []}
+    wanted = {int(value) for value in (peer_ids or []) if int(value) > 2000000000}
+    users: set[int] = set()
+    chats = 0
+    errors: list[dict[str, Any]] = []
+    for chat in _recorded_vk_course_chats():
+        if not chat.get("community_owned") or chat.get("test_mode"):
+            continue
+        peer_id = int(chat["peer_id"])
+        if wanted and peer_id not in wanted:
+            continue
+        response = await _vk_method(
+            "messages.getConversationMembers",
+            {"peer_id": peer_id, "count": 1000, "group_id": group_id},
+            token,
+        )
+        error = _vk_error_summary(response)
+        if error:
+            errors.append({"peer_id": peer_id, "error": error})
+            continue
+        chats += 1
+        users.update(
+            int(item.get("member_id") or 0)
+            for item in response.get("items", [])
+            if int(item.get("member_id") or 0) > 0
+        )
+    return {"ok": not errors, "status": "ready" if not errors else "partial_error", "chats": chats, "users": sorted(users), "errors": errors}
+
+
+async def _sync_vk_course_chat_members_to_senler(peer_ids: list[int] | None = None) -> dict[str, Any]:
+    members = await _vk_course_chat_member_ids(peer_ids)
+    if not members.get("ok") and not members.get("users"):
+        return members
+    return {**members, "senler": await _sync_vk_users_to_senler(members.get("users") or [])}
 
 
 def _vk_error_summary(response: Any) -> dict[str, Any] | None:
@@ -3429,6 +3577,387 @@ async def _remove_tg_from_course_chats(target: str, *, dry_run: bool = True, lim
                 await client(functions.channels.EditBannedRequest(channel=dialog.entity, participant=entity, banned_rights=banned))
             touched.append({"platform": "telegram", "title": title, "chat_id": getattr(dialog.entity, "id", None), "status": "would_remove" if dry_run else "removed", "present": True})
         return {"ok": True, "platform": "telegram", "target": target, "dry_run": dry_run, "items": touched}
+    finally:
+        await client.disconnect()
+
+
+def service_flow_setup() -> dict[str, Any]:
+    _ensure_db()
+    with _db() as db:
+        courses = [dict(row) for row in db.execute("SELECT * FROM courses WHERE enabled=1 ORDER BY choice,key").fetchall()]
+    return {
+        "courses": courses,
+        "teachers": [
+            {
+                "id": int(person["id"]),
+                "name": _clean(person.get("name")),
+                "offer_id": int(person.get("offer_id") or 0),
+                "vk": _clean(person.get("vk_id")),
+                "telegram": _clean(person.get("tg_ref")),
+            }
+            for person in _people("kurator", enabled=True)
+        ],
+    }
+
+
+def service_flow_catalog() -> dict[str, Any]:
+    _ensure_db()
+    with _db() as db:
+        db.row_factory = sqlite3.Row
+        rows = [
+            dict(row)
+            for row in db.execute(
+                """
+                SELECT * FROM runs
+                WHERE test_mode=0 AND platform IN ('vk','telegram')
+                ORDER BY created_at,id
+                """
+            ).fetchall()
+        ]
+    people = {int(item["id"]): item for item in _people(enabled=False)}
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        course_key = _course_key(row.get("course_key"))
+        stream = _clean(row.get("stream_number"))
+        if not course_key or not stream:
+            continue
+        request_data = _json_dict(row.get("request_json"))
+        response_data = _json_dict(row.get("response_json"))
+        curator_id = int(request_data.get("curator_id") or response_data.get("curator_id") or 0)
+        teacher = people.get(curator_id) or {}
+        item = grouped.setdefault(
+            (course_key, stream),
+            {
+                "course_key": course_key,
+                "course": "Щенок" if course_key == "puppy" else "Собака",
+                "stream": stream,
+                "date_start": _clean(row.get("date_start")),
+                "teacher_id": curator_id,
+                "teacher": _clean(teacher.get("name")),
+                "offer_id": int(teacher.get("offer_id") or 0),
+                "vk": None,
+                "telegram": None,
+            },
+        )
+        if curator_id:
+            item.update(
+                {
+                    "teacher_id": curator_id,
+                    "teacher": _clean(teacher.get("name")),
+                    "offer_id": int(teacher.get("offer_id") or 0),
+                }
+            )
+        item["date_start"] = _clean(row.get("date_start") or item.get("date_start"))
+        item[row["platform"]] = {
+            "run_id": int(row.get("id") or 0),
+            "status": _clean(row.get("status")),
+            "title": _clean(row.get("title")),
+            "link": _clean(row.get("link")),
+            "chat_id": _clean(row.get("chat_id")),
+            "error": _clean(row.get("error")),
+        }
+    items = list(grouped.values())
+    items.sort(key=lambda item: (0 if item["course_key"] == "puppy" else 1, -int(item["stream"]) if item["stream"].isdigit() else 0))
+    return {"ok": True, "items": items, **service_flow_setup()}
+
+
+def service_set_flow_curator(*, course_key: str, stream_number: str, teacher_id: int) -> dict[str, Any]:
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    teacher = next(
+        (item for item in service_flow_setup()["teachers"] if int(item["id"]) == int(teacher_id)),
+        None,
+    )
+    if not teacher or not int(teacher.get("offer_id") or 0):
+        raise ValueError("Куратор не поддерживается")
+    _ensure_db()
+    changed = 0
+    with _db() as db:
+        rows = db.execute(
+            "SELECT id,request_json,response_json FROM runs WHERE course_key=? AND stream_number=? AND test_mode=0",
+            (course_key, stream_number),
+        ).fetchall()
+        for row in rows:
+            request_data = _json_dict(row["request_json"])
+            response_data = _json_dict(row["response_json"])
+            request_data["curator_id"] = int(teacher_id)
+            response_data["curator_id"] = int(teacher_id)
+            db.execute(
+                "UPDATE runs SET request_json=?,response_json=? WHERE id=?",
+                (json.dumps(request_data, ensure_ascii=False), json.dumps(response_data, ensure_ascii=False), int(row["id"])),
+            )
+            changed += 1
+        db.commit()
+    return {"ok": True, "found": bool(rows), "changed": changed, "teacher": teacher}
+
+
+def _set_manual_vk_link_sync(course_key: str, stream_number: str, link: str, credentials_path: Path) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    spreadsheet_id = _clean(os.environ.get("COURSE_CHAT_CREATOR_CHAT_LINKS_SPREADSHEET_ID")) or DEFAULT_CHAT_LINKS_SPREADSHEET_ID
+    gid = _clean((CHAT_LINK_SHEETS.get(course_key) or {}).get("vk"))
+    session = AuthorizedSession(
+        Credentials.from_service_account_file(str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    )
+    metadata_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets.properties(sheetId,title)"}, timeout=30,
+    )
+    metadata_response.raise_for_status()
+    title = next(
+        (
+            _clean((sheet.get("properties") or {}).get("title"))
+            for sheet in (metadata_response.json() or {}).get("sheets") or []
+            if str((sheet.get("properties") or {}).get("sheetId")) == gid
+        ),
+        "",
+    )
+    if not title:
+        raise RuntimeError("VK links worksheet not found")
+    escaped = title.replace("'", "''")
+    values_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/'{escaped}'!A:B",
+        params={"majorDimension": "ROWS"}, timeout=30,
+    )
+    values_response.raise_for_status()
+    rows = (values_response.json() or {}).get("values") or []
+    row_number = _chat_link_row(rows, stream_number) or len(rows) + 1
+    response = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+        json={
+            "valueInputOption": "RAW",
+            "data": [{"range": f"'{escaped}'!A{row_number}:B{row_number}", "values": [[f"{'Щенок' if course_key == 'puppy' else 'Собака'} {stream_number}", link]]}],
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return {"ok": True, "spreadsheet_id": spreadsheet_id, "gid": gid, "row": row_number, "link": link}
+
+
+async def service_set_manual_vk_link(*, course_key: str, stream_number: str, link: str) -> dict[str, Any]:
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    link = _clean(link)
+    if not re.match(r"^https://vk\.me/join/", link, flags=re.IGNORECASE):
+        raise ValueError("VK invite link must start with https://vk.me/join/")
+    credentials_path = _chat_links_credentials_path()
+    if not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Google Sheets is not configured")
+    result = await asyncio.to_thread(_set_manual_vk_link_sync, course_key, stream_number, link, credentials_path)
+    _ensure_db()
+    with _db() as db:
+        row = db.execute(
+            "SELECT id,response_json FROM runs WHERE platform='vk' AND course_key=? AND stream_number=? AND test_mode=0 ORDER BY id DESC LIMIT 1",
+            (course_key, stream_number),
+        ).fetchone()
+        if row:
+            response_data = _json_dict(row["response_json"])
+            response_data["manual_invite_link"] = link
+            db.execute(
+                "UPDATE runs SET link=?,response_json=? WHERE id=?",
+                (link, json.dumps(response_data, ensure_ascii=False), int(row["id"])),
+            )
+            db.commit()
+    return result
+
+
+async def service_create_flow_pair(
+    *, course_key: str, stream_number: str, date_start: str, teacher_id: int
+) -> dict[str, Any]:
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    if not stream_number or not stream_number.isdigit():
+        raise ValueError("stream_number must be numeric")
+    setup = service_flow_setup()
+    teacher = next((item for item in setup["teachers"] if int(item["id"]) == int(teacher_id)), None)
+    if not teacher:
+        raise ValueError("teacher is disabled or not found")
+    if not int(teacher.get("offer_id") or 0):
+        raise ValueError("teacher offer_id is not configured")
+    try:
+        datetime.strptime(_clean(date_start), "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("date_start must be YYYY-MM-DD")
+    payload = {
+        "course_type": course_key,
+        "course_choice": course_key,
+        "stream_number": stream_number,
+        "date_start": _clean(date_start) or _today_moscow(),
+        "curator_id": int(teacher_id),
+        "test_mode": False,
+    }
+    existing = {
+        item["platform"]: item
+        for item in _ready_chat_pair(course_key, stream_number).values()
+        if _clean(item.get("link"))
+    }
+    result: dict[str, Any] = {"ok": True, "course_key": course_key, "stream": stream_number}
+    result["telegram"] = existing.get("telegram") or await _create_tg_chat(payload, trusted=True)
+    result["vk"] = existing.get("vk") or await _create_vk_chat(payload, trusted=True)
+    result["catalog"] = service_flow_catalog()
+    return result
+
+
+def service_transfer_chat_readiness(course_key: str, stream_number: str) -> dict[str, Any]:
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    vk = next(
+        (
+            item
+            for item in _recorded_vk_course_chats()
+            if item.get("course_key") == course_key and item.get("stream_number") == stream_number
+        ),
+        None,
+    )
+    _ensure_db()
+    with _db() as db:
+        tg_row = db.execute(
+            """
+            SELECT id,title,chat_id,status
+            FROM runs
+            WHERE platform='telegram' AND course_key=? AND stream_number=? AND test_mode=0
+            ORDER BY created_at DESC,id DESC LIMIT 1
+            """,
+            (course_key, stream_number),
+        ).fetchone()
+    return {
+        "vk": {
+            "recorded": bool(vk),
+            "manageable": bool(vk and vk.get("community_owned")),
+            "status": "ready" if vk and vk.get("community_owned") else ("legacy_inaccessible" if vk else "not_recorded"),
+            "title": _clean((vk or {}).get("title")),
+        },
+        "telegram": {
+            "recorded": bool(tg_row),
+            "manageable": bool(tg_row),
+            "status": "ready" if tg_row else "not_recorded",
+            "title": _clean(tg_row["title"] if tg_row else ""),
+        },
+    }
+
+
+async def service_remove_transfer_member(
+    *, platform: str, target: str, course_key: str, stream_number: str, dry_run: bool = False
+) -> dict[str, Any]:
+    platform = _clean(platform).lower()
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    target = _clean(target)
+    if not target or not course_key or not stream_number:
+        raise ValueError("target, course_key and stream_number are required")
+    if platform == "vk":
+        token = _vk_group_token()
+        if not token:
+            return {"ok": False, "status": "not_configured", "error": "VK_GROUP_TOKEN is not configured"}
+        user_id = await _resolve_vk_target_id(target, token)
+        inventory = await _vk_course_chat_inventory(user_id)
+        item = next(
+            (
+                row
+                for row in inventory.get("items") or []
+                if row.get("course_key") == course_key and row.get("stream_number") == stream_number
+            ),
+            None,
+        )
+        if not item:
+            return {"ok": False, "status": "not_recorded", "platform": "vk"}
+        if not item.get("accessible"):
+            return {"ok": False, "status": item.get("status") or "inaccessible", "platform": "vk", "item": item}
+        if not item.get("target_present"):
+            return {"ok": True, "status": "not_member", "platform": "vk", "item": item}
+        if dry_run:
+            return {"ok": True, "status": "would_remove", "platform": "vk", "item": item}
+        response = await _vk_method(
+            "messages.removeChatUser",
+            {"chat_id": item["chat_id"], "member_id": user_id},
+            token,
+        )
+        error = _vk_error_summary(response)
+        if error:
+            return {"ok": False, "status": "error", "platform": "vk", "error": error, "item": item}
+        await asyncio.sleep(0.4)
+        verify = await _vk_method(
+            "messages.getConversationMembers",
+            {"peer_id": item["peer_id"], "count": 1000},
+            token,
+        )
+        rows = verify.get("items", []) if isinstance(verify, dict) and "error" not in verify else []
+        present = any(int(row.get("member_id") or 0) == user_id for row in rows)
+        return {"ok": not present, "status": "removed" if not present else "verify_failed", "platform": "vk", "item": item}
+    if platform not in {"tg", "telegram"}:
+        raise ValueError("platform must be vk or telegram")
+    try:
+        from telethon.tl import functions, types
+    except Exception as exc:
+        return {"ok": False, "status": "not_configured", "error": f"Telethon is not installed: {exc}"}
+    _ensure_db()
+    with _db() as db:
+        row = db.execute(
+            """
+            SELECT id,title,chat_id FROM runs
+            WHERE platform='telegram' AND course_key=? AND stream_number=? AND test_mode=0
+            ORDER BY created_at DESC,id DESC LIMIT 1
+            """,
+            (course_key, stream_number),
+        ).fetchone()
+    if not row:
+        return {"ok": False, "status": "not_recorded", "platform": "telegram"}
+    api_id, api_hash, session_file = _telegram_credentials()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
+    try:
+        if not await client.is_user_authorized():
+            return {"ok": False, "status": "not_authorized", "platform": "telegram"}
+        member = await client.get_entity(target)
+        wanted_id = _clean(row["chat_id"])
+        wanted_entity_id = wanted_id[4:] if wanted_id.startswith("-100") else wanted_id.lstrip("-")
+        wanted_title = _clean(row["title"])
+        dialog = None
+        async for candidate in client.iter_dialogs(limit=1000):
+            entity_id = _clean(getattr(candidate.entity, "id", ""))
+            if (wanted_entity_id and entity_id == wanted_entity_id) or _clean(candidate.name) == wanted_title:
+                dialog = candidate
+                break
+        if dialog is None:
+            return {"ok": False, "status": "chat_not_found", "platform": "telegram", "title": wanted_title}
+        try:
+            await client.get_permissions(dialog.entity, member)
+            present = True
+        except Exception:
+            present = False
+        if not present:
+            return {"ok": True, "status": "not_member", "platform": "telegram", "title": wanted_title}
+        if dry_run:
+            return {"ok": True, "status": "would_remove", "platform": "telegram", "title": wanted_title}
+        if isinstance(dialog.entity, types.Channel):
+            await client(
+                functions.channels.EditBannedRequest(
+                    channel=dialog.entity,
+                    participant=member,
+                    banned_rights=types.ChatBannedRights(until_date=None, view_messages=True),
+                )
+            )
+            await client(
+                functions.channels.EditBannedRequest(
+                    channel=dialog.entity,
+                    participant=member,
+                    banned_rights=types.ChatBannedRights(until_date=None),
+                )
+            )
+        else:
+            await client(functions.messages.DeleteChatUserRequest(chat_id=dialog.entity, user_id=member))
+        try:
+            await client.get_permissions(dialog.entity, member)
+            still_present = True
+        except Exception:
+            still_present = False
+        return {
+            "ok": not still_present,
+            "status": "removed" if not still_present else "verify_failed",
+            "platform": "telegram",
+            "title": wanted_title,
+        }
     finally:
         await client.disconnect()
 
@@ -3843,6 +4372,7 @@ async def upsert_person(request: Request):
         "vk_id": vk_value,
         "vk_mention": vk_mention,
         "tg_ref": tg_ref,
+        "offer_id": max(0, int(data.get("offer_id") or 0)) if kind == "kurator" else 0,
         "parity": _clean(data.get("parity")) or "any",
         "enabled": 1 if data.get("enabled", True) else 0,
         "note": _clean(data.get("note")),
@@ -3851,13 +4381,13 @@ async def upsert_person(request: Request):
         if data.get("id"):
             payload["id"] = int(data["id"])
             db.execute(
-                """UPDATE people SET kind=:kind,name=:name,vk_id=:vk_id,vk_mention=:vk_mention,tg_ref=:tg_ref,parity=:parity,enabled=:enabled,note=:note,updated_at=strftime('%s','now') WHERE id=:id""",
+                """UPDATE people SET kind=:kind,name=:name,vk_id=:vk_id,vk_mention=:vk_mention,tg_ref=:tg_ref,offer_id=:offer_id,parity=:parity,enabled=:enabled,note=:note,updated_at=strftime('%s','now') WHERE id=:id""",
                 payload,
             )
             person_id = payload["id"]
         else:
             cur = db.execute(
-                """INSERT INTO people(kind,name,vk_id,vk_mention,tg_ref,parity,enabled,note) VALUES(:kind,:name,:vk_id,:vk_mention,:tg_ref,:parity,:enabled,:note)""",
+                """INSERT INTO people(kind,name,vk_id,vk_mention,tg_ref,offer_id,parity,enabled,note) VALUES(:kind,:name,:vk_id,:vk_mention,:tg_ref,:offer_id,:parity,:enabled,:note)""",
                 payload,
             )
             person_id = cur.lastrowid
@@ -4251,6 +4781,12 @@ async def remove_member_from_course_chats(request: Request):
 async def list_vk_course_chats(request: Request):
     await _require_panel_access(request)
     return await _vk_course_chat_inventory()
+
+
+@router.post("/vk-course-chats/senler/sync")
+async def sync_vk_course_chat_members_to_senler(request: Request):
+    await _require_panel_access(request)
+    return await _sync_vk_course_chat_members_to_senler()
 
 
 @router.post("/vk-course-chats/pin/restore")

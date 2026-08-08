@@ -135,6 +135,13 @@ DIRECT_ABUSE_RE = re.compile(
 GENERAL_VENT_RE = re.compile(
     r"(?i)^\s*(?:люди|человек|человечество)\s+(?:вообще\s+)?(?:зл[её]йш\w+|странн\w+|жесток\w+|непонятн\w+)(?:\s+\w+){0,4}\s*[.!?…]*\s*$"
 )
+NEGATIVE_LANGUAGE_MENTION_RE = re.compile(
+    r"(?i)\b(?:запрет\w*|правил\w*|говор\w*|обсужд\w*|информац\w*)\b"
+    r".{0,100}\b(?:руган\w*|мат(?:а|ом|е)?|оскорблен\w*|агресси\w*)\b"
+)
+BENIGN_CONSISTENCY_RE = re.compile(
+    r"(?i)^\s*(?:да|нет|ну)?\s*(?:жидковат\w*|густоват\w*|мягковат\w*|суховат\w*|твердоват\w*)\s*[.!?…)]*\s*$"
+)
 REFUND_RE = re.compile(
     r"(?i)(?:"
     r"\bверн(?:ите|уть|и|ул[аи]?|ули)\s+(?:мне\s+)?(?:деньги|средства|оплат[уы])\b|"
@@ -173,6 +180,8 @@ GENERIC_CHAT_REDIRECT_RE = re.compile(
 TG_SYSTEM_PROMPT = """Ты модератор Telegram-чата. Твоя задача — определить, является ли сообщение:
 - негативом (оскорбления, агрессия, токсичность, угрозы),
 - скамом (реклама сторонних услуг, ссылки на подозрительные ресурсы, мошеннические предложения, "заработать деньги", казино, ставки, крипто-схемы, продажа аккаунтов и т.п.).
+
+Слова с негативной окраской сами по себе не означают нарушение. Описания поведения или состояния собаки, пересказ правил и упоминание ругани, короткие бытовые оценки без адресной агрессии — это "ок". Если сомневаешься, выбирай "ок".
 
 Отвечай СТРОГО одним словом: "негатив", "скам" или "ок"."""
 
@@ -1770,6 +1779,22 @@ def _should_downgrade_vk_negative(text: str) -> bool:
     return bool(GENERAL_VENT_RE.match(value))
 
 
+def _should_downgrade_tg_negative(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    urls = extract_urls(value)
+    if urls and not all(is_trusted_url(url) for url in urls):
+        return False
+    if _has_actionable_profanity(value) or DIRECT_ABUSE_RE.search(value) or GENERIC_CHAT_REDIRECT_RE.search(value):
+        return False
+    return bool(
+        _has_canine_context(value)
+        or NEGATIVE_LANGUAGE_MENTION_RE.search(value)
+        or BENIGN_CONSISTENCY_RE.match(value)
+    )
+
+
 def _rule_based_category(text: str) -> str:
     value = str(text or "").strip()
     if not value:
@@ -1857,6 +1882,8 @@ class ModerationAnalyzer:
             )
             for category in ("негатив", "скам", "удалить"):
                 if category in result:
+                    if category == "негатив" and _should_downgrade_tg_negative(text):
+                        return "ок"
                     return category
             return "ок"
         except Exception as error:

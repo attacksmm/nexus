@@ -86,6 +86,10 @@ def sample_order(process="created"):
 
 
 class GetCourseAmoLogicTest(unittest.TestCase):
+    def test_manual_sync_limit_is_bounded(self):
+        self.assertEqual(router.MAX_MANUAL_SYNC_LIMIT, 10)
+        self.assertEqual(max(1, min(router.MAX_MANUAL_SYNC_LIMIT, 200)), 10)
+
     def test_floating_attempt_identity_uses_normalized_phone_and_email_only_as_fallback(self):
         order = sample_order()
         order["phone"] = "8 (999) 000-11-22"

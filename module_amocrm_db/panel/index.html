@@ -38,6 +38,7 @@
     table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;background:#111;position:sticky;top:0}
     .events{max-height:calc(100vh - 170px);overflow:auto;border:1px solid var(--line)}
     @media(max-width:980px){.filters{grid-template-columns:1fr 1fr}.workspace{grid-template-columns:1fr}.side{display:none}.state{display:none}}
+    @media(max-width:600px){.top{padding:8px;gap:6px;overflow-x:auto}.tabs{flex:1;overflow-x:auto}.tab,.btn{min-height:40px;white-space:nowrap}.filters{grid-template-columns:1fr;padding:8px}.input,.select,.textarea{min-height:40px}.workspace{min-height:0}.board{padding:8px}.col{width:min(288px,calc(100vw - 32px));min-width:min(288px,calc(100vw - 32px))}.panel{padding:8px}.grid{grid-template-columns:1fr}.actions{gap:6px}.actions .btn{flex:1}.events{max-height:calc(100vh - 150px);overflow:auto}}
   </style>
 </head>
 <body>
@@ -184,8 +185,7 @@ async function loadSettings(){
   $('amoRetryInput').value = settings.amo_retry_attempts || '5';
   $('dbPath').value = settings.customer_db_path || '';
   renderWebhookUrl();
-  await loadReconcileStatus();
-  await loadQueueStatus();
+  await Promise.all([loadReconcileStatus(), loadQueueStatus()]);
 }
 
 async function loadEnv(){
@@ -231,6 +231,7 @@ function renderStatusFilter(){
 }
 
 async function loadDeals(){
+  $('board').innerHTML = '<div class="status">Загрузка…</div>';
   const params = new URLSearchParams();
   if ($('pipelineFilter').value) params.set('pipeline_id', $('pipelineFilter').value);
   if ($('statusFilter').value) params.set('status_id', $('statusFilter').value);
@@ -379,7 +380,7 @@ $('pipelineFilter').addEventListener('change', () => { renderStatusFilter(); loa
 $('applyFiltersBtn').addEventListener('click', loadDeals);
 $('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') loadDeals(); });
 $('clearFiltersBtn').addEventListener('click', () => { $('pipelineFilter').value=''; $('statusFilter').value=''; $('searchInput').value=''; renderStatusFilter(); loadDeals(); });
-$('refreshBtn').addEventListener('click', async () => { await loadEnv(); await loadPipelines(true); await loadDeals(); });
+ $('refreshBtn').addEventListener('click', async () => { await Promise.all([loadEnv(), loadPipelines(true)]); await loadDeals(); });
 $('copyWebhookBtn').addEventListener('click', async () => { await navigator.clipboard.writeText($('webhookUrl').value); $('webhookStatus').textContent='URL скопирован'; });
 $('manualSyncBtn').addEventListener('click', () => syncDeal($('manualDealId').value.trim()));
 $('sendTestBtn').addEventListener('click', async () => {
@@ -418,9 +419,7 @@ $('runReconcileBtn').addEventListener('click', async () => {
 $('secretInput').addEventListener('input', renderWebhookUrl);
 
 (async function init(){
-  await loadSettings();
-  await loadEnv();
-  await loadPipelines();
+  await Promise.all([loadSettings(), loadEnv(), loadPipelines()]);
   await loadDeals();
 })();
 </script>

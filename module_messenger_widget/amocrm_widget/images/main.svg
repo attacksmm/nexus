@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="272" viewBox="0 0 400 272">
+  <rect width="400" height="272" rx="28" fill="#14242d"/>
+  <path d="M42 42h136v92c0 20-16 36-36 36H96l-45 28 12-34c-13-7-21-20-21-35z" fill="#46b45f"/>
+  <path d="M77 126V78h18l30 30V78h18v48h-18l-30-30v30z" fill="#fff"/>
+  <text x="207" y="104" fill="#fff" font-family="Arial,sans-serif" font-size="28" font-weight="700">Nexus</text>
+  <text x="207" y="136" fill="#b9c7ce" font-family="Arial,sans-serif" font-size="16">Мессенджеры</text>
+  <circle cx="218" cy="184" r="8" fill="#46b45f"/><circle cx="246" cy="184" r="8" fill="#46b45f"/><circle cx="274" cy="184" r="8" fill="#46b45f"/>
+</svg>

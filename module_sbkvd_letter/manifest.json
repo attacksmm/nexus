@@ -1,7 +1,7 @@
 {
   "id": "sbkvd-letter",
   "name": "Рассылки",
-  "version": "1.0.34",
+  "version": "1.0.35",
   "description": "Параллельные рассылки VK и Telegram с исключением купивших, игнора и not_allow, паузой и удалением.",
   "env_vars": {
     "SBKVD_LETTER_VK_TOKEN": "Токен сообщества VK с доступом к сообщениям",

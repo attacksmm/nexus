@@ -1,8 +1,8 @@
 {
   "id": "amocrm-duplicates",
   "name": "Дубли amoCRM",
-  "version": "1.0.5",
-  "description": "Ищет дубли новых сделок amoCRM, ждёт ручного принятия из Неразобранного и затем добавляет теги, ссылки и при необходимости ответственного.",
+  "version": "1.0.8",
+  "description": "Ищет дубли новых сделок amoCRM и добавляет сводки OpenRouter по platform_id из utm_term.",
   "env_required": [
     "AMO_BASE_URL",
     "AMO_ACCESS_TOKEN"

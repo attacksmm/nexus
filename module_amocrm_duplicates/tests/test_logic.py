@@ -9,6 +9,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 
 def load_router():
@@ -146,6 +147,7 @@ class ConfigTests(unittest.TestCase):
         config = r._clean_config(r.DEFAULT_CONFIG)
         self.assertFalse(config["enabled"])
         self.assertFalse(config["copy_responsible_from_latest_duplicate"])
+        self.assertFalse(config["ai"]["openrouter_summary_enabled"])
         self.assertEqual(config["search"]["groups"][0]["conditions"][0]["field_code"], "PHONE")
         self.assertEqual(config["base_tags"], ["Дубль?"])
 
@@ -191,8 +193,23 @@ class PanelSourceTests(unittest.TestCase):
         self.assertNotIn("renderStates()", status_handler)
         self.assertNotIn("renderStates()", pipeline_handler)
 
+    def test_ai_tab_has_summary_switch_and_today_backfill(self):
+        self.assertIn('data-view="ai">AI</button>', self.source)
+        self.assertIn('id="aiSummaryEnabled"', self.source)
+        self.assertIn("/ai/backfill-today", self.source)
+
 
 class ParsingTests(unittest.TestCase):
+    def test_platform_id_is_read_only_from_utm_term(self):
+        lead = {
+            "custom_fields_values": [
+                {"field_name": "utm_term", "values": [{"value": "vk_884568514_sale"}]},
+                {"field_code": "UTM_TERM", "values": [{"value": "repeat 884568514"}]},
+                {"field_name": "other", "values": [{"value": "71045594"}]},
+            ]
+        }
+        self.assertEqual(r._platform_ids_from_utm(lead), ["884568514"])
+
     def test_nested_and_flat_add_webhooks(self):
         nested = {"leads": {"add": [{"id": "123", "pipeline_id": "10", "status_id": "20"}]}}
         flat = {
@@ -243,6 +260,78 @@ class MatchTests(unittest.TestCase):
         source = {"phone": ["79991234567"], "email": []}
         self.assertFalse(r._expression_ready(source, search_and))
         self.assertTrue(r._expression_ready(source, search_or))
+
+
+class AiSummaryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        r._module_dir = root / "amocrm-duplicates"
+        db_path = root / "openrouter" / "data" / "openrouter.db"
+        db_path.parent.mkdir(parents=True)
+        db = sqlite3.connect(db_path)
+        db.execute("CREATE TABLE users(platform_id TEXT PRIMARY KEY, summary TEXT NOT NULL DEFAULT '')")
+        db.execute("INSERT INTO users(platform_id,summary) VALUES(?,?)", ("884568514", "**Коротко:** готов купить"))
+        db.commit()
+        db.close()
+        self.config = {"ai": {"openrouter_summary_enabled": True}, "request_timeout": 15}
+        self.lead = {
+            "id": 123,
+            "pipeline_id": 1,
+            "status_id": 2,
+            "responsible_user_id": 3,
+            "custom_fields_values": [
+                {"field_name": "utm_term", "values": [{"value": "884568514"}]}
+            ],
+        }
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    async def test_creates_only_common_note_even_for_unsorted_lead(self):
+        calls = []
+
+        async def amo(method, path, _config, payload=None):
+            calls.append((method, path, payload))
+            if method == "GET":
+                return {"_embedded": {"notes": []}}, "", 200
+            return {}, "", 200
+
+        with patch.object(r, "_amo_request", side_effect=amo):
+            result = await r._apply_ai_summary(123, self.lead, self.config)
+
+        self.assertEqual(result["state"], "created")
+        self.assertEqual([call[0] for call in calls], ["GET", "POST"])
+        self.assertNotIn("PATCH", [call[0] for call in calls])
+        self.assertEqual(calls[1][1], "/api/v4/leads/123/notes")
+        self.assertEqual(
+            calls[1][2][0]["params"]["text"],
+            "Общение с ИИ:\n\nКоротко: готов купить",
+        )
+        self.assertNotIn("**", calls[1][2][0]["params"]["text"])
+
+    async def test_existing_ai_note_is_not_created_twice(self):
+        body = {"_embedded": {"notes": [{"params": {"text": r.AI_NOTE_TITLE + "\n\nСводка"}}]}}
+        request = AsyncMock(return_value=(body, "", 200))
+        with patch.object(r, "_amo_request", request):
+            result = await r._apply_ai_summary(123, self.lead, self.config)
+        self.assertEqual(result["state"], "already_added")
+        request.assert_awaited_once()
+
+    async def test_legacy_ai_note_is_not_created_twice(self):
+        body = {"_embedded": {"notes": [{"params": {"text": "Краткая сводка диалога\n\nСводка"}}]}}
+        request = AsyncMock(return_value=(body, "", 200))
+        with patch.object(r, "_amo_request", request):
+            result = await r._apply_ai_summary(123, self.lead, self.config)
+        self.assertEqual(result["state"], "already_added")
+        request.assert_awaited_once()
+
+    async def test_dry_run_does_not_create_note(self):
+        request = AsyncMock(return_value=({"_embedded": {"notes": []}}, "", 200))
+        with patch.object(r, "_amo_request", request):
+            result = await r._apply_ai_summary(123, self.lead, self.config, dry_run=True)
+        self.assertEqual(result["state"], "ready")
+        request.assert_awaited_once()
 
 
 class OutcomeTests(unittest.TestCase):

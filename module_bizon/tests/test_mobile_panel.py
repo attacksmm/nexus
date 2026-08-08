@@ -16,10 +16,14 @@ class BizonMobilePanelTests(unittest.TestCase):
         cls.manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
 
     def test_release_version_is_consistent(self):
-        self.assertEqual(self.manifest["version"], "1.1.23")
-        self.assertIn("Bizon365 1.1.23", self.docs)
-        self.assertIn("moderator_openrouter_pm.js?v=1.1.23", self.router)
-        self.assertIn("Runtime 1.1.23 loaded", self.runtime)
+        self.assertEqual(self.manifest["version"], "1.1.24")
+        self.assertIn("Bizon365 1.1.24", self.docs)
+        self.assertIn("moderator_openrouter_pm.js?v=1.1.24", self.router)
+        self.assertIn("Runtime 1.1.24 loaded", self.runtime)
+
+    def test_runtime_scans_for_new_messages_when_bizon_reuses_dom(self):
+        self.assertIn("const scanMessages = () =>", self.runtime)
+        self.assertIn("setInterval(scanMessages, 1000)", self.runtime)
 
     def test_runner_has_mobile_sections(self):
         for name in ("status", "settings", "logs"):

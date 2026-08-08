@@ -171,6 +171,37 @@ def test_error_classification_and_exponential_backoff() -> None:
     assert module._gc_retry_delay_seconds(settings, 1, "quota") == 900
 
 
+def test_getcourse_json_error_is_not_treated_as_export() -> None:
+    assert module._getcourse_response_error({"success": True, "error": False, "info": {"export_id": 1}}) == ""
+
+
+def test_getcourse_export_resumes_existing_file(monkeypatch) -> None:
+    module._gc_pending_exports.clear()
+    starts = 0
+    polls = 0
+
+    async def get(path, params, settings, purpose):
+        nonlocal starts, polls
+        if purpose.endswith(":start"):
+            starts += 1
+            return True, {"info": {"export_id": "42"}}, ""
+        polls += 1
+        if polls == 1:
+            return True, {"status": "Файл еще не создан"}, ""
+        return True, {"info": {"items": [{"id": "1", "email": "x@y.ru"}]}}, ""
+
+    monkeypatch.setattr(module, "_getcourse_export_get", get)
+    settings = {"gc_export_lookup_poll_attempts": "1", "gc_export_lookup_poll_delay_seconds": "0"}
+    first = asyncio.run(module._getcourse_export_rows("/pl/api/account/users", {"email": "x@y.ru"}, settings, "test"))
+    second = asyncio.run(module._getcourse_export_rows("/pl/api/account/users", {"email": "x@y.ru"}, settings, "test"))
+    assert first[0] == []
+    assert second[0][0]["id"] == "1"
+    assert starts == 1
+    assert polls == 2
+    assert module._getcourse_response_error({"success": False, "error": True}) == "GetCourse временно не принял запрос"
+    assert module._getcourse_response_error({"success": False, "error_message": "API limit"}) == "API limit"
+
+
 def test_getcourse_payload_includes_required_resolved_identity() -> None:
     fields = {"Поток": "53"}
     user_payload = module._getcourse_user_payload(
@@ -283,5 +314,40 @@ def test_new_write_job_is_claimed_before_retry(tmp_path) -> None:
         claimed = await module._claim_gc_fields_write_job(module.DEFAULT_SETTINGS.copy())
         assert claimed is not None
         assert claimed["order_id"] == "new"
+
+    asyncio.run(scenario())
+
+
+def test_registry_curator_reconciliation_queues_actual_mismatch_once(tmp_path) -> None:
+    async def scenario() -> None:
+        module._db_path = tmp_path / "getcourse-chat-fields.db"
+        await module._init_db()
+        with sqlite3.connect(module._db_path) as db:
+            db.execute(
+                """
+                INSERT INTO processed_orders(
+                    source_record_id,platform_id,order_id,gc_user_id,status,details_json
+                ) VALUES(13682,'873857315','873857315','511441775','processed',?)
+                """,
+                (json.dumps({"output_fields": {"Номер куратора": "Куратор 1"}}, ensure_ascii=False),),
+            )
+            db.commit()
+        flow = {
+            "course_key": "puppy", "course": "Щенок", "stream": "57",
+            "vk_link": "https://vk.example/57", "tg_link": "https://t.me/57",
+            "students": [{
+                "source_record_id": 13682, "order_id": "873857315", "deal_number": "873857315",
+                "gc_user_id": "511441775", "email": "student@example.com", "teacher_code": "Куратор 3",
+            }],
+        }
+        first = await module.service_reconcile_registry_curators(flows=[flow])
+        second = await module.service_reconcile_registry_curators(flows=[flow])
+        assert first["queued"] == 1
+        assert second["queued"] == 0
+        assert await module._fields_write_reconciliation_candidates(module.DEFAULT_SETTINGS.copy()) == []
+        with sqlite3.connect(module._db_path) as db:
+            payload = json.loads(db.execute("SELECT payload_json FROM gc_fields_write_jobs").fetchone()[0])
+        assert payload["fields"]["Номер куратора"] == "Куратор 3"
+        assert payload["flow"]["change_reason"] == "registry_curator_reconciliation"
 
     asyncio.run(scenario())

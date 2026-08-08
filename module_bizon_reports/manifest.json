@@ -1,7 +1,7 @@
 {
   "id": "bizon-reports",
   "name": "Bizon365 отчеты",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "Канонический приемник Bizon365 v2: клиенты, посещения, feed для amoCRM и Google Sheets, временный Vakas forwarding.",
   "env_required": [],
   "env_vars": {}

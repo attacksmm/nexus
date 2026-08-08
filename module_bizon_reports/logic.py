@@ -5,7 +5,7 @@ import json
 import math
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 TABLE_NAME = "bizon365_clients"
 TABLE_DISPLAY_NAME = "Клиенты Bizon365"
@@ -67,6 +67,19 @@ VIEWER_KEEP_KEYS = (
 
 MAX_WATCH_SECONDS = 24 * 60 * 60
 WEBINAR_AT_RE = re.compile(r"\*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)")
+REFERER_FIELDS = (
+    ("utm_source", "utm_source"),
+    ("utm_medium", "utm_medium"),
+    ("utm_campaign", "utm_campaign"),
+    ("utm_content", "utm_content"),
+    ("utm_term", "utm_term"),
+    ("p1", "p1"),
+    ("param1", "p1"),
+    ("p2", "p2"),
+    ("param2", "p2"),
+    ("p3", "p3"),
+    ("param3", "p3"),
+)
 
 
 def clean_text(value: Any, limit: int = 2000) -> str:
@@ -84,6 +97,22 @@ def normalize_phone(value: Any) -> str:
 
 def normalize_email(value: Any) -> str:
     return clean_text(value, 500).casefold()
+
+
+def _referer_values(viewers: list[dict[str, Any]]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for viewer in viewers:
+        for source, target in REFERER_FIELDS:
+            value = viewer.get(source)
+            if target not in values and value not in (None, ""):
+                values[target] = value
+    for viewer in viewers:
+        query = parse_qs(urlparse(clean_text(viewer.get("referer"), 5000)).query)
+        for source, target in REFERER_FIELDS:
+            value = clean_text((query.get(source) or [""])[0])
+            if target not in values and value:
+                values[target] = value
+    return values
 
 
 def webinar_at_from_values(*values: Any) -> str:
@@ -302,6 +331,7 @@ def normalize_viewer(viewer: dict[str, Any], meta: dict[str, Any] | None = None)
         if key.startswith("utm_") or key.startswith("p") or key in {"sup", "cu1", "c1"}:
             if value not in (None, ""):
                 fields[str(key)] = value
+    fields.update(_referer_values([viewer]))
     fields["raw_viewer"] = viewer
     return {
         "platform_id": platform_id_for_viewer(viewer, fields),
@@ -482,6 +512,7 @@ def normalize_attendances(
             value = _best_value(group, key)
             if value not in (None, ""):
                 fields[key] = value
+        fields.update(_referer_values(group))
         fields.update(_watch_summary(group))
         fields.update(_chat_summary(group))
         records.append({"platform_id": attendance_key, "custom_fields": fields})

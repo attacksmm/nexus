@@ -103,6 +103,7 @@
           <label>Потоки<select id="pParity"><option value="any">Все потоки</option><option value="even">Только четные</option><option value="odd">Только нечетные</option></select></label>
           <label>VK страница / username / ID<input id="pVkId" placeholder="https://vk.com/name или @name"></label>
           <label>Telegram username<input id="pTgRef" placeholder="@username"></label>
+          <label>Предложение GetCourse<input id="pOfferId" inputmode="numeric" placeholder="8593080"></label>
           <label>Активен<select id="pEnabled"><option value="1">да</option><option value="0">нет</option></select></label>
         </div>
         <div class="actions"><button class="btn" id="personSave" type="button">Сохранить</button><button class="btn ghost" id="personClear" type="button">Новая запись</button></div>
@@ -346,12 +347,12 @@ function renderCurators() {
   }
 }
 function editPerson(p) {
-  editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
+  editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pOfferId").value = p.offer_id || ""; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
 }
-$("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pTgRef"].forEach(id => $(id).value = ""); $("pParity").value = "any"; $("pEnabled").value = "1"; };
+$("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pTgRef","pOfferId"].forEach(id => $(id).value = ""); $("pParity").value = "any"; $("pEnabled").value = "1"; };
 $("personSave").onclick = async () => {
   try {
-    const payload = {id:editPersonId, kind:$("pKind").value, name:$("pName").value, vk_id:$("pVkId").value, tg_ref:$("pTgRef").value, parity:$("pParity").value, enabled:$("pEnabled").value === "1"};
+    const payload = {id:editPersonId, kind:$("pKind").value, name:$("pName").value, vk_id:$("pVkId").value, tg_ref:$("pTgRef").value, offer_id:Number($("pOfferId").value||0), parity:$("pParity").value, enabled:$("pEnabled").value === "1"};
     hide($("peopleStatus")); await postJson("/people", payload); await loadPeople(); $("personClear").click();
   } catch(e) { show($("peopleStatus"), e); }
 };

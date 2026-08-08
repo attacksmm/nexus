@@ -1,0 +1,10 @@
+{
+  "widget": {
+    "name": "Виджет мессенжеров",
+    "description": "Диалоги и шаблоны Nexus в карточках сделок и контактов.",
+    "short_description": "Мессенжеры Nexus"
+  },
+  "settings": {
+    "nexus_url": "Адрес Nexus"
+  }
+}

@@ -59,6 +59,8 @@ _sheet_check_lock = asyncio.Lock()
 _sheet_check_key: tuple[str, str, str, bool] | None = None
 _sheet_check_until = 0.0
 WRITE_THROTTLE_SECONDS = 2.1
+RETRY_STATUSES = ("failed", "received")
+DEFAULT_RETRY_LIMIT = 10
 
 
 class SettingsIn(BaseModel):
@@ -529,9 +531,13 @@ async def get_settings(request: Request):
     await _require_user(request)
     settings = await _settings()
     path = _credentials_path()
+    env_token = os.environ.get("NEXUS_BIZON_FEED_TOKEN", "").strip()
+    feed_token = env_token or settings.get("feed_token", "")
     return {
         **settings,
-        "feed_token": os.environ.get("NEXUS_BIZON_FEED_TOKEN", "").strip() or settings.get("feed_token", ""),
+        "feed_token": "",
+        "feed_token_configured": bool(feed_token),
+        "feed_token_source": "env" if env_token else "module_db",
         "dry_run": _bool(settings.get("dry_run")),
         "poll_enabled": _bool(settings.get("poll_enabled")),
         "vakas_mirror_enabled": _bool(settings.get("vakas_mirror_enabled")),
@@ -573,7 +579,10 @@ async def events(request: Request, limit: int = Query(100, ge=1, le=500), status
     async with aiosqlite.connect(_must_db()) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?", params + [limit])
-        return {"items": [dict(row) for row in await cur.fetchall()]}
+        items = [dict(row) for row in await cur.fetchall()]
+        counts_cur = await db.execute("SELECT status,COUNT(*) FROM events GROUP BY status")
+        counts = {str(row[0]): int(row[1]) for row in await counts_cur.fetchall()}
+        return {"items": items, "counts": counts}
 
 
 @router.post("/sync/run")
@@ -583,9 +592,9 @@ async def sync_run(request: Request):
 
 
 @router.post("/events/retry")
-async def retry_events(request: Request, include_shadow: int = 0, limit: int = Query(200, ge=1, le=500)):
+async def retry_events(request: Request, include_shadow: int = 0, limit: int = Query(DEFAULT_RETRY_LIMIT, ge=1, le=500)):
     await _require_user(request)
-    statuses = ["failed"] + (["shadow"] if include_shadow else [])
+    statuses = ["shadow"] if include_shadow else list(RETRY_STATUSES)
     placeholders = ",".join("?" for _ in statuses)
     async with aiosqlite.connect(_must_db()) as db:
         cur = await db.execute(f"SELECT id FROM events WHERE status IN ({placeholders}) ORDER BY id ASC LIMIT ?", statuses + [limit])

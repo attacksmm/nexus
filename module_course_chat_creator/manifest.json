@@ -1,7 +1,7 @@
 {
   "id": "course-chat-creator",
   "name": "Создание учебных чатов",
-  "version": "1.3.17",
+  "version": "1.4.3",
   "description": "Создание учебных Telegram/VK чатов, invite-ссылки, рассылки и управление участниками.",
   "env_required": [
     "VK_GROUP_TOKEN",
@@ -13,6 +13,7 @@
     "NEXUS_CHAT_CREATOR_PASSWORD": "Опционально: пароль для публичных webhook endpoint'ов создания чатов. Из панели Nexus не нужен.",
     "VK_GROUP_TOKEN": "Официальный токен сообщества с правами messages и photos.",
     "VK_GROUP_ID": "Идентификатор сообщества, от имени которого создаются VK-беседы.",
+    "SENLER_COURSE_CHAT_SUBSCRIPTION_ID": "Опционально: ID Senler-группы участников учебных VK-чатов. По умолчанию 3801272.",
     "TELEGRAM_API_ID": "Telegram API ID для Telethon.",
     "TELEGRAM_API_HASH": "Telegram API hash для Telethon.",
     "SBKVD_PROCESS_WEBHOOK_PASSWORD": "Legacy пароль webhook'ов Sobakovod. Используется только если NEXUS_CHAT_CREATOR_PASSWORD не задан.",

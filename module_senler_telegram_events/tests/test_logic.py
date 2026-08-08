@@ -122,6 +122,46 @@ class TelegramEventDescriptionTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotIn("top-secret", first)
 
+    def test_senler_start_attribution_is_extracted(self):
+        claim = router._attribution_claim({
+            "message": {
+                "from": {"id": 777},
+                "text": "/start n_AbCdEf0123456789",
+            }
+        })
+        self.assertEqual(claim, {
+            "token": "AbCdEf0123456789",
+            "tg_user_id": "777",
+        })
+        legacy = router._attribution_claim({
+            "message": {
+                "from": {"id": 777},
+                "text": "/start s=3728286-utm_term=n_AbCdEf0123456789",
+            }
+        })
+        self.assertEqual(legacy, {
+            "subscription_id": "3728286",
+            "token": "AbCdEf0123456789",
+            "tg_user_id": "777",
+        })
+        client_id = router._attribution_claim({
+            "message": {
+                "from": {"id": 777},
+                "text": "/start s=3728286-utm_term=12345678901234567890",
+            }
+        })
+        self.assertEqual(client_id, {
+            "subscription_id": "3728286",
+            "client_id": "12345678901234567890",
+            "tg_user_id": "777",
+        })
+        self.assertIsNone(router._attribution_claim({
+            "message": {"from": {"id": 777}, "text": "/start ordinary-campaign"}
+        }))
+        self.assertIsNone(router._attribution_claim({
+            "message": {"from": {"id": 777}, "text": "/start s=3728286"}
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()

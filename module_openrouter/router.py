@@ -29,9 +29,11 @@ router = APIRouter()
 MODULE_ID = "openrouter"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_TIMEOUT = 90
 MAX_HISTORY_MESSAGES = 80
+SUMMARY_RECENT_HISTORY_MESSAGES = 8
 SUMMARY_MAX_CHARS = 1800
 SUMMARY_TRANSCRIPT_MAX_CHARS = 16000
 MODULE_TOKEN_SETTING = "module_api_token"
@@ -39,6 +41,9 @@ DEFAULT_AVITO_SPLIT_SIZE = 800
 SALEBOT_ANSWER_VAR_CLEAR_LIMIT = 80
 SALEBOT_RETRY_ATTEMPTS = 5
 SALEBOT_RETRY_DELAY_SECONDS = 2.0
+SALEBOT_AVITO_DELIVERY_POLL_DELAYS = (5.0, 10.0, 15.0)
+SALEBOT_AVITO_FALLBACK_POLL_DELAYS = (2.0, 4.0, 6.0)
+DEFAULT_SALEBOT_AVITO_FIRST_ANSWER_BLOCK_ID = "60812489"
 OPENROUTER_RETRY_ATTEMPTS = 2
 OPENROUTER_RETRY_DELAY_SECONDS = 1.0
 OPENROUTER_SECURITY_POLICY_DETAIL = (
@@ -210,7 +215,7 @@ PREVIOUS_PROFILE_SUMMARY_PROMPT = """Составь краткую долгов�
 - приветствия, благодарности и другие фразы без устойчивой информации о клиенте.
 
 Не считай слова ассистента фактом, пока клиент сам их не подтвердил. Не придумывай сведения и не ставь диагнозы. Пиши 1-3 коротких фактических абзаца. Если данных мало, сохрани только то, что достоверно известно."""
-CLIENT_STORY_SUMMARY_PROMPT = """Составь краткую долговременную карточку клиента на русском языке.
+PREVIOUS_DURABLE_SUMMARY_PROMPT = """Составь краткую долговременную карточку клиента на русском языке.
 
 Цель: дать следующему ответу только устойчивую информацию о клиенте, его собаке и проблеме. Это не пересказ диалога и не состояние воронки.
 
@@ -226,12 +231,67 @@ CLIENT_STORY_SUMMARY_PROMPT = """Составь краткую долговре�
 Если в запросе есть предыдущая сводка, используй её как основную память и аккуратно обновляй только подтверждёнными новыми фактами из нового диалога. Не удаляй старые устойчивые факты, если новый диалог им не противоречит. Если новый диалог короткий или не содержит новых фактов, верни прежнюю сводку без выдумок.
 
 Не считай слова ассистента фактом, пока клиент сам их не подтвердил. Не додумывай цель клиента по предложению ассистента, не придумывай сведения и не ставь диагнозы. Пиши 1-3 коротких фактических абзаца. Если данных мало, сохрани только то, что достоверно известно."""
+PREVIOUS_STRICT_PROFILE_SUMMARY_PROMPT = PREVIOUS_DURABLE_SUMMARY_PROMPT.replace(
+    "\n\nЕсли в запросе есть предыдущая сводка, используй её как основную память и аккуратно обновляй только подтверждёнными новыми фактами из нового диалога. Не удаляй старые устойчивые факты, если новый диалог им не противоречит. Если новый диалог короткий или не содержит новых фактов, верни прежнюю сводку без выдумок.",
+    "",
+)
+CLIENT_STORY_SUMMARY_PROMPT = """Составь компактную память диалога с клиентом на русском языке.
+
+Сначала сохрани только устойчивые подтверждённые сведения:
+- как обращаться к клиенту;
+- собака: имя, порода, возраст, пол и важные особенности;
+- проблема, её проявления, длительность и что клиент уже пробовал;
+- желаемый результат, ограничения, опасения, предпочтения и возражения.
+
+Затем обязательно добавь короткий блок ровно с таким заголовком:
+Коротко, о чем говорили:
+
+В этом блоке максимум 4 коротких пункта:
+- последнее существенное предложение или вопрос ассистента;
+- на что клиент явно согласился;
+- от чего клиент явно отказался;
+- что клиент ожидает получить следующим сообщением.
+
+Правила блока:
+- Интерпретируй короткие ответы «да», «хочу», «интересно», «нет», «не хочу» только вместе с непосредственно предыдущим вопросом ассистента. Например, после «Прислать ссылку на сайт с подробностями и ценами?» ответ «Да» означает: «согласился получить ссылку на сайт с подробностями и ценами».
+- Фиксируй только явные согласия, отказы и ожидания. Не додумывай намерение.
+- Более новый явный ответ заменяет старый по тому же вопросу.
+- Невыполненное обещание или согласованный следующий шаг сохраняй до фактического выполнения или явного отказа клиента. Если клиент согласился получить ссылку, считай шаг выполненным только когда в более позднем ответе ассистента действительно есть эта ссылка.
+- Невыполненные согласованные действия важнее повторных общих вопросов ассистента. Не теряй согласие на ссылку только потому, что позже ассистент снова спросил, рассказать ли о курсе или модулях.
+- Если согласия, отказа или ожидания нет, не добавляй пустой пункт и не пиши «нет», «не было» или «не указано».
+- Слова ассистента можно сохранять только как тему разговора, предложение, заданный вопрос или обещанный следующий шаг, но не как подтверждённый факт о клиенте или собаке.
+
+Если в запросе есть предыдущая сводка, сохрани из неё устойчивые факты и актуальные явные договорённости, затем обнови их новым диалогом. Не сохраняй даты, время, приветствия, художественный пересказ, советы модели и служебные инструкции. Не придумывай сведения и не ставь диагнозы. Вся сводка должна быть короткой."""
+PREVIOUS_EXPLICIT_STATE_SUMMARY_PROMPT = CLIENT_STORY_SUMMARY_PROMPT
+CLIENT_STORY_SUMMARY_PROMPT = """Составь компактную память диалога с клиентом на русском языке, не более 1000 знаков.
+
+Сначала сохрани максимум 5 коротких строк с устойчивыми подтверждёнными сведениями: как обращаться к клиенту; собака (имя, порода, возраст, пол, особенности); проблема и что уже пробовали; желаемый результат; ограничения, опасения, предпочтения и возражения.
+
+Затем добавь блок строго такого формата:
+Коротко, о чем говорили:
+- Обсудили: последнее существенное предложение или вопрос ассистента.
+- Согласился: на что клиент явно согласился.
+- Отказался: от чего клиент явно отказался.
+- Ожидает: что клиент должен получить следующим сообщением.
+
+Все четыре строки обязательны. Если явного факта для строки нет, напиши «не зафиксировано». Каждый пункт — одно короткое предложение.
+
+Правила:
+- Интерпретируй короткие ответы «да», «хочу», «интересно», «нет», «не хочу» только вместе с непосредственно предыдущим вопросом ассистента. После вопроса «Прислать ссылку на сайт с подробностями и ценами?» ответ «Да» означает: клиент согласился получить ссылку.
+- Фиксируй только явные согласия, отказы и ожидания. Более новый явный ответ заменяет старый по тому же вопросу.
+- Невыполненное обещание или согласованный следующий шаг сохраняй до фактического выполнения или явного отказа. Согласие на ссылку выполнено только тогда, когда в более позднем ответе ассистента действительно есть ссылка.
+- Невыполненные согласованные действия важнее повторных общих вопросов. Не теряй согласие на ссылку из-за более позднего вопроса о курсе или модулях.
+- Слова ассистента сохраняй только как тему, предложение, вопрос или обещанный следующий шаг, но не как факт о клиенте или собаке.
+- Если есть предыдущая сводка, сохрани устойчивые факты и актуальные договорённости, затем обнови их новым диалогом.
+- Не придумывай сведения, не ставь диагнозы и не добавляй советы модели, приветствия, художественный пересказ или служебные инструкции."""
 
 _ctx = None
 _db_path: Path | None = None
 _module_dir: Path | None = None
 _logger = None
 _module_write_lock = asyncio.Lock()
+_summary_pending: dict[str, str] = {}
+_summary_workers: dict[str, asyncio.Task] = {}
 _outbound_job_worker_task: asyncio.Task | None = None
 
 
@@ -246,6 +306,20 @@ def setup(ctx):
         loop.create_task(_init_db())
     else:
         loop.run_until_complete(_init_db())
+
+
+async def shutdown() -> None:
+    global _outbound_job_worker_task
+    tasks = [task for task in _summary_workers.values() if not task.done()]
+    if _outbound_job_worker_task and not _outbound_job_worker_task.done():
+        tasks.append(_outbound_job_worker_task)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _summary_pending.clear()
+    _summary_workers.clear()
+    _outbound_job_worker_task = None
 
 
 def _log(level: str, message: str, *args: Any, **kwargs: Any) -> None:
@@ -273,6 +347,13 @@ def _new_pair_id() -> str:
 
 def _clean(value: Any, limit: int = 10000) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _is_emoji_char(ch: str) -> bool:
@@ -306,6 +387,15 @@ def _is_emoji_only_message(message: Any) -> bool:
     return has_emoji
 
 
+def _avito_ignored_reason(message: Any) -> str:
+    if _is_emoji_only_message(message):
+        return "emoji_only_message"
+    text = str(message or "").casefold()
+    if "оставьте отзыв об исполнителе" in text or ("[системное сообщение]" in text and "отзыв" in text):
+        return "avito_review_request"
+    return ""
+
+
 def _validation_detail(exc: ValidationError) -> str:
     parts = []
     for err in exc.errors():
@@ -322,7 +412,14 @@ def _coerce_text_input(value: Any) -> str:
     raise ValueError("must be a string or number")
 
 
-SENLER_TEMPLATE_TOKEN_RE = re.compile(r"(\{%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\}|\[%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\]|#\{\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*\})")
+SENLER_TEMPLATE_TOKEN_RE = re.compile(
+    r"(\{%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\}"
+    r"|\[%\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%\]"
+    r"|#\{\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*\}"
+    r"|\{\{\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*\}\}"
+    r"|%7B%7B\s*([A-Za-z0-9_а-яА-ЯёЁ.-]+)\s*%7D%7D)",
+    re.IGNORECASE,
+)
 SENLER_TEMPLATE_RESERVED_KEYS = {
     "platform_id",
     "conversation_id",
@@ -400,11 +497,12 @@ def _format_replay_bonus_blocks(answer: str, prompt_path: str) -> str:
 
 CLIENT_NAME_LINE_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:клиент|имя клиента|имя пользователя|пользователь)(?:\*\*)?\s*[:—-]\s*.+(?:\n|$)")
 CLIENT_NAME_VALUE_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:клиент|имя клиента|имя пользователя|пользователь)(?:\*\*)?\s*[:—-]\s*(.+?)\.?\s*$")
-DIRECT_ADDRESS_NAME_PATTERN = r"[А-ЯЁ][а-яё]+(?:\s+(?:[А-ЯЁ](?:\.|(?=,|\s|$))|[А-ЯЁ][а-яё]+)){0,2}"
+DIRECT_ADDRESS_NAME_WORD = r"(?:[А-ЯЁ][а-яё]+|[A-Z][a-z]+)"
+DIRECT_ADDRESS_NAME_PATTERN = rf"{DIRECT_ADDRESS_NAME_WORD}(?:\s+(?:[А-ЯЁA-Z](?:\.|(?=,|\s|$))|{DIRECT_ADDRESS_NAME_WORD})){{0,2}}"
 GREETING_NAME_RE = re.compile(
-    r"(?iu)^(\s*(?:здравствуйте|добрый день|добрый вечер|доброе утро|привет|отлично|спасибо|супер|поняла|понял|рада|рад)\s*,\s*)"
+    r"(?iu)^(\s*(?:здравствуйте|добрый день|добрый вечер|доброе утро|привет|отлично|спасибо|супер|поняла|понял|рада|рад|ох|ой|эх)\s*,\s*)"
     rf"({DIRECT_ADDRESS_NAME_PATTERN})"
-    r"([!.,:;—–-]?\s*)"
+    r"(\s*(?:\([^\n)]{0,80}\))?[!.,:;—–-]?\s*)"
 )
 LEADING_NAME_RE = re.compile(rf"(?u)^(\s*)({DIRECT_ADDRESS_NAME_PATTERN})(,\s+)")
 EARLY_SENTENCE_NAME_RE = re.compile(rf"(?su)^(.{{0,180}}?[.!?]\s+)({DIRECT_ADDRESS_NAME_PATTERN})(,\s+)")
@@ -472,7 +570,7 @@ def _normalize_person_name_part(value: Any) -> str:
         return ""
     if len(text) < 2 or len(text) > 32:
         return ""
-    if not re.fullmatch(r"[А-ЯЁ][а-яё]+(?:[-'][А-ЯЁа-яё]+)?", text):
+    if not re.fullmatch(r"(?:[А-ЯЁ][а-яё]+|[A-Z][a-z]+)(?:[-'][А-ЯЁA-Za-zа-яё]+)?", text):
         return ""
     return text
 
@@ -605,7 +703,7 @@ def _rewrite_direct_client_address(text: str, trusted_name: str) -> str:
             punctuation = "!" if "!" in tail else ","
             return f"{prefix}{safe_name}{punctuation} "
         clean_prefix = prefix.rstrip(" ,")
-        punctuation = "!" if "!" in tail else "."
+        punctuation = "!" if "!" in tail else "," if clean_prefix.casefold().endswith(("ох", "ой", "эх")) else "."
         return f"{clean_prefix}{punctuation} "
 
     updated = GREETING_NAME_RE.sub(greeting_repl, text, count=1)
@@ -709,6 +807,10 @@ def _env() -> dict[str, str]:
         ).strip(),
         "api_token": os.environ.get("NEXUS_OPENROUTER_API_TOKEN", "").strip(),
         "salebot_key": (os.environ.get("SALEBOT_API_KEY", "") or os.environ.get("SALEBOT_API_KEY_3", "")).strip(),
+        "salebot_avito_first_answer_block_id": (
+            os.environ.get("SALEBOT_AVITO_FIRST_ANSWER_BLOCK_ID", "")
+            or DEFAULT_SALEBOT_AVITO_FIRST_ANSWER_BLOCK_ID
+        ).strip(),
         "senler_token": os.environ.get("SENLER_ACCESS_TOKEN", "").strip(),
         "senler_group_id": os.environ.get("SENLER_GROUP_ID", "").strip(),
         "customer_db_path": os.environ.get("OPENROUTER_CUSTOMER_DB_PATH", "").strip(),
@@ -760,6 +862,19 @@ async def _init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
             CREATE INDEX IF NOT EXISTS idx_messages_platform ON messages(platform_id, id);
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind            TEXT NOT NULL,
+                source          TEXT NOT NULL DEFAULT '',
+                conversation_id TEXT NOT NULL DEFAULT '',
+                platform_id     TEXT NOT NULL DEFAULT '',
+                prompt_path     TEXT NOT NULL DEFAULT '',
+                model           TEXT NOT NULL DEFAULT '',
+                usage_json      TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_model ON usage_events(model, created_at);
             CREATE TABLE IF NOT EXISTS prompt_models (
                 prompt_path TEXT PRIMARY KEY,
                 model       TEXT NOT NULL DEFAULT '',
@@ -792,6 +907,8 @@ async def _init_db():
             "request_timeout": str(DEFAULT_TIMEOUT),
             "history_limit": str(MAX_HISTORY_MESSAGES),
             "summary_prompt": CLIENT_STORY_SUMMARY_PROMPT,
+            "budget_daily_warn": "0",
+            "budget_monthly_warn": "0",
         }
         for key, value in defaults.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
@@ -810,6 +927,18 @@ async def _init_db():
         await db.execute(
             "UPDATE settings SET value=? WHERE key='summary_prompt' AND value=?",
             (CLIENT_STORY_SUMMARY_PROMPT, PREVIOUS_PROFILE_SUMMARY_PROMPT),
+        )
+        await db.execute(
+            "UPDATE settings SET value=? WHERE key='summary_prompt' AND value=?",
+            (CLIENT_STORY_SUMMARY_PROMPT, PREVIOUS_DURABLE_SUMMARY_PROMPT),
+        )
+        await db.execute(
+            "UPDATE settings SET value=? WHERE key='summary_prompt' AND value=?",
+            (CLIENT_STORY_SUMMARY_PROMPT, PREVIOUS_STRICT_PROFILE_SUMMARY_PROMPT),
+        )
+        await db.execute(
+            "UPDATE settings SET value=? WHERE key='summary_prompt' AND value=?",
+            (CLIENT_STORY_SUMMARY_PROMPT, PREVIOUS_EXPLICIT_STATE_SUMMARY_PROMPT),
         )
         cur = await db.execute("SELECT value FROM settings WHERE key=?", (MODULE_TOKEN_SETTING,))
         row = await cur.fetchone()
@@ -1059,13 +1188,50 @@ async def _retry_failed_chat_job(
     job_id: int,
 ) -> dict[str, Any]:
     data = model_cls(**payload)
+    is_senler = source.startswith("senler") and isinstance(data, SenlerChatIn)
     result = await _run_chat(
         data,
-        allow_write=True,
+        allow_write=not is_senler,
         source=source,
         defer_summary=True,
-        prefer_summary_context=source.startswith("senler"),
     )
+    if is_senler:
+        delivery = await _senler_set_var_and_add_ai_bot(
+            result.get("platform_id", data.platform_id),
+            data.answer_var,
+            result.get("text", ""),
+        )
+        if not delivery.get("ok"):
+            raise RuntimeError(f"Senler retry delivery failed: {_json_dumps_compact(delivery)[:1000]}")
+        result["senler_ai_bot"] = delivery
+        try:
+            async with _module_write_lock:
+                async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+                    await _save_turn(
+                        db,
+                        conversation_id=result["conversation_id"],
+                        platform_id=result["platform_id"],
+                        pair_id=_new_pair_id(),
+                        question=_clean(data.message, 50000),
+                        answer=result.get("text", ""),
+                        source="senler_retry_delivered",
+                        prompt_path=result.get("prompt", ""),
+                        model=result.get("model", ""),
+                        usage=result.get("usage") or {},
+                    )
+                    await db.commit()
+            if _context_mode(data.context) == 4:
+                _schedule_summary(result["conversation_id"], result["platform_id"])
+        except Exception as exc:
+            result["persistence_error"] = _exception_text(exc)
+            _log(
+                "error",
+                "failed chat retry delivered but persistence failed id=%s source=%s error=%s",
+                job_id,
+                source,
+                result["persistence_error"],
+                exc_info=True,
+            )
     _log(
         "info",
         "failed chat retry ok id=%s source=%s platform_id=%s conversation_id=%s answer_chars=%s",
@@ -1220,6 +1386,8 @@ class SettingsIn(BaseModel):
     provider_data_collection: str | None = None
     provider_max_prompt_per_m: float | None = None
     provider_max_completion_per_m: float | None = None
+    budget_daily_warn: float | None = None
+    budget_monthly_warn: float | None = None
 
 
 class PromptModelIn(BaseModel):
@@ -1291,6 +1459,8 @@ async def _settings() -> dict[str, str]:
         "provider_data_collection": "allow",
         "provider_max_prompt_per_m": str(DEFAULT_PROVIDER_MAX_PROMPT_PER_M),
         "provider_max_completion_per_m": str(DEFAULT_PROVIDER_MAX_COMPLETION_PER_M),
+        "budget_daily_warn": "0",
+        "budget_monthly_warn": "0",
     }
     data.update({row[0]: row[1] for row in rows})
     return data
@@ -1488,6 +1658,10 @@ async def _save_settings(data: SettingsIn) -> dict[str, str]:
         updates["provider_max_prompt_per_m"] = str(max(0.0, min(100.0, float(data.provider_max_prompt_per_m))))
     if data.provider_max_completion_per_m is not None:
         updates["provider_max_completion_per_m"] = str(max(0.0, min(100.0, float(data.provider_max_completion_per_m))))
+    if data.budget_daily_warn is not None:
+        updates["budget_daily_warn"] = str(max(0.0, min(1_000_000.0, float(data.budget_daily_warn))))
+    if data.budget_monthly_warn is not None:
+        updates["budget_monthly_warn"] = str(max(0.0, min(1_000_000.0, float(data.budget_monthly_warn))))
     openrouter_api_key = _clean(data.openrouter_api_key, 2000) if data.openrouter_api_key is not None else None
     async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
         for key, value in updates.items():
@@ -1733,6 +1907,7 @@ async def _load_history(db: aiosqlite.Connection, conversation_id: str, limit: i
             """
             SELECT role, content FROM messages
             WHERE conversation_id=?
+              AND source NOT IN ('senler_retry','senler_fallback_undelivered')
             ORDER BY id ASC
             """,
             (conversation_id,),
@@ -1743,6 +1918,7 @@ async def _load_history(db: aiosqlite.Connection, conversation_id: str, limit: i
             """
             SELECT role, content FROM messages
             WHERE conversation_id=?
+              AND source NOT IN ('senler_retry','senler_fallback_undelivered')
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -1860,6 +2036,7 @@ async def generate_direct_chat(
     history: list[dict[str, Any]] | None = None,
     summary: str = "",
     attachment_url: str = "",
+    source: str = "direct",
 ) -> dict[str, Any]:
     """Generate through OpenRouter without touching OpenRouter context tables."""
     clean_message = _clean(message, 50000)
@@ -1882,6 +2059,13 @@ async def generate_direct_chat(
     payload.extend(_normalize_direct_history(history, _history_limit(settings)))
     payload.append({"role": "user", "content": _user_content(clean_message, clean_attachment_url)})
     answer, usage = await _call_openrouter(effective_model, payload, _timeout(settings), settings)
+    await _record_usage_event(
+        kind="direct",
+        source=source,
+        model=effective_model,
+        prompt_path=prompt_path,
+        usage=usage,
+    )
     return {
         "ok": True,
         "prompt": prompt_path,
@@ -2288,7 +2472,7 @@ async def _call_openrouter(
     messages: list[dict[str, Any]],
     timeout: float,
     settings: dict[str, str] | None = None,
-) -> tuple[str, dict[str, int]]:
+) -> tuple[str, dict[str, Any]]:
     api_key = _env()["openrouter_key"]
     if not api_key:
         _log("warning", "OpenRouter call blocked: OPENROUTER_API_KEY is not configured model=%s", model)
@@ -2389,10 +2573,17 @@ async def _call_openrouter(
                 raise HTTPException(502, f"OpenRouter response invalid after {attempt} attempts: {last_error}")
 
             usage = data.get("usage") or {}
+            prompt_details = usage.get("prompt_tokens_details") or {}
             return clean_content, {
                 "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
+                "cached_tokens": int(prompt_details.get("cached_tokens") or 0),
+                "cache_write_tokens": int(prompt_details.get("cache_write_tokens") or 0),
+                "cost": _number(usage.get("cost")),
+                "cost_details": usage.get("cost_details") if isinstance(usage.get("cost_details"), dict) else {},
+                "generation_id": _clean(data.get("id"), 200),
+                "provider": _clean(data.get("provider"), 200),
             }
     raise HTTPException(502, f"OpenRouter request failed: {last_error or 'unknown error'}")
 
@@ -2408,7 +2599,7 @@ async def _save_turn(
     source: str,
     prompt_path: str = "",
     model: str = "",
-    usage: dict[str, int] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> None:
     now = _now()
     if question.strip():
@@ -2431,8 +2622,62 @@ async def _save_turn(
     await db.execute("UPDATE users SET updated_at=?, total_tokens_used=total_tokens_used+? WHERE platform_id=?", (now, int((usage or {}).get("total_tokens") or 0), platform_id))
 
 
-async def _conversation_transcript(db: aiosqlite.Connection, conversation_id: str, trusted_name: str = "") -> list[str]:
-    cur = await db.execute("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id ASC", (conversation_id,))
+async def _record_usage_event(
+    *,
+    kind: str,
+    source: str,
+    model: str,
+    usage: dict[str, Any],
+    conversation_id: str = "",
+    platform_id: str = "",
+    prompt_path: str = "",
+) -> None:
+    try:
+        async with _module_write_lock:
+            async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+                await db.execute(
+                    """
+                    INSERT INTO usage_events(kind,source,conversation_id,platform_id,prompt_path,model,usage_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        _clean(kind, 40),
+                        _clean(source, 80),
+                        _clean(conversation_id, 200),
+                        _clean(platform_id, 300),
+                        _clean(prompt_path, 500),
+                        _clean(model, 300),
+                        json.dumps(usage or {}, ensure_ascii=False),
+                        _now(),
+                    ),
+                )
+                await db.commit()
+    except Exception as exc:
+        _log("error", "usage accounting failed kind=%s source=%s error=%s", kind, source, exc, exc_info=True)
+
+
+async def _conversation_transcript(
+    db: aiosqlite.Connection,
+    conversation_id: str,
+    trusted_name: str = "",
+    limit: int = -1,
+) -> list[str]:
+    if limit >= 0:
+        cur = await db.execute(
+            """
+            SELECT role,content FROM (
+                SELECT id,role,content FROM messages
+                WHERE conversation_id=? AND source NOT IN ('senler_retry','senler_fallback_undelivered')
+                ORDER BY id DESC LIMIT ?
+            ) ORDER BY id ASC
+            """,
+            (conversation_id, limit),
+        )
+    else:
+        cur = await db.execute(
+            "SELECT role,content FROM messages WHERE conversation_id=? AND source NOT IN ('senler_retry','senler_fallback_undelivered') ORDER BY id ASC",
+            (conversation_id,),
+        )
     messages = await cur.fetchall()
     transcript = []
     for role, content in messages:
@@ -2466,6 +2711,18 @@ def _message_pairs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry["answer"] = row["content"]
         entry["messages"].append(row)
     return list(pairs.values())
+
+
+def _bounded_transcript(items: list[str], max_chars: int) -> str:
+    selected: list[str] = []
+    size = 0
+    for item in reversed(items):
+        extra = len(item) + (2 if selected else 0)
+        if selected and size + extra > max_chars:
+            break
+        selected.append(item if len(item) <= max_chars else item[-max_chars:])
+        size += min(len(item), max_chars) + (2 if len(selected) > 1 else 0)
+    return "\n\n".join(reversed(selected))
 
 
 def _history_format(value: str) -> str:
@@ -2558,7 +2815,12 @@ async def _history_for_platform(platform_id: str, fmt: str) -> dict[str, Any] | 
     }
 
 
-async def _generate_and_save_summary(conversation_id: str, model: str | None = None) -> dict[str, Any]:
+async def _generate_and_save_summary(
+    conversation_id: str,
+    model: str | None = None,
+    *,
+    incremental: bool = True,
+) -> dict[str, Any]:
     settings = await _settings()
     summary_model = model or settings.get("summary_model") or DEFAULT_MODEL
     async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
@@ -2568,14 +2830,17 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
         if not conv:
             raise HTTPException(404, "conversation not found")
         trusted_name = ""
-        transcript = await _conversation_transcript(db, conversation_id, trusted_name)
         previous_summary = await _user_summary(db, conv["platform_id"])
+        transcript = await _conversation_transcript(
+            db,
+            conversation_id,
+            trusted_name,
+            SUMMARY_RECENT_HISTORY_MESSAGES if incremental and previous_summary.strip() else -1,
+        )
     if not transcript:
         raise HTTPException(400, "conversation has no messages")
     summary_prompt = settings.get("summary_prompt") or CLIENT_STORY_SUMMARY_PROMPT
-    transcript_text = "\n\n".join(transcript)
-    if len(transcript_text) > SUMMARY_TRANSCRIPT_MAX_CHARS:
-        transcript_text = transcript_text[-SUMMARY_TRANSCRIPT_MAX_CHARS:]
+    transcript_text = _bounded_transcript(transcript, SUMMARY_TRANSCRIPT_MAX_CHARS)
     summary_source = transcript_text
     if previous_summary.strip():
         summary_source = "ПРЕДЫДУЩАЯ СВОДКА ПО КЛИЕНТУ:\n" + _strip_client_name_from_summary(previous_summary).strip() + "\n\nНОВЫЙ ДИАЛОГ:\n" + transcript_text
@@ -2584,6 +2849,15 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
         [{"role": "system", "content": summary_prompt}, {"role": "user", "content": summary_source}],
         _timeout(settings),
         settings,
+    )
+    await _record_usage_event(
+        kind="summary",
+        source="auto" if incremental else "manual",
+        model=summary_model,
+        usage=usage,
+        conversation_id=conversation_id,
+        platform_id=conv["platform_id"],
+        prompt_path=conv["prompt_path"],
     )
     summary = _finalize_summary_client_name(summary, trusted_name)
     async with _module_write_lock:
@@ -2596,20 +2870,31 @@ async def _generate_and_save_summary(conversation_id: str, model: str | None = N
     return {"platform_id": conv["platform_id"], "conversation_id": conversation_id, "model": summary_model, "summary": summary, "usage": usage}
 
 
-async def _generate_summary_background(conversation_id: str) -> None:
+async def _summary_worker(platform_id: str) -> None:
     try:
-        result = await _generate_and_save_summary(conversation_id)
-        _log(
-            "info",
-            "chat auto-summary ok conversation_id=%s model=%s summary_chars=%s",
-            conversation_id,
-            result.get("model", ""),
-            len(result.get("summary", "") or ""),
-        )
-    except HTTPException as exc:
-        _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", conversation_id, exc.detail)
-    except Exception as exc:
-        _log("error", "chat auto-summary crashed conversation_id=%s detail=%s", conversation_id, exc, exc_info=True)
+        while conversation_id := _summary_pending.pop(platform_id, ""):
+            try:
+                result = await _generate_and_save_summary(conversation_id, incremental=True)
+                _log(
+                    "info",
+                    "chat auto-summary ok conversation_id=%s model=%s summary_chars=%s",
+                    conversation_id,
+                    result.get("model", ""),
+                    len(result.get("summary", "") or ""),
+                )
+            except HTTPException as exc:
+                _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", conversation_id, exc.detail)
+            except Exception as exc:
+                _log("error", "chat auto-summary crashed conversation_id=%s detail=%s", conversation_id, exc, exc_info=True)
+    finally:
+        _summary_workers.pop(platform_id, None)
+
+
+def _schedule_summary(conversation_id: str, platform_id: str) -> None:
+    _summary_pending[platform_id] = conversation_id
+    task = _summary_workers.get(platform_id)
+    if task is None or task.done():
+        _summary_workers[platform_id] = asyncio.create_task(_summary_worker(platform_id))
 
 
 @router.get("/env-status")
@@ -2636,6 +2921,151 @@ async def env_status(request: Request):
 async def get_settings(request: Request):
     await _require_panel_user(request)
     return await _settings()
+
+
+async def _openrouter_key_usage() -> dict[str, Any]:
+    api_key = _env()["openrouter_key"]
+    if not api_key:
+        return {"ok": False, "error": "OPENROUTER_API_KEY не задан"}
+    try:
+        async with httpx.AsyncClient(**_openrouter_client_kwargs(20.0)) as client:
+            response = await client.get(OPENROUTER_KEY_URL, headers={"Authorization": f"Bearer {api_key}"})
+        if response.status_code >= 400:
+            return {"ok": False, "error": f"OpenRouter HTTP {response.status_code}"}
+        payload = response.json()
+        raw = payload.get("data") if isinstance(payload, dict) else {}
+        raw = raw if isinstance(raw, dict) else {}
+        return {
+            "ok": True,
+            "usage": _number(raw.get("usage")),
+            "daily": _number(raw.get("usage_daily")),
+            "weekly": _number(raw.get("usage_weekly")),
+            "monthly": _number(raw.get("usage_monthly")),
+            "limit": _number(raw.get("limit")) if raw.get("limit") is not None else None,
+            "limit_remaining": _number(raw.get("limit_remaining")) if raw.get("limit_remaining") is not None else None,
+            "is_free_tier": bool(raw.get("is_free_tier")),
+        }
+    except Exception as exc:
+        _log("warning", "OpenRouter key usage failed: %s", exc)
+        return {"ok": False, "error": _exception_text(exc)}
+
+
+def _usage_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "requests": len(rows),
+        "cost": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_tokens": 0,
+        "cost_records": 0,
+    }
+    for row in rows:
+        usage = row["usage"]
+        totals["cost"] += _number(usage.get("cost"))
+        totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        totals["cached_tokens"] += int(usage.get("cached_tokens") or 0)
+        if "cost" in usage:
+            totals["cost_records"] += 1
+    totals["cost"] = round(totals["cost"], 8)
+    return totals
+
+
+def _group_usage(rows: list[dict[str, Any]], field: str, limit: int = 20) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = str(row.get(field) or "не указан")
+        groups.setdefault(key, []).append(row)
+    items = [{field: key, **_usage_totals(group)} for key, group in groups.items()]
+    return sorted(items, key=lambda item: (item["cost"], item["requests"]), reverse=True)[:limit]
+
+
+async def _spend_report(days: int) -> dict[str, Any]:
+    days = max(7, min(90, int(days)))
+    async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM usage_events WHERE datetime(created_at)>=datetime('now', ?) ORDER BY id DESC",
+            (f"-{days} days",),
+        )
+        raw_rows = [dict(row) for row in await cur.fetchall()]
+        cur = await db.execute("SELECT MIN(created_at), COUNT(*) FROM usage_events")
+        tracked_since, all_events = await cur.fetchone()
+        try:
+            cur = await db.execute(
+                """
+                SELECT COUNT(*),
+                       COALESCE(SUM(CAST(json_extract(usage_json,'$.prompt_tokens') AS INTEGER)),0),
+                       COALESCE(SUM(CAST(json_extract(usage_json,'$.completion_tokens') AS INTEGER)),0)
+                FROM messages WHERE role IN ('assistant','manual_assistant')
+                """
+            )
+            historical_messages, historical_prompt, historical_completion = await cur.fetchone()
+        except Exception:
+            historical_messages = historical_prompt = historical_completion = 0
+    rows: list[dict[str, Any]] = []
+    for row in raw_rows:
+        try:
+            usage = json.loads(row.get("usage_json") or "{}")
+        except Exception:
+            usage = {}
+        row["usage"] = usage if isinstance(usage, dict) else {}
+        rows.append(row)
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    month = now.strftime("%Y-%m")
+    last_week = now.timestamp() - 7 * 86400
+    periods = {
+        "today": _usage_totals([row for row in rows if str(row["created_at"]).startswith(today)]),
+        "week": _usage_totals([row for row in rows if (_parse_utc(str(row["created_at"])) or now).timestamp() >= last_week]),
+        "month": _usage_totals([row for row in rows if str(row["created_at"]).startswith(month)]),
+    }
+    daily_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        daily_groups.setdefault(str(row["created_at"])[:10], []).append(row)
+    key_usage = await _openrouter_key_usage()
+    settings = await _settings()
+    daily_warn = _number(settings.get("budget_daily_warn"))
+    monthly_warn = _number(settings.get("budget_monthly_warn"))
+    warnings = []
+    for period, spent, threshold in (
+        ("day", key_usage.get("daily", 0), daily_warn),
+        ("month", key_usage.get("monthly", 0), monthly_warn),
+    ):
+        warnings.append({
+            "period": period,
+            "spent": _number(spent),
+            "threshold": threshold,
+            "enabled": threshold > 0,
+            "exceeded": threshold > 0 and _number(spent) >= threshold,
+        })
+    return {
+        "ok": True,
+        "days": days,
+        "key": key_usage,
+        "warnings": warnings,
+        "local": {
+            "tracked_since": tracked_since or "",
+            "all_events": int(all_events or 0),
+            "periods": periods,
+            "daily": [{"date": key, **_usage_totals(value)} for key, value in sorted(daily_groups.items(), reverse=True)],
+            "models": _group_usage(rows, "model"),
+            "sources": _group_usage(rows, "source"),
+            "kinds": _group_usage(rows, "kind"),
+            "prompts": _group_usage(rows, "prompt_path"),
+            "historical": {
+                "assistant_messages": int(historical_messages or 0),
+                "prompt_tokens": int(historical_prompt or 0),
+                "completion_tokens": int(historical_completion or 0),
+            },
+        },
+    }
+
+
+@router.get("/spend")
+async def get_spend(request: Request, days: int = 30):
+    await _require_panel_user(request)
+    return await _spend_report(days)
 
 
 @router.get("/provider-options")
@@ -2781,6 +3211,7 @@ def _outbound_job_public(row: dict[str, Any]) -> dict[str, Any]:
         "answer": answer,
         "openrouter_error": _clean(result.get("openrouter_error"), 500),
         "delivery_fallback": bool(result.get("delivery_fallback")),
+        "retryable": str(row.get("status") or "") in {"pending", "failed"},
         "payload": payload,
         "result": result,
     }
@@ -2808,17 +3239,7 @@ async def list_error_jobs(
         where.append("status=?")
         params.append(clean_status)
     elif clean_status == "problem":
-        where.append(
-            """
-            (
-                status IN ('pending','running','failed')
-                OR error_text <> ''
-                OR source IN ('api_failed','senler_failed')
-                OR result_json LIKE '%delivery_fallback%'
-                OR result_json LIKE '%openrouter_error%'
-            )
-            """
-        )
+        where.append("status IN ('pending','running','failed')")
     where_sql = " AND ".join(where)
     async with aiosqlite.connect(_must_db(), timeout=DB_BUSY_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
@@ -2829,7 +3250,7 @@ async def list_error_jobs(
             SELECT *
             FROM outbound_jobs
             WHERE {where_sql}
-            ORDER BY id DESC
+            ORDER BY CASE WHEN status IN ('pending','running','failed') THEN 0 ELSE 1 END,id DESC
             LIMIT ? OFFSET ?
             """,
             [*params, limit, offset],
@@ -2892,7 +3313,6 @@ async def _run_chat(
     allow_write: bool,
     source: str,
     defer_summary: bool = False,
-    prefer_summary_context: bool = False,
 ) -> dict[str, Any]:
     platform_id = _clean(data.platform_id, 300)
     conversation_id = _clean(data.conversation_id, 200) or None
@@ -2902,7 +3322,7 @@ async def _run_chat(
     if _is_emoji_only_message(message):
         raise HTTPException(400, "emoji_only_message")
     mode = _context_mode(data.context)
-    read_mode = 2 if (prefer_summary_context or data.summary_only) and mode == 4 else mode
+    read_mode = 2 if data.summary_only and mode == 4 else mode
     prompt_path, prompt_text = await _resolve_prompt(data.prompt)
     senler_template_vars = data.template_vars if source == "senler" and isinstance(data, SenlerChatIn) else {}
     trusted_client_name = ""
@@ -2932,7 +3352,13 @@ async def _run_chat(
             summary = _strip_client_name_from_summary(summary)
             if read_mode in (1, 2):
                 history = [] if summary else await _load_history(db, cid, _history_limit(settings))
-            elif read_mode in (3, 4):
+            elif read_mode == 4:
+                history = await _load_history(
+                    db,
+                    cid,
+                    min(_history_limit(settings), SUMMARY_RECENT_HISTORY_MESSAGES),
+                )
+            elif read_mode == 3:
                 history = await _load_history(db, cid, -1)
             else:
                 history = []
@@ -2961,6 +3387,15 @@ async def _run_chat(
         _timeout(settings),
         settings,
     )
+    await _record_usage_event(
+        kind="test" if source == "panel_test" else "answer",
+        source=source,
+        model=model,
+        usage=usage,
+        conversation_id=cid,
+        platform_id=platform_id,
+        prompt_path=prompt_path,
+    )
     if senler_template_vars:
         answer = _render_senler_template_text(answer, senler_template_vars)
     answer = _rewrite_direct_client_address(answer, trusted_client_name)
@@ -2985,11 +3420,11 @@ async def _run_chat(
                 await db.commit()
         if mode == 4:
             if defer_summary:
-                asyncio.create_task(_generate_summary_background(cid))
+                _schedule_summary(cid, platform_id)
                 _log("info", "chat auto-summary scheduled conversation_id=%s source=%s", cid, source)
             else:
                 try:
-                    summary_result = await _generate_and_save_summary(cid)
+                    summary_result = await _generate_and_save_summary(cid, incremental=True)
                 except HTTPException as exc:
                     summary_error = str(exc.detail)
                     _log("warning", "chat auto-summary failed conversation_id=%s detail=%s", cid, summary_error)
@@ -3189,6 +3624,7 @@ async def direct_chat(request: Request):
             history=data.history,
             summary=data.summary,
             attachment_url=data.attachment_url,
+            source="panel_direct",
         )
     except HTTPException as exc:
         _log("warning", "direct-chat failed status=%s detail=%s", exc.status_code, exc.detail)
@@ -3362,6 +3798,82 @@ async def _salebot_post_json_with_retry(client: httpx.AsyncClient, url: str, pay
     raise HTTPException(502, f"Salebot HTTP error: {last_exc}")
 
 
+async def _salebot_post_json_once(client: httpx.AsyncClient, url: str, payload: dict[str, Any]) -> httpx.Response:
+    response = await client.post(url, json=payload)
+    response.raise_for_status()
+    return response
+
+
+def _salebot_history_outbound_id(payload: Any, *, after_id: int = 0) -> int | None:
+    rows = payload.get("result") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise ValueError("Salebot history result is not a list")
+    outbound_ids = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_id = int(row.get("id") or 0)
+            outside = int(row.get("message_from_outside") or 0)
+        except (TypeError, ValueError):
+            continue
+        if (
+            row_id > after_id
+            and row.get("client_replica") is False
+            and outside == 0
+            and row.get("delivered") is not False
+            and str(row.get("text") or "").strip()
+        ):
+            outbound_ids.append(row_id)
+    return max(outbound_ids, default=None)
+
+
+async def _salebot_history_payload(
+    client: httpx.AsyncClient,
+    url: str,
+    salebot_id: str,
+    *,
+    attempts: int = SALEBOT_RETRY_ATTEMPTS,
+) -> Any:
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.get(url, params={"client_id": salebot_id, "limit": 2000})
+            response.raise_for_status()
+            return response.json()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                await asyncio.sleep(SALEBOT_RETRY_DELAY_SECONDS)
+    raise RuntimeError(f"Salebot history error: {last_exc}")
+
+
+async def _wait_for_salebot_outbound(
+    client: httpx.AsyncClient,
+    history_url: str,
+    salebot_id: str,
+    *,
+    after_id: int,
+    delays: tuple[float, ...],
+) -> tuple[int | None, bool]:
+    last_poll_succeeded = False
+    for delay in delays:
+        await asyncio.sleep(delay)
+        try:
+            payload = await _salebot_history_payload(client, history_url, salebot_id, attempts=1)
+        except Exception as exc:
+            last_poll_succeeded = False
+            _log("warning", "salebot delivery poll failed client_id=%s error=%s", salebot_id, _exception_text(exc))
+            continue
+        last_poll_succeeded = True
+        outbound_id = _salebot_history_outbound_id(payload, after_id=after_id)
+        if outbound_id is not None:
+            return outbound_id, True
+    return None, last_poll_succeeded
+
+
 async def _send_salebot_avito_callback(
     *,
     salebot_id: str,
@@ -3402,10 +3914,64 @@ async def _send_salebot_avito_callback(
     clean_callback = _clean(callback_message, 300) or "callback openai_answer"
     save_url = f"{SALEBOT_API_BASE}/{api_key}/save_variables"
     callback_url = f"{SALEBOT_API_BASE}/{api_key}/callback"
+    history_url = f"{SALEBOT_API_BASE}/{api_key}/get_history"
+    message_url = f"{SALEBOT_API_BASE}/{api_key}/message"
 
     async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            history = await _salebot_history_payload(client, history_url, salebot_id)
+            baseline_id = max(
+                (int(row.get("id") or 0) for row in history.get("result", []) if isinstance(row, dict)),
+                default=0,
+            )
+        except Exception as exc:
+            baseline_id = None
+            _log("warning", "salebot delivery baseline unavailable client_id=%s error=%s", salebot_id, _exception_text(exc))
         await _salebot_post_json_with_retry(client, save_url, {"client_id": salebot_id, "variables": variables})
-        await _salebot_post_json_with_retry(client, callback_url, {"client_id": salebot_id, "message": clean_callback})
+        callback_error = ""
+        try:
+            await _salebot_post_json_once(client, callback_url, {"client_id": salebot_id, "message": clean_callback})
+        except Exception as exc:
+            callback_error = _exception_text(exc)
+            _log("warning", "salebot callback result ambiguous client_id=%s error=%s", salebot_id, callback_error)
+
+        delivery_method = "callback"
+        delivery_verified = False
+        outbound_message_id = None
+        delivery_error = "history baseline unavailable" if baseline_id is None else callback_error
+        if baseline_id is not None:
+            outbound_message_id, final_poll_succeeded = await _wait_for_salebot_outbound(
+                client,
+                history_url,
+                salebot_id,
+                after_id=baseline_id,
+                delays=SALEBOT_AVITO_DELIVERY_POLL_DELAYS,
+            )
+            delivery_verified = outbound_message_id is not None
+            if not delivery_verified and final_poll_succeeded:
+                first_answer_block_id = _env()["salebot_avito_first_answer_block_id"]
+                try:
+                    await _salebot_post_json_once(
+                        client,
+                        message_url,
+                        {"client_id": salebot_id, "message_id": first_answer_block_id},
+                    )
+                    delivery_method = "message_block"
+                    outbound_message_id, _ = await _wait_for_salebot_outbound(
+                        client,
+                        history_url,
+                        salebot_id,
+                        after_id=baseline_id,
+                        delays=SALEBOT_AVITO_FALLBACK_POLL_DELAYS,
+                    )
+                    delivery_verified = outbound_message_id is not None
+                    if not delivery_verified:
+                        delivery_error = "fallback accepted but outbound was not verified"
+                except Exception as exc:
+                    delivery_error = _exception_text(exc)
+                    _log("error", "salebot avito fallback failed client_id=%s error=%s", salebot_id, delivery_error)
+            elif not delivery_verified:
+                delivery_error = "final delivery poll unavailable; fallback skipped"
 
     return {
         "ok": True,
@@ -3416,6 +3982,10 @@ async def _send_salebot_avito_callback(
         "variables": sorted(variables.keys()),
         "chunk_count": len(clean_chunks),
         "chunks": clean_chunks,
+        "delivery_method": delivery_method,
+        "delivery_verified": delivery_verified,
+        "outbound_message_id": outbound_message_id,
+        "delivery_error": delivery_error,
     }
 
 
@@ -3466,7 +4036,7 @@ async def _send_salebot_callback(
 
 async def _run_chat_with_stale_retry(data: AvitoChatIn | SalebotChatIn, *, source: str, platform_id: str) -> dict[str, Any]:
     try:
-        return await _run_chat(data, allow_write=True, source=source, defer_summary=True, prefer_summary_context=True)
+        return await _run_chat(data, allow_write=True, source=source, defer_summary=True)
     except HTTPException as exc:
         if exc.status_code == 404 and str(exc.detail) == "conversation_id not found" and data.conversation_id:
             stale_conversation_id = data.conversation_id
@@ -3478,7 +4048,7 @@ async def _run_chat_with_stale_retry(data: AvitoChatIn | SalebotChatIn, *, sourc
                 stale_conversation_id,
                 platform_id,
             )
-            return await _run_chat(data, allow_write=True, source=source, defer_summary=True, prefer_summary_context=True)
+            return await _run_chat(data, allow_write=True, source=source, defer_summary=True)
         raise
 
 
@@ -3587,12 +4157,13 @@ async def _deliver_avito_job(data: AvitoChatIn, *, job_id: int) -> dict[str, Any
         salebot_id,
         _clean(data.conversation_id, 80),
     )
-    if _is_emoji_only_message(data.message):
-        _log("info", "avito job ignored emoji-only message id=%s platform_id=%s", job_id, avito_id)
+    ignored_reason = _avito_ignored_reason(data.message)
+    if ignored_reason:
+        _log("info", "avito job ignored id=%s platform_id=%s reason=%s", job_id, avito_id, ignored_reason)
         return {
             "ok": False,
             "ignored": True,
-            "reason": "emoji_only_message",
+            "reason": ignored_reason,
             "job_id": job_id,
             "source": "avito",
             "platform_id": avito_id,
@@ -3742,7 +4313,7 @@ async def senler_chat(request: Request):
             _log("warning", "senler-chat ignored invalid JSON body: %s", exc)
             return _senler_safe_response(raw, "invalid_json_body")
         try:
-            result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True, prefer_summary_context=True)
+            result = await _run_chat(data, allow_write=True, source="senler", defer_summary=True)
         except HTTPException as exc:
             if exc.status_code == 400:
                 reason = _clean(exc.detail, 300) or "bad_request"
@@ -3760,6 +4331,18 @@ async def senler_chat(request: Request):
                 )
                 raw["conversation_id"] = fallback_result.get("conversation_id") or raw.get("conversation_id", "")
                 raw["platform_id"] = fallback_result.get("platform_id") or raw.get("platform_id", "")
+                fallback_delivery = await _senler_set_var_and_add_ai_bot(
+                    raw.get("platform_id", ""),
+                    data.answer_var,
+                    SALEBOT_FALLBACK_ANSWER,
+                )
+                if not fallback_delivery.get("ok"):
+                    _log(
+                        "warning",
+                        "senler-chat fallback delivery failed platform_id=%s result=%s",
+                        raw.get("platform_id", ""),
+                        _json_dumps_compact(fallback_delivery)[:1000],
+                    )
                 return _senler_safe_response(raw, error_text, SALEBOT_FALLBACK_ANSWER)
             raise
         senler_ai_bot = await _senler_set_var_and_add_ai_bot(
@@ -3840,12 +4423,13 @@ async def avito_chat(request: Request):
             raise HTTPException(400, "salebot_id must be numeric")
         if not _env()["salebot_key"]:
             raise HTTPException(503, "SALEBOT_API_KEY or SALEBOT_API_KEY_3 is not configured")
-        if _is_emoji_only_message(data.message):
-            _log("info", "avito ignored emoji-only message platform_id=%s salebot_id=%s", avito_id, salebot_id)
+        ignored_reason = _avito_ignored_reason(data.message)
+        if ignored_reason:
+            _log("info", "avito ignored message platform_id=%s salebot_id=%s reason=%s", avito_id, salebot_id, ignored_reason)
             return {
                 "ok": False,
                 "ignored": True,
-                "reason": "emoji_only_message",
+                "reason": ignored_reason,
                 "delivery": "ignored",
                 "source": "avito",
                 "platform_id": avito_id,
@@ -3999,7 +4583,7 @@ async def api_schema(request: Request):
             "method": "POST",
             "path": "/nexus/openrouter/api/senler-chat",
             "auth": "Authorization: Bearer <токен модуля из настроек>",
-            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var, client_name/first_name/last_name и template_vars. template_vars подставляет значения Senler-переменных в prompt/message/ответ до возврата ai_answer, потому что Senler не делает вложенную подстановку переменных. Значения можно также передавать top-level полями: airtime, web_date, full_price и т.д. При context=4 ответ строится по краткой сводке о клиенте, а сводка обновляется в фоне.",
+            "body": "как /chat; дополнительно answer_var, conversation_id_var, platform_id_var, model_var, summary_var, summary_error_var, client_name/first_name/last_name и template_vars. template_vars подставляет значения Senler-переменных в prompt/message/ответ до возврата ai_answer, потому что Senler не делает вложенную подстановку переменных. Значения можно также передавать top-level полями: airtime, web_date, full_price и т.д. При context=4 ответ строится по краткой сводке и последним четырём парам реплик, а сводка обновляется в фоне.",
             "name_guard": "если client_name или first_name/last_name переданы, модель может использовать только это имя; если имя не передано, модуль удаляет имя из summary и запрещает модели обращаться по имени, чтобы не повторять ошибочные имена из истории",
             "senler_side_effect": "если platform_id является числовым VK ID и непустой ai_answer успешно записан через Senler vars/set, подписчик добавляется в бота 3461217 через bots/addSubscriber с enforce=true; preflight/test-запросы безопасно пропускаются",
             "name_fields_example": {
@@ -4115,7 +4699,7 @@ async def append_context(data: AppendIn, request: Request):
     summary_error = ""
     if data.update_summary:
         try:
-            summary_result = await _generate_and_save_summary(cid)
+            summary_result = await _generate_and_save_summary(cid, incremental=True)
         except HTTPException as exc:
             summary_error = str(exc.detail)
             _log("warning", "append summary failed conversation_id=%s detail=%s", cid, summary_error)
@@ -4376,5 +4960,5 @@ async def conversation_messages(conversation_id: str, request: Request):
 @router.post("/conversations/{conversation_id}/summary")
 async def conversation_summary(conversation_id: str, data: SummaryIn, request: Request):
     await _require_panel_user(request)
-    result = await _generate_and_save_summary(conversation_id, data.model)
+    result = await _generate_and_save_summary(conversation_id, data.model, incremental=False)
     return {"ok": True, **result}

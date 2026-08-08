@@ -1,7 +1,7 @@
 {
   "id": "amocrm-salebot",
   "name": "amoCRM → SaleBot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Передаёт изменения сделок amoCRM в переменные клиента SaleBot и вызывает callback_amoCRM.",
   "env_vars": {
     "AMO_BASE_URL": "Базовый URL аккаунта amoCRM, например https://example.amocrm.ru",

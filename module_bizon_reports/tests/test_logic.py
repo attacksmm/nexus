@@ -130,6 +130,30 @@ class BizonReportsLogicTest(unittest.TestCase):
         self.assertTrue(record["clicked_button"])
         self.assertFalse(record["clicked_banner"])
 
+    def test_uses_referer_attribution_only_as_fallback(self):
+        viewer = {
+            "chatUserId": "user-42",
+            "utm_source": "explicit",
+            "referer": (
+                "https://start.bizon365.ru/room/97242/puppy?utm_source=url"
+                "&utm_medium=cpc&utm_campaign=summer%20sale&utm_content=banner&utm_term=42"
+                "&param1=ym-123&param2=segment"
+            ),
+        }
+        client = logic.normalize_viewer(viewer)["custom_fields"]
+        attendance = logic.normalize_attendances([viewer], {"webinarId": "web-1"})[0]["custom_fields"]
+        expected = {
+            "utm_source": "explicit",
+            "utm_medium": "cpc",
+            "utm_campaign": "summer sale",
+            "utm_content": "banner",
+            "utm_term": "42",
+            "p1": "ym-123",
+            "p2": "segment",
+        }
+        self.assertEqual({key: client[key] for key in expected}, expected)
+        self.assertEqual({key: attendance[key] for key in expected}, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

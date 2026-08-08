@@ -15,6 +15,10 @@ DEFAULT_GROUP_ID = "225075265"
 DEFAULT_BUTTON_ID = "senlerBtn-1779702884"
 DEFAULT_TARGET = ".salebot_tilda_block"
 DEFAULT_REDIRECT_URL = "https://vk.com/app6013442_-225075265?form_id=1#form_id=1"
+DEFAULT_TELEGRAM_BOT = "Master_class_for_dog_owners_bot"
+DEFAULT_TELEGRAM_CHANNEL_ID = "1101081"
+DEFAULT_TELEGRAM_SUBSCRIPTION_ID = "3728286"
+TELEGRAM_ATTRIBUTION_URL = "https://junior.sobakovod.pro/nexus/senler/api/telegram-attribution"
 
 
 async def _require_panel_user(request: Request) -> dict:
@@ -155,6 +159,11 @@ def _clean_url(value: str, default: str = "") -> str:
     if not re.match(r"^https://(vk\.com|vk\.ru)/", value):
         return default
     return value[:1000]
+
+
+def _telegram_bot(value: str) -> str:
+    value = str(value or "").strip().rstrip("/").rsplit("/", 1)[-1].lstrip("@")
+    return value if re.fullmatch(r"[A-Za-z0-9_]{5,32}", value) else DEFAULT_TELEGRAM_BOT
 
 
 def _direct_href(value: str) -> str:
@@ -898,6 +907,195 @@ async def replace_js(request: Request):
     return PlainTextResponse(
         script,
         headers={"Access-Control-Allow-Origin": "*"},
+        media_type="application/javascript; charset=utf-8",
+    )
+
+
+@router.get("/all-senler.js")
+async def all_senler_js(request: Request):
+    cfg = json.dumps(
+        {
+            "rootSelector": _clean_text(request.query_params.get("target"), DEFAULT_TARGET),
+            "vkHref": _clean_url(request.query_params.get("redirect_url"), DEFAULT_REDIRECT_URL),
+            "vkText": _clean_text(request.query_params.get("vk_text"), "Записаться ВКонтакте"),
+            "telegramText": _clean_text(request.query_params.get("telegram_text"), "Записаться в Telegram"),
+            "telegramBot": _telegram_bot(request.query_params.get("telegram_bot")),
+            "telegramChannelId": _numeric(request.query_params.get("telegram_channel_id"), DEFAULT_TELEGRAM_CHANNEL_ID),
+            "telegramSubscriptionId": _numeric(
+                request.query_params.get("telegram_subscription_id"), DEFAULT_TELEGRAM_SUBSCRIPTION_ID
+            ),
+            "attributionUrl": TELEGRAM_ATTRIBUTION_URL,
+        },
+        ensure_ascii=False,
+    )
+    script = r"""
+(function(){
+  'use strict';
+  window.__nexusAllSenlerReady=true;
+  var cfg=__CFG__,telegramHref='',attributionPromise=null,attributionClientId=null,attributionVersion=0,pageToken=window.__nexusAllSenlerToken||localToken();
+  function localToken(){
+    var key='nexus_senler_token_v1:'+location.origin+location.pathname+location.search+location.hash,stored='';
+    try{stored=sessionStorage.getItem(key)||'';}catch(ignore){}
+    if(/^[A-Za-z0-9_-]{16}$/.test(stored))return stored;
+    var bytes=new Uint8Array(12);
+    if(window.crypto&&crypto.getRandomValues)crypto.getRandomValues(bytes);
+    else for(var i=0;i<bytes.length;i++)bytes[i]=Math.floor(Math.random()*256);
+    var raw='';for(var j=0;j<bytes.length;j++)raw+=String.fromCharCode(bytes[j]);
+    stored=btoa(raw).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    try{sessionStorage.setItem(key,stored);}catch(ignore){}
+    return stored;
+  }
+  function ensureStyle(){
+    if(document.getElementById('nexus-all-senler-style'))return;
+    var s=document.createElement('style');
+    s.id='nexus-all-senler-style';
+    s.textContent='.nexus-all-senler-pair{display:flex!important;flex-direction:column!important;align-items:stretch!important;gap:12px!important;width:var(--nexus-all-senler-width,min(100%,360px))!important;max-width:100%!important;margin:0 auto!important;opacity:0;transform:translateY(4px);transition:opacity .18s ease,transform .18s ease}.nexus-all-senler-pair.is-ready{opacity:1;transform:none}.nexus-all-senler-btn{display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:12px!important;width:100%!important;min-height:50px!important;padding:10px 18px!important;box-sizing:border-box!important;border:0!important;border-radius:999px!important;color:#fff!important;font-family:inherit!important;font-size:16px!important;font-weight:700!important;line-height:1.15!important;text-align:left!important;text-decoration:none!important;letter-spacing:0!important;box-shadow:0 7px 20px rgba(26,70,115,.16)!important;transition:transform .14s ease,filter .14s ease,box-shadow .14s ease!important;-webkit-tap-highlight-color:transparent}.nexus-all-senler-btn:hover{filter:brightness(1.06);transform:translateY(-1px);box-shadow:0 9px 24px rgba(26,70,115,.22)!important}.nexus-all-senler-btn:active{transform:translateY(0);filter:brightness(.98)}.nexus-all-senler-btn--vk{background:#447bba!important}.nexus-all-senler-btn--tg{background:#279bd3!important}.nexus-all-senler-icon{display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 30px!important;width:30px!important;height:30px!important;border-radius:50%!important;background:rgba(255,255,255,.16)!important;color:#fff!important;font:900 11px/1 Arial,sans-serif!important;letter-spacing:0!important}.nexus-all-senler-label{flex:1 1 auto!important;text-align:center!important;padding-right:30px!important}.nexus-all-senler-original{display:none!important}@media(max-width:640px){.nexus-all-senler-btn{min-height:48px!important;padding:9px 14px!important;font-size:15px!important}}@media(prefers-reduced-motion:reduce){.nexus-all-senler-pair,.nexus-all-senler-btn{transition:none!important}}';
+    (document.head||document.documentElement).appendChild(s);
+  }
+  function value(name){
+    var query=new URLSearchParams(location.search),hash=new URLSearchParams(String(location.hash||'').replace(/^#/,''));
+    return query.get(name)||hash.get(name)||'';
+  }
+  function cookie(name){
+    var match=('; '+document.cookie).match('; '+name+'=([^;]*)');
+    return match?decodeURIComponent(match[1]):'';
+  }
+  function attribution(clientId){
+    var params=[];
+    new URLSearchParams(location.search).forEach(function(v,k){params.push([k,v]);});
+    var hash=String(location.hash||'').replace(/^#/,'');
+    if(hash.indexOf('=')>=0)new URLSearchParams(hash).forEach(function(v,k){params.push([k,v]);});
+    return {
+      channel_id:cfg.telegramChannelId,
+      subscription_id:cfg.telegramSubscriptionId,
+      token:pageToken,
+      utm_source:value('utm_source'),
+      utm_medium:value('utm_medium'),
+      utm_campaign:value('utm_campaign'),
+      utm_content:value('utm_content'),
+      utm_term:value('utm_term'),
+      ym_client_id:clientId,
+      yclid:value('yclid')||cookie('yclid'),
+      landing_url:location.href,
+      referrer:document.referrer,
+      url_params:params
+    };
+  }
+  function baseTelegramHref(){
+    return 'https://t.me/'+cfg.telegramBot+'?start=s='+cfg.telegramSubscriptionId;
+  }
+  function setTelegramHref(href){
+    telegramHref=href||baseTelegramHref();
+    [].slice.call(document.querySelectorAll('.nexus-all-senler-btn--tg')).forEach(function(link){link.href=telegramHref;});
+  }
+  function clientId(){
+    var stored='';
+    try{stored=localStorage.getItem('_ym_uid')||'';}catch(ignore){}
+    return cookie('_ym_uid')||stored||value('_ym_uid');
+  }
+  function validClientId(id){return /^\d{6,32}$/.test(String(id||''));}
+  function clientTelegramHref(id){
+    if(!validClientId(id))return baseTelegramHref();
+    var start='s='+cfg.telegramSubscriptionId+'-utm_term='+id;
+    return start.length<=64?'https://t.me/'+cfg.telegramBot+'?start='+start:baseTelegramHref();
+  }
+  function tokenTelegramHref(){
+    return 'https://t.me/'+cfg.telegramBot+'?start=s='+cfg.telegramSubscriptionId+'-utm_term=n_'+pageToken;
+  }
+  function directTelegramHref(id){
+    var data=attribution(id),parts=['s='+cfg.telegramSubscriptionId],fields=['utm_source','utm_medium','utm_campaign','utm_content','utm_term'];
+    for(var i=0;i<fields.length;i++){
+      var field=fields[i],item=String(data[field]||'');
+      if(!item)continue;
+      if(!/^[A-Za-z0-9_-]+$/.test(item))return '';
+      parts.push(field+'='+item);
+    }
+    var start=parts.join('-');
+    return start.length<=64?'https://t.me/'+cfg.telegramBot+'?start='+start:'';
+  }
+  function prepareAttribution(force){
+    var id=clientId();
+    if(attributionPromise&&!force&&id===attributionClientId)return attributionPromise;
+    attributionClientId=id;
+    var version=++attributionVersion,direct=directTelegramHref(id),fallback=tokenTelegramHref();
+    attributionPromise=Promise.race([
+      fetch(cfg.attributionUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(attribution(id)),keepalive:true})
+        .then(function(response){return response.ok?response.json():null;}).then(function(body){
+          if(!body||!body.ok)throw new Error('attribution unavailable');
+          return tokenTelegramHref();
+        }),
+      new Promise(function(resolve){setTimeout(function(){resolve(direct||fallback);},1500);})
+    ]).catch(function(){return direct||fallback;}).then(function(href){
+        if(version===attributionVersion)setTelegramHref(href);
+        return href;
+      });
+    return attributionPromise;
+  }
+  function withPageParams(url){
+    var params=new URLSearchParams(location.search),hash=String(location.hash||'').replace(/^#/,'');
+    if(hash.indexOf('=')>=0)new URLSearchParams(hash).forEach(function(v,k){if(!params.has(k))params.set(k,v);});
+    if(!params.has('_ym_uid')&&cookie('_ym_uid'))params.set('_ym_uid',cookie('_ym_uid'));
+    if(!params.has('yclid')&&cookie('yclid'))params.set('yclid',cookie('yclid'));
+    var fragment='',index=url.indexOf('#');
+    if(index>=0){fragment=url.slice(index);url=url.slice(0,index);}
+    params.forEach(function(v,k){if(!new RegExp('([?&#])'+k+'=').test(url+fragment))url+=(url.indexOf('?')<0?'?':'&')+encodeURIComponent(k)+'='+encodeURIComponent(v);});
+    return url+fragment;
+  }
+  function looksLike(action,kind){
+    if(!action||action.closest&&action.closest('.nexus-all-senler-pair'))return false;
+    var text=((action.textContent||'')+' '+(action.className||'')+' '+(action.getAttribute&&action.getAttribute('href')||'')).toLowerCase();
+    return kind==='tg'?(text.indexOf('telegram')>=0||text.indexOf('t.me')>=0||text.indexOf('tg_link')>=0):(text.indexOf('вконтакте')>=0||text.indexOf('vk.com')>=0||text.indexOf('vk.ru')>=0||text.indexOf('vk_link')>=0||text.indexOf(' вк')>=0);
+  }
+  function actionList(root){
+    var result=[];
+    [].slice.call(root.querySelectorAll('a,button,[role=button],input[type=button],input[type=submit]')).forEach(function(node){
+      var action=node.closest('a,button,[role=button]')||node;
+      if(result.indexOf(action)<0)result.push(action);
+    });
+    return result;
+  }
+  function button(kind,text,href){
+    var link=document.createElement('a'),icon=document.createElement('span'),label=document.createElement('span');
+    link.className='nexus-all-senler-btn nexus-all-senler-btn--'+kind;
+    link.href=href;link.target='_self';link.rel='noopener';
+    icon.className='nexus-all-senler-icon';icon.textContent=kind==='vk'?'VK':'TG';
+    label.className='nexus-all-senler-label';label.textContent=text;
+    link.appendChild(icon);link.appendChild(label);
+    return link;
+  }
+  function mount(root){
+    if(!root||root.querySelector('.nexus-all-senler-pair'))return;
+    var actions=actionList(root),vk=actions.find(function(x){return looksLike(x,'vk');}),tg=actions.find(function(x){return looksLike(x,'tg');});
+    if(!vk&&!tg)return;
+    var widths=[vk,tg].filter(Boolean).map(function(x){return x.getBoundingClientRect().width||x.offsetWidth||0;}),width=Math.max.apply(Math,[240].concat(widths));
+    if(root.clientWidth)width=Math.min(width,root.clientWidth);
+    var pair=document.createElement('div'),vkLink=button('vk',cfg.vkText,withPageParams(cfg.vkHref)),tgLink=button('tg',cfg.telegramText,telegramHref||baseTelegramHref());
+    pair.className='nexus-all-senler-pair';pair.style.setProperty('--nexus-all-senler-width',Math.round(width)+'px');
+    pair.appendChild(vkLink);pair.appendChild(tgLink);
+    tgLink.addEventListener('click',function(){prepareAttribution(true);});
+    var anchor=vk||tg;
+    if(anchor&&anchor.parentNode)anchor.parentNode.insertBefore(pair,anchor);else root.appendChild(pair);
+    actions.forEach(function(action){if(looksLike(action,'vk')||looksLike(action,'tg'))action.classList.add('nexus-all-senler-original');});
+    requestAnimationFrame(function(){pair.classList.add('is-ready');});
+  }
+  function scan(){
+    ensureStyle();
+    var roots=[].slice.call(document.querySelectorAll(cfg.rootSelector));
+    if(!roots.length)roots=[].slice.call(document.querySelectorAll('.salebot_tilda_block,.form_integration_block'));
+    roots.forEach(mount);
+  }
+  setTelegramHref(tokenTelegramHref());
+  prepareAttribution();
+  var clientWatcher=setInterval(function(){if(clientId()!==attributionClientId)prepareAttribution(true);},250);
+  setTimeout(function(){clearInterval(clientWatcher);},30000);
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',scan);else scan();
+  var observer=new MutationObserver(scan);observer.observe(document.documentElement,{childList:true,subtree:true});
+  setTimeout(function(){observer.disconnect();},30000);
+})();
+""".replace("__CFG__", cfg).lstrip()
+    return PlainTextResponse(
+        script,
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300, stale-if-error=86400"},
         media_type="application/javascript; charset=utf-8",
     )
 

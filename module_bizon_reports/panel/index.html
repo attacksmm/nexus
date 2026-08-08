@@ -18,8 +18,7 @@
     *,*::before,*::after{box-sizing:border-box}[hidden]{display:none!important}
     html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text)}
     button,input,textarea,select{font:inherit}button{cursor:pointer}
-    *{scrollbar-color:var(--border-strong) #080808;scrollbar-width:thin}
-    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#080808}::-webkit-scrollbar-thumb{background:var(--border-strong);border:2px solid #080808}
+    *{scrollbar-width:none}::-webkit-scrollbar{display:none}
     .shell{width:100%;height:100vh;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;background:var(--bg)}
     .tabs{min-width:0;display:flex;align-items:stretch;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto;overflow-y:hidden}
     .tab{flex:0 0 auto;height:36px;padding:0 16px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--subtle);font-size:.82rem}
@@ -27,8 +26,10 @@
     .tabs__right{margin-left:auto;display:flex;gap:8px;align-items:center;padding:0 10px;border-left:1px solid var(--border)}
     .view{display:none;min-width:0;min-height:0;height:100%;overflow:hidden;flex-direction:column}.view.is-active{display:flex}
     .toolbar{flex-shrink:0;display:grid;grid-template-columns:minmax(170px,.7fr) minmax(170px,.7fr) minmax(110px,.4fr) auto;gap:8px;align-items:end;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);min-width:0}
+    .toolbar--events{grid-template-columns:minmax(230px,1fr) minmax(110px,.35fr) auto}
     .panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}
     .form-grid{display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr);gap:10px;align-items:end;min-width:0}
+    .form-grid--webhook{grid-template-columns:minmax(300px,1fr) auto}
     .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
     .f-input{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text);outline:none}
     .f-input:focus{border-color:var(--accent)}textarea.f-input{min-height:82px;resize:vertical}
@@ -44,19 +45,28 @@
     .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
     .split{display:grid;grid-template-columns:minmax(0,1fr) 390px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.empty{padding:24px;text-align:center;color:var(--subtle)}.kv{display:grid;grid-template-columns:132px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}
     .event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
-    @media(max-width:980px){.toolbar,.form-grid,.report-row{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+    .event-back{display:none}.status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.status-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px;border:1px solid var(--border);background:var(--panel)}.meta-grid{padding:10px;border:1px solid var(--border);background:#030303}.settings-actions{display:flex;justify-content:flex-end}
+    @media(max-width:980px){.toolbar,.form-grid,.report-row,.toolbar--events,.form-grid--webhook{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+    @media(max-width:600px){
+      .tab{height:40px;padding:0 9px}.tabs__right{padding:0 6px}.tabs__right .muted{display:none}.tabs__right .btn{width:40px;padding:0;min-height:40px}
+      .toolbar,.panel-body{padding:10px}.f-input,.btn{min-height:40px}.btn--sm{min-height:40px}
+      .reports{padding:10px}.report-row{padding:12px}.report-title,.report-meta{white-space:normal;overflow-wrap:anywhere}
+      .split{display:block;position:relative;overflow:auto}.table-wrap{overflow:visible}table,tbody,tr,td{display:block;width:100%}thead,colgroup{display:none}table{padding:10px}tbody{display:grid;gap:8px}
+      tr.event-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px;border:1px solid var(--border);background:var(--panel)}tr.event-row td{padding:0;border:0;white-space:normal;overflow-wrap:anywhere}tr.event-row td::before{content:attr(data-label);display:block;margin-bottom:3px;color:var(--subtle);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em}tr.event-row td[data-label="Webinar"],tr.event-row td[data-label="URL"]{grid-column:1/-1}.event-row.is-active td{background:transparent}
+      .side{display:none;position:absolute;inset:0;z-index:3;max-height:none;border:0;padding:12px}.side.is-open{display:grid}.event-back{display:inline-flex;justify-self:start}.kv{grid-template-columns:100px 1fr}.status-grid{grid-template-columns:1fr}.settings-actions .btn{width:100%}
+    }
   </style>
 </head>
 <body>
 <div class="shell">
   <div class="tabs">
-    <button class="tab is-active" type="button" data-view="reports">Отчеты Bizon365</button>
+    <button class="tab is-active" type="button" data-view="reports">Отчеты</button>
     <button class="tab" type="button" data-view="events">Журнал</button>
     <button class="tab" type="button" data-view="webhook">Webhook</button>
     <button class="tab" type="button" data-view="settings">Настройки</button>
     <div class="tabs__right">
       <span id="statusLine" class="muted">Загрузка</span>
-      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button">Обновить</button>
+      <button id="refreshBtn" class="btn btn--ghost btn--sm" type="button" aria-label="Обновить" title="Обновить">↻</button>
     </div>
   </div>
 
@@ -64,14 +74,14 @@
     <div class="toolbar">
       <div class="f-group"><label>Тип</label><select id="reportType" class="f-input"><option value="">Все</option><option value="LiveWebinars">Вебинары</option><option value="AutoWebinars">Автовебинары</option></select></div>
       <div class="f-group"><label>Лимит</label><input id="reportLimit" class="f-input" value="100"></div>
-      <div class="f-group"><label>Skip</label><input id="reportSkip" class="f-input" value="0"></div>
+      <div class="f-group"><label>Пропуск</label><input id="reportSkip" class="f-input" value="0"></div>
       <button id="loadReportsBtn" class="btn" type="button">Загрузить отчеты</button>
     </div>
     <div id="reportsList" class="reports"><div class="empty">Загрузка отчетов</div></div>
   </section>
 
   <section id="viewEvents" class="view">
-    <div class="toolbar" style="grid-template-columns:minmax(230px,1fr) minmax(110px,.35fr) auto">
+    <div class="toolbar toolbar--events">
       <div class="f-group"><label>Таблица</label><input id="customerTable" class="f-input mono" readonly></div>
       <div class="f-group"><label>Лимит</label><input id="eventLimit" class="f-input" value="80"></div>
       <button id="loadEventsBtn" class="btn" type="button">Обновить</button>
@@ -90,27 +100,27 @@
 
   <section id="viewWebhook" class="view">
     <div class="panel-body">
-      <div class="hint">Поле Vakas endpoint намеренно пустое. Вставьте нужный endpoint, и он попадет в параметр <code>url</code> готовой ссылки.</div>
-      <div class="form-grid" style="grid-template-columns:minmax(300px,1fr) auto">
-        <div class="f-group"><label>Vakas endpoint</label><input id="webhookForwardUrl" class="f-input mono" placeholder="https://vakas-tools.ru/base/report/..."></div>
+      <div class="hint">Vakas добавляется в параметр <code>url</code>.</div>
+      <div class="form-grid form-grid--webhook">
+        <div class="f-group"><label>Webhook Vakas</label><input id="webhookForwardUrl" class="f-input mono" placeholder="https://vakas-tools.ru/base/report/..."></div>
         <button id="applyForwardBtn" class="btn" type="button">Обновить ссылку</button>
-        <div class="f-group"><label>Готовый webhook Bizon365</label><input id="webhookUrl" class="f-input mono" readonly></div>
+        <div class="f-group"><label>Webhook Bizon365</label><input id="webhookUrl" class="f-input mono" readonly></div>
         <button id="copyWebhookBtn" class="btn btn--primary" type="button">Копировать</button>
       </div>
-      <pre id="webhookMeta" class="pre"></pre>
+      <div id="webhookMeta" class="kv meta-grid"></div>
     </div>
   </section>
 
   <section id="viewSettings" class="view">
     <div class="panel-body">
-      <div id="settingsStatus" class="pre"></div>
+      <div id="settingsStatus" class="status-grid"></div>
       <div class="form-grid">
-        <div class="f-group"><label>Webhook secret</label><input id="webhookSecret" class="f-input mono" autocomplete="off"></div>
+        <div class="f-group"><label>Webhook secret</label><input id="webhookSecret" class="f-input mono" type="password" autocomplete="new-password" placeholder="Не менять"></div>
         <div class="f-group"><label>Bizon365 API token</label><input id="bizonApiToken" class="f-input mono" type="password" autocomplete="new-password" placeholder="Оставьте пустым, если не меняете"></div>
-        <div class="f-group"><label>Bizon365 Project ID</label><input id="projectId" class="f-input mono" autocomplete="off"></div>
-        <div class="f-group"><label>Timeout, секунд</label><input id="requestTimeout" class="f-input" type="number" min="5" max="60"></div>
+        <div class="f-group"><label>Project ID</label><input id="projectId" class="f-input mono" autocomplete="off"></div>
+        <div class="f-group"><label>Тайм-аут, секунд</label><input id="requestTimeout" class="f-input" type="number" min="5" max="60"></div>
       </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
+      <div class="settings-actions">
         <button id="saveSettingsBtn" class="btn btn--primary" type="button">Сохранить настройки</button>
       </div>
     </div>
@@ -146,32 +156,26 @@ function buildWebhookUrl(){
   return url.toString();
 }
 function renderSettings(){
-  $('statusLine').textContent = [
-    settings.bizon_api_token_configured ? 'Bizon API: ok' : 'Bizon API: нет',
-    settings.customer_db_token_configured ? 'Customer DB: ok' : 'Customer DB: нет'
-  ].join(' · ');
+  const ready = settings.bizon_api_token_configured && settings.customer_db_token_configured;
+  $('statusLine').textContent = ready ? 'Готово' : 'Проверьте настройки';
   $('customerTable').value = `${settings.customer_table_display || 'Клиенты Bizon365'} (${settings.customer_table || 'bizon365_clients'})`;
-  $('webhookSecret').value = settings.webhook_secret || '';
+  $('webhookSecret').value = '';
+  $('webhookSecret').disabled = settings.webhook_secret_source === 'env';
+  $('webhookSecret').placeholder = settings.webhook_secret_source === 'env' ? 'Задан в ENV' : 'Не менять';
   $('requestTimeout').value = settings.request_timeout || 20;
   $('projectId').value = settings.project_id || '97242';
-  $('settingsStatus').textContent = JSON.stringify({
-    webhook_secret_source: settings.webhook_secret_source,
-    bizon_api_token_configured: settings.bizon_api_token_configured,
-    customer_db_token_configured: settings.customer_db_token_configured,
-    customer_table: settings.customer_table,
-    attendance_table: settings.attendance_table,
-    project_id: settings.project_id,
-    feed_token: settings.feed_token,
-    allowed_forward_prefix: settings.allowed_forward_prefix,
-    env_path: settings.env_path
-  }, null, 2);
-  $('webhookMeta').textContent = JSON.stringify({
-    method: 'POST',
-    table: settings.customer_table,
-    allowed_forward_prefix: settings.allowed_forward_prefix,
-    url_parameter: 'заполняется только из поля Vakas endpoint',
-    fallback: settings.bizon_api_token_configured ? 'Bizon API включен' : 'Bizon API token не задан'
-  }, null, 2);
+  $('settingsStatus').innerHTML = [
+    ['Bizon API', settings.bizon_api_token_configured],
+    ['Customer DB', settings.customer_db_token_configured],
+    ['Webhook', Boolean(settings.webhook_secret)],
+    ['Проект', Boolean(settings.project_id)]
+  ].map(([label, ok]) => `<div class="status-item"><span>${esc(label)}</span>${badge(ok ? 'ok' : 'bad', ok ? 'готово' : 'не настроено')}</div>`).join('');
+  $('webhookMeta').innerHTML = `
+    <span>Метод</span><span>POST</span>
+    <span>Таблица</span><span>${esc(settings.customer_table || '-')}</span>
+    <span>Vakas</span><span>${esc(settings.allowed_forward_prefix || '-')}</span>
+    <span>Резерв</span><span>${settings.bizon_api_token_configured ? 'Bizon API' : 'не настроен'}</span>
+  `;
   buildWebhookUrl();
 }
 async function loadSettings(){
@@ -182,6 +186,7 @@ async function loadReports(){
   const limit = Math.max(1, Math.min(100, Number($('reportLimit').value || 100)));
   const skip = Math.max(0, Number($('reportSkip').value || 0));
   const type = $('reportType').value;
+  $('loadReportsBtn').disabled = true;
   $('reportsList').innerHTML = '<div class="empty">Загрузка отчетов</div>';
   try {
     const data = await fetchJson(`${API}/reports?limit=${limit}&skip=${skip}&type=${encodeURIComponent(type)}`);
@@ -207,6 +212,8 @@ async function loadReports(){
     document.querySelectorAll('.report-import').forEach(btn => btn.addEventListener('click', () => importReport(btn)));
   } catch(e) {
     $('reportsList').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  } finally {
+    $('loadReportsBtn').disabled = false;
   }
 }
 async function importReport(btn){
@@ -229,46 +236,65 @@ async function importReport(btn){
 }
 async function loadEvents(){
   const limit = Math.max(1, Math.min(200, Number($('eventLimit').value || 80)));
-  const data = await fetchJson(API + '/events?limit=' + limit);
-  const rows = data.items || [];
-  $('eventsTable').innerHTML = rows.map(row => {
-    const forwardBadge = row.forward_url ? (row.forward_ok ? badge('ok', row.forward_status_code || 'ok') : badge('bad', row.forward_status_code || 'fail')) : badge('off','-');
-    return `
-      <tr class="event-row" data-id="${esc(row.id)}">
-        <td>${esc(row.id)}</td>
-        <td class="mono">${esc(row.received_at)}</td>
-        <td>${esc(row.webinar_id || '-')}</td>
-        <td>${esc(row.viewers_source || 'none')}: ${esc(row.viewers_count)} / ${esc(row.records_count)}</td>
-        <td>${row.db_ok ? badge('ok','ok') : badge('bad','fail')}</td>
-        <td>${forwardBadge}</td>
-        <td title="${esc(row.forward_url)}">${esc(row.forward_url || '-')}</td>
-      </tr>
-    `;
-  }).join('') || '<tr><td colspan="7" class="empty">Событий пока нет</td></tr>';
-  document.querySelectorAll('.event-row').forEach(tr => tr.addEventListener('click', () => {
-    if(activeEventRow) activeEventRow.classList.remove('is-active');
-    activeEventRow = tr; tr.classList.add('is-active');
-    const row = rows.find(item => String(item.id) === tr.dataset.id);
-    showEvent(row);
-  }));
+  $('loadEventsBtn').disabled = true;
+  $('eventsTable').innerHTML = '<tr><td colspan="7" class="empty">Загрузка событий</td></tr>';
+  activeEventRow = null;
+  showEvent(null);
+  try {
+    const data = await fetchJson(API + '/events?limit=' + limit);
+    const rows = data.items || [];
+    $('eventsTable').innerHTML = rows.map(row => {
+      const forwardBadge = row.forward_url ? (row.forward_ok ? badge('ok', row.forward_status_code || 'ok') : badge('bad', row.forward_status_code || 'ошибка')) : badge('off','-');
+      return `
+        <tr class="event-row" data-id="${esc(row.id)}" tabindex="0" role="button" aria-label="Событие ${esc(row.id)}">
+          <td data-label="ID">${esc(row.id)}</td>
+          <td data-label="Получен" class="mono">${esc(row.received_at)}</td>
+          <td data-label="Webinar">${esc(row.webinar_id || '-')}</td>
+          <td data-label="Зрители">${esc(row.viewers_source || 'нет')}: ${esc(row.viewers_count)} / ${esc(row.records_count)}</td>
+          <td data-label="DB">${row.db_ok ? badge('ok','ok') : badge('bad','ошибка')}</td>
+          <td data-label="Vakas">${forwardBadge}</td>
+          <td data-label="URL" title="${esc(row.forward_url)}">${esc(row.forward_url || '-')}</td>
+        </tr>
+      `;
+    }).join('') || '<tr><td colspan="7" class="empty">Событий пока нет</td></tr>';
+    document.querySelectorAll('.event-row').forEach(tr => {
+      const open = () => {
+        if(activeEventRow) activeEventRow.classList.remove('is-active');
+        activeEventRow = tr; tr.classList.add('is-active');
+        showEvent(rows.find(item => String(item.id) === tr.dataset.id));
+      };
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', event => {
+        if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); open(); }
+      });
+    });
+  } catch(e) {
+    $('eventsTable').innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`;
+    throw e;
+  } finally {
+    $('loadEventsBtn').disabled = false;
+  }
 }
 function showEvent(row){
-  if(!row){$('eventDetail').innerHTML = '<div class="empty">Выберите событие</div>'; return}
+  if(!row){$('eventDetail').classList.remove('is-open'); $('eventDetail').innerHTML = '<div class="empty">Выберите событие</div>'; return}
   let dbStatus = row.db_status || '';
   try { dbStatus = JSON.stringify(JSON.parse(dbStatus), null, 2); } catch(e) {}
   $('eventDetail').innerHTML = `
+    <button class="btn event-back" type="button">← Журнал</button>
     <div class="kv">
       <span>ID</span><span>${esc(row.id)}</span>
       <span>Получен</span><span class="mono">${esc(row.received_at)}</span>
       <span>Webinar</span><span>${esc(row.webinar_id || '-')}</span>
       <span>Источник</span><span>${esc(row.viewers_source || 'none')}</span>
       <span>Зрители</span><span>${esc(row.viewers_count)} / ${esc(row.records_count)}</span>
-      <span>DB</span><span>${row.db_ok ? 'ok' : 'fail'}</span>
+      <span>DB</span><span>${row.db_ok ? 'ok' : 'ошибка'}</span>
       <span>Vakas</span><span>${row.forward_url ? esc(row.forward_status_code || '-') : '-'}</span>
     </div>
-    <div class="f-group"><label>DB status</label><pre class="pre">${esc(dbStatus)}</pre></div>
-    <div class="f-group"><label>Forward error</label><pre class="pre">${esc(row.forward_error || '')}</pre></div>
+    <div class="f-group"><label>Результат записи</label><pre class="pre">${esc(dbStatus)}</pre></div>
+    <div class="f-group"><label>Ошибка Vakas</label><pre class="pre">${esc(row.forward_error || '')}</pre></div>
   `;
+  $('eventDetail').classList.add('is-open');
+  $('eventDetail').querySelector('.event-back').addEventListener('click', () => $('eventDetail').classList.remove('is-open'));
 }
 
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
@@ -276,27 +302,37 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
   document.querySelectorAll('.view').forEach(v => v.classList.remove('is-active'));
   btn.classList.add('is-active');
   $('view' + btn.dataset.view[0].toUpperCase() + btn.dataset.view.slice(1)).classList.add('is-active');
+  if(btn.dataset.view !== 'events') showEvent(null);
   if(btn.dataset.view === 'reports') loadReports();
   if(btn.dataset.view === 'events') loadEvents().catch(e => notify(e.message, 'bad'));
   if(btn.dataset.view === 'webhook') renderSettings();
   if(btn.dataset.view === 'settings') loadSettings().catch(e => notify(e.message, 'bad'));
 }));
-$('refreshBtn').addEventListener('click', () => Promise.all([loadSettings(), loadReports(), loadEvents()]).catch(e => notify(e.message, 'bad')));
+$('refreshBtn').addEventListener('click', async () => {
+  $('refreshBtn').disabled = true;
+  $('statusLine').textContent = 'Обновление';
+  try { await Promise.all([loadSettings(), loadReports(), loadEvents()]); }
+  catch(e) { $('statusLine').textContent = 'Ошибка'; notify(e.message, 'bad'); }
+  finally { $('refreshBtn').disabled = false; }
+});
 $('loadReportsBtn').addEventListener('click', loadReports);
 $('loadEventsBtn').addEventListener('click', () => loadEvents().catch(e => notify(e.message, 'bad')));
 $('applyForwardBtn').addEventListener('click', buildWebhookUrl);
 $('copyWebhookBtn').addEventListener('click', async () => {
-  buildWebhookUrl();
-  await navigator.clipboard.writeText($('webhookUrl').value);
-  notify('Webhook URL скопирован', 'ok');
+  try {
+    buildWebhookUrl();
+    await navigator.clipboard.writeText($('webhookUrl').value);
+    notify('Webhook скопирован', 'ok');
+  } catch(e) { notify('Не удалось скопировать', 'bad'); }
 });
 $('saveSettingsBtn').addEventListener('click', async () => {
   try {
     const payload = {
-      webhook_secret: $('webhookSecret').value.trim(),
       project_id: $('projectId').value.trim(),
       request_timeout: Number($('requestTimeout').value || 20)
     };
+    const secret = $('webhookSecret').value.trim();
+    if(secret) payload.webhook_secret = secret;
     const token = $('bizonApiToken').value.trim();
     if(token) payload.bizon_api_token = token;
     settings = await fetchJson(API + '/settings', {

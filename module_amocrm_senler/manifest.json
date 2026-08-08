@@ -1,7 +1,7 @@
 {
   "id": "amocrm-senler",
   "name": "amoCRM -> Senler",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Принимает webhook amoCRM по сделкам, добавляет VK-подписчика в нужную группу Senler и записывает переменные amo_responsible/amo_deal_id.",
   "env_vars": {
     "SENLER_ACCESS_TOKEN": "Токен API Senler. Senler -> Настройки -> API -> Токен доступа",

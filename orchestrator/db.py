@@ -1,3 +1,5 @@
+import json
+
 import aiosqlite
 from pathlib import Path
 
@@ -76,6 +78,40 @@ async def upsert_module(meta: dict):
             meta,
         )
         await db.commit()
+
+
+async def replace_module(old_id: str, meta: dict):
+    """Atomically replace a module ID and preserve explicit user access."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute(
+                """INSERT INTO modules (id, name, version, description, status, installed_at, manifest_json)
+                   VALUES (:id, :name, :version, :description, :status, :installed_at, :manifest_json)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=excluded.name, version=excluded.version,
+                     description=excluded.description, status=excluded.status,
+                     installed_at=excluded.installed_at, manifest_json=excluded.manifest_json""",
+                meta,
+            )
+            rows = await (await db.execute("SELECT id,module_access FROM users")).fetchall()
+            for user_id, raw_access in rows:
+                try:
+                    access = json.loads(raw_access or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(access, list) or old_id not in access:
+                    continue
+                updated = list(dict.fromkeys(meta["id"] if value == old_id else value for value in access))
+                await db.execute(
+                    "UPDATE users SET module_access=? WHERE id=?",
+                    (json.dumps(updated, ensure_ascii=False), user_id),
+                )
+            await db.execute("DELETE FROM modules WHERE id=?", (old_id,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def update_module_status(module_id: str, status: str):

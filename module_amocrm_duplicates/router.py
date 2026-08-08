@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 import httpx
@@ -27,6 +28,9 @@ FALLBACK_POLL_INTERVAL_SECONDS = 15
 FALLBACK_POLL_LOOKBACK_SECONDS = 15 * 60
 TERMINAL_STATES = {"completed", "ignored", "no_data", "failed"}
 LEAD_KEY_RE = re.compile(r"^leads\[add\]\[(?P<idx>\d+)\]\[(?P<field>[^\]]+)\]$")
+PLATFORM_ID_RE = re.compile(r"(?<!\d)-?\d{5,20}(?!\d)")
+AI_NOTE_TITLE = "Общение с ИИ:"
+AI_NOTE_TITLES = (AI_NOTE_TITLE, "Краткая сводка диалога")
 
 _db_path: str | None = None
 _module_dir: Path | None = None
@@ -38,6 +42,7 @@ _poll_last_error = ""
 _poll_last_seen = 0
 _poll_waiting_unsorted = 0
 _poll_last_resumed = 0
+_ai_lock = asyncio.Lock()
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -67,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "base_tags": ["Дубль?"],
     "copy_responsible_from_latest_duplicate": False,
     "state_rules": [],
+    "ai": {"openrouter_summary_enabled": False},
 }
 
 
@@ -267,6 +273,7 @@ def _clean_tags(value: Any) -> list[str]:
 
 def _clean_config(raw: Any) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
+    ai = data.get("ai") if isinstance(data.get("ai"), dict) else {}
     source = data.get("source_scope") if isinstance(data.get("source_scope"), dict) else {}
     search = data.get("search") if isinstance(data.get("search"), dict) else {}
     groups: list[dict[str, Any]] = []
@@ -341,6 +348,7 @@ def _clean_config(raw: Any) -> dict[str, Any]:
             data.get("copy_responsible_from_latest_duplicate")
         ),
         "state_rules": state_rules,
+        "ai": {"openrouter_summary_enabled": _bool(ai.get("openrouter_summary_enabled"))},
     }
     if config["enabled"]:
         if not groups:
@@ -460,6 +468,106 @@ def _entity_values(entity: dict[str, Any], condition: dict[str, Any]) -> list[st
             if text:
                 values.append(text)
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _platform_ids_from_utm(lead: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for field in lead.get("custom_fields_values") or []:
+        if not isinstance(field, dict):
+            continue
+        code = _clean(field.get("field_code") or field.get("code"), 120).upper()
+        name = _clean(field.get("field_name") or field.get("name"), 300).casefold()
+        if code != "UTM_TERM" and name != "utm_term":
+            continue
+        for item in field.get("values") or []:
+            value = item.get("value") if isinstance(item, dict) else item
+            values.extend(PLATFORM_ID_RE.findall(_clean(value, 4000)))
+    return list(dict.fromkeys(values))
+
+
+def _openrouter_db() -> Path | None:
+    if not _module_dir:
+        return None
+    return _module_dir.parent / "openrouter" / "data" / "openrouter.db"
+
+
+async def _openrouter_summary(platform_ids: list[str]) -> tuple[str, str, str]:
+    db_path = _openrouter_db()
+    if not db_path or not db_path.is_file() or not platform_ids:
+        return "", "", ""
+    try:
+        async with aiosqlite.connect(str(db_path)) as db:
+            for platform_id in platform_ids:
+                cur = await db.execute(
+                    "SELECT summary FROM users WHERE platform_id=? AND trim(summary)<>''",
+                    (platform_id,),
+                )
+                row = await cur.fetchone()
+                summary = _clean(row[0] if row else "", 50000)
+                if summary:
+                    return platform_id, summary, ""
+    except Exception as exc:
+        return "", "", str(exc)
+    return "", "", ""
+
+
+def _ai_note_text(summary: str) -> str:
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", _clean(summary, 50000)).strip()
+    return f"{AI_NOTE_TITLE}\n\n{text}"
+
+
+async def _ai_note_exists(lead_id: int, config: dict[str, Any]) -> tuple[bool, str]:
+    path = f"/api/v4/leads/{lead_id}/notes?filter[note_type]=common&limit=250"
+    for _ in range(20):
+        body, error, _ = await _amo_request("GET", path, config)
+        if error:
+            return False, error
+        for note in ((((body or {}).get("_embedded") or {}).get("notes")) or []):
+            text = _clean(((note.get("params") or {}).get("text")), 60000)
+            if text.startswith(AI_NOTE_TITLES):
+                return True, ""
+        next_href = _clean((((body or {}).get("_links") or {}).get("next") or {}).get("href"), 3000)
+        if not next_href:
+            return False, ""
+        parsed = urlparse(next_href)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+    return False, "Не удалось проверить все примечания сделки"
+
+
+async def _apply_ai_summary(
+    lead_id: int,
+    lead: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    if not ((config.get("ai") or {}).get("openrouter_summary_enabled")):
+        return {"state": "disabled"}
+    platform_ids = _platform_ids_from_utm(lead)
+    if not platform_ids:
+        return {"state": "no_platform_id"}
+    platform_id, summary, error = await _openrouter_summary(platform_ids)
+    if error:
+        return {"state": "error", "error": error}
+    if not summary:
+        return {"state": "no_summary"}
+    async with _ai_lock:
+        exists, error = await _ai_note_exists(lead_id, config)
+        if error:
+            return {"state": "error", "platform_id": platform_id, "error": error}
+        if exists:
+            return {"state": "already_added", "platform_id": platform_id}
+        if dry_run:
+            return {"state": "ready", "platform_id": platform_id}
+        _body, error, _ = await _amo_request(
+            "POST",
+            f"/api/v4/leads/{lead_id}/notes",
+            config,
+            [{"note_type": "common", "params": {"text": _ai_note_text(summary)}}],
+        )
+        if error:
+            return {"state": "error", "platform_id": platform_id, "error": error}
+        return {"state": "created", "platform_id": platform_id}
 
 
 def _is_phone(condition: dict[str, Any]) -> bool:
@@ -951,6 +1059,7 @@ async def _process_lead(lead_id: int, received_at: str | None = None) -> None:
     delays = RETRY_DELAYS
     last_error = ""
     last_details: dict[str, Any] = {}
+    ai_checked = False
     for attempt, delay in enumerate(delays, 1):
         remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
         if remaining <= delay:
@@ -976,6 +1085,10 @@ async def _process_lead(lead_id: int, received_at: str | None = None) -> None:
                 source_pipeline_id=_clean(lead.get("pipeline_id"), 64),
                 source_status_id=_clean(lead.get("status_id"), 64),
             )
+            if lead and not ai_checked:
+                ai_result = await _apply_ai_summary(lead_id, lead, config)
+                details["ai"] = ai_result
+                ai_checked = ai_result.get("state") not in {"no_platform_id", "error"}
         if outcome == "ignored":
             await _event_update(lead_id, state="ignored", finished_at=_now(), details_json=details, error="")
             return
@@ -1278,6 +1391,52 @@ async def _register_event(item: dict[str, str], raw_payload: str) -> tuple[bool,
     return True, "queued"
 
 
+async def _today_leads(config: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    zone = ZoneInfo("Europe/Moscow")
+    now = datetime.now(zone)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    path = "/api/v4/leads?" + urlencode(
+        [
+            ("filter[created_at][from]", str(int(start.timestamp()))),
+            ("filter[created_at][to]", str(int(now.timestamp()))),
+            ("limit", "250"),
+        ]
+    )
+    leads: list[dict[str, Any]] = []
+    for _ in range(20):
+        body, error, _ = await _amo_request("GET", path, config)
+        if error:
+            return [], error
+        leads.extend(
+            item
+            for item in ((((body or {}).get("_embedded") or {}).get("leads")) or [])
+            if isinstance(item, dict)
+        )
+        next_href = _clean((((body or {}).get("_links") or {}).get("next") or {}).get("href"), 3000)
+        if not next_href:
+            break
+        parsed = urlparse(next_href)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+    return leads, ""
+
+
+async def _backfill_ai_today(config: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    leads, error = await _today_leads(config)
+    if error:
+        raise HTTPException(502, error)
+    counts: dict[str, int] = {"total": len(leads)}
+    errors: list[dict[str, Any]] = []
+    for lead in leads:
+        lead_id = _int(lead.get("id"))
+        result = await _apply_ai_summary(lead_id, lead, config, dry_run=dry_run)
+        state = _clean(result.get("state"), 40) or "error"
+        counts[state] = counts.get(state, 0) + 1
+        if state == "error":
+            errors.append({"lead_id": lead_id, "error": _clean(result.get("error"), 1000)})
+        await asyncio.sleep(0.15)
+    return {"ok": not errors, "dry_run": dry_run, "counts": counts, "errors": errors[:20]}
+
+
 @router.get("/health")
 async def health() -> dict[str, Any]:
     env = _env()
@@ -1338,6 +1497,15 @@ async def get_events(request: Request, limit: int = 150) -> dict[str, Any]:
     for row in rows:
         row["tags"] = _loads(row.pop("tags_json", "[]"), [])
     return {"items": rows}
+
+
+@router.post("/ai/backfill-today")
+async def backfill_ai_today(request: Request, dry_run: int = 0) -> dict[str, Any]:
+    await _require_user(request)
+    config = await _config()
+    if not ((config.get("ai") or {}).get("openrouter_summary_enabled")):
+        raise HTTPException(400, "Включите добавление сводки")
+    return await _backfill_ai_today(config, bool(dry_run))
 
 
 @router.get("/events/{event_id}")

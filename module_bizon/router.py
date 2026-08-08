@@ -746,7 +746,7 @@ async def _script_room_rows() -> dict[str, dict[str, Any]]:
 
 def _script_urls() -> dict[str, str]:
     public_api = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/api/public"
-    script_src = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/static/moderator_openrouter_pm.js?v=1.1.23"
+    script_src = f"{PUBLIC_NEXUS_BASE}/{MODULE_ID}/static/moderator_openrouter_pm.js?v=1.1.24"
     return {"public_api": public_api, "script_src": script_src}
 
 

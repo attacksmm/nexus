@@ -98,6 +98,36 @@ class TelegramEventWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event[3:], (1, "ok"))
         self.assertEqual(source, (2, 1, 1, 0))
 
+    async def test_start_event_claims_saved_attribution(self):
+        payload = {
+            "update_id": 503,
+            "message": {
+                "message_id": 8,
+                "from": {"id": 777, "username": "tester"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "/start n_AbCdEf0123456789",
+            },
+        }
+        calls = []
+        original = router._claim_attribution
+
+        async def claim(data):
+            calls.append(data)
+            return "applied"
+
+        router._claim_attribution = claim
+        try:
+            response = await router.webhook(
+                "source-uuid", request_for(json.dumps(payload, ensure_ascii=False).encode())
+            )
+        finally:
+            router._claim_attribution = original
+        self.assertEqual(json.loads(response.body)["attribution"], "applied")
+        self.assertEqual(calls, [{
+            "token": "AbCdEf0123456789",
+            "tg_user_id": "777",
+        }])
+
     async def test_wrong_secret_is_rejected_without_database_write(self):
         response = await router.webhook("source-uuid", request_for(b'{"update_id":502}', "wrong"))
         self.assertEqual(response.status_code, 401)

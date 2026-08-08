@@ -83,6 +83,7 @@ DEFAULT_SETTINGS = {
     "budget_source": "paid",
     "minicourse_curator_mediums": "irina\nslava\nnastasia",
 }
+MAX_MANUAL_SYNC_LIMIT = 10
 
 MINICOURSE_PIPELINE_ID = "8493006"
 MINICOURSE_PAID_STATUS_ID = "69046790"
@@ -2720,9 +2721,9 @@ async def customer_db_sync_status(request: Request):
 
 
 @router.post("/sync/customer-db/run")
-async def customer_db_sync_run(request: Request, backfill: int = 0, limit: int = 50):
+async def customer_db_sync_run(request: Request, backfill: int = 0, limit: int = MAX_MANUAL_SYNC_LIMIT):
     await _require_panel_user(request)
-    return await _sync_customer_db_once(backfill=bool(backfill), limit=limit)
+    return await _sync_customer_db_once(backfill=bool(backfill), limit=max(1, min(MAX_MANUAL_SYNC_LIMIT, int(limit))))
 
 
 @router.api_route("/webhook", methods=["GET", "POST"])

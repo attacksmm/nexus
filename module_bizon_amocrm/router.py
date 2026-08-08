@@ -143,7 +143,7 @@ class BindingIn(BaseModel):
     click_status_id: str = ""
     pipeline_scope: list[str] = []
     status_scope: list[str] = []
-    duplicate_action: str = "merge_empty"
+    duplicate_action: str = "note_only"
     duplicate_rules: list[dict[str, Any]] = []
     exclude_conditions: list[dict[str, Any]] = []
     note_only_status_ids: list[str] = []
@@ -1659,8 +1659,9 @@ async def save_binding(data: BindingIn, request: Request):
         raise HTTPException(400, "Выберите хотя бы одну воронку поиска дублей")
     if not data.responsible_user_ids:
         raise HTTPException(400, "Выберите ответственных для round-robin")
-    if data.duplicate_action not in {"update", "merge_empty", "note_only", "skip", "create"}:
-        raise HTTPException(400, "invalid duplicate_action")
+    duplicate_action = _clean(data.duplicate_action, 30) or "note_only"
+    if duplicate_action not in {"update", "merge_empty", "note_only", "skip", "create"}:
+        raise HTTPException(400, "Неизвестное действие для найденной сделки")
     for index, rule in enumerate(data.duplicate_rules or DEFAULT_DUPLICATE_RULES):
         if not isinstance(rule, dict):
             raise HTTPException(400, f"Правило дублей #{index + 1} должно быть объектом")
@@ -1701,7 +1702,7 @@ async def save_binding(data: BindingIn, request: Request):
         min_minutes, min_minutes, max_minutes, _clean(data.pipeline_id, 50), _clean(data.status_id, 50),
         _clean(data.click_status_id, 50),
         json.dumps(data.pipeline_scope, ensure_ascii=False), json.dumps(data.status_scope, ensure_ascii=False),
-        data.duplicate_action, json.dumps(data.duplicate_rules or DEFAULT_DUPLICATE_RULES, ensure_ascii=False),
+        duplicate_action, json.dumps(data.duplicate_rules or DEFAULT_DUPLICATE_RULES, ensure_ascii=False),
         json.dumps(normalized_exclude_conditions, ensure_ascii=False),
         json.dumps(data.note_only_status_ids, ensure_ascii=False),
         json.dumps(data.responsible_user_ids, ensure_ascii=False), json.dumps(data.tags, ensure_ascii=False),

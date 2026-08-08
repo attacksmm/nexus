@@ -43,7 +43,7 @@
     .split{display:grid;grid-template-columns:minmax(0,1fr) 360px;min-height:0;flex:1;overflow:hidden}.side{border-left:1px solid var(--border);background:var(--panel);overflow:auto;padding:12px;display:grid;align-content:start;gap:10px}.kv{display:grid;grid-template-columns:128px 1fr;gap:5px 10px}.kv span:first-child{color:var(--subtle)}.pre{margin:0;padding:10px;background:#030303;border:1px solid var(--border);white-space:pre-wrap;word-break:break-word;color:var(--muted);max-height:340px;overflow:auto}.panel-body{padding:14px;display:grid;gap:12px;overflow:auto;min-width:0}.event-row{cursor:pointer}.event-row.is-active td{background:var(--panel-soft);border-bottom-color:var(--border-strong)}
     @media(max-width:1180px){.form-grid{grid-template-columns:170px minmax(230px,1fr) 160px minmax(170px,1fr)}.form-actions{grid-column:1 / -1}}
     @media(max-width:900px){.form-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
-    @media(max-width:760px){.form-grid{grid-template-columns:1fr}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
+    @media(max-width:760px){.tab{height:40px;padding:0 12px}.form-grid{grid-template-columns:1fr}.f-input,.select-btn{min-height:40px}.btn,.btn--sm{min-height:40px;padding:7px 12px}.split{grid-template-columns:1fr}.side{border-left:0;border-top:1px solid var(--border);max-height:42vh}}
   </style>
 </head>
 <body>
@@ -168,6 +168,15 @@ async function fetchJson(url, opts){
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || 'Ошибка запроса');
   return data;
+}
+
+async function withButtonBusy(button, busyText, action){
+  if (button?.disabled) return;
+  const label = button?.textContent || '';
+  if (button) { button.disabled = true; button.textContent = busyText; }
+  try { return await action(); }
+  catch (e) { notify(e.message || 'Ошибка запроса', 'error'); }
+  finally { if (button) { button.disabled = false; button.textContent = label; } }
 }
 
 async function loadSettings(){
@@ -297,8 +306,7 @@ function clearBindingForm(){
   selectedStatuses.clear(); $('category').dispatchEvent(new Event('change')); renderStatusList();
 }
 $('newBindingBtn').addEventListener('click', clearBindingForm);
-$('saveBindingBtn').addEventListener('click', async () => {
-  try {
+$('saveBindingBtn').addEventListener('click', event => withButtonBusy(event.currentTarget, 'Сохранение…', async () => {
     const category = $('category').value;
     const statuses = [...selectedStatuses.values()];
     if (category !== 'created' && !statuses.length) throw new Error('Выберите статусы amoCRM галочками');
@@ -315,11 +323,11 @@ $('saveBindingBtn').addEventListener('click', async () => {
         active:true
       })
     });
-    clearBindingForm(); loadBindings(); notify('Связка сохранена', 'ok');
-  } catch(e) { notify(e.message, 'error'); }
-});
+    clearBindingForm(); await loadBindings(); notify('Связка сохранена', 'ok');
+}));
 
 async function loadBindings(){
+  $('bindingsTable').innerHTML = '<tr><td colspan="8" class="empty">Загрузка…</td></tr>';
   bindings = await fetchJson(API + '/bindings').catch(e => (notify(e.message, 'error'), []));
   const tb = $('bindingsTable');
   if (!bindings.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Связок нет</td></tr>'; return; }
@@ -333,8 +341,8 @@ async function loadBindings(){
     <td><span class="badge ${b.active ? 'badge--ok' : 'badge--off'}">${b.active ? 'активна' : 'откл'}</span></td>
     <td style="display:flex;gap:4px;overflow:visible">
       <button class="btn btn--sm btn--ghost" onclick="editBinding(${b.id})">Править</button>
-      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id})">${b.active ? 'Откл' : 'Вкл'}</button>
-      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id})">×</button>
+      <button class="btn btn--sm btn--ghost" onclick="toggleBinding(${b.id},this)">${b.active ? 'Откл' : 'Вкл'}</button>
+      <button class="btn btn--sm btn--danger" onclick="deleteBinding(${b.id},this)">×</button>
     </td>
   </tr>`).join('');
 }
@@ -350,12 +358,13 @@ window.editBinding = async id => {
   $('category').dispatchEvent(new Event('change'));
   renderStatusList();
 };
-window.toggleBinding = async id => { await fetchJson(API + `/bindings/${id}/toggle`, {method:'PUT'}); loadBindings(); };
-window.deleteBinding = async id => { if (!confirm('Удалить связку?')) return; await fetchJson(API + `/bindings/${id}`, {method:'DELETE'}); loadBindings(); };
+window.toggleBinding = async (id, button) => withButtonBusy(button, '…', async () => { await fetchJson(API + `/bindings/${id}/toggle`, {method:'PUT'}); await loadBindings(); });
+window.deleteBinding = async (id, button) => { if (!confirm('Удалить связку?')) return; await withButtonBusy(button, 'Удаление…', async () => { await fetchJson(API + `/bindings/${id}`, {method:'DELETE'}); await loadBindings(); }); };
 
 $('loadEventsBtn').addEventListener('click', loadEvents);
 $('eventFilter').addEventListener('change', loadEvents);
 async function loadEvents(){
+  $('eventsTable').innerHTML = '<tr><td colspan="6" class="empty">Загрузка…</td></tr>';
   const qs = new URLSearchParams({limit:$('eventLimit').value || '200', result:$('eventFilter').value});
   const list = await fetchJson(API + '/events?' + qs).catch(e => (notify(e.message, 'error'), []));
   const tb = $('eventsTable');

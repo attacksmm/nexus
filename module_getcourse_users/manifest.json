@@ -1,7 +1,7 @@
 {
   "id": "getcourse-users",
   "name": "GetCourse → Пользователи",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Принимает пользователей из процесса GetCourse и без дублей обновляет таблицу «Клиенты GetCourse».",
   "env_required": [],
   "env_vars": {

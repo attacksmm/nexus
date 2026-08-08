@@ -47,6 +47,10 @@ router = load_router()
 
 
 class SheetRowsTest(unittest.TestCase):
+    def test_retry_batch_is_small_and_recovers_interrupted_events(self):
+        self.assertEqual(router.DEFAULT_RETRY_LIMIT, 10)
+        self.assertEqual(router.RETRY_STATUSES, ("failed", "received"))
+
     def test_write_throttle_stays_above_two_seconds(self):
         self.assertGreaterEqual(router.WRITE_THROTTLE_SECONDS, 2.0)
 

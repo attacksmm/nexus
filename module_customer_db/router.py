@@ -4,6 +4,7 @@ customer-db v2.0.0
 Поддерживает несколько именованных таблиц.
 """
 import hashlib
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from orchestrator.auth import can_access_module, verify_token_from_request
 router = APIRouter()
 _db_path = None
 _logger: logging.Logger | None = None
+_archive_initialized = False
 
 SAFE_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
 PLACEHOLDER_VALUE = re.compile(r"^#\{[^{}]+\}$")
@@ -72,8 +74,6 @@ async def _connect_db():
     db = await aiosqlite.connect(_db_path, timeout=30)
     try:
         await db.execute("PRAGMA busy_timeout=30000")
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=FULL")
         yield db
     finally:
         await db.close()
@@ -83,7 +83,6 @@ def setup(ctx):
     global _db_path, _logger
     _db_path = ctx.db_path
     _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.customer-db"))
-    import asyncio
     loop = asyncio.get_event_loop()
     if loop.is_running():
         loop.create_task(_init_db())
@@ -121,20 +120,23 @@ def _retention_cutoff(months: int = HOT_RETENTION_MONTHS) -> str:
 
 @asynccontextmanager
 async def _connect_archive_db():
+    global _archive_initialized
     path = _archive_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     db = await aiosqlite.connect(path, timeout=30)
     try:
         await db.execute("PRAGMA busy_timeout=30000")
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=FULL")
-        await _init_archive_db(db)
+        if not _archive_initialized:
+            await _init_archive_db(db)
+            _archive_initialized = True
         yield db
     finally:
         await db.close()
 
 
 async def _init_archive_db(db: aiosqlite.Connection):
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA synchronous=FULL")
     await db.executescript("""
         CREATE TABLE IF NOT EXISTS archive_records (
             table_name TEXT NOT NULL,
@@ -166,6 +168,8 @@ async def _init_archive_db(db: aiosqlite.Connection):
 
 async def _init_db():
     async with _connect_db() as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=FULL")
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS _cdb_tables (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,6 +194,7 @@ async def _init_db():
             if SAFE_NAME.match(name):
                 await db.execute(_create_table_sql(name))
                 await db.execute(_create_index_sql(name))
+                await db.execute(_create_created_index_sql(name))
         await db.commit()
 
 
@@ -207,6 +212,10 @@ def _create_table_sql(name: str) -> str:
 
 def _create_index_sql(name: str) -> str:
     return f"CREATE INDEX IF NOT EXISTS idx_cdb_{name}_platform_id ON cdb_{name} (platform_id);"
+
+
+def _create_created_index_sql(name: str) -> str:
+    return f"CREATE INDEX IF NOT EXISTS idx_cdb_{name}_created_id ON cdb_{name} (created_at DESC, id DESC);"
 
 
 def _log(level: str, message: str, *args):
@@ -663,6 +672,9 @@ async def _aggregate_records(
     if not tables:
         return [], 0
 
+    if not q:
+        return await _aggregate_records_fallback(db, tables=tables, q=q, limit=limit, offset=offset)
+
     row_selects: list[str] = []
     row_params: list[object] = []
     count_selects: list[str] = []
@@ -721,7 +733,7 @@ async def _aggregate_records_fallback(
         try:
             cur = await db.execute(
                 f"SELECT id, platform_id, custom_fields, created_at, updated_at FROM cdb_{name}{where} "
-                "ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
                 [*params, row_limit],
             )
             for row in await cur.fetchall():

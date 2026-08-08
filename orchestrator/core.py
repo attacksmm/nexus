@@ -15,7 +15,7 @@ from types import ModuleType
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from orchestrator.db import get_modules_by_status, update_module_status, upsert_module
+from orchestrator.db import get_modules_by_status, replace_module, update_module_status, upsert_module
 from orchestrator.lifecycle import LifecycleSupervisor
 
 MODULES_DIR = Path(__file__).parent.parent / "modules"
@@ -57,6 +57,7 @@ class ModuleManager:
         self.base_dir = base_dir
         self._loaded: dict[str, ModuleType] = {}
         self._contexts: dict[str, ModuleContext] = {}
+        self._aliases: dict[str, list[str]] = {}
         self._supervisor = LifecycleSupervisor()
         self._env_restart_lock = asyncio.Lock()
 
@@ -79,8 +80,15 @@ class ModuleManager:
         module_id = manifest["id"]
         module_dir = MODULES_DIR / module_id
         rollback_dir = MODULES_DIR / f".rollback-{module_id}-{uuid.uuid4().hex}"
-        old_meta = next((row for row in await get_modules_by_status() if row["id"] == module_id), None)
+        modules = await get_modules_by_status()
+        old_meta = next((row for row in modules if row["id"] == module_id), None)
         old_exists = module_dir.exists()
+        replaced_id = str(manifest.get("replaces") or "").strip()
+        replaced_dir = MODULES_DIR / replaced_id if replaced_id else None
+        replacing = bool(replaced_id and replaced_id != module_id and not old_exists and replaced_dir and replaced_dir.exists())
+        replaced_meta = next((row for row in modules if row["id"] == replaced_id), None) if replacing else None
+        replaced_rollback = MODULES_DIR / f".rollback-{replaced_id}-{uuid.uuid4().hex}" if replacing else None
+        migrated_db = staging_dir / "data" / f"{module_id}.db"
         meta = {
             "id": module_id,
             "name": manifest["name"],
@@ -92,7 +100,19 @@ class ModuleManager:
         }
         try:
             await self._unmount_module(module_id, app)
-            if old_exists:
+            if replacing:
+                await self._unmount_module(replaced_id, app)
+                replaced_dir.rename(replaced_rollback)
+                old_data = replaced_rollback / "data"
+                if old_data.exists():
+                    staged_data = staging_dir / "data"
+                    if staged_data.exists():
+                        shutil.rmtree(staged_data)
+                    old_data.rename(staged_data)
+                    old_db = staged_data / f"{replaced_id}.db"
+                    if old_db.exists():
+                        old_db.rename(migrated_db)
+            elif old_exists:
                 module_dir.rename(rollback_dir)
                 old_data = rollback_dir / "data"
                 if old_data.exists():
@@ -102,13 +122,32 @@ class ModuleManager:
                     old_data.rename(staged_data)
             staging_dir.rename(module_dir)
             await self._mount_module(module_id, module_dir, app)
-            await upsert_module(meta)
+            if replacing:
+                await replace_module(replaced_id, meta)
+            else:
+                await upsert_module(meta)
         except Exception:
             await self._unmount_module(module_id, app)
             failed_dir = MODULES_DIR / f".failed-{module_id}-{uuid.uuid4().hex}"
             if module_dir.exists():
                 module_dir.rename(failed_dir)
-            if old_exists and rollback_dir.exists():
+            if replacing and replaced_rollback and replaced_rollback.exists():
+                failed_data = failed_dir / "data"
+                staged_data = staging_dir / "data"
+                recovered_data = failed_data if failed_data.exists() else staged_data
+                if recovered_data.exists():
+                    new_db = recovered_data / f"{module_id}.db"
+                    old_db = recovered_data / f"{replaced_id}.db"
+                    if new_db.exists() and not old_db.exists():
+                        new_db.rename(old_db)
+                    rollback_data = replaced_rollback / "data"
+                    if rollback_data.exists():
+                        shutil.rmtree(rollback_data)
+                    recovered_data.rename(rollback_data)
+                replaced_rollback.rename(replaced_dir)
+                if replaced_meta and replaced_meta.get("status") == "active":
+                    await self._mount_module(replaced_id, replaced_dir, app)
+            elif old_exists and rollback_dir.exists():
                 failed_data = failed_dir / "data"
                 staged_data = staging_dir / "data"
                 recovered_data = failed_data if failed_data.exists() else staged_data
@@ -128,6 +167,8 @@ class ModuleManager:
         else:
             if rollback_dir.exists():
                 shutil.rmtree(rollback_dir, ignore_errors=True)
+            if replaced_rollback and replaced_rollback.exists():
+                shutil.rmtree(replaced_rollback, ignore_errors=True)
             return meta
 
     async def pause(self, module_id: str, app: FastAPI):
@@ -301,6 +342,16 @@ class ModuleManager:
     async def _mount_module(self, module_id: str, module_dir: Path, app: FastAPI):
         await self._unmount_module(module_id, app)
 
+        aliases: list[str] = []
+        try:
+            manifest = json.loads((module_dir / "manifest.json").read_text(encoding="utf-8"))
+            replaced_id = str(manifest.get("replaces") or "").strip()
+            if replaced_id and replaced_id != module_id and replaced_id.replace("-", "_").isidentifier():
+                aliases.append(replaced_id)
+        except (OSError, ValueError, TypeError):
+            pass
+        self._aliases[module_id] = aliases
+
         router_file = module_dir / "router.py"
         if router_file.exists():
             mod = self._import_module_file(module_id, router_file)
@@ -329,6 +380,8 @@ class ModuleManager:
                 raise
             if hasattr(mod, "router"):
                 app.include_router(mod.router, prefix=f"/{module_id}/api")
+                for alias in aliases:
+                    app.include_router(mod.router, prefix=f"/{alias}/api")
             ctx.logger.info(f"Module {module_id} active")
 
         for d, suffix in [(module_dir / "panel", "panel"), (module_dir / "static", "static")]:
@@ -341,8 +394,19 @@ class ModuleManager:
                     )
                 except Exception:
                     pass
+            if d.exists() and suffix == "static":
+                for alias in aliases:
+                    try:
+                        app.mount(
+                            f"/{alias}/static",
+                            StaticFiles(directory=str(d), html=True),
+                            name=f"mod_{module_id}_alias_{alias}_static",
+                        )
+                    except Exception:
+                        pass
 
     async def _unmount_module(self, module_id: str, app: FastAPI):
+        aliases = self._aliases.pop(module_id, [])
         mod = self._loaded.pop(module_id, None)
         ctx = self._contexts.pop(module_id, None)
         lifecycle = ctx.lifecycle if ctx is not None else self._supervisor.get(module_id)
@@ -365,7 +429,10 @@ class ModuleManager:
             await self._supervisor.unregister(module_id, lifecycle)
         sys.modules.pop(f"_nexus_mod_{module_id}", None)
 
-        prefixes = (f"/{module_id}/api", f"/{module_id}/panel", f"/{module_id}/static")
+        prefixes = [f"/{module_id}/api", f"/{module_id}/panel", f"/{module_id}/static"]
+        for alias in aliases:
+            prefixes.extend((f"/{alias}/api", f"/{alias}/static"))
+        prefixes = tuple(prefixes)
         app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path.startswith(prefixes))]
         app.router.routes[:] = [r for r in app.router.routes if not (hasattr(r, "path") and r.path.startswith(prefixes))]
 

@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -27,6 +30,10 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 30
 MAX_RETENTION_DAYS = 365
 MAX_PAGE_SIZE = 200
+ATTRIBUTION_CLAIM_URL = os.environ.get(
+    "SENLER_TELEGRAM_ATTRIBUTION_CLAIM_URL",
+    "https://junior.sobakovod.pro/nexus/senler/api/telegram-attribution/claim",
+).strip()
 
 _db_path: Path | None = None
 _logger: logging.Logger | None = None
@@ -311,6 +318,55 @@ def _event_type(payload: dict[str, Any]) -> str:
         if key in payload and payload.get(key) is not None:
             return key
     return next((str(key) for key in payload if key != "update_id"), "unknown")
+
+
+def _attribution_claim(payload: dict[str, Any]) -> dict[str, str] | None:
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return None
+    text = str(message.get("text") or "").strip()
+    short_match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]+)?\s+n_([A-Za-z0-9_-]{12,80})", text)
+    legacy_match = re.fullmatch(
+        r"/start(?:@[A-Za-z0-9_]+)?\s+s=(\d{1,24})-utm_term=n_([A-Za-z0-9_-]{12,80})",
+        text,
+    )
+    client_match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]+)?\s+s=(\d{1,24})(?:-(.*))?", text)
+    actor = message.get("from") if isinstance(message.get("from"), dict) else {}
+    tg_user_id = str(actor.get("id") or "").strip()
+    if not re.fullmatch(r"\d{1,24}", tg_user_id):
+        return None
+    if short_match:
+        return {"token": short_match.group(1), "tg_user_id": tg_user_id}
+    if legacy_match:
+        return {
+            "subscription_id": legacy_match.group(1),
+            "token": legacy_match.group(2),
+            "tg_user_id": tg_user_id,
+        }
+    params = client_match.group(2) if client_match else ""
+    term_match = re.search(r"(?:^|-)utm_term=(\d{6,32})(?:-|$)", params or "")
+    if client_match and term_match:
+        return {
+            "subscription_id": client_match.group(1),
+            "client_id": term_match.group(1),
+            "tg_user_id": tg_user_id,
+        }
+    return None
+
+
+async def _claim_attribution(data: dict[str, str]) -> str:
+    if not ATTRIBUTION_CLAIM_URL:
+        return "failed"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(ATTRIBUTION_CLAIM_URL, json=data)
+        body = response.json()
+        if response.is_success and body.get("ok"):
+            return str(body.get("status") or "applied")
+        _log("warning", "Telegram attribution claim failed: HTTP %s", response.status_code)
+    except Exception as exc:
+        _log("warning", "Telegram attribution claim failed: %s", exc)
+    return "failed"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -888,6 +944,7 @@ async def webhook(source_uuid: str, request: Request) -> JSONResponse:
         "chat_id": "", "chat_type": "", "chat_title": "", "message_id": "",
     }
 
+    payload: dict[str, Any] | None = None
     if oversized:
         parse_status = "rejected"
         error = f"request body exceeds {MAX_BODY_BYTES} bytes"
@@ -921,9 +978,20 @@ async def webhook(source_uuid: str, request: Request) -> JSONResponse:
         error=error,
         metadata=metadata,
     )
+    attribution = _attribution_claim(payload) if payload else None
+    attribution_status = await _claim_attribution(attribution) if attribution else "none"
     _log(
         "info" if parse_status == "ok" else "warning",
         "Senler Telegram event source=%s event=%s type=%s duplicate=%s status=%s",
         source["id"], event_id, metadata["event_type"], duplicate, parse_status,
     )
-    return JSONResponse({"ok": True, "event_id": event_id, "duplicate": duplicate, "parse_status": parse_status}, status_code=200)
+    return JSONResponse(
+        {
+            "ok": True,
+            "event_id": event_id,
+            "duplicate": duplicate,
+            "parse_status": parse_status,
+            "attribution": attribution_status,
+        },
+        status_code=200,
+    )

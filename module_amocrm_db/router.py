@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -27,6 +29,7 @@ _logger: logging.Logger | None = None
 _startup_task: asyncio.Task | None = None
 _queue_task: asyncio.Task | None = None
 _reconcile_task: asyncio.Task | None = None
+_manager_index_task: asyncio.Task | None = None
 _customer_write_lock = asyncio.Lock()
 _amo_rate_lock = asyncio.Lock()
 _amo_next_request_at = 0.0
@@ -47,6 +50,7 @@ _reconcile_state: dict[str, Any] = {
     "last_failed": 0,
     "last_days": [],
 }
+_amo_users_cache: dict[str, Any] = {"expires_at": 0.0, "items": {}}
 
 MODULE_ID = "amocrm-db"
 TABLE_NAME = "amo_deals"
@@ -101,8 +105,8 @@ def setup(ctx):
 
 
 async def shutdown() -> None:
-    global _startup_task, _queue_task, _reconcile_task
-    tasks = [_startup_task, _queue_task, _reconcile_task]
+    global _startup_task, _queue_task, _reconcile_task, _manager_index_task
+    tasks = [_startup_task, _queue_task, _reconcile_task, _manager_index_task]
     for task in tasks:
         if task and not task.done():
             task.cancel()
@@ -116,11 +120,14 @@ async def shutdown() -> None:
     _startup_task = None
     _queue_task = None
     _reconcile_task = None
+    _manager_index_task = None
 
 
 async def _start_background_tasks() -> None:
-    global _queue_task, _reconcile_task
+    global _queue_task, _reconcile_task, _manager_index_task
     await _init_db()
+    if _manager_index_task is None or _manager_index_task.done():
+        _manager_index_task = asyncio.create_task(_ensure_successful_manager_index())
     if _queue_task is None or _queue_task.done():
         _queue_task = asyncio.create_task(_queue_worker_loop())
     if _reconcile_task is None or _reconcile_task.done():
@@ -130,6 +137,7 @@ async def _start_background_tasks() -> None:
 async def _init_db() -> None:
     if not _db_path:
         return
+    await asyncio.to_thread(_backup_manager_index_migration)
     async with _module_db() as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
@@ -165,6 +173,17 @@ async def _init_db() -> None:
                 payload TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS successful_manager_identities (
+                identity TEXT NOT NULL,
+                deal_id TEXT NOT NULL,
+                manager_id TEXT NOT NULL DEFAULT '',
+                manager_name TEXT NOT NULL DEFAULT '',
+                deal_url TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(identity,deal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_successful_manager_identity
+                ON successful_manager_identities(identity,updated_at DESC);
             """
         )
         columns = {str(row[1]) for row in await (await db.execute("PRAGMA table_info(events)")).fetchall()}
@@ -177,6 +196,12 @@ async def _init_db() -> None:
         for column, sql in migrations.items():
             if column not in columns:
                 await db.execute(sql)
+        manager_columns = {
+            str(row[1]) for row in await (await db.execute("PRAGMA table_info(successful_manager_identities)")).fetchall()
+        }
+        if "manager_name" not in manager_columns:
+            await db.execute("ALTER TABLE successful_manager_identities ADD COLUMN manager_name TEXT NOT NULL DEFAULT ''")
+            await db.execute("DELETE FROM successful_manager_identities")
         await db.execute(
             "UPDATE events SET queue_status='retry',next_attempt_at=?,updated_at=? WHERE queue_status='processing'",
             (_now(), _now()),
@@ -195,6 +220,33 @@ async def _init_db() -> None:
         requeued = await _requeue_unrecovered_rate_limits(db)
         await db.commit()
     _log("info", "amocrm-db initialized legacy_429_requeued=%s", requeued)
+
+
+def _backup_manager_index_migration() -> None:
+    if not _db_path or _module_dir is None:
+        return
+    db_path = Path(_db_path)
+    if not db_path.exists():
+        return
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60) as source:
+        table = source.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='successful_manager_identities'"
+        ).fetchone()
+        columns = {
+            str(row[1]) for row in source.execute("PRAGMA table_info(successful_manager_identities)").fetchall()
+        } if table else set()
+        if "manager_name" in columns:
+            return
+        backup = _module_dir.parents[1] / "backups" / "amocrm-db-pre-manager-name-20260808T2245MSK" / "amocrm-db.db"
+        if backup.exists():
+            return
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(backup) as target:
+            source.backup(target)
+            if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("amocrm-db backup quick_check failed")
+        backup.chmod(0o600)
+        _log("info", "amocrm-db migration backup created: %s", backup)
 
 
 def _log(level: str, message: str, *args: Any) -> None:
@@ -1121,6 +1173,7 @@ async def _sync_deal(deal_id: str, *, source_event: dict[str, Any] | None = None
         return {"ok": False, "deal_id": deal_id, "error": error or "deal not found"}
     record = await _build_deal_record(body, settings, source_event=source_event)
     storage = await _upsert_customer_deal(deal_id, record)
+    await _refresh_successful_manager_deal(deal_id, record)
     if event_id:
         await _update_event(event_id, success=True, ignored=False, error="", details={"storage": storage, "status": record.get("status_name")})
     _log("info", "amocrm-db synced deal_id=%s action=%s", deal_id, storage.get("action"))
@@ -1136,6 +1189,183 @@ def _deal_from_row(row: aiosqlite.Row) -> dict[str, Any]:
         "updated_at": row["updated_at"],
         "custom_fields": fields,
     }
+
+
+async def _amo_user_names() -> dict[str, str]:
+    now = time.monotonic()
+    if now < float(_amo_users_cache.get("expires_at") or 0):
+        return dict(_amo_users_cache.get("items") or {})
+    body, error = await _amo_get("/api/v4/users", await _settings_map(), params={"limit": "250"})
+    if error:
+        return dict(_amo_users_cache.get("items") or {})
+    names = {
+        _clean(user.get("id"), 64): _manager_name(user.get("name"))
+        for user in (((body or {}).get("_embedded") or {}).get("users") or [])
+        if isinstance(user, dict) and _clean(user.get("id"), 64)
+    }
+    _amo_users_cache.update(expires_at=now + 1800, items=names)
+    return names
+
+
+def _manager_name(value: Any) -> str:
+    return re.sub(r"\s*\((?:auto|авто)\)\s*$", "", _clean(value, 300), flags=re.IGNORECASE).strip()
+
+
+def _deal_identity_keys(fields: dict[str, Any]) -> set[str]:
+    emails = list(fields.get("emails") or [])
+    phones = list(fields.get("phones") or [])
+    contact = fields.get("contact_fields") if isinstance(fields.get("contact_fields"), dict) else {}
+    emails.append(contact.get("email"))
+    phones.append(contact.get("phone"))
+    return {
+        *(f"email:{_clean(value, 320).casefold()}" for value in emails if _clean(value, 320)),
+        *(f"phone:{_normalize_phone(value)}" for value in phones if _normalize_phone(value)),
+    }
+
+
+def _is_successful_deal(fields: dict[str, Any]) -> bool:
+    amo = fields.get("amo") if isinstance(fields.get("amo"), dict) else {}
+    status_id = _clean(fields.get("status_id") or amo.get("status_id"), 64)
+    status_name = " ".join(
+        _clean(fields.get("status_name") or amo.get("status_name"), 300).casefold().replace("ё", "е").split()
+    )
+    return status_id == "142" or status_name == "успешно реализовано"
+
+
+def _rebuild_successful_manager_index_sync(module_db_path: str, customer_db_path: Path) -> int:
+    if not customer_db_path.exists():
+        return 0
+    with sqlite3.connect(f"file:{customer_db_path}?mode=ro", uri=True, timeout=60) as source:
+        source.row_factory = sqlite3.Row
+        rows = source.execute(
+            f"""
+            SELECT platform_id,custom_fields,updated_at FROM cdb_{TABLE_NAME}
+            WHERE json_valid(custom_fields)
+            """
+        ).fetchall()
+    entries: list[tuple[str, str, str, str, str, str]] = []
+    for row in rows:
+        fields = _json_loads(row["custom_fields"], {})
+        if not _is_successful_deal(fields):
+            continue
+        amo = fields.get("amo") if isinstance(fields.get("amo"), dict) else {}
+        deal_id = _clean(row["platform_id"], 64)
+        deal = (
+            deal_id,
+            _clean(fields.get("responsible_user_id") or amo.get("responsible_user_id"), 64),
+            _manager_name(fields.get("responsible_user_name") or amo.get("responsible_user_name")),
+            _clean(fields.get("deal_url"), 1000),
+            _clean(row["updated_at"], 100),
+        )
+        entries.extend((identity, *deal) for identity in _deal_identity_keys(fields))
+    with sqlite3.connect(module_db_path, timeout=60) as target:
+        target.execute("PRAGMA busy_timeout=60000")
+        target.execute("DELETE FROM successful_manager_identities")
+        target.executemany(
+            """
+            INSERT OR REPLACE INTO successful_manager_identities(
+                identity,deal_id,manager_id,manager_name,deal_url,updated_at
+            ) VALUES(?,?,?,?,?,?)
+            """,
+            entries,
+        )
+        target.commit()
+    return len(entries)
+
+
+async def _ensure_successful_manager_index() -> None:
+    try:
+        async with _module_db() as db:
+            count = int((await (await db.execute("SELECT COUNT(*) FROM successful_manager_identities")).fetchone())[0])
+        if count:
+            return
+        inserted = await asyncio.to_thread(
+            _rebuild_successful_manager_index_sync, str(_db_path), _customer_db_path()
+        )
+        _log("info", "amocrm-db manager identity index initialized rows=%s", inserted)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _log("warning", "amocrm-db manager identity index failed: %s", exc)
+
+
+async def _refresh_successful_manager_deal(deal_id: str, fields: dict[str, Any]) -> None:
+    async with _module_db() as db:
+        await db.execute("DELETE FROM successful_manager_identities WHERE deal_id=?", (deal_id,))
+        if _is_successful_deal(fields):
+            amo = fields.get("amo") if isinstance(fields.get("amo"), dict) else {}
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO successful_manager_identities(
+                    identity,deal_id,manager_id,manager_name,deal_url,updated_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        identity,
+                        deal_id,
+                        _clean(fields.get("responsible_user_id") or amo.get("responsible_user_id"), 64),
+                        _manager_name(fields.get("responsible_user_name") or amo.get("responsible_user_name")),
+                        _clean(fields.get("deal_url"), 1000),
+                        _clean(fields.get("updated_at") or fields.get("synced_at"), 100),
+                    )
+                    for identity in _deal_identity_keys(fields)
+                ],
+            )
+        await db.commit()
+
+
+async def service_successful_managers(*, identities: list[dict[str, Any]]) -> dict[str, Any]:
+    """Resolve responsible users from the newest successful amoCRM deal without mutating amoCRM."""
+
+    requested: dict[str, set[str]] = {}
+    for item in identities[:250]:
+        key = _clean(item.get("key"), 100)
+        email = _clean(item.get("email"), 320).casefold()
+        phone = _normalize_phone(item.get("phone"))
+        if key:
+            requested[key] = {
+                *( [f"email:{email}"] if email else [] ),
+                *( [f"phone:{phone}"] if phone else [] ),
+            }
+    needed = set().union(*requested.values()) if requested else set()
+    if not needed:
+        return {"ok": True, "items": []}
+    async with _module_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT identity,deal_id,manager_id,manager_name,deal_url,updated_at
+                FROM successful_manager_identities
+                WHERE identity IN ({','.join('?' for _ in needed)})
+                ORDER BY updated_at DESC,deal_id DESC
+                """,
+                sorted(needed),
+            )
+        ).fetchall()
+    matches: dict[str, dict[str, str]] = {}
+    for row in rows:
+        matches.setdefault(str(row["identity"]), {
+            "deal_id": _clean(row["deal_id"], 64),
+            "deal_url": _clean(row["deal_url"], 1000),
+            "manager_id": _clean(row["manager_id"], 64),
+            "manager_name": _clean(row["manager_name"], 300),
+            "updated_at": _clean(row["updated_at"], 100),
+        })
+    names = await _amo_user_names() if matches else {}
+    result = []
+    for key, identity_keys in requested.items():
+        candidates = [matches[value] for value in identity_keys if value in matches]
+        deal = max(candidates, key=lambda item: item.get("updated_at", ""), default=None)
+        if not deal:
+            continue
+        result.append({
+            "key": key,
+            **{name: value for name, value in deal.items() if name != "updated_at"},
+            "manager_name": deal.get("manager_name") or names.get(deal["manager_id"], ""),
+        })
+    return {"ok": True, "items": result}
 
 
 async def _amo_lead_ids_created_between(start_ts: int, end_ts: int, settings: dict[str, str]) -> tuple[list[str], str]:

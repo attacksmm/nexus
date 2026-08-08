@@ -14,8 +14,8 @@ class SenlerMobilePanelTests(unittest.TestCase):
         cls.manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
 
     def test_release_version_is_consistent(self):
-        self.assertEqual(self.manifest["version"], "1.0.6")
-        self.assertIn("Списки Сенлер v1.0.6", self.docs)
+        self.assertEqual(self.manifest["version"], "1.3.2")
+        self.assertIn("Списки Сенлер v1.3.2", self.docs)
 
     def test_mobile_list_editor_navigation_exists(self):
         for marker in (

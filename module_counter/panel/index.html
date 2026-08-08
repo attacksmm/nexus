@@ -6,7 +6,7 @@
   <title>Подсчет</title>
   <style>
     :root{color-scheme:dark;--bg:#080808;--panel:#101010;--panel2:#161616;--line:#2b2b2b;--line2:#454545;--text:#f1f1f1;--muted:#9c9c9c;--soft:#d5d5d5;--ok:#70d98b;--bad:#ff7777;--accent:#fff}
-    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+    *{box-sizing:border-box;scrollbar-width:none}*::-webkit-scrollbar{width:0;height:0}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
     button,input,select,textarea{font:inherit}button{cursor:pointer}
     .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0}
     .top{height:44px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--line);background:#0b0b0b;min-width:0}
@@ -26,6 +26,7 @@
     .table-wrap{max-height:42vh;overflow:auto;border:1px solid var(--line);margin-top:10px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}th{position:sticky;top:0;background:#141414;color:var(--muted);z-index:1}
     .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.notice{color:var(--muted);min-height:18px}.ok{color:var(--ok)}.bad{color:var(--bad)}
     @media(max-width:1100px){.grid{grid-template-columns:1fr}.pane{border-right:0;border-bottom:1px solid var(--line)}}
+    @media(max-width:600px){.top{height:auto;min-height:44px;padding:8px;flex-wrap:wrap}.top .status{width:100%;margin-left:0}.grid{display:block;overflow:auto}.pane{min-height:auto;max-height:none}.btn{min-height:40px;white-space:nowrap}.input,.select,.textarea{min-height:40px}.cond{grid-template-columns:1fr}.result-head{grid-template-columns:1fr 1fr 1fr}.table-wrap{max-height:50vh}}
   </style>
 </head>
 <body>
@@ -115,7 +116,7 @@ const OPS = [
 ];
 
 async function fetchJson(url, opts){
-  const res = await fetch(url, opts);
+  const res = await fetch(url, {credentials:'same-origin', ...(opts || {})});
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || data.detail || `HTTP ${res.status}`);
   return data;
@@ -189,6 +190,7 @@ function renderPresets(){
 }
 
 async function loadTables(){
+  $('tablesList').innerHTML = '<div class="sub">Загрузка…</div>';
   const data = await fetchJson(API + '/tables');
   tables = data.items || [];
   renderTables();
@@ -196,12 +198,14 @@ async function loadTables(){
 }
 
 async function loadFields(){
+  $('fieldsList').innerHTML = '';
   const qs = selectedTables().join(',');
   const data = await fetchJson(API + '/fields?tables=' + encodeURIComponent(qs));
   $('fieldsList').innerHTML = (data.items || []).map(item => `<option value="${esc(item.name)}"></option>`).join('');
 }
 
 async function loadPresets(){
+  $('presetsList').innerHTML = '<div class="sub">Загрузка…</div>';
   const data = await fetchJson(API + '/presets');
   presets = data.items || [];
   renderPresets();
@@ -301,12 +305,11 @@ $('newPresetBtn').addEventListener('click', resetPreset);
 $('refreshBtn').addEventListener('click', async () => { await loadTables(); await loadFields(); await loadPresets(); });
 
 (async function init(){
-  await loadTables();
+  await Promise.all([loadTables(), loadPresets()]);
   await loadFields();
-  await loadPresets();
   renderConditions();
   renderColumns();
-  await runQuery();
+  $('resultStatus').textContent = 'Выберите условия и нажмите «Посчитать»';
 })();
 </script>
 </body>

@@ -42,6 +42,9 @@ class MobilePanelTests(unittest.TestCase):
         self.assertIn("requestId !== tablesRequest", self.panel)
         self.assertIn("requestId !== recordsRequest", self.panel)
 
+    def test_initial_record_load_does_not_repeat_stats_query(self):
+        self.assertNotIn('`/tables/${currentTable}/stats`', self.panel)
+
     def test_docs_wrap_content_without_document_overflow(self):
         self.assertIn('name="viewport"', self.docs)
         self.assertIn("overflow-x:hidden", self.docs)

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Тестовые карточки — Виджет мессенжеров</title>
+  <style>
+    :root{font-family:Arial,"Helvetica Neue",sans-serif;--line:#d4dce2;--text:#263746;--muted:#71818d;--blue:#337ab7;--green:#45a45f}*{box-sizing:border-box}[hidden]{display:none!important}html,body{margin:0;min-height:100%;background:#e9eef1;color:var(--text)}button,input{font:inherit}.bar{height:52px;display:flex;align-items:center;gap:8px;padding:0 14px;background:#172936;color:#fff}.bar b{margin-right:8px}.switch{height:32px;padding:0 13px;border:1px solid #557080;background:#223c4d;color:#dbe7ed;cursor:pointer}.switch.active{border-color:#fff;background:#fff;color:#172936}.back{margin-left:auto;color:#dbe7ed;text-decoration:none;font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:calc(100vh - 52px)}.stage{min-width:0;overflow:auto}.editor{padding:16px;border-left:1px solid #c4cdd4;background:#f7f9fa}.editor h2{margin:0 0 15px;font-size:15px}.field{display:grid;gap:5px;margin-bottom:11px}.field label{color:#657682;font-size:11px}.field input{width:100%;height:34px;padding:6px 8px;border:1px solid #afbdc6;background:#fff;color:#263746}.apply,.amo-open{height:36px;border:1px solid var(--green);background:var(--green);color:#fff;font-weight:700;cursor:pointer}.apply{width:100%;margin-top:3px}.hint{margin:13px 0 0;color:#7c8b95;font-size:11px;line-height:1.45}
+    .gc-top{height:46px;display:flex;align-items:center;gap:16px;padding:0 20px;background:#263746;color:#fff}.gc-logo{font-weight:700}.gc-user{margin-left:auto;color:#d3dce2;font-size:12px}.gc-nav{height:40px;display:flex;padding-left:18px;background:#3178ad}.gc-nav span{display:flex;align-items:center;padding:0 14px;color:#edf7fd;font-size:13px}.gc-nav .active{background:#245f8a}.gc-work{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:14px;padding:18px}.gc-panel{border:1px solid var(--line);background:#fff}.gc-head{padding:13px;border-bottom:1px solid var(--line);background:#f8fafb;font-weight:700;font-size:14px}.gc-body{padding:18px}.gc-title{display:flex;align-items:center;gap:13px}.avatar{display:grid;place-items:center;width:56px;height:56px;border-radius:50%;background:#e3ebf0;color:#6d8595;font-size:19px;font-weight:700}.user-name{margin:0 0 5px;font-size:21px;font-weight:500}.subtle{color:#85939d;font-size:12px}.gc-actions{display:flex;gap:8px;margin:17px 0;padding:11px 0;border-block:1px solid #e8edf0}.gc-action{height:34px;padding:0 12px;border:1px solid var(--blue);background:var(--blue);color:#fff;font-weight:700}.rows{display:grid;grid-template-columns:140px minmax(0,1fr);margin:0}.rows dt,.rows dd{min-height:42px;margin:0;padding:11px 9px;border-bottom:1px solid #edf0f2;font-size:13px}.rows dt{background:#fafbfc;color:#7a8994}.gc-profile-sidebar{padding:14px}.gc-profile-sidebar .profile-name,.gc-profile-sidebar .user-call-to-phone{display:block;margin-bottom:10px}.gc-profile-sidebar .profile-name{color:var(--blue);font-weight:700}.gc-contact{height:32px;border:1px solid #b7c3cb;background:#fff;color:#334b5c;cursor:pointer}
+    .amo{min-height:calc(100vh - 52px);background:#0d2939;color:#d7e5ed}.amo-top{height:58px;display:flex;align-items:center;gap:18px;padding:0 18px;border-bottom:1px solid #34505f}.amo-logo{font-weight:700;color:#fff}.amo-top span{color:#9eb3bf;font-size:12px}.amo-grid{display:grid;grid-template-columns:310px minmax(0,1fr) 270px;min-height:calc(100vh - 110px)}.amo-card,.amo-widgets{border-right:1px solid #34505f}.amo-card,.amo-center,.amo-widgets{min-width:0}.amo-section{padding:15px;border-bottom:1px solid #34505f}.amo-section h1{margin:0 0 8px;color:#fff;font-size:17px}.amo-label{margin-bottom:5px;color:#7894a4;font-size:11px}.amo-value{margin-bottom:13px;color:#e5eef3;font-size:13px;overflow-wrap:anywhere}.amo-center{padding:18px}.amo-feed{height:100%;padding:16px;border:1px solid #34505f;background:#122f40}.amo-feed h2{margin:0 0 18px;font-size:14px}.amo-event{margin-bottom:12px;padding:12px;border:1px solid #3a5969;background:#173747;color:#c4d5de;font-size:12px}.amo-widgets{border-right:0;border-left:1px solid #34505f}.amo-widgets h2{margin:0;padding:15px;border-bottom:1px solid #34505f;font-size:15px}.amo-widget{padding:14px;border-bottom:1px solid #34505f}.amo-widget b{display:block;margin-bottom:11px;color:#fff}.amo-open{width:100%}.modal{position:fixed;inset:0;z-index:2147483600;display:grid;place-items:center;padding:22px;background:rgba(12,22,28,.62)}.modal-shell{position:relative;width:min(1180px,96vw);height:min(760px,92vh);background:#fff;box-shadow:0 18px 70px rgba(0,0,0,.35)}.modal iframe{width:100%;height:100%;border:0}
+    @media(max-width:900px){.layout{grid-template-columns:1fr}.editor{border-top:1px solid #c4cdd4;border-left:0}.gc-work{grid-template-columns:1fr}.amo-grid{grid-template-columns:1fr}.amo-card,.amo-widgets{border:0;border-bottom:1px solid #34505f}.amo-center{min-height:330px}.bar{flex-wrap:wrap;height:auto;min-height:52px;padding:9px}.bar b{width:100%}.back{margin-left:0}.modal{padding:8px}.modal-shell{width:100%;height:calc(100dvh - 70px)}}
+  </style>
+</head>
+<body>
+  <header class="bar"><b>Тестовые карточки</b><button class="switch active" data-mode="getcourse" type="button">GetCourse</button><button class="switch" data-mode="amocrm" type="button">amoCRM</button><a class="back" href="index.html">← Модуль</a></header>
+  <div class="layout">
+    <main class="stage">
+      <section id="getcourseView">
+        <div class="gc-top"><span class="gc-logo">GC · GetCourse</span><span>Пользователи</span><span class="gc-user">Администратор</span></div>
+        <div class="gc-nav"><span>Сайт</span><span class="active">Пользователи</span><span>Заказы</span><span>Обучение</span><span>Сообщения</span></div>
+        <div class="gc-work">
+          <section class="gc-panel gc-user-user-info"><div class="gc-head">Профиль пользователя</div><div class="gc-body">
+            <div class="gc-title"><div class="avatar">Н</div><div><h1 id="gcName" class="user-name">Никита</h1><div class="subtle">ID 99915462823 · тестовая запись</div></div></div>
+            <div class="gc-actions"><button class="gc-action" type="button">Написать пользователю</button><button class="gc-action" type="button">Добавить в группу</button></div>
+            <dl class="rows"><dt>Email</dt><dd><a id="gcEmail" class="user-email" href="mailto:attack.smm@gmail.com">attack.smm@gmail.com</a></dd><dt>Телефон</dt><dd><span id="gcPhone" class="user-call-to-phone">+7 (996) 415-85-37</span></dd><dt>utm_term</dt><dd id="gcUtm">789663225</dd></dl>
+            <input id="gcUtmField" data-field-name="utm_term" value="789663225" type="hidden"><input id="gcPlatformField" data-field-name="platform_id" value="789663225" type="hidden"><input id="gcSalebotField" data-field-name="salebot_id" value="" type="hidden">
+          </div></section>
+          <aside class="gc-panel"><div class="gc-head">Виджеты</div><div class="gc-profile-sidebar"><span class="profile-name">Никита</span><span class="user-call-to-phone">+7 (996) 415-85-37</span><button class="gc-contact" type="button">Общение с пользователем</button></div></aside>
+        </div>
+      </section>
+      <section id="amocrmView" hidden>
+        <div class="amo"><div class="amo-top"><b class="amo-logo">amoCRM</b><span>Сделки</span><span>Покупатели</span><span>Задачи</span></div><div class="amo-grid">
+          <aside class="amo-card"><div class="amo-section"><h1 id="amoLead">&quot;ЩЕНОК&quot; | Премиум | Тестовая Никита | 03.09.2025 17:46:33</h1><div class="amo-label">Сделка</div><div class="amo-value">15462823</div><div class="amo-label">Контакт</div><div id="amoName" class="amo-value">Никита</div><div class="amo-label">Телефон</div><div id="amoPhone" class="amo-value">+7 (996) 415-85-37</div><div class="amo-label">Email</div><div id="amoEmail" class="amo-value">attack.smm@gmail.com</div><div class="amo-label">utm_term</div><div id="amoUtm" class="amo-value">789663225</div></div></aside>
+          <section class="amo-center"><div class="amo-feed"><h2>События сделки</h2><div class="amo-event">Тестовая карточка открыта</div><div class="amo-event">Контакт связан со сделкой</div></div></section>
+          <aside class="amo-widgets"><h2>Виджеты</h2><div class="amo-widget"><b>Виджет мессенджеров</b><button id="amoOpen" class="amo-open" type="button">Открыть мессенджеры</button></div></aside>
+        </div></div>
+      </section>
+    </main>
+    <aside class="editor"><h2>Данные карточки</h2>
+      <div class="field"><label for="nameInput">Имя контакта</label><input id="nameInput" value="Никита" maxlength="200"></div>
+      <div class="field"><label for="phoneInput">Телефон</label><input id="phoneInput" value="+7 (996) 415-85-37" maxlength="40" inputmode="tel"></div>
+      <div class="field"><label for="emailInput">Email</label><input id="emailInput" value="attack.smm@gmail.com" maxlength="320" type="email"></div>
+      <div class="field"><label for="utmInput">utm_term</label><input id="utmInput" value="789663225" maxlength="500"></div>
+      <div class="field"><label for="platformInput">platform_id</label><input id="platformInput" value="789663225" maxlength="200"></div>
+      <div class="field"><label for="salebotInput">salebot_id</label><input id="salebotInput" maxlength="200"></div>
+      <div class="field"><label for="amoUserInput">ID менеджера amoCRM</label><input id="amoUserInput" value="6269974" maxlength="200"></div>
+      <div class="field"><label for="amoEmailInput">Email менеджера amoCRM</label><input id="amoEmailInput" value="fotoupro.ak@gmail.com" maxlength="320" type="email"></div>
+      <button id="applyDemo" class="apply" type="button">Обновить</button>
+      <p class="hint">Каналы, история, шаблоны и отправка — рабочие. Для каждой системы нужен код активации.</p>
+    </aside>
+  </div>
+  <div id="amoModal" class="modal" hidden><div class="modal-shell"><iframe id="amoFrame" title="Виджет мессенджеров"></iframe></div></div>
+  <script>
+    (()=>{'use strict';const $=id=>document.getElementById(id);let mode='getcourse',amoContextDelivered=false;
+      function values(){return{name:$('nameInput').value.trim()||'Без имени',phone:$('phoneInput').value.trim(),email:$('emailInput').value.trim().toLowerCase(),utm:$('utmInput').value.trim(),platformId:$('platformInput').value.trim(),salebotId:$('salebotInput').value.trim(),amoUser:$('amoUserInput').value.trim()||'nexus-test-manager',amoEmail:$('amoEmailInput').value.trim().toLowerCase()};}
+      function apply(){const v=values();$('gcName').textContent=v.name;$('gcPhone').textContent=v.phone||'Телефон не указан';$('gcEmail').textContent=v.email||'Email не указан';$('gcEmail').href=v.email?'mailto:'+v.email:'#';$('gcUtm').textContent=v.utm||'—';$('gcUtmField').value=v.utm;$('gcPlatformField').value=v.platformId;$('gcSalebotField').value=v.salebotId;document.querySelector('.gc-profile-sidebar .profile-name').textContent=v.name;document.querySelector('.gc-profile-sidebar .user-call-to-phone').textContent=v.phone||'Телефон не указан';$('amoName').textContent=v.name;$('amoPhone').textContent=v.phone||'Телефон не указан';$('amoEmail').textContent=v.email||'Email не указан';$('amoUtm').textContent=v.utm||'—';}
+      function widgetHosts(hidden){['nexus-messenger-widget-button','nexus-messenger-widget-inbox','nexus-messenger-widget-drawer'].forEach(id=>{const node=$(id);if(node)node.hidden=hidden;});}
+      function show(next){mode=next;$('getcourseView').hidden=next!=='getcourse';$('amocrmView').hidden=next!=='amocrm';document.querySelectorAll('.switch').forEach(n=>n.classList.toggle('active',n.dataset.mode===next));widgetHosts(next!=='getcourse');}
+      function amoContext(){const v=values();return{platform:'amocrm',platform_user_id:v.amoUser,platform_user_email:v.amoEmail,entity_type:'lead',entity_id:'15462823',name:v.name,phone:v.phone,email:v.email,fields:{utm_term:v.utm,utm_source:'yandex_dk_NW_ai',utm_medium:'03.09.2025',utm_campaign:'none',utm_content:'none',platform_id:v.platformId,salebot_id:v.salebotId,responsible_user_id:'6269974',contact_id:'22508701',TRANID:'8816581:7745705372',FORMNAME:'"ЩЕНОК" | Премиум','lead.name':$('amoLead').textContent}};}
+      function closeAmo(){$('amoModal').hidden=true;$('amoFrame').src='about:blank';}
+      function sendAmoContext(){if(amoContextDelivered||!$('amoFrame').contentWindow)return;amoContextDelivered=true;$('amoFrame').contentWindow.postMessage({type:'nexus-messenger-context',context:amoContext()},location.origin);}
+      $('applyDemo').onclick=apply;document.querySelectorAll('.switch').forEach(n=>n.onclick=()=>show(n.dataset.mode));$('amoOpen').onclick=()=>{amoContextDelivered=false;$('amoModal').hidden=false;$('amoFrame').src='../static/amocrm.html?v=583';};$('amoFrame').onload=sendAmoContext;$('amoModal').onclick=e=>{if(e.target===$('amoModal'))closeAmo();};addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('amoModal').hidden)closeAmo();});addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==$('amoFrame').contentWindow||!e.data)return;if(e.data.type==='nexus-messenger-close'){closeAmo();return}if(e.data.type==='nexus-messenger-ready')sendAmoContext();});
+      new MutationObserver(()=>widgetHosts(mode!=='getcourse')).observe(document.body,{childList:true});apply();
+    })();
+  </script>
+  <script src="../static/widget.js?v=583" data-nexus-wazzup-api="../api/widget" data-nexus-wazzup-test="1" data-nexus-wazzup-source-url="https://club.sobakovod.pro/user/control/user/update/id/99915462823" async></script>
+</body>
+</html>

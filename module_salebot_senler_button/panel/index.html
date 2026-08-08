@@ -14,7 +14,7 @@
     header{padding:14px;border-bottom:1px solid var(--line)}
     h1{margin:0 0 4px;font-size:17px;font-weight:650}.muted{margin:0;color:var(--muted)}
     .list{padding:10px;display:grid;gap:8px;overflow:auto}
-    .preset{border:1px solid var(--line);background:#0b0b0b;color:var(--text);padding:10px;text-align:left;display:grid;gap:4px}
+    .preset{min-height:40px;border:1px solid var(--line);background:#0b0b0b;color:var(--text);padding:10px;text-align:left;display:grid;gap:4px}
     .preset:hover,.preset.is-active{border-color:var(--line2);background:var(--panel2)}
     .preset strong{font-size:13px}.preset span{color:var(--muted);font-size:12px;word-break:break-all}
     main{display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;overflow:hidden}
@@ -25,7 +25,7 @@
     input,textarea{width:100%;background:#050505;color:var(--text);border:1px solid var(--line);padding:8px 9px}
     textarea{min-height:72px;resize:vertical}
     pre{margin:0;padding:12px;border:1px solid var(--line);background:#020202;color:var(--ok);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-height:210px;max-height:min(46vh,520px);overflow:auto;overflow-x:hidden;min-width:0;scrollbar-color:#555 #090909}
-    .btn{width:max-content;background:#f4f4f4;color:#050505;border:0;padding:8px 12px;font-weight:650}
+    .btn{width:max-content;min-height:40px;background:#f4f4f4;color:#050505;border:0;padding:8px 12px;font-weight:650}
     .btn--ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
     .btn--bad{background:#2a1114;color:var(--bad);border:1px solid #67343a}
     .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:20px;color:var(--muted)}code{color:var(--ok)}
@@ -55,6 +55,7 @@
     <div class="content">
       <div class="tabs">
         <button class="tab is-active" id="tabSenler" type="button" data-view="senler">Senler-замена</button>
+        <button class="tab" id="tabAllSenler" type="button" data-view="allSenler">Обе → Senler</button>
         <button class="tab" id="tabFallback" type="button" data-view="fallback">Авто fallback</button>
       </div>
 
@@ -88,6 +89,27 @@
         <label>Заметка
           <textarea id="note" placeholder="Где используется, какая страница, комментарии"></textarea>
         </label>
+      </section>
+
+      <section class="view" id="viewAllSenler" hidden>
+        <p class="muted">Inline-кнопки работают без Nexus. Telegram получает короткий токен; UTM и параметры страницы сохраняются при доступной сети.</p>
+        <div class="grid">
+          <label>Telegram-бот
+            <input id="telegramBot" value="Master_class_for_dog_owners_bot">
+          </label>
+          <label>Telegram Subscription ID
+            <input id="telegramSubscriptionId" value="3728286">
+          </label>
+          <label>Telegram Channel ID
+            <input id="telegramChannelId" value="1101081">
+          </label>
+          <label>Текст VK
+            <input id="allVkText" value="Записаться ВКонтакте">
+          </label>
+          <label>Текст Telegram
+            <input id="allTelegramText" value="Записаться в Telegram">
+          </label>
+        </div>
       </section>
 
       <section class="view" id="viewFallback" hidden>
@@ -266,11 +288,79 @@ function buildFallbackSnippet(data) {
 <\/script>`;
 }
 
+function buildAllSenlerSnippet(data) {
+  const config = {
+    target: data.target_selector || '.salebot_tilda_block',
+    redirect_url: data.redirect_url || 'https://vk.com/app6013442_-225075265?form_id=1#form_id=1',
+    vk_text: $('allVkText').value.trim() || 'Записаться ВКонтакте',
+    telegram_text: $('allTelegramText').value.trim() || 'Записаться в Telegram',
+    telegram_bot: $('telegramBot').value.trim() || 'Master_class_for_dog_owners_bot',
+    telegram_channel_id: $('telegramChannelId').value.trim() || '1101081',
+    telegram_subscription_id: $('telegramSubscriptionId').value.trim() || '3728286'
+  };
+  return `<script>
+(function(){
+  'use strict';
+  var cfg=${JSON.stringify(config)},queueKey='nexus_senler_queue_v1';
+  function token(){
+    var key='nexus_senler_token_v1:'+location.origin+location.pathname+location.search+location.hash,value='';
+    try{value=sessionStorage.getItem(key)||'';}catch(ignore){}
+    if(/^[A-Za-z0-9_-]{16}$/.test(value))return value;
+    var bytes=new Uint8Array(12),raw='';
+    if(window.crypto&&crypto.getRandomValues)crypto.getRandomValues(bytes);else for(var i=0;i<12;i++)bytes[i]=Math.floor(Math.random()*256);
+    for(var j=0;j<12;j++)raw+=String.fromCharCode(bytes[j]);
+    value=btoa(raw).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+    try{sessionStorage.setItem(key,value);}catch(ignore){}
+    return value;
+  }
+  var pageToken=window.__nexusAllSenlerToken=token();
+  function value(name){var q=new URLSearchParams(location.search),h=new URLSearchParams(String(location.hash||'').replace(/^#/,''));return q.get(name)||h.get(name)||'';}
+  function cookie(name){var m=('; '+document.cookie).match('; '+name+'=([^;]*)');return m?decodeURIComponent(m[1]):'';}
+  function clientId(){var stored='';try{stored=localStorage.getItem('_ym_uid')||'';}catch(ignore){}return cookie('_ym_uid')||stored||value('_ym_uid');}
+  function payload(){
+    var pairs=[];new URLSearchParams(location.search).forEach(function(v,k){pairs.push([k,v]);});
+    var hash=String(location.hash||'').replace(/^#/,'');if(hash.indexOf('=')>=0)new URLSearchParams(hash).forEach(function(v,k){pairs.push([k,v]);});
+    return {token:pageToken,channel_id:cfg.telegram_channel_id,subscription_id:cfg.telegram_subscription_id,utm_source:value('utm_source'),utm_medium:value('utm_medium'),utm_campaign:value('utm_campaign'),utm_content:value('utm_content'),utm_term:value('utm_term'),ym_client_id:clientId(),yclid:value('yclid')||cookie('yclid'),landing_url:location.href,referrer:document.referrer,url_params:pairs};
+  }
+  function queue(data){try{var items=JSON.parse(localStorage.getItem(queueKey)||'[]');if(!Array.isArray(items))items=[];items=items.filter(function(x){return x&&x.token!==data.token;});items.push(data);localStorage.setItem(queueKey,JSON.stringify(items.slice(-20)));}catch(ignore){}}
+  function transmit(data){
+    if(typeof fetch!=='function')return;
+    fetch('https://junior.sobakovod.pro/nexus/senler/api/telegram-attribution',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),keepalive:true}).then(function(r){if(!r.ok)throw new Error('save');try{var items=JSON.parse(localStorage.getItem(queueKey)||'[]');localStorage.setItem(queueKey,JSON.stringify(items.filter(function(x){return x&&x.token!==data.token;})));}catch(ignore){}}).catch(function(){});
+  }
+  function save(data){queue(data);transmit(data);}
+  function flush(){try{var items=JSON.parse(localStorage.getItem(queueKey)||'[]');if(Array.isArray(items))items.forEach(transmit);}catch(ignore){}}
+  function withParams(raw){var url=new URL(raw,location.href),params=new URLSearchParams(location.search);params.forEach(function(v,k){if(!url.searchParams.has(k))url.searchParams.set(k,v);});return url.toString();}
+  function telegramHref(){return 'https://t.me/'+cfg.telegram_bot+'?start=s='+cfg.telegram_subscription_id+'-utm_term=n_'+pageToken;}
+  function style(){if(document.getElementById('nexus-all-senler-inline-style'))return;var s=document.createElement('style');s.id='nexus-all-senler-inline-style';s.textContent='.nexus-all-senler-pair{display:flex!important;flex-direction:column!important;gap:12px!important;width:min(100%,420px)!important;margin:0 auto!important}.nexus-all-senler-btn{display:flex!important;align-items:center!important;justify-content:center!important;min-height:50px!important;padding:10px 18px!important;box-sizing:border-box!important;border:0!important;border-radius:999px!important;color:#fff!important;font-family:inherit!important;font-size:16px!important;font-weight:700!important;line-height:1.15!important;text-decoration:none!important}.nexus-all-senler-btn--vk{background:#447bba!important}.nexus-all-senler-btn--tg{background:#279bd3!important}.nexus-all-senler-original{display:none!important}';(document.head||document.documentElement).appendChild(s);}
+  function looks(node,kind){if(!node||node.closest&&node.closest('.nexus-all-senler-pair'))return false;var text=((node.textContent||'')+' '+(node.className||'')+' '+(node.getAttribute&&node.getAttribute('href')||'')).toLowerCase();return kind==='tg'?(text.indexOf('telegram')>=0||text.indexOf('t.me')>=0||text.indexOf('tg_link')>=0):(text.indexOf('вконтакте')>=0||text.indexOf('vk.com')>=0||text.indexOf('vk.ru')>=0||text.indexOf('vk_link')>=0);}
+  function link(kind,text,href){var a=document.createElement('a');a.className='nexus-all-senler-btn nexus-all-senler-btn--'+kind;a.href=href;a.target='_self';a.rel='noopener';a.textContent=text;return a;}
+  function mount(root){
+    if(!root)return;
+    var actions=[].slice.call(root.querySelectorAll('a,button,[role=button]')),originals=actions.filter(function(action){return looks(action,'vk')||looks(action,'tg');});
+    if(!originals.length)return;
+    var anchor=originals[0],host=anchor.parentNode,existing=root.querySelector('.nexus-all-senler-pair');
+    originals.forEach(function(action){action.classList.add('nexus-all-senler-original');});
+    if(existing){if(existing.parentNode!==host)host.insertBefore(existing,anchor);return;}
+    var pair=document.createElement('div');
+    pair.className='nexus-all-senler-pair';pair.appendChild(link('vk',cfg.vk_text,withParams(cfg.redirect_url)));var tg=link('tg',cfg.telegram_text,telegramHref());tg.addEventListener('click',function(){save(payload());});pair.appendChild(tg);
+    host.insertBefore(pair,anchor);
+  }
+  function run(){style();var roots=[].slice.call(document.querySelectorAll(cfg.target+',.form_integration_block'));roots.forEach(mount);}
+  flush();save(payload());
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',run);else run();
+  var observer=new MutationObserver(run);observer.observe(document.documentElement,{childList:true,subtree:true});setTimeout(function(){observer.disconnect();},30000);
+  window.addEventListener('online',flush);setTimeout(flush,5000);setTimeout(flush,20000);
+})();
+<\/script>`;
+}
+
 function renderSnippet() {
   const data = formData();
   $('snippet').textContent = activeView === 'fallback'
       ? buildFallbackSnippet(data)
-      : (serverSnippet || buildSnippet(data));
+      : activeView === 'allSenler'
+        ? buildAllSenlerSnippet(data)
+        : (serverSnippet || buildSnippet(data));
 }
 
 function fill(data) {
@@ -289,6 +379,11 @@ function fill(data) {
   $('fallbackSubId').value = data?.subscription_id || '3700634';
   $('fallbackUrl').value = `https://vk.ru/app5898182_-${data?.group_id || '225075265'}#s=${data?.subscription_id || '3700634'}`;
   $('fallbackId').value = (data?.button_id || 'senlerBtn-custom').replace(/^senlerBtn/, 'nexusVkFallback');
+  $('telegramBot').value = 'Master_class_for_dog_owners_bot';
+  $('telegramSubscriptionId').value = '3728286';
+  $('telegramChannelId').value = '1101081';
+  $('allVkText').value = 'Записаться ВКонтакте';
+  $('allTelegramText').value = 'Записаться в Telegram';
   renderList();
   renderSnippet();
 }
@@ -315,13 +410,22 @@ function renderList() {
 }
 
 async function loadPresets() {
-  const res = await fetch(API + '/presets');
-  presets = res.ok ? await res.json() : [];
-  renderList();
-  const selected = presets.find(p => Number(p.id) === activeId);
-  if (selected) fill(selected);
-  else if (presets.length) fill(presets[0]);
-  else fill({});
+  $('status').textContent = 'Загрузка…';
+  try {
+    const res = await fetch(API + '/presets');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    presets = await res.json();
+    renderList();
+    const selected = presets.find(p => Number(p.id) === activeId);
+    if (selected) fill(selected);
+    else if (presets.length) fill(presets[0]);
+    else fill({});
+    $('status').textContent = '';
+  } catch (error) {
+    presets = [];
+    renderList();
+    $('status').textContent = `Не удалось загрузить: ${error.message}`;
+  }
 }
 
 async function savePreset() {
@@ -330,29 +434,37 @@ async function savePreset() {
     $('status').textContent = 'Заполните Button ID и VK group ID';
     return;
   }
-  const res = await fetch(API + '/presets', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(data)
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    $('status').textContent = body.error || 'Ошибка сохранения';
-    return;
+  $('status').textContent = 'Сохранение…';
+  try {
+    const res = await fetch(API + '/presets', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    activeId = Number(body.id || 0);
+    await loadPresets();
+    const saved = presets.find(p => Number(p.id) === activeId);
+    if (saved) fill(saved);
+    $('status').textContent = 'Сохранено';
+  } catch (error) {
+    $('status').textContent = `Не удалось сохранить: ${error.message}`;
   }
-  $('status').textContent = 'Сохранено';
-  activeId = Number(body.id || 0);
-  await loadPresets();
-  const saved = presets.find(p => Number(p.id) === activeId);
-  if (saved) fill(saved);
 }
 
 async function deletePreset() {
   if (!activeId || !confirm('Удалить сохранённую кнопку?')) return;
-  await fetch(API + '/presets/' + activeId, {method: 'DELETE'});
-  $('status').textContent = 'Удалено';
-  activeId = 0;
-  await loadPresets();
+  $('status').textContent = 'Удаление…';
+  try {
+    const res = await fetch(API + '/presets/' + activeId, {method: 'DELETE'});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    activeId = 0;
+    await loadPresets();
+    $('status').textContent = 'Удалено';
+  } catch (error) {
+    $('status').textContent = `Не удалось удалить: ${error.message}`;
+  }
 }
 
 function newPreset() {
@@ -376,11 +488,13 @@ function newPreset() {
   renderSnippet();
 }));
 ['fallbackText','fallbackUrl','fallbackGroupId','fallbackSubId','fallbackId'].forEach(id => $(id).addEventListener('input', renderSnippet));
+['telegramBot','telegramSubscriptionId','telegramChannelId','allVkText','allTelegramText'].forEach(id => $(id).addEventListener('input', renderSnippet));
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
     activeView = btn.dataset.view;
     document.querySelectorAll('.tab').forEach(x => x.classList.toggle('is-active', x === btn));
     $('viewSenler').hidden = activeView !== 'senler';
+    $('viewAllSenler').hidden = activeView !== 'allSenler';
     $('viewFallback').hidden = activeView !== 'fallback';
     renderSnippet();
   });
@@ -391,6 +505,8 @@ $('deleteBtn').addEventListener('click', deletePreset);
 $('copyBtn').addEventListener('click', () => {
   navigator.clipboard.writeText($('snippet').textContent).then(() => {
     $('status').textContent = 'Скопировано';
+  }).catch(error => {
+    $('status').textContent = `Не удалось скопировать: ${error.message}`;
   });
 });
 

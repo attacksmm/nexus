@@ -100,7 +100,7 @@
           </div></div>
 
           <div class="editor-section"><div class="section-copy"><span class="section-no">04</span><h3>Как искать контакт</h3><p>Точный телефон или email ищется и в amoCRM, и среди дублирующихся контактов в Customer DB.</p></div><div class="section-body">
-            <div class="form-grid"><label class="label"><span>Если сделка найдена</span><select id="b_duplicate_action" class="input"><option value="merge_empty">Дополнить последнюю сделку и добавить примечание</option></select></label></div>
+            <div class="form-grid"><label class="label"><span>Если сделка найдена</span><select id="b_duplicate_action" class="input"><option value="note_only">Добавить примечание</option></select></label></div>
             <div class="system-note" style="margin-top:9px">Включая upsell и сделки в других воронках. Воронка, статус и ответственный найденной сделки не меняются.</div>
             <div style="margin-top:16px"><div class="selection-toolbar"><span>Воронки поиска</span><span><button id="selectAllPipelines" class="btn small ghost">Выбрать все</button> <button id="selectOutgoing" class="btn small ghost">Только «Исходящие»</button></span></div><input id="pipelineSearch" class="input search" placeholder="Найти воронку"><div id="scopePipelines" class="choice-list"></div></div>
             <div id="scopeStatuses" class="scope-groups"></div>
@@ -146,7 +146,7 @@ const state={settings:{},bindings:[],catalog:{pipelines:[],users:[],lead_fields:
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clone=o=>JSON.parse(JSON.stringify(o));
 async function api(path,opts){const r=await fetch(API+path,opts),d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||d.error||'Ошибка запроса');return d}
-function notify(message,kind='ok'){const t=$('toast');t.textContent=message;t.className='toast show'+(kind==='bad'?' bad':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>t.className='toast',2800);if(parent&&parent.notify)parent.notify(message,kind)}
+function notify(message,kind='ok'){const t=$('toast');t.textContent=message;t.className='toast show'+(kind==='bad'?' bad':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>t.className='toast',2800);if(parent!==window&&typeof parent.notify==='function')parent.notify(message,kind)}
 function pipelineById(id){return state.catalog.pipelines.find(p=>String(p.id)===String(id))}
 function statusesOf(id){return ((pipelineById(id)?._embedded||{}).statuses||[])}
 function statusById(id){for(const p of state.catalog.pipelines){const s=((p._embedded||{}).statuses||[]).find(x=>String(x.id)===String(id));if(s)return s}return null}

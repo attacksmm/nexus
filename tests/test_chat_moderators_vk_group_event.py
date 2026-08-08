@@ -10,9 +10,11 @@ def test_group_join_action_sends_moderator_welcome() -> None:
     async def scenario() -> None:
         runtime = object.__new__(module.VKModeratorRuntime)
         runtime.get_chat_zone = lambda _peer_id: "training_stream"
-        runtime._get_chat_title = lambda _peer_id: "999. Курс Щенок. Современный Собаковод"
+        runtime._get_chat_title = lambda _peer_id: "57. 30.07.2026 - Курс Щенок. Современный Собаковод"
         runtime._should_send_join_greeting = lambda _peer_id, _user_id: True
         sent: list[tuple[int, int, str]] = []
+        synced: list[tuple[int, int, str, str]] = []
+        runtime._schedule_joined_user_senler_sync = lambda peer_id, user_id, zone, title: synced.append((peer_id, user_id, zone, title))
 
         async def send_welcome(peer_id: int, user_id: int, zone: str) -> None:
             sent.append((peer_id, user_id, zone))
@@ -46,6 +48,14 @@ def test_group_join_action_sends_moderator_welcome() -> None:
             await runtime.process_message(event)
 
         assert sent == [(2000000017, 1105209997, "training_stream")]
+        assert synced == [
+            (
+                2000000017,
+                1105209997,
+                "training_stream",
+                "57. 30.07.2026 - Курс Щенок. Современный Собаковод",
+            )
+        ]
 
     asyncio.run(scenario())
 
@@ -54,9 +64,11 @@ def test_initial_bulk_member_action_does_not_send_moderator_welcome() -> None:
     async def scenario() -> None:
         runtime = object.__new__(module.VKModeratorRuntime)
         runtime.get_chat_zone = lambda _peer_id: "training_stream"
-        runtime._get_chat_title = lambda _peer_id: "999. Курс Щенок. Современный Собаковод"
+        runtime._get_chat_title = lambda _peer_id: "57. 30.07.2026 - Курс Щенок. Современный Собаковод"
         runtime._should_send_join_greeting = lambda _peer_id, _user_id: True
         sent: list[tuple[int, int, str]] = []
+        synced: list[tuple[int, int, str, str]] = []
+        runtime._schedule_joined_user_senler_sync = lambda peer_id, user_id, zone, title: synced.append((peer_id, user_id, zone, title))
 
         async def send_welcome(peer_id: int, user_id: int, zone: str) -> None:
             sent.append((peer_id, user_id, zone))
@@ -83,6 +95,14 @@ def test_initial_bulk_member_action_does_not_send_moderator_welcome() -> None:
             await runtime.process_message(event)
 
         assert sent == []
+        assert synced == [
+            (
+                2000000017,
+                1105209997,
+                "training_stream",
+                "57. 30.07.2026 - Курс Щенок. Современный Собаковод",
+            )
+        ]
         assert any(call.kwargs.get("action") == "skip_initial_member_welcome" for call in record_action.call_args_list)
 
     asyncio.run(scenario())
@@ -165,6 +185,7 @@ def test_vk_log_forward_and_delete_use_community_cmids() -> None:
     runtime.vk = SimpleNamespace(messages=messages)
     runtime._get_user_name = lambda _user_id: "Участник"
     runtime._get_chat_title = lambda _peer_id: "Поток"
+    runtime._pace_mutating_action = lambda: None
 
     with patch.object(module, "_record_action"):
         asyncio.run(runtime.forward_to_log(123, 2000000017, "негатив", 0, cmid=24))

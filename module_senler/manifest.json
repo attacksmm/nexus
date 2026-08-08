@@ -1,10 +1,13 @@
 {
   "id": "senler",
   "name": "Списки Сенлер",
-  "version": "1.0.6",
-  "description": "Автоматическое добавление посетителей сайтов в основной список и список посещения Senler по связкам страница → списки.",
+  "version": "1.3.2",
+  "description": "Связывает Telegram-регистрации с полной атрибуцией и серверной целью Яндекс Метрики.",
   "env_vars": {
     "SENLER_ACCESS_TOKEN": "Fallback API ключ основного канала Senler. Для новых каналов ключ задаётся во вкладке настроек модуля.",
-    "SENLER_GROUP_ID": "Fallback ID основного канала Senler. Дополнительные каналы добавляются во вкладке настроек модуля."
+    "SENLER_GROUP_ID": "Fallback ID основного канала Senler. Дополнительные каналы добавляются во вкладке настроек модуля.",
+    "YANDEX_METRIKA_COUNTER_ID": "ID счётчика Measurement Protocol. По умолчанию 96682515.",
+    "YANDEX_METRIKA_SUBSCRIBE_GOAL": "Идентификатор серверной цели. По умолчанию subscribe.",
+    "YANDEX_METRIKA_MEASUREMENT_TOKEN": "Секретный токен Measurement Protocol из настроек счётчика."
   }
 }

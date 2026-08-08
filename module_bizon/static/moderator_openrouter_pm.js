@@ -31,7 +31,7 @@
     const FETCH_TIMEOUT = 180000;
     const MINIMUM_REPLY_DELAY_MS = 60000;
 
-    console.log('[NEXUS-BIZON] Runtime 1.1.23 loaded');
+    console.log('[NEXUS-BIZON] Runtime 1.1.24 loaded');
     console.log('[NEXUS-BIZON] Config loaded:', CFG);
     console.log('[NEXUS-BIZON] Status:', { isActive });
 
@@ -474,6 +474,13 @@
             const id = msg.getAttribute('data-msgid');
             if (id) answeredMessageIds.add(id);
         });
+        const scanMessages = () => {
+            chatframe.querySelectorAll('.msg.guest.msg_can_reply').forEach(msgNode => {
+                const messageId = msgNode.getAttribute('data-msgid');
+                if (!messageId || answeredMessageIds.has(messageId) || queuedMessageIds.has(messageId) || processingMessageIds.has(messageId)) return;
+                processOneMessage(msgNode, messageId);
+            });
+        };
         const observer = new MutationObserver(mutations => {
             for (const mutation of mutations) {
                 if (mutation.type !== 'childList') continue;
@@ -491,8 +498,10 @@
                     }
                 }
             }
+            scanMessages();
         });
         observer.observe(chatframe, { childList: true, subtree: true });
+        setInterval(scanMessages, 1000);
     }
 
     function processOneMessage(messageElement, messageId) {

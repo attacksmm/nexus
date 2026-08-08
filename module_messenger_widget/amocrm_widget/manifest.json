@@ -1,0 +1,23 @@
+{
+  "widget": {
+    "name": "widget.name",
+    "description": "widget.description",
+    "short_description": "widget.short_description",
+    "version": "1.7.1",
+    "interface_version": 2,
+    "init_once": false,
+    "locale": ["ru"],
+    "installation": true,
+    "support": {
+      "link": "https://junior.sobakovod.pro/nexus/#messenger-widget"
+    }
+  },
+  "locations": ["lcard-1", "ccard-1", "settings"],
+  "settings": {
+    "nexus_url": {
+      "name": "settings.nexus_url",
+      "type": "text",
+      "required": false
+    }
+  }
+}

@@ -78,6 +78,20 @@
     .status-pending,.status-running{color:var(--warn)}
     .status-failed{color:var(--bad)}
     .status-completed{color:var(--ok)}
+    .spend-sheet{display:grid;gap:18px;padding:14px;max-width:1500px;margin:0 auto}
+    .spend-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--border)}
+    .spend-metric{display:grid;gap:5px;padding:16px;border-right:1px solid var(--border);background:#090909}
+    .spend-metric:last-child{border-right:0}
+    .spend-metric span{color:var(--subtle);font-size:.7rem;text-transform:uppercase;letter-spacing:.08em}
+    .spend-metric strong{font-size:1.55rem;font-weight:650;font-variant-numeric:tabular-nums}
+    .spend-section{display:grid;gap:8px}
+    .spend-section h2{margin:0;font-size:.82rem;font-weight:650;color:var(--muted)}
+    .spend-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    .spend-table{border:1px solid var(--border)}
+    .spend-table th,.spend-table td{text-align:right;font-variant-numeric:tabular-nums}
+    .spend-table th:first-child,.spend-table td:first-child{text-align:left}
+    .budget-row{display:grid;grid-template-columns:repeat(2,minmax(160px,240px)) max-content;gap:8px;align-items:end}
+    .budget-warning{color:var(--warn)}
 
     table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:.82rem}
     th,td{height:34px;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -151,6 +165,10 @@
       .statusbar__pager .btn{min-width:24px;padding:2px 5px}
       .client-result{grid-template-columns:minmax(0,1fr);gap:10px}
       .client-result__links{justify-content:flex-start;max-width:none}
+      .spend-strip,.spend-grid{grid-template-columns:minmax(0,1fr)}
+      .spend-metric{border-right:0;border-bottom:1px solid var(--border)}
+      .spend-metric:last-child{border-bottom:0}
+      .budget-row{grid-template-columns:minmax(0,1fr)}
     }
   </style>
 </head>
@@ -158,7 +176,7 @@
 <div class="shell">
   <div class="topbar">
     <div class="title">OpenRouter API</div>
-    <div class="ver">v1.0.79</div>
+    <div class="ver">v1.1.8</div>
     <span id="envReady" class="pill">проверка</span>
     <span id="tokenState" class="pill">Bearer</span>
     <span id="keyState" class="pill">OpenRouter</span>
@@ -169,6 +187,7 @@
     <button class="tab" data-tab="contexts" type="button">Контексты</button>
     <button class="tab" data-tab="client-search" type="button">Поиск клиентов</button>
     <button class="tab" data-tab="test" type="button">Протестировать</button>
+    <button class="tab" data-tab="spend" type="button">Расходы</button>
     <button class="tab" data-tab="errors" type="button">Ошибки</button>
     <button class="tab" data-tab="settings" type="button">Настройки</button>
   </div>
@@ -191,6 +210,48 @@
         <tbody id="promptsBody"></tbody>
       </table>
       <div id="promptsEmpty" class="empty" hidden>В file-storage нет .txt промптов</div>
+    </div>
+  </section>
+
+  <section id="view-spend" class="view">
+    <div class="toolbar">
+      <button id="refreshSpend" class="btn icon ghost" type="button" title="Обновить">↻</button>
+      <select id="spendDays" class="select" style="width:150px"><option value="30">30 дней</option><option value="7">7 дней</option><option value="90">90 дней</option></select>
+      <span id="spendState" class="pill">—</span>
+    </div>
+    <div class="content">
+      <div class="spend-sheet">
+        <div class="spend-section">
+          <h2>Ключ OpenRouter</h2>
+          <div class="spend-strip">
+            <div class="spend-metric"><span>Сегодня</span><strong id="keySpendDay">—</strong></div>
+            <div class="spend-metric"><span>7 дней</span><strong id="keySpendWeek">—</strong></div>
+            <div class="spend-metric"><span>Месяц</span><strong id="keySpendMonth">—</strong></div>
+            <div class="spend-metric"><span>Всего</span><strong id="keySpendAll">—</strong></div>
+          </div>
+        </div>
+        <div class="spend-section">
+          <h2>Предупреждения</h2>
+          <div class="budget-row">
+            <div class="field"><label>За день, $</label><input id="budgetDaily" class="input" type="number" min="0" step="0.01" /></div>
+            <div class="field"><label>За месяц, $</label><input id="budgetMonthly" class="input" type="number" min="0" step="0.01" /></div>
+            <button id="saveBudgets" class="btn primary" type="button">Сохранить</button>
+          </div>
+          <p id="budgetStatus" class="hint">0 — выключено. Запросы не блокируются.</p>
+        </div>
+        <div class="spend-section">
+          <h2>Записано модулем</h2>
+          <p id="spendCoverage" class="hint">Учёт загружается…</p>
+          <div class="spend-grid">
+            <table class="spend-table"><thead><tr><th>Дата</th><th>Запросы</th><th>Стоимость</th><th>Cache</th></tr></thead><tbody id="spendDailyBody"></tbody></table>
+            <table class="spend-table"><thead><tr><th>Источник</th><th>Запросы</th><th>Стоимость</th><th>Токены</th></tr></thead><tbody id="spendSourceBody"></tbody></table>
+          </div>
+        </div>
+        <div class="spend-grid">
+          <div class="spend-section"><h2>Модели</h2><table class="spend-table"><thead><tr><th>Модель</th><th>Запросы</th><th>Стоимость</th></tr></thead><tbody id="spendModelBody"></tbody></table></div>
+          <div class="spend-section"><h2>Промпты</h2><table class="spend-table"><thead><tr><th>Prompt</th><th>Запросы</th><th>Стоимость</th></tr></thead><tbody id="spendPromptBody"></tbody></table></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -247,7 +308,7 @@
       <div class="test-grid">
         <div class="field"><label>Prompt</label><select id="testPrompt" class="select"></select></div>
         <div class="field"><label>Модель</label><input id="testModel" class="input" list="modelsList" placeholder="по умолчанию для prompt" autocomplete="off" /></div>
-        <div class="field"><label>Контекст</label><select id="testContext" class="select"><option value="0">0 — без контекста</option><option value="1" selected>1 — краткий, без записи</option><option value="3">3 — полный, без записи</option></select></div>
+        <div class="field"><label>Контекст</label><select id="testContext" class="select"><option value="0">0 — без контекста</option><option value="1" selected>1 — сводка, без записи</option><option value="2">2 — сводка</option><option value="3">3 — полная история</option><option value="4">4 — сводка + 4 пары</option></select></div>
         <div class="field"><label>platform_id</label><input id="testPlatform" class="input" autocomplete="off" name="openrouter_test_platform" placeholder="по умолчанию ваш логин" /></div>
         <div class="field"><label>conversation_id</label><input id="testConversation" class="input no-autofill" autocomplete="off" name="openrouter_test_conversation" placeholder="можно вместо platform_id" /></div>
         <div class="field"><label>Статус</label><input id="testStatus" class="input" readonly value="Готово" /></div>
@@ -263,8 +324,8 @@
       <select id="errorStatus" class="select" style="width:170px">
         <option value="problem">Проблемные</option>
         <option value="pending">Ожидают</option>
-        <option value="failed">Failed</option>
-        <option value="completed">Completed</option>
+        <option value="failed">Ошибки</option>
+        <option value="completed">Успешные</option>
         <option value="all">Все</option>
       </select>
       <select id="errorSource" class="select" style="width:170px">
@@ -431,6 +492,8 @@ function esc(s){return String(s ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'
 function fmtDate(s){if(!s)return '';const d=new Date(s);return Number.isNaN(d.getTime())?s:d.toLocaleString('ru-RU',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function fmtSize(n){if(!n)return '—';const u=['Б','КБ','МБ'];let i=0,v=Number(n||0);while(v>=1024&&i<u.length-1){v/=1024;i++;}return `${v>=10||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`;}
 function fmtPrice(n){const v=Number(n||0);return v===0?'$0':`$${v.toFixed(v<1?4:3).replace(/0+$/,'').replace(/\.$/,'')}`;}
+function fmtUsd(n){const v=Number(n);return Number.isFinite(v)?`$${v.toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:4})}`:'—';}
+function fmtInt(n){return Number(n||0).toLocaleString('ru-RU');}
 function parseTags(raw){try{const v=JSON.parse(raw||'[]');return Array.isArray(v)?v:[];}catch{return [];}}
 function selectedProviderTags(){
   return [...document.querySelectorAll('.provider-check:checked')].map(el=>el.value).filter(Boolean);
@@ -522,6 +585,8 @@ async function loadSettings(){
   $('moduleApiToken').value = state.settings.module_api_token || '';
   $('openrouterKey').value = '';
   $('providerDataCollection').value = state.settings.provider_data_collection || 'allow';
+  $('budgetDaily').value = state.settings.budget_daily_warn || 0;
+  $('budgetMonthly').value = state.settings.budget_monthly_warn || 0;
   renderProviders();
   if(state.me && !$('testPlatform').value.trim()) $('testPlatform').value = state.me.username || '';
 }
@@ -570,6 +635,45 @@ async function loadModels(refresh=0){
   if(data.fallback) setMsg('OpenRouter models недоступны, показан fallback','error');
 }
 
+async function saveBudgets(){
+  await api('/settings', jsonPost('PUT', {
+    budget_daily_warn:Number($('budgetDaily').value||0),
+    budget_monthly_warn:Number($('budgetMonthly').value||0)
+  }));
+  await loadSettings();
+  await loadSpend();
+  setMsg('Пороги сохранены','ok');
+}
+function spendRows(id, items, key, columns){
+  $(id).innerHTML = (items||[]).map(item=>`<tr><td title="${esc(item[key])}">${esc(item[key])}</td>${columns(item)}</tr>`).join('') || '<tr><td colspan="4" class="muted">Нет данных</td></tr>';
+}
+async function loadSpend(){
+  $('spendState').className='pill';
+  $('spendState').textContent='загрузка';
+  const data = await api('/spend?days=' + encodeURIComponent($('spendDays').value || 30));
+  const key = data.key || {};
+  $('keySpendDay').textContent = key.ok ? fmtUsd(key.daily) : '—';
+  $('keySpendWeek').textContent = key.ok ? fmtUsd(key.weekly) : '—';
+  $('keySpendMonth').textContent = key.ok ? fmtUsd(key.monthly) : '—';
+  $('keySpendAll').textContent = key.ok ? fmtUsd(key.usage) : '—';
+  const exceeded = (data.warnings||[]).filter(item=>item.exceeded);
+  $('spendState').className = 'pill ' + (exceeded.length ? 'bad' : 'ok');
+  $('spendState').textContent = key.ok ? (exceeded.length ? 'выше порога' : 'норма') : 'ключ недоступен';
+  $('budgetStatus').className = exceeded.length ? 'hint budget-warning' : 'hint';
+  $('budgetStatus').textContent = exceeded.length
+    ? exceeded.map(item=>`${item.period==='day'?'День':'Месяц'}: ${fmtUsd(item.spent)} / ${fmtUsd(item.threshold)}`).join(' · ')
+    : '0 — выключено. Запросы не блокируются.';
+  const local = data.local || {};
+  const historical = local.historical || {};
+  $('spendCoverage').textContent = local.tracked_since
+    ? `Точные расходы записываются с ${fmtDate(local.tracked_since)} · ${fmtInt(local.all_events)} вызовов. История до этого: ${fmtInt(historical.prompt_tokens)} входных и ${fmtInt(historical.completion_tokens)} выходных токенов без точной стоимости.`
+    : `Точный учёт начнётся с первого вызова. История: ${fmtInt(historical.prompt_tokens)} входных и ${fmtInt(historical.completion_tokens)} выходных токенов.`;
+  spendRows('spendDailyBody', local.daily, 'date', item=>`<td>${fmtInt(item.requests)}</td><td>${fmtUsd(item.cost)}</td><td>${fmtInt(item.cached_tokens)}</td>`);
+  spendRows('spendSourceBody', local.sources, 'source', item=>`<td>${fmtInt(item.requests)}</td><td>${fmtUsd(item.cost)}</td><td>${fmtInt(item.prompt_tokens+item.completion_tokens)}</td>`);
+  spendRows('spendModelBody', local.models, 'model', item=>`<td>${fmtInt(item.requests)}</td><td>${fmtUsd(item.cost)}</td>`);
+  spendRows('spendPromptBody', local.prompts, 'prompt_path', item=>`<td>${fmtInt(item.requests)}</td><td>${fmtUsd(item.cost)}</td>`);
+}
+
 async function loadErrors(){
   const status = encodeURIComponent($('errorStatus').value || 'problem');
   const source = encodeURIComponent($('errorSource').value || '');
@@ -584,11 +688,12 @@ function renderErrors(){
   $('errorsEmpty').hidden = state.errors.length > 0;
   $('errorsBody').innerHTML = state.errors.map(j=>{
     const detail = j.error_text || j.openrouter_error || j.answer || '';
-    const canRetry = ['api_failed','senler_failed','avito','salebot'].includes(j.source);
+    const canRetry = j.retryable !== false && ['pending','failed'].includes(j.status) && ['api_failed','senler_failed','avito','salebot'].includes(j.source);
+    const statusLabel = ({pending:'ожидает',running:'в работе',failed:'ошибка',completed:'успешно'})[j.status] || j.status;
     return `<tr>
       <td class="mono">#${j.id}</td>
       <td>${esc(j.source)}</td>
-      <td class="status-${esc(j.status)}">${esc(j.status)}</td>
+      <td class="status-${esc(j.status)}">${esc(statusLabel)}</td>
       <td>${j.attempts || 0}</td>
       <td class="mono">${esc(j.platform_id || '')}</td>
       <td class="mono">${esc(j.prompt || '')}</td>
@@ -884,11 +989,18 @@ document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click', ()=
     setTimeout(()=>$('clientSearchInput').focus(),0);
   }
   if(btn.dataset.tab === 'errors') loadErrors().catch(err=>setMsg(err.message,'error'));
+  if(btn.dataset.tab === 'spend'){
+    setLeft('Расходы');
+    loadSpend().catch(err=>setMsg(err.message,'error'));
+  }
 }));
 $('promptFilter').addEventListener('input', renderPrompts);
 $('refreshPrompts').addEventListener('click', ()=>loadPrompts().catch(e=>setMsg(e.message,'error')));
 $('refreshModels').addEventListener('click', ()=>loadModels(1).catch(e=>setMsg(e.message,'error')));
 $('refreshErrors').addEventListener('click', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
+$('refreshSpend').addEventListener('click', ()=>loadSpend().catch(e=>setMsg(e.message,'error')));
+$('spendDays').addEventListener('change', ()=>loadSpend().catch(e=>setMsg(e.message,'error')));
+$('saveBudgets').addEventListener('click', ()=>saveBudgets().catch(e=>setMsg(e.message,'error')));
 $('errorStatus').addEventListener('change', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
 $('errorSource').addEventListener('change', ()=>loadErrors().catch(e=>setMsg(e.message,'error')));
 $('testPrompt').addEventListener('change', syncTestModelPlaceholder);

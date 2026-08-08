@@ -1,7 +1,7 @@
 {
   "id": "getcourse-revenue",
   "name": "Конверсии",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Конверсии GetCourse и входящей воронки amoCRM с дисковым индексом личностей и двумя режимами аналитики.",
   "env_required": [],
   "env_vars": {
