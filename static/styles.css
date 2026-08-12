@@ -371,7 +371,7 @@ td:last-child { white-space: nowrap; }
   .topbar__sep, .topbar__crumb { display: none; }
   .topbar__actions { flex-shrink: 0; gap: 4px; }
   button.mobile-modules-btn { display: inline-flex; min-height: 36px; }
-  .topbar__actions > a, #uploadBtn, .topbar__logout {
+  .topbar__actions > a, #themeToggle, #uploadBtn, .topbar__logout {
     width: 36px; min-height: 36px; padding: 0;
   }
   #uploadBtn, .topbar__logout { font-size: 0; }
