@@ -11,7 +11,7 @@ import aiofiles
 import psutil
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -55,6 +55,88 @@ MAX_MODULE_ZIP_BYTES = 100 * 1024 * 1024
 LOGIN_BODY_LIMIT_BYTES = 64 * 1024
 ADMIN_BODY_LIMIT_BYTES = 2 * 1024 * 1024
 MODULE_UPLOAD_BODY_LIMIT_BYTES = 105 * 1024 * 1024
+
+MODULE_LOAD_BRIDGE_MARKER = "data-nexus-module-load-bridge"
+MODULE_THEME_STYLE_MARKER = "data-nexus-module-theme"
+MODULE_THEME_STYLE = r"""<style data-nexus-module-theme>
+:root[data-nexus-theme="dark"]{color-scheme:dark;filter:contrast(.9)}
+:root[data-nexus-theme="dark"] img,:root[data-nexus-theme="dark"] video,:root[data-nexus-theme="dark"] canvas{filter:contrast(1.1111)}
+:root[data-nexus-theme="gray"]{color-scheme:dark;filter:invert(.18) contrast(1.1)}
+:root[data-nexus-theme="gray"] img,:root[data-nexus-theme="gray"] video,:root[data-nexus-theme="gray"] canvas{filter:contrast(1.4205)}
+:root[data-nexus-theme="light"]{color-scheme:dark;filter:invert(1) hue-rotate(180deg) contrast(.9)}
+:root[data-nexus-theme="light"] img,:root[data-nexus-theme="light"] video,:root[data-nexus-theme="light"] canvas{filter:contrast(1.1111) invert(1) hue-rotate(180deg)}
+</style>"""
+MODULE_LOAD_BRIDGE = r"""<script data-nexus-module-load-bridge>(function(){
+  if(window.parent===window)return;
+  var themes=["light","gray","dark"];
+  function readTheme(){try{var value=window.parent.localStorage.getItem("nexus-theme")||window.parent.localStorage.getItem("nexus-streams-theme");return themes.indexOf(value)>=0?value:"dark"}catch(error){return"dark"}}
+  function applyTheme(theme){var value=themes.indexOf(theme)>=0?theme:"dark";document.documentElement.setAttribute("data-nexus-theme",value);document.documentElement.setAttribute("data-theme",value)}
+  applyTheme(readTheme());
+  var pending=0,domReady=document.readyState!=="loading",ready=false,idleTimer=0;
+  function isNonCredentialInput(input){
+    if(!input||input.tagName!=="INPUT"||input.disabled)return false;
+    if(input.readOnly&&input.getAttribute("data-form-type")!=="other")return false;
+    if(input.type!=="text"&&input.type!=="search")return false;
+    if(input.defaultValue)return false;
+    if(input.classList.contains("no-autofill")||input.classList.contains("search")||input.type==="search")return true;
+    var clue=[input.id,input.name,input.placeholder,input.getAttribute("aria-label")].join(" ").toLowerCase();
+    return /search|filter|поиск|фильтр|найти/.test(clue);
+  }
+  function guardInput(input){
+    if(!isNonCredentialInput(input)||input.getAttribute("data-nexus-autofill-guard")==="1")return;
+    input.setAttribute("data-nexus-autofill-guard","1");
+    input.setAttribute("autocomplete","one-time-code");
+    input.setAttribute("data-lpignore","true");
+    input.setAttribute("data-1p-ignore","true");
+    input.setAttribute("data-form-type","other");
+    input.readOnly=true;
+    function clearAutofill(){if(input.readOnly&&input.value)input.value=""}
+    function unlock(event){if(event.isTrusted)input.readOnly=false}
+    input.addEventListener("pointerdown",unlock,{once:true});
+    input.addEventListener("keydown",unlock,{once:true});
+    input.addEventListener("input",clearAutofill);
+    input.addEventListener("change",clearAutofill);
+    clearAutofill();
+  }
+  function guardInputs(root){
+    if(root.nodeType===1&&root.matches("input"))guardInput(root);
+    if(root.querySelectorAll)root.querySelectorAll("input").forEach(guardInput);
+  }
+  function installAutofillGuard(){
+    guardInputs(document);
+    new MutationObserver(function(records){records.forEach(function(record){record.addedNodes.forEach(guardInputs)})})
+      .observe(document.documentElement,{childList:true,subtree:true});
+  }
+  function post(state){window.parent.postMessage({type:"nexus:module-load",state:state,path:location.pathname},location.origin)}
+  function settle(){
+    clearTimeout(idleTimer);
+    if(ready||!domReady||pending)return;
+    idleTimer=setTimeout(function(){if(!ready&&domReady&&!pending){ready=true;post("ready")}},140);
+  }
+  function begin(){if(ready)return false;pending+=1;post("busy");return true}
+  function end(tracked){if(!tracked)return;pending=Math.max(0,pending-1);settle()}
+  var nativeFetch=window.fetch;
+  if(typeof nativeFetch==="function")window.fetch=function(){
+    var tracked=begin(),result;
+    try{result=nativeFetch.apply(this,arguments)}catch(error){end(tracked);throw error}
+    return Promise.resolve(result).finally(function(){end(tracked)});
+  };
+  if(window.XMLHttpRequest){
+    var nativeSend=XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send=function(){
+      var request=this,tracked=begin();
+      if(tracked)request.addEventListener("loadend",function(){end(true)},{once:true});
+      try{return nativeSend.apply(request,arguments)}catch(error){end(tracked);throw error}
+    };
+  }
+  window.addEventListener("message",function(event){
+    if(event.origin!==location.origin||event.source!==window.parent)return;
+    var data=event.data||{};
+    if(data.type==="nexus:theme")applyTheme(data.theme);
+  });
+  document.addEventListener("DOMContentLoaded",function(){domReady=true;installAutofillGuard();settle()},{once:true});
+  if(domReady){installAutofillGuard();settle()}
+})();</script>"""
 
 manager = ModuleManager(BASE_DIR)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -123,6 +205,39 @@ def _app_request_path(request: Request) -> str:
     return path
 
 
+def _is_module_panel_index(path: str) -> bool:
+    parts = [part for part in path.strip("/").split("/") if part]
+    return len(parts) == 3 and parts[1] == "panel" and parts[2] == "index.html"
+
+
+def _inject_module_load_bridge(html: str) -> str:
+    lower = html.lower()
+    head_start = lower.find("<head")
+    head_end = lower.find(">", head_start) if head_start >= 0 else -1
+    if MODULE_LOAD_BRIDGE_MARKER in html or head_end < 0:
+        return html
+    index = head_end + 1
+    return html[:index] + MODULE_LOAD_BRIDGE + MODULE_THEME_STYLE + html[index:]
+
+
+async def _bridge_module_panel_response(response: Response) -> Response:
+    if response.status_code != 200 or "text/html" not in response.headers.get("content-type", "").lower():
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    injected = _inject_module_load_bridge(body.decode("utf-8", errors="replace")).encode("utf-8")
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    headers.pop("etag", None)
+    headers.pop("last-modified", None)
+    headers["cache-control"] = "no-store"
+    return Response(
+        content=injected,
+        status_code=response.status_code,
+        headers=headers,
+        background=response.background,
+    )
+
+
 def _cross_origin_cookie_request(request: Request) -> bool:
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
         return False
@@ -181,8 +296,12 @@ async def module_lifecycle_scope_middleware(request: Request, call_next):
     lifecycle = manager.lifecycle_for(parts[0]) if parts else None
     if lifecycle is not None:
         with lifecycle.activate():
-            return await call_next(request)
-    return await call_next(request)
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
+    if request.method == "GET" and _is_module_panel_index(request_path):
+        return await _bridge_module_panel_response(response)
+    return response
 
 
 @app.middleware("http")

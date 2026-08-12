@@ -23,10 +23,51 @@ let activeModuleId = null;
 let modulesCache = {};
 let sortOrder = [];  // localStorage порядок
 let globalBusyCount = 0;
+let moduleLoadGeneration = 0;
+let moduleLoadBridgeSeen = false;
+let moduleLoadSlowTimer = 0;
+let moduleLoadActionTimer = 0;
+let moduleLoadFallbackTimer = 0;
 const moduleRuntimeStatus = new Map();
 const mobileShellQuery = window.matchMedia("(max-width: 760px)");
 
 const $ = id => document.getElementById(id);
+const THEMES = ["light", "gray", "dark"];
+const THEME_LABELS = {light: "светлая", gray: "серая", dark: "тёмная"};
+
+function currentTheme() {
+  const value = document.documentElement.dataset.theme;
+  return THEMES.includes(value) ? value : "dark";
+}
+
+function notifyModuleTheme(theme) {
+  const frame = $("moduleFrame");
+  if (frame?.contentWindow) frame.contentWindow.postMessage({type: "nexus:theme", theme}, location.origin);
+}
+
+function applyTheme(theme, persist = true) {
+  const value = THEMES.includes(theme) ? theme : "dark";
+  document.documentElement.dataset.theme = value;
+  document.documentElement.style.colorScheme = value === "light" ? "light" : "dark";
+  if (persist) {
+    try {
+      localStorage.setItem("nexus-theme", value);
+      localStorage.setItem("nexus-streams-theme", value);
+    } catch { /* storage may be unavailable */ }
+  }
+  const button = $("themeToggle");
+  if (button) {
+    const label = `Тема: ${THEME_LABELS[value]}`;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  }
+  notifyModuleTheme(value);
+}
+
+function cycleTheme() {
+  const theme = currentTheme();
+  applyTheme(THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]);
+}
 
 function setMobileModulesOpen(open) {
   const active = mobileShellQuery.matches && Boolean(open);
@@ -48,6 +89,45 @@ async function withGlobalBusy(promise, text = "Загрузка") {
   setGlobalBusy(true, text);
   try { return await promise; }
   finally { setGlobalBusy(false, text); }
+}
+
+function clearModuleLoadTimers() {
+  clearTimeout(moduleLoadSlowTimer);
+  clearTimeout(moduleLoadActionTimer);
+  clearTimeout(moduleLoadFallbackTimer);
+  moduleLoadSlowTimer = moduleLoadActionTimer = moduleLoadFallbackTimer = 0;
+}
+
+function finishModuleLoading() {
+  clearModuleLoadTimers();
+  const overlay = $("moduleLoading");
+  if (overlay) overlay.hidden = true;
+}
+
+function startModuleLoading() {
+  const generation = ++moduleLoadGeneration;
+  moduleLoadBridgeSeen = false;
+  clearModuleLoadTimers();
+  $("moduleLoadingTitle").textContent = "Открываем модуль";
+  $("moduleLoadingText").textContent = "Загружаем данные…";
+  $("moduleLoadingActions").hidden = true;
+  $("moduleLoading").hidden = false;
+  moduleLoadSlowTimer = setTimeout(() => {
+    if (generation !== moduleLoadGeneration || $("moduleLoading").hidden) return;
+    $("moduleLoadingTitle").textContent = "Данные загружаются дольше обычного";
+    $("moduleLoadingText").textContent = "Можно ещё немного подождать — Nexus продолжает загрузку.";
+  }, 4000);
+  moduleLoadActionTimer = setTimeout(() => {
+    if (generation !== moduleLoadGeneration || $("moduleLoading").hidden) return;
+    $("moduleLoadingActions").hidden = false;
+  }, 12000);
+}
+
+function reloadModuleFrame() {
+  const frame = $("moduleFrame");
+  if (!frame || frame.src === "about:blank") return;
+  startModuleLoading();
+  frame.src = frame.src;
 }
 
 // ── LocalStorage order ────────────────────────────────────────────────────────
@@ -114,6 +194,11 @@ window.addEventListener("popstate", () => {
 window.addEventListener("message", event => {
   if (event.origin !== location.origin) return;
   const data = event.data || {};
+  if (event.source === $("moduleFrame")?.contentWindow && data.type === "nexus:module-load") {
+    moduleLoadBridgeSeen = true;
+    if (data.state === "ready") finishModuleLoading();
+    return;
+  }
   if (data.type === "nexus:module-status") {
     const allowed = new Set(["active", "paused", "error", "restarting"]);
     for (const update of Array.isArray(data.updates) ? data.updates : []) {
@@ -243,7 +328,13 @@ function selectModule(id, pushHistory = true, modulePath = "") {
   $("contentWelcome").hidden = true;
   $("contentModule").hidden = false;
   const panelHash = modulePath ? "#" + modulePath.replace(/^\/?/, "/") : "";
-  $("moduleFrame").src = m.status === "active" ? `${RP}/${id}/panel/index.html?v=${encodeURIComponent(m.version || "")}${panelHash}` : "about:blank";
+  if (m.status === "active") {
+    startModuleLoading();
+    $("moduleFrame").src = `${RP}/${id}/panel/index.html?v=${encodeURIComponent(m.version || "")}&nexus_loader=1${panelHash}`;
+  } else {
+    finishModuleLoading();
+    $("moduleFrame").src = "about:blank";
+  }
 
   // уведомления о статусе модуля
   if (m.status === "error") {
@@ -311,6 +402,17 @@ $("mobileModulesBtn").addEventListener("click", () => {
   setMobileModulesOpen($("mobileModulesBtn").getAttribute("aria-expanded") !== "true");
 });
 $("mobileSidebarBackdrop").addEventListener("click", () => setMobileModulesOpen(false));
+$("themeToggle").addEventListener("click", cycleTheme);
+$("moduleLoadingRetry").addEventListener("click", reloadModuleFrame);
+$("moduleLoadingDismiss").addEventListener("click", finishModuleLoading);
+$("moduleFrame").addEventListener("load", () => {
+  notifyModuleTheme(currentTheme());
+  const generation = moduleLoadGeneration;
+  clearTimeout(moduleLoadFallbackTimer);
+  moduleLoadFallbackTimer = setTimeout(() => {
+    if (generation === moduleLoadGeneration && !moduleLoadBridgeSeen) finishModuleLoading();
+  }, 1600);
+});
 mobileShellQuery.addEventListener("change", () => setMobileModulesOpen(false));
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") setMobileModulesOpen(false);
@@ -453,6 +555,7 @@ function esc(s) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 (async () => {
+  applyTheme(currentTheme(), false);
   setMobileModulesOpen(false);
   const res = await withGlobalBusy(fetch(RP + "/api/modules"), "Загрузка Nexus");
   if (!res.ok) return;
