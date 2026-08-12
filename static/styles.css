@@ -1,27 +1,27 @@
 :root {
   font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   color-scheme: dark;
-  --bg:           #0b0c0d;
-  --panel:        #141619;
-  --panel-strong: #191b1f;
-  --panel-soft:   #202328;
+  --bg:           #060708;
+  --panel:        #101114;
+  --panel-strong: #15171a;
+  --panel-soft:   #1b1d21;
   --text:         #eceef1;
   --text-muted:   #a7abb3;
   --text-subtle:  #868b94;
-  --border:       #292c31;
-  --border-mid:   #383c43;
-  --border-strong:#50555e;
+  --border:       #24262b;
+  --border-mid:   #34383f;
+  --border-strong:#4b5059;
   --accent-bg:    #e6e9ee;
   --accent-text:  #111316;
   --ok:    #9fe0aa; --ok-bg:   #102417; --ok-bd:   #315f3a;
   --warn:  #ffe08a; --warn-bg: #1a1500; --warn-bd: #6b5a00;
   --bad:   #ffc2ca; --bad-bg:  #251315; --bad-bd:  #5f3137;
   --blue:  #80c8ff; --blue-bg: #0d1f30; --blue-bd: #1e4a70;
-  --field-bg: #101215;
-  --code-bg: #111317;
-  --pre-bg: #0f1113;
+  --field-bg: #0d0f12;
+  --code-bg: #0e1013;
+  --pre-bg: #0c0e11;
   --overlay-bg: rgba(0,0,0,.72);
-  --loading-overlay: rgba(11,12,13,.76);
+  --loading-overlay: rgba(6,7,8,.78);
   --shadow: rgba(0,0,0,.55);
 }
 
