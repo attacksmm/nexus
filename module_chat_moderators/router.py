@@ -40,6 +40,10 @@ router = APIRouter()
 MODULE_ID = "chat-moderators"
 VK_API_VERSION = "5.131"
 VK_MESSAGE_CHUNK_LIMIT = 3500
+VK_CHAT_PEER_BASE = 2_000_000_000
+VK_CHAT_DISCOVERY_BATCH_SIZE = 25
+VK_CHAT_DISCOVERY_EMPTY_TAIL = 100
+VK_CHAT_DISCOVERY_HARD_LIMIT = 2_000
 SENLER_API_BASE = "https://senler.ru/api"
 SENLER_COURSE_CHAT_SUBSCRIPTION_ID = "3801272"
 GETCOURSE_ACCESS_CHAT_ID = 2000000090
@@ -281,7 +285,7 @@ SECRET_SPECS = {
         "env": "SBKVD_SERVER_PUBLIC_BASE_URL",
         "label": "Публичный base URL",
         "kind": "url",
-        "default": "https://attackpng.sobakovod.pro",
+        "default": "https://junior.sobakovod.pro",
         "visible": False,
     },
 }
@@ -361,8 +365,21 @@ async def setup(ctx):
 async def shutdown() -> None:
     global _runtime
     runtime, _runtime = _runtime, None
-    if runtime is not None:
-        await runtime.stop("all")
+    if runtime is None:
+        return
+
+    async def stop_platform(name: str, stop) -> None:
+        try:
+            await asyncio.wait_for(stop(), timeout=2.0)
+        except TimeoutError:
+            _log("warning", "chat-moderators %s shutdown timed out; forcing lifecycle cancellation", name)
+        except Exception as error:
+            _log("warning", "chat-moderators %s shutdown failed: %s", name, error)
+
+    await asyncio.gather(
+        stop_platform("telegram", runtime.telegram.stop),
+        stop_platform("vk", runtime.vk.stop),
+    )
 
 
 async def on_telegram_proxy_changed() -> dict[str, Any]:
@@ -1079,14 +1096,32 @@ class NexusGetCourseAccessService:
         _gc_mark_request_status(request_id, status="cancelled", apply_result={"cancelled": True})
 
 
+MINI_ACCESS_GROUPS: tuple[dict[str, Any], ...] = (
+    {"group_id": 4842617, "name": "Мини-курс «Намордник». Тариф «Самостоятельно»", "course_key": "mini_muzzle", "group_kind": "mini", "managed": True},
+    {"group_id": 4842619, "name": "Мини-курс «Намордник». Тариф «С проверкой и поддержкой»", "course_key": "mini_muzzle", "group_kind": "mini", "managed": True},
+    {"group_id": 4119459, "name": "Мини-курс \"Поводок\"", "course_key": "mini_leash", "group_kind": "mini", "managed": True},
+    {"group_id": 4217019, "name": "Мини-курс \"Послушание\"", "course_key": "mini_obedience", "group_kind": "mini", "managed": True},
+    {"group_id": 4443745, "name": "Послушная собака за 15 минут в день", "course_key": "mini_15", "group_kind": "mini", "managed": True},
+)
+ACCESS_COURSE_KEYS = {"puppy", "dog", "mini_muzzle", "mini_leash", "mini_obedience", "mini_15"}
+
+
+def _access_catalog_with_minis(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = {str(item.get("group_id") or ""): dict(item) for item in items}
+    for configured in MINI_ACCESS_GROUPS:
+        group_id = str(configured["group_id"])
+        merged[group_id] = {**merged.get(group_id, {}), **configured}
+    return list(merged.values())
+
+
 def service_access_catalog() -> dict[str, Any]:
-    items = NexusGetCourseAccessService()._catalog()
+    items = _access_catalog_with_minis(NexusGetCourseAccessService()._catalog())
     return {
         "ok": True,
         "items": [
             item
             for item in items
-            if item.get("managed") and str(item.get("course_key") or "") in {"puppy", "dog"}
+            if item.get("managed") and str(item.get("course_key") or "") in ACCESS_COURSE_KEYS
         ],
     }
 
@@ -1100,7 +1135,7 @@ def service_prepare_access_change(
     requester_user_id: str,
 ) -> dict[str, Any]:
     service = NexusGetCourseAccessService()
-    catalog = service._catalog()
+    catalog = _access_catalog_with_minis(service._catalog())
     by_id = {str(item.get("group_id") or ""): dict(item) for item in catalog}
     current: list[dict[str, Any]] = []
     for raw in current_groups:
@@ -1116,7 +1151,7 @@ def service_prepare_access_change(
     for raw in changes[:40]:
         group_id = str(raw.get("group_id") or "").strip()
         group = by_id.get(group_id)
-        if not group or not group.get("managed") or group.get("course_key") not in {"puppy", "dog"}:
+        if not group or not group.get("managed") or group.get("course_key") not in ACCESS_COURSE_KEYS:
             raise GetCourseAccessError("Недоступная группа GetCourse")
         enabled = bool(raw.get("enabled"))
         course_key = str(group.get("course_key"))
@@ -1136,18 +1171,44 @@ def service_prepare_access_change(
                         and value.get("group_kind") == "package"
                     )
                 }
+            if kind == "mini":
+                target = {
+                    key: value
+                    for key, value in target.items()
+                    if not (
+                        value.get("managed")
+                        and value.get("course_key") == course_key
+                        and value.get("group_kind") == "mini"
+                    )
+                }
             target[group_id] = dict(group)
         else:
             target.pop(group_id, None)
 
     for course_key in touched_courses:
+        all_course_groups = [
+            group for group in target.values()
+            if group.get("course_key") == course_key
+        ]
         course_groups = [
             group for group in target.values()
             if group.get("managed") and group.get("course_key") == course_key
         ]
         if not course_groups:
             continue
-        if not any(group.get("group_kind") == "package" for group in course_groups):
+        entitlement_marker = any(
+            (
+                "частичн" in _norm_text(group.get("name"))
+                and "оплат" in _norm_text(group.get("name"))
+            )
+            or "автооплат" in _norm_text(group.get("name"))
+            for group in all_course_groups
+        )
+        if (
+            course_key in {"puppy", "dog"}
+            and not any(group.get("group_kind") == "package" for group in course_groups)
+            and not entitlement_marker
+        ):
             bridge = service._find_group(catalog, course_key=course_key, kind="bridge")
             if bridge:
                 target[str(bridge["group_id"])] = dict(bridge)
@@ -1193,11 +1254,125 @@ def service_apply_access_change(*, request_id: str, requester_user_id: str) -> d
         raise GetCourseAccessError("Запрос не найден")
     if str(request.get("requester_user_id") or "") != str(requester_user_id or ""):
         raise GetCourseAccessError("Запрос создан другим оператором")
-    if time.time() - float(request.get("created_at") or 0) > GETCOURSE_PENDING_TIMEOUT_SECONDS:
+    if (
+        time.time() - float(request.get("created_at") or 0) > GETCOURSE_PENDING_TIMEOUT_SECONDS
+        and not bool((request.get("apply_result") or {}).get("apply_queued"))
+    ):
         _gc_mark_request_status(request_id, status="cancelled", apply_result={"error": "expired"})
         raise GetCourseAccessError("Проверка устарела")
     result = NexusGetCourseAccessService().apply_access_request(request_id)
     return {"ok": True, "result": result, "request": _gc_get_access_request(request_id)}
+
+
+def service_schedule_access_apply(
+    *, request_id: str, requester_user_id: str, delay_seconds: int = 2
+) -> dict[str, Any]:
+    """Persist an access write for the Streams worker and return immediately."""
+    request = _gc_get_access_request(request_id)
+    if request is None:
+        raise GetCourseAccessError("Запрос не найден")
+    if str(request.get("requester_user_id") or "") != str(requester_user_id or ""):
+        raise GetCourseAccessError("Запрос создан другим оператором")
+    if request["status"] != "pending":
+        raise GetCourseAccessError(f"Запрос уже обработан: {request['status']}")
+    if time.time() - float(request.get("created_at") or 0) > GETCOURSE_PENDING_TIMEOUT_SECONDS:
+        _gc_mark_request_status(request_id, status="cancelled", apply_result={"error": "expired"})
+        raise GetCourseAccessError("Проверка устарела")
+    now = time.time()
+    next_at = now + max(1, min(int(delay_seconds), 300))
+    ready_by = max(next_at + 5 * 60, now + 5 * 60)
+    previous = request.get("apply_result") or {}
+    result = {
+        **previous,
+        "apply_queued": True,
+        "apply_attempts": int(previous.get("apply_attempts") or 0),
+        "apply_next_at": next_at,
+        "apply_ready_by": ready_by,
+        "apply_error": "",
+    }
+    _gc_update_access_result(request_id, result)
+    return {
+        "ok": True,
+        "queued": True,
+        "request_id": request_id,
+        "target_groups": request.get("target_groups") or [],
+        "next_check_at": datetime.fromtimestamp(next_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ready_by": datetime.fromtimestamp(ready_by, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def service_pending_access_applies(*, limit: int = 1) -> dict[str, Any]:
+    now = time.time()
+    bounded_limit = max(1, min(int(limit), 10))
+    with _gc_db() as db:
+        rows = db.execute(
+            """
+            SELECT request_id FROM gc_access_requests
+            WHERE command_text='streams-access' AND status='pending'
+              AND COALESCE(json_extract(apply_result_json,'$.apply_queued'),0)=1
+              AND COALESCE(json_extract(apply_result_json,'$.apply_next_at'),0)<=?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (now, bounded_limit),
+        ).fetchall()
+    return {
+        "ok": True,
+        "items": [
+            item for row in rows
+            if (item := _gc_get_access_request(str(row["request_id"]))) is not None
+        ],
+    }
+
+
+def service_retry_access_apply(*, request_id: str, delay_seconds: int, error: str) -> dict[str, Any]:
+    request = _gc_get_access_request(request_id)
+    if request is None or request.get("status") != "pending":
+        raise GetCourseAccessError("Запрос на изменение доступов уже закрыт")
+    previous = request.get("apply_result") or {}
+    attempts = int(previous.get("apply_attempts") or 0) + 1
+    next_at = time.time() + max(15, min(int(delay_seconds), 6 * 3600))
+    ready_by = next_at + 5 * 60
+    _gc_update_access_result(request_id, {
+        **previous,
+        "apply_queued": True,
+        "apply_attempts": attempts,
+        "apply_next_at": next_at,
+        "apply_ready_by": ready_by,
+        "apply_error": str(error or "")[:500],
+    })
+    return {
+        "ok": True,
+        "attempts": attempts,
+        "next_check_at": datetime.fromtimestamp(next_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ready_by": datetime.fromtimestamp(ready_by, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def service_fail_access_apply(*, request_id: str, error: str) -> dict[str, Any]:
+    request = _gc_get_access_request(request_id)
+    if request is None:
+        raise GetCourseAccessError("Запрос не найден")
+    result = {**(request.get("apply_result") or {}), "apply_queued": False, "apply_error": str(error or "")[:500]}
+    _gc_mark_request_status(request_id, status="failed", apply_result=result)
+    return {"ok": True, "request_id": request_id}
+
+
+def service_access_change_request(*, request_id: str, requester_user_id: str) -> dict[str, Any]:
+    """Return the identity bound to a prepared request before any write occurs."""
+    request = _gc_get_access_request(request_id)
+    if request is None:
+        raise GetCourseAccessError("Запрос не найден")
+    if str(request.get("requester_user_id") or "") != str(requester_user_id or ""):
+        raise GetCourseAccessError("Запрос создан другим оператором")
+    return {
+        "ok": True,
+        "request_id": str(request.get("request_id") or ""),
+        "gc_user_id": str(request.get("gc_user_id") or ""),
+        "identifier": str(request.get("identifier") or ""),
+        "status": str(request.get("status") or ""),
+        "created_at": float(request.get("created_at") or 0),
+    }
 
 
 def service_schedule_access_verification(*, request_id: str, delay_seconds: int = 60, error: str = "") -> dict[str, Any]:
@@ -1245,12 +1420,44 @@ def service_pending_access_verifications(*, limit: int = 1) -> dict[str, Any]:
     return {"ok": True, "items": [_gc_get_access_request(str(row["request_id"])) for row in rows]}
 
 
+def service_access_verifications(*, limit: int = 50, request_id: str = "") -> dict[str, Any]:
+    """Return queued and completed Streams access changes for the operations journal."""
+    bounded_limit = max(1, min(int(limit), 200))
+    params: list[Any] = []
+    clauses = [
+        "command_text='streams-access'",
+        "(status IN ('applied','failed') OR (status='pending' AND COALESCE(json_extract(apply_result_json,'$.apply_queued'),0)=1))",
+    ]
+    if str(request_id or "").strip():
+        clauses.append("request_id=?")
+        params.append(str(request_id).strip())
+    params.append(bounded_limit)
+    with _gc_db() as db:
+        rows = db.execute(
+            f"""
+            SELECT request_id FROM gc_access_requests
+            WHERE {' AND '.join(clauses)}
+            ORDER BY COALESCE(applied_at,created_at) DESC, created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return {
+        "ok": True,
+        "items": [
+            item
+            for row in rows
+            if (item := _gc_get_access_request(str(row["request_id"]))) is not None
+        ],
+    }
+
+
 def service_latest_access_verification(*, gc_user_id: str = "", email: str = "") -> dict[str, Any]:
     params: list[Any] = []
     clauses = [
         "command_text='streams-access'",
-        "status='applied'",
-        "COALESCE(json_extract(apply_result_json,'$.verification_pending'),0)=1",
+        "((status='applied' AND COALESCE(json_extract(apply_result_json,'$.verification_pending'),0)=1) "
+        "OR (status='pending' AND COALESCE(json_extract(apply_result_json,'$.apply_queued'),0)=1))",
     ]
     if str(gc_user_id or "").strip():
         clauses.append("gc_user_id=?")
@@ -1262,21 +1469,26 @@ def service_latest_access_verification(*, gc_user_id: str = "", email: str = "")
         return {"ok": True, "pending": False}
     with _gc_db() as db:
         row = db.execute(
-            f"SELECT request_id FROM gc_access_requests WHERE {' AND '.join(clauses)} ORDER BY applied_at DESC LIMIT 1",
+            f"SELECT request_id FROM gc_access_requests WHERE {' AND '.join(clauses)} "
+            "ORDER BY COALESCE(applied_at,created_at) DESC LIMIT 1",
             params,
         ).fetchone()
     request = _gc_get_access_request(str(row["request_id"])) if row else None
     result = (request or {}).get("apply_result") or {}
     if not request:
         return {"ok": True, "pending": False}
-    next_at = float(result.get("verification_next_at") or 0)
+    applying = request.get("status") == "pending"
+    next_at = float((result.get("apply_next_at") if applying else result.get("verification_next_at")) or 0)
+    ready_by = float(result.get("apply_ready_by") or 0)
     return {
         "ok": True,
         "pending": True,
+        "stage": "queued" if applying else "verifying",
         "request_id": request["request_id"],
         "target_groups": request["target_groups"],
-        "attempts": int(result.get("verification_attempts") or 0),
+        "attempts": int((result.get("apply_attempts") if applying else result.get("verification_attempts")) or 0),
         "next_check_at": datetime.fromtimestamp(next_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if next_at else "",
+        "ready_by": datetime.fromtimestamp(ready_by, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ready_by else "",
     }
 
 
@@ -1534,6 +1746,30 @@ def _init_db() -> None:
                 meta_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(platform, chat_id, peer_id)
             );
+            CREATE TABLE IF NOT EXISTS vk_member_roster (
+                peer_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                welcome_status TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY(peer_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vk_member_roster_present
+                ON vk_member_roster(peer_id, present);
+            CREATE TABLE IF NOT EXISTS vk_roster_state (
+                peer_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'baseline',
+                initialized_at TEXT NOT NULL DEFAULT '',
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS vk_roster_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS moderation_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL,
@@ -1691,8 +1927,13 @@ def _save_settings(values: dict[str, Any]) -> dict[str, str]:
 
 
 def _stored_secrets() -> dict[str, str]:
-    with _db() as db:
-        rows = db.execute("SELECT key,value FROM secret_settings").fetchall()
+    try:
+        with _db() as db:
+            rows = db.execute("SELECT key,value FROM secret_settings").fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).casefold():
+            raise
+        return {}
     return {row["key"]: row["value"] for row in rows}
 
 
@@ -2037,6 +2278,159 @@ def _upsert_chat(*, platform: str, chat_id: Any = "", peer_id: Any = "", title: 
         )
 
 
+def _prepare_vk_roster_upgrade_baseline(zones: set[str]) -> None:
+    """Mark pre-existing chats before the first roster scan so an upgrade never mass-greets them."""
+    now = _now()
+    with _db() as db:
+        initialized = db.execute(
+            "SELECT value FROM vk_roster_meta WHERE key='upgrade_baseline_prepared'"
+        ).fetchone()
+        if initialized:
+            return
+        placeholders = ",".join("?" for _ in zones)
+        rows = db.execute(
+            f"""SELECT DISTINCT peer_id FROM managed_chats
+                WHERE platform='vk' AND enabled=1 AND peer_id!='' AND zone IN ({placeholders})""",
+            sorted(zones),
+        ).fetchall()
+        for row in rows:
+            db.execute(
+                """INSERT OR IGNORE INTO vk_roster_state(peer_id,mode,initialized_at,last_checked_at,last_error)
+                   VALUES(?, 'baseline', '', '', '')""",
+                (str(row["peer_id"]),),
+            )
+        db.execute(
+            "INSERT INTO vk_roster_meta(key,value,updated_at) VALUES('upgrade_baseline_prepared','1',?)",
+            (now,),
+        )
+
+
+def _managed_vk_roster_chats(zones: set[str]) -> list[tuple[int, str]]:
+    placeholders = ",".join("?" for _ in zones)
+    with _db() as db:
+        rows = db.execute(
+            f"""SELECT mc.peer_id, mc.zone FROM managed_chats mc
+                LEFT JOIN vk_roster_state rs ON rs.peer_id=mc.peer_id
+                WHERE mc.platform='vk' AND mc.enabled=1 AND mc.peer_id!='' AND mc.zone IN ({placeholders})
+                  AND (rs.last_error IS NULL OR rs.last_error='' OR
+                       rs.last_checked_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now','-1 hour'))
+                ORDER BY mc.last_seen_at DESC""",
+            sorted(zones),
+        ).fetchall()
+    result: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for row in rows:
+        peer_id = _safe_int(row["peer_id"], 0)
+        if peer_id > 2000000000 and peer_id not in seen:
+            seen.add(peer_id)
+            result.append((peer_id, str(row["zone"] or "")))
+    return result
+
+
+def _reconcile_discovered_vk_chats(chats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Make community-side peer IDs authoritative without deleting historical rows."""
+    by_title: dict[str, list[dict[str, Any]]] = {}
+    for item in chats:
+        title = _clean(item.get("title"), 500)
+        peer_id = _safe_int(item.get("peer_id"), 0)
+        zone = _clean(item.get("zone"), 80)
+        if title and peer_id > VK_CHAT_PEER_BASE and zone in {"training_stream", "closed_club"}:
+            by_title.setdefault(title, []).append({"peer_id": peer_id, "title": title, "zone": zone})
+    authoritative = {
+        title: items[0]
+        for title, items in by_title.items()
+        if len({int(item["peer_id"]) for item in items}) == 1
+    }
+    if not authoritative:
+        return {"discovered": 0, "created": 0, "updated": 0, "stale_disabled": 0, "ambiguous": len(by_title)}
+
+    now = _now()
+    created = 0
+    updated = 0
+    stale_disabled = 0
+    with _db() as db:
+        before = [dict(row) for row in db.execute(
+            "SELECT * FROM managed_chats WHERE platform='vk' AND zone IN ('training_stream','closed_club')"
+        ).fetchall()]
+        enabled_by_title: dict[str, int] = {}
+        source_by_title: dict[str, dict[str, Any]] = {}
+        for row in before:
+            title = str(row.get("title") or "")
+            enabled_by_title[title] = max(enabled_by_title.get(title, 0), int(row.get("enabled") or 0))
+            current = source_by_title.get(title)
+            if current is None or str(row.get("last_seen_at") or "") > str(current.get("last_seen_at") or ""):
+                source_by_title[title] = row
+
+        for title, item in authoritative.items():
+            peer_id = str(item["peer_id"])
+            zone = str(item["zone"])
+            source = source_by_title.get(title) or {}
+            desired_enabled = enabled_by_title.get(title, 1)
+            existing = db.execute(
+                "SELECT id,title,zone,enabled FROM managed_chats WHERE platform='vk' AND chat_id='' AND peer_id=?",
+                (peer_id,),
+            ).fetchone()
+            if existing:
+                changed = (
+                    str(existing["title"] or "") != title
+                    or str(existing["zone"] or "") != zone
+                    or int(existing["enabled"] or 0) != desired_enabled
+                )
+                db.execute(
+                    """UPDATE managed_chats SET title=?,zone=?,enabled=?,last_seen_at=?,meta_json=?
+                       WHERE id=?""",
+                    (
+                        title,
+                        zone,
+                        desired_enabled,
+                        max(str(source.get("last_seen_at") or ""), now),
+                        str(source.get("meta_json") or "{}"),
+                        int(existing["id"]),
+                    ),
+                )
+                updated += int(changed)
+            else:
+                db.execute(
+                    """INSERT INTO managed_chats(
+                           platform,chat_id,peer_id,title,zone,enabled,last_seen_at,meta_json
+                       ) VALUES('vk','',?,?,?,?,?,?)""",
+                    (
+                        peer_id,
+                        title,
+                        zone,
+                        desired_enabled,
+                        max(str(source.get("last_seen_at") or ""), now),
+                        str(source.get("meta_json") or "{}"),
+                    ),
+                )
+                created += 1
+            db.execute(
+                """INSERT OR IGNORE INTO vk_roster_state(
+                       peer_id,mode,initialized_at,last_checked_at,last_error
+                   ) VALUES(?,'baseline','','','')""",
+                (peer_id,),
+            )
+
+        rows = db.execute(
+            """SELECT id,peer_id,title,enabled FROM managed_chats
+               WHERE platform='vk' AND zone IN ('training_stream','closed_club')"""
+        ).fetchall()
+        for row in rows:
+            expected = authoritative.get(str(row["title"] or ""))
+            if not expected or str(row["peer_id"] or "") == str(expected["peer_id"]):
+                continue
+            if int(row["enabled"] or 0):
+                db.execute("UPDATE managed_chats SET enabled=0 WHERE id=?", (int(row["id"]),))
+                stale_disabled += 1
+    return {
+        "discovered": len(authoritative),
+        "created": created,
+        "updated": updated,
+        "stale_disabled": stale_disabled,
+        "ambiguous": len(by_title) - len(authoritative),
+    }
+
+
 def _telegram_peer_id_from_chat_id(chat_id: Any) -> str:
     value = str(chat_id or "").strip()
     if value.startswith("-100") and len(value) > 4:
@@ -2111,6 +2505,22 @@ def _telegram_welcome_thread_id(chat_id: Any) -> int | None:
         if topic_id > 0:
             return topic_id
     return None
+
+
+def _telegram_welcome_thread_candidates(chat_id: Any) -> list[int | None]:
+    """Prefer stored metadata, then the course-chat Vizitka convention, then General."""
+    candidates: list[int | None] = []
+    stored = _telegram_welcome_thread_id(chat_id)
+    ordered = ([stored] if stored is not None else []) + [3, None]
+    for thread_id in ordered:
+        if thread_id not in candidates:
+            candidates.append(thread_id)
+    return candidates
+
+
+def _telegram_topic_unavailable(error: Exception) -> bool:
+    value = str(error or "").casefold().replace("_", " ")
+    return "topic closed" in value or "message thread not found" in value
 
 
 def _is_course_chat_title(title: str) -> bool:
@@ -2388,6 +2798,8 @@ class TelegramModeratorRuntime:
         self.analyzer = analyzer
         self.app: Any | None = None
         self.running = False
+        self.last_polling_error_signature = ""
+        self.last_polling_error_at = 0.0
 
     async def start(self, settings: dict[str, str]) -> None:
         if self.running:
@@ -2547,14 +2959,6 @@ class TelegramModeratorRuntime:
             text = update.message.text
             chat_zone = _telegram_chat_zone(update.effective_chat)
             if not chat_zone:
-                _log(
-                    "info",
-                    "chat-moderators ignored telegram message: chat_id=%s title=%r user_id=%s reason=title_not_matched text=%r",
-                    chat_id,
-                    getattr(update.effective_chat, "title", "") or "",
-                    getattr(user, "id", ""),
-                    _preview_log_text(text),
-                )
                 return
             _upsert_chat(platform="telegram", chat_id=chat_id, title=getattr(update.effective_chat, "title", ""), zone=chat_zone)
             if not _chat_enabled(platform="telegram", chat_id=chat_id):
@@ -2705,7 +3109,6 @@ class TelegramModeratorRuntime:
                 _record_action(platform="telegram", action="skip_template_disabled", status="ok", chat_id=chat_id, request_json={"template": "tg_welcome", "event": "new_chat_members"})
                 return
             bot_id = getattr(context.bot, "id", None)
-            welcome_thread_id = _telegram_welcome_thread_id(chat_id)
             for member in getattr(message, "new_chat_members", []) or []:
                 user_id = getattr(member, "id", "")
                 if bot_id and user_id == bot_id:
@@ -2726,21 +3129,31 @@ class TelegramModeratorRuntime:
                 if dry_run:
                     _record_action(platform="telegram", action="would_send_welcome", status="dry_run", chat_id=chat_id, user_id=user_id, user_name=user_name, text=text)
                     continue
-                try:
-                    thread_kwargs = {"message_thread_id": welcome_thread_id} if welcome_thread_id else {}
-                    sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", **thread_kwargs)
-                    _record_action(
-                        platform="telegram",
-                        action="send_welcome",
-                        status="ok",
-                        chat_id=chat_id,
-                        message_id=getattr(sent, "message_id", ""),
-                        user_id=user_id,
-                        user_name=user_name,
-                        text=text,
-                        request_json={"message_thread_id": welcome_thread_id},
-                    )
-                except Exception as error:
+                attempted_threads: list[int | None] = []
+                last_error: Exception | None = None
+                for welcome_thread_id in _telegram_welcome_thread_candidates(chat_id):
+                    attempted_threads.append(welcome_thread_id)
+                    try:
+                        thread_kwargs = {"message_thread_id": welcome_thread_id} if welcome_thread_id else {}
+                        sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", **thread_kwargs)
+                        _record_action(
+                            platform="telegram",
+                            action="send_welcome",
+                            status="ok",
+                            chat_id=chat_id,
+                            message_id=getattr(sent, "message_id", ""),
+                            user_id=user_id,
+                            user_name=user_name,
+                            text=text,
+                            request_json={"message_thread_id": welcome_thread_id, "attempted_threads": attempted_threads},
+                        )
+                        last_error = None
+                        break
+                    except Exception as error:
+                        last_error = error
+                        if not _telegram_topic_unavailable(error):
+                            break
+                if last_error is not None:
                     _record_action(
                         platform="telegram",
                         action="send_welcome",
@@ -2748,9 +3161,9 @@ class TelegramModeratorRuntime:
                         chat_id=chat_id,
                         user_id=user_id,
                         user_name=user_name,
-                        error=str(error),
+                        error=str(last_error),
                         text=text,
-                        request_json={"message_thread_id": welcome_thread_id},
+                        request_json={"attempted_threads": attempted_threads},
                     )
 
         async def on_added_to_chat(update: Any, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2815,7 +3228,25 @@ class TelegramModeratorRuntime:
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(drop_pending_updates=True)
+        def polling_error_callback(error: Exception) -> None:
+            signature = f"{type(error).__name__}: {error}"
+            now = time.monotonic()
+            if signature == self.last_polling_error_signature and now - self.last_polling_error_at < 60.0:
+                return
+            self.last_polling_error_signature = signature
+            self.last_polling_error_at = now
+            _record_action(
+                platform="telegram",
+                action="polling_error",
+                status="error",
+                error=signature,
+                request_json={"module": MODULE_ID},
+            )
+
+        await self.app.updater.start_polling(
+            drop_pending_updates=False,
+            error_callback=polling_error_callback,
+        )
         self.running = True
 
     async def stop(self) -> None:
@@ -2841,6 +3272,7 @@ class VKModeratorRuntime:
         self.analyzer = analyzer
         self.vk: Any | None = None
         self.own_id = 0
+        self.group_id = 0
         self.subscription: VkGroupPollSubscription | None = None
         self.action_pacing_lock = threading.Lock()
         self.last_mutating_action_at = 0.0
@@ -2849,6 +3281,10 @@ class VKModeratorRuntime:
         self.user_admin_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self.community_admin_cache: dict[int, dict[str, Any]] = {}
         self.join_greeting_cache: dict[tuple[int, int], float] = {}
+        self.roster_reconcile_lock = asyncio.Lock()
+        self.roster_last_checked: dict[int, float] = {}
+        self.roster_task: asyncio.Task[Any] | None = None
+        self.last_peer_discovery_at = 0.0
         self.senler_join_tasks: set[asyncio.Task[Any]] = set()
         self.settings: dict[str, str] = {}
         self.getcourse_service = NexusGetCourseAccessService()
@@ -2875,7 +3311,30 @@ class VKModeratorRuntime:
         )
         self.vk = self.subscription.vk
         self.own_id = self.subscription.own_id
+        self.group_id = group_id
         self.subscription.activate()
+        try:
+            discovery = await asyncio.to_thread(self._discover_community_chat_peers_sync)
+            self.last_peer_discovery_at = time.monotonic()
+            _record_action(
+                platform="vk",
+                action="community_peer_discovery",
+                status="ok",
+                request_json={"group_id": group_id},
+                response_json=discovery,
+            )
+        except Exception as error:
+            _record_action(
+                platform="vk",
+                action="community_peer_discovery",
+                status="error",
+                error=str(error),
+                request_json={"group_id": group_id},
+            )
+        _prepare_vk_roster_upgrade_baseline({"training_stream", "closed_club"})
+        self.roster_task = asyncio.create_task(
+            self._roster_reconcile_loop(), name=f"{MODULE_ID}-vk-roster"
+        )
         _record_action(
             platform="vk",
             action="runtime_token_selected",
@@ -2890,6 +3349,10 @@ class VKModeratorRuntime:
         )
 
     async def stop(self) -> None:
+        roster_task, self.roster_task = self.roster_task, None
+        if roster_task is not None:
+            roster_task.cancel()
+            await asyncio.gather(roster_task, return_exceptions=True)
         subscription, self.subscription = self.subscription, None
         if subscription is not None:
             await subscription.close()
@@ -2902,15 +3365,244 @@ class VKModeratorRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.vk = None
         self.own_id = 0
+        self.group_id = 0
+
+    def _zone_for_discovered_title(self, title: str) -> str:
+        if self._is_closed_club_chat_title(title):
+            return "closed_club"
+        if self._is_training_stream_chat_title(title):
+            return "training_stream"
+        return ""
+
+    def _discover_community_chat_peers_sync(self) -> dict[str, Any]:
+        """Enumerate community-side chat IDs exactly as VK Support recommends."""
+        if self.vk is None:
+            raise RuntimeError("VK runtime is not connected")
+        discovered: list[dict[str, Any]] = []
+        highest_existing_local_id = 0
+        scanned_until = 0
+        for start in range(1, VK_CHAT_DISCOVERY_HARD_LIMIT + 1, VK_CHAT_DISCOVERY_BATCH_SIZE):
+            local_ids = list(range(start, min(start + VK_CHAT_DISCOVERY_BATCH_SIZE, VK_CHAT_DISCOVERY_HARD_LIMIT + 1)))
+            peer_ids = [VK_CHAT_PEER_BASE + local_id for local_id in local_ids]
+            code = "return [" + ",".join(
+                f'API.messages.getConversationsById({{"peer_ids":{peer_id}}})'
+                for peer_id in peer_ids
+            ) + "];"
+            responses = self.vk.execute(code=code) or []
+            for local_id, peer_id, response in zip(local_ids, peer_ids, responses):
+                if not isinstance(response, dict):
+                    continue
+                items = response.get("items") or []
+                if not items:
+                    continue
+                highest_existing_local_id = max(highest_existing_local_id, local_id)
+                item = items[0]
+                conversation = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+                actual_peer_id = _safe_int((conversation.get("peer") or {}).get("id"), peer_id)
+                title = _clean((conversation.get("chat_settings") or {}).get("title"), 500)
+                zone = self._zone_for_discovered_title(title)
+                if zone:
+                    discovered.append({"peer_id": actual_peer_id, "title": title, "zone": zone})
+            scanned_until = local_ids[-1]
+            if highest_existing_local_id and scanned_until - highest_existing_local_id >= VK_CHAT_DISCOVERY_EMPTY_TAIL:
+                break
+            if not highest_existing_local_id and scanned_until >= 250:
+                break
+        result = _reconcile_discovered_vk_chats(discovered)
+        return {
+            **result,
+            "scanned_until": scanned_until,
+            "highest_existing_local_id": highest_existing_local_id,
+        }
 
     async def _handle_shared_event(self, event: Any) -> None:
         try:
             message_event = adapt_group_message_event(event)
-            if message_event is not None and not bool(getattr(message_event, "from_me", False)):
+            payload = getattr(message_event, "message_payload", {}) if message_event is not None else {}
+            has_chat_action = isinstance(payload, dict) and isinstance(payload.get("action"), dict)
+            peer_id = int(getattr(message_event, "peer_id", 0) or 0) if message_event is not None else 0
+            if peer_id > 2000000000:
+                await self._maybe_reconcile_chat_members(peer_id, trigger="long_poll_event")
+            if message_event is not None and (
+                not bool(getattr(message_event, "from_me", False)) or has_chat_action
+            ):
                 await self.process_message(message_event)
         except Exception as error:
             _record_action(platform="vk", action="runtime_event_error", status="error", error=str(error))
             _log("error", "Shared VK event handler failed: %s", error, exc_info=True)
+
+    async def _roster_reconcile_loop(self) -> None:
+        try:
+            while self.subscription is not None and self.subscription.running:
+                if time.monotonic() - self.last_peer_discovery_at >= 6 * 3600:
+                    try:
+                        discovery = await asyncio.to_thread(self._discover_community_chat_peers_sync)
+                        self.last_peer_discovery_at = time.monotonic()
+                        _record_action(
+                            platform="vk",
+                            action="community_peer_discovery",
+                            status="ok",
+                            request_json={"trigger": "periodic"},
+                            response_json=discovery,
+                        )
+                    except Exception as error:
+                        self.last_peer_discovery_at = time.monotonic()
+                        _record_action(
+                            platform="vk",
+                            action="community_peer_discovery",
+                            status="error",
+                            error=str(error),
+                            request_json={"trigger": "periodic"},
+                        )
+                for peer_id, zone in _managed_vk_roster_chats({"training_stream", "closed_club"}):
+                    if self.subscription is None or not self.subscription.running:
+                        return
+                    await self._maybe_reconcile_chat_members(
+                        peer_id, zone=zone, trigger="periodic", force=True
+                    )
+                    await asyncio.sleep(0.75)
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _record_action(platform="vk", action="roster_loop_error", status="error", error=str(error))
+            _log("warning", "VK roster reconciliation loop failed: %s", error)
+
+    async def _maybe_reconcile_chat_members(
+        self,
+        peer_id: int,
+        *,
+        zone: str = "",
+        trigger: str,
+        force: bool = False,
+    ) -> None:
+        peer_id = int(peer_id or 0)
+        if peer_id <= 2000000000 or self.vk is None:
+            return
+        now_monotonic = time.monotonic()
+        if not force and now_monotonic - self.roster_last_checked.get(peer_id, 0.0) < 15.0:
+            return
+        async with self.roster_reconcile_lock:
+            now_monotonic = time.monotonic()
+            if not force and now_monotonic - self.roster_last_checked.get(peer_id, 0.0) < 15.0:
+                return
+            self.roster_last_checked[peer_id] = now_monotonic
+            title = self._get_chat_title(peer_id)
+            zone = zone or self.get_chat_zone(peer_id) or ""
+            if zone not in {"training_stream", "closed_club"}:
+                return
+            if trigger != "periodic" and title:
+                _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
+            if not _chat_enabled(platform="vk", peer_id=peer_id):
+                return
+            peer_key = str(peer_id)
+            with _db() as db:
+                state = db.execute(
+                    "SELECT mode,initialized_at FROM vk_roster_state WHERE peer_id=?", (peer_key,)
+                ).fetchone()
+            if state is None:
+                owner_id = 0
+                try:
+                    response = self._vk_for_peer(peer_id).messages.getConversationsById(peer_ids=[peer_id])
+                    item = (response.get("items") or [{}])[0]
+                    conversation = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+                    owner_id = _safe_int((conversation.get("chat_settings") or {}).get("owner_id"), 0)
+                except Exception as error:
+                    _record_action(
+                        platform="vk", zone=zone, action="roster_owner_lookup", status="error",
+                        peer_id=peer_id, error=str(error), request_json={"trigger": trigger},
+                    )
+                mode = "active" if owner_id == -abs(int(self.group_id or 0)) and self.group_id else "baseline"
+                with _db() as db:
+                    db.execute(
+                        """INSERT OR IGNORE INTO vk_roster_state(peer_id,mode,initialized_at,last_checked_at,last_error)
+                           VALUES(?,?, '', '', '')""",
+                        (peer_key, mode),
+                    )
+                initialized_at = ""
+            else:
+                mode = str(state["mode"] or "baseline")
+                initialized_at = str(state["initialized_at"] or "")
+            try:
+                response = self._vk_for_peer(peer_id).messages.getConversationMembers(peer_id=peer_id)
+                members = [
+                    {
+                        "user_id": int(item.get("member_id") or 0),
+                        "is_admin": _vk_member_is_admin(item),
+                    }
+                    for item in (response.get("items") or [])
+                    if int(item.get("member_id") or 0) > 0
+                ]
+            except Exception as error:
+                with _db() as db:
+                    db.execute(
+                        "UPDATE vk_roster_state SET last_checked_at=?,last_error=? WHERE peer_id=?",
+                        (_now(), _clean(error, 1000), peer_key),
+                    )
+                _record_action(
+                    platform="vk", zone=zone, action="roster_reconcile", status="error",
+                    peer_id=peer_id, error=str(error), request_json={"trigger": trigger},
+                )
+                return
+            now = _now()
+            baseline_scan = mode == "baseline" and not initialized_at
+            candidates: list[int] = []
+            with _db() as db:
+                previous = {
+                    int(row["user_id"]): dict(row)
+                    for row in db.execute(
+                        "SELECT user_id,present,welcome_status FROM vk_member_roster WHERE peer_id=?",
+                        (peer_key,),
+                    ).fetchall()
+                }
+                db.execute("UPDATE vk_member_roster SET present=0 WHERE peer_id=?", (peer_key,))
+                for member in members:
+                    user_id = member["user_id"]
+                    is_admin = bool(member["is_admin"])
+                    prior = previous.get(user_id)
+                    rejoined = prior is None or not bool(prior.get("present"))
+                    prior_status = str((prior or {}).get("welcome_status") or "")
+                    if baseline_scan:
+                        welcome_status = "admin" if is_admin else "baseline"
+                    elif is_admin:
+                        welcome_status = "admin"
+                    else:
+                        welcome_status = prior_status
+                        if rejoined or prior_status == "error":
+                            candidates.append(user_id)
+                            welcome_status = "pending"
+                    db.execute(
+                        """INSERT INTO vk_member_roster(
+                               peer_id,user_id,is_admin,present,welcome_status,first_seen_at,last_seen_at
+                           ) VALUES(?,?,?,?,?,?,?)
+                           ON CONFLICT(peer_id,user_id) DO UPDATE SET
+                             is_admin=excluded.is_admin,present=1,welcome_status=excluded.welcome_status,
+                             last_seen_at=excluded.last_seen_at""",
+                        (peer_key, str(user_id), int(is_admin), 1, welcome_status, now, now),
+                    )
+                db.execute(
+                    """UPDATE vk_roster_state SET mode='active',initialized_at=CASE WHEN initialized_at='' THEN ? ELSE initialized_at END,
+                       last_checked_at=?,last_error='' WHERE peer_id=?""",
+                    (now, now, peer_key),
+                )
+            for user_id in candidates:
+                self._schedule_joined_user_senler_sync(peer_id, user_id, zone, title)
+                if not _template_enabled("vk_welcome"):
+                    welcome_status = "disabled"
+                else:
+                    sent = await self._send_welcome_message(peer_id, user_id, zone)
+                    welcome_status = "sent" if sent else "error"
+                with _db() as db:
+                    db.execute(
+                        "UPDATE vk_member_roster SET welcome_status=?,last_seen_at=? WHERE peer_id=? AND user_id=?",
+                        (welcome_status, _now(), peer_key, str(user_id)),
+                    )
+            if candidates or baseline_scan:
+                _record_action(
+                    platform="vk", zone=zone, action="roster_reconcile", status="ok", peer_id=peer_id,
+                    request_json={"trigger": trigger, "baseline": baseline_scan},
+                    response_json={"members": len(members), "welcome_candidates": len(candidates)},
+                )
 
     async def _handle_shared_error(self, error: Exception) -> None:
         _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
@@ -3248,24 +3940,26 @@ class VKModeratorRuntime:
         self._pace_mutating_action()
         self._vk_for_peer(peer_id).messages.sendReaction(peer_id=int(peer_id), cmid=int(cmid), reaction_id=int(reaction_id))
 
-    async def _send_welcome_message(self, peer_id: int, user_id: int, zone: str) -> None:
+    async def _send_welcome_message(self, peer_id: int, user_id: int, zone: str) -> bool:
         if int(user_id) <= 0:
-            return
+            return False
         if not _template_enabled("vk_welcome"):
             _record_action(platform="vk", zone=zone, action="skip_template_disabled", status="ok", peer_id=peer_id, user_id=user_id, request_json={"template": "vk_welcome"})
-            return
+            return False
         user_name = self._get_user_name(int(user_id))
         user_mention = f"[id{int(user_id)}|{user_name}]"
         message = _template_value("vk_welcome").format(user_mention=user_mention)
         if _truthy(self.settings.get("dry_run")):
             _record_action(platform="vk", zone=zone, action="would_send_welcome", status="dry_run", peer_id=peer_id, user_id=user_id, user_name=user_name, text=message)
-            return
+            return False
         try:
             self._pace_mutating_action()
             self._vk_for_peer(peer_id).messages.send(peer_id=int(peer_id), message=message, random_id=0)
             _record_action(platform="vk", zone=zone, action="send_welcome", status="ok", peer_id=peer_id, user_id=user_id, user_name=user_name, text=message)
+            return True
         except Exception as error:
             _record_action(platform="vk", zone=zone, action="send_welcome", status="error", peer_id=peer_id, user_id=user_id, user_name=user_name, error=str(error), text=message)
+            return False
 
     async def forward_to_log(
         self, user_id: int, peer_id: int, category: str, message_id: Any, *, cmid: Any = None
@@ -3333,10 +4027,9 @@ class VKModeratorRuntime:
         if not _chat_enabled(platform="vk", peer_id=peer_id):
             _record_action(platform="vk", zone=zone, action="skip_chat_disabled", status="ok", peer_id=peer_id, user_id=user_id)
             return
-        if not self._should_send_join_greeting(peer_id, user_id):
-            _record_action(platform="vk", zone=zone, action="skip_duplicate_welcome", status="ok", peer_id=peer_id, user_id=user_id)
-            return
-        await self._send_welcome_message(peer_id, user_id, zone)
+        await self._maybe_reconcile_chat_members(
+            peer_id, zone=zone, trigger="chat_update_user_joined", force=True
+        )
 
     async def process_message(self, event: Any) -> None:
         peer_id = int(getattr(event, "peer_id", 0) or 0)
@@ -3368,15 +4061,6 @@ class VKModeratorRuntime:
         zone = self.get_chat_zone(peer_id)
         title = self._get_chat_title(peer_id)
         if zone not in {"training_stream", "closed_club"}:
-            if zone != "logs":
-                _log(
-                    "info",
-                    "chat-moderators ignored vk message: peer_id=%s title=%r user_id=%s reason=title_not_matched text=%r",
-                    peer_id,
-                    title,
-                    self._extract_from_id(event),
-                    _preview_log_text(getattr(event, "text", "") or ""),
-                )
             return
         _record_action(
             platform="vk",
@@ -3392,21 +4076,9 @@ class VKModeratorRuntime:
         _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
         if zone in {"training_stream", "closed_club"} and isinstance(full_msg.get("action"), dict):
             action = full_msg.get("action") or {}
-            if action.get("type") == "chat_invite_user_by_link":
-                user_id = int(action.get("member_id") or self._extract_from_id(event) or 0)
-                self._schedule_joined_user_senler_sync(peer_id, user_id, zone, title)
-                if user_id > 0 and self._should_send_join_greeting(peer_id, user_id):
-                    await self._send_welcome_message(peer_id, user_id, zone)
-            elif action.get("type") == "chat_invite_user":
-                user_id = int(action.get("member_id") or 0)
-                self._schedule_joined_user_senler_sync(peer_id, user_id, zone, title)
-                _record_action(
-                    platform="vk",
-                    zone=zone,
-                    action="skip_initial_member_welcome",
-                    status="ok",
-                    peer_id=peer_id,
-                    user_id=user_id,
+            if action.get("type") in {"chat_invite_user_by_link", "chat_invite_user"}:
+                await self._maybe_reconcile_chat_members(
+                    peer_id, zone=zone, trigger=str(action.get("type")), force=True
                 )
             return
         text = str(getattr(event, "text", "") or "").strip()
@@ -3590,12 +4262,14 @@ class VKModeratorRuntime:
             user_name = "Участник"
             user_mention = "Участник"
         if category in {"негатив", "скам", "удалить", "возврат"}:
+            # VK cannot forward an already deleted conversation message (error 969).
+            # Preserve the original in the moderator log before deleting it for all.
+            await self.forward_to_log(from_id, peer_id, category, message_id, cmid=cmid)
             try:
                 self._delete_chat_message(peer_id=peer_id, message_id=message_id, cmid=cmid)
                 _record_action(platform="vk", zone=zone, action="delete", category=category, status="ok" if not _truthy(self.settings.get("dry_run")) else "dry_run", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, text=text)
             except Exception as error:
                 _record_action(platform="vk", zone=zone, action="delete", category=category, status="error", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, error=str(error), text=text)
-            await self.forward_to_log(from_id, peer_id, category, message_id, cmid=cmid)
             if category == "возврат" and _template_enabled("vk_refund"):
                 self._send_message(peer_id, _template_value("vk_refund").format(user_mention=user_mention))
             return
@@ -3859,6 +4533,51 @@ async def runtime_start(request: Request):
         raise
     except Exception as error:
         return JSONResponse({"ok": False, "error": str(error)}, status_code=500)
+
+
+@router.post("/vk/join/reconcile")
+async def reconcile_vk_join(request: Request):
+    await _require_user(request)
+    data = await request.json()
+    peer_id = _safe_int((data or {}).get("peer_id"), 0)
+    user_id = _safe_int((data or {}).get("user_id"), 0)
+    if peer_id <= 2000000000 or user_id <= 0:
+        raise HTTPException(status_code=400, detail="peer_id and user_id are invalid")
+    runtime = _runtime_or_error().vk
+    if not runtime.subscription or not runtime.subscription.running:
+        raise HTTPException(status_code=409, detail="VK runtime is not running")
+    zone = runtime.get_chat_zone(peer_id)
+    title = runtime._get_chat_title(peer_id)
+    if zone not in {"training_stream", "closed_club"}:
+        raise HTTPException(status_code=400, detail="Chat is not a managed course chat")
+    members = runtime._vk_for_peer(peer_id).messages.getConversationMembers(peer_id=peer_id)
+    member = next(
+        (item for item in members.get("items") or [] if int(item.get("member_id") or 0) == user_id),
+        None,
+    )
+    if member is None:
+        raise HTTPException(status_code=409, detail="User is not a chat member")
+    if _vk_member_is_admin(member):
+        raise HTTPException(status_code=409, detail="Chat administrators are not students")
+    _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
+    sent = await runtime._send_welcome_message(peer_id, user_id, zone)
+    if not sent:
+        raise HTTPException(status_code=409, detail="Welcome message was not sent")
+    with _db() as db:
+        now = _now()
+        db.execute(
+            """INSERT INTO vk_member_roster(peer_id,user_id,is_admin,present,welcome_status,first_seen_at,last_seen_at)
+               VALUES(?,?,0,1,'sent',?,?)
+               ON CONFLICT(peer_id,user_id) DO UPDATE SET
+                 present=1,is_admin=0,welcome_status='sent',last_seen_at=excluded.last_seen_at""",
+            (str(peer_id), str(user_id), now, now),
+        )
+    runtime._schedule_joined_user_senler_sync(peer_id, user_id, zone, title)
+    _record_action(
+        platform="vk", zone=zone, action="join_reconcile", status="ok",
+        peer_id=peer_id, user_id=user_id, request_json={"title": title},
+    )
+    return {"ok": True, "peer_id": peer_id, "user_id": user_id, "zone": zone, "title": title, "sent": True}
 
 
 @router.post("/runtime/stop")

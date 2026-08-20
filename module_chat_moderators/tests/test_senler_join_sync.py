@@ -147,3 +147,25 @@ def test_telegram_log_copy_uses_configured_vk_log_chat() -> None:
         )
 
     assert sent == [(2000000040, "TG log")]
+
+
+def test_outgoing_vk_service_join_event_is_not_discarded() -> None:
+    runtime = module.VKModeratorRuntime(module.ModerationAnalyzer())
+    seen = []
+
+    async def process(event):
+        seen.append(event)
+
+    runtime.process_message = process
+    raw = SimpleNamespace(
+        type="message_new",
+        object={"message": {
+            "peer_id": 2000000088, "from_id": -225075265, "out": 1,
+            "id": 10, "conversation_message_id": 4, "text": "",
+            "action": {"type": "chat_invite_user_by_link", "member_id": 1105209997},
+        }},
+    )
+
+    asyncio.run(runtime._handle_shared_event(raw))
+
+    assert len(seen) == 1

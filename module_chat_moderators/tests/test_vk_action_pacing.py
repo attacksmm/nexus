@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 from module_chat_moderators import router as module
@@ -20,3 +21,9 @@ def test_vk_delete_uses_group_client_and_pacing_under_two_seconds(monkeypatch):
     assert sleeps == [0.75]
     assert sleeps[0] <= 1.8
     assert calls == [{"delete_for_all": 1, "peer_id": 2000000017, "cmids": [3]}]
+
+
+def test_vk_forwards_moderation_log_before_deleting_message():
+    source = inspect.getsource(module.VKModeratorRuntime._moderate_regular_member_message)
+    branch = source[source.index('if category in {"негатив", "скам", "удалить", "возврат"}:'):]
+    assert branch.index("await self.forward_to_log") < branch.index("self._delete_chat_message")

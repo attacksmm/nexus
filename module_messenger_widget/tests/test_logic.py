@@ -1213,15 +1213,18 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(calls, [("965776230", "Проверка", "", "")])
 
-    def test_getcourse_widget_uses_inline_confirmation_and_plain_labels(self):
+    def test_getcourse_widget_queues_access_changes_without_second_confirmation(self):
         module_dir = Path(__file__).resolve().parents[1]
         amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
         widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
         panel = (module_dir / "panel" / "index.html").read_text(encoding="utf-8")
         for source in (amo, widget):
-            self.assertIn("Проверить изменения", source)
-            self.assertIn("Отправить изменения", source)
+            self.assertIn("Проверить и применить", source)
+            self.assertIn("Проверяем и ставим в очередь", source)
+            self.assertIn("Запрос принят", source)
             self.assertIn("GetCourse отвечает", source)
+            self.assertNotIn("Проверьте изменения", source)
+            self.assertNotIn("Данные ДЗ пока не найдены", source)
         self.assertNotIn("if(!confirm((details", amo)
         self.assertNotIn("window.confirm((text", widget)
         self.assertIn("replace(/^(\\d+)[.,]0$/", amo)
