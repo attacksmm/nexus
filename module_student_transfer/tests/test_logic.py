@@ -991,6 +991,44 @@ def test_missing_access_snapshot_refreshes_and_exposes_module_nine(monkeypatch):
     assert result["items"][0]["enabled"] is True
 
 
+def test_live_access_prefers_authenticated_browser_without_export_budget(monkeypatch):
+    class Browser:
+        async def service_getcourse_browser_access_snapshot(self, **kwargs):
+            assert kwargs == {"gc_user_id": "511"}
+            return {
+                "ok": True,
+                "source": "browser",
+                "groups": [{"group_id": "4059687", "name": "1 модуль. Щенок"}],
+            }
+
+    class Fields:
+        async def service_getcourse_access_snapshot(self, **_kwargs):
+            raise AssertionError("Export API must stay a fallback when the browser succeeds")
+
+    class Access:
+        def service_access_catalog(self):
+            return {"ok": True, "items": [{
+                "group_id": 4059687,
+                "name": "1 модуль. Щенок",
+                "course_key": "puppy",
+                "group_kind": "module",
+                "module_index": 1,
+                "managed": True,
+            }]}
+
+    services = {
+        "getcourse-onboarding": Browser(),
+        "getcourse-chat-fields": Fields(),
+        "chat-moderators": Access(),
+    }
+    monkeypatch.setattr(module, "_module", lambda module_id, _service: services[module_id])
+    result = asyncio.run(module._get_access_view(
+        {"gc_user_id": "511", "email": "student@example.com"}, live=True, force=True,
+    ))
+    assert result["source"] == "browser"
+    assert result["items"][0]["enabled"] is True
+
+
 def test_access_preview_uses_cached_groups_when_getcourse_verification_is_busy(monkeypatch):
     calls = []
 

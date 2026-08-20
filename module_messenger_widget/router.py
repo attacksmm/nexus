@@ -4326,6 +4326,8 @@ async def _telegram_card_link(data: dict[str, Any]) -> dict[str, str]:
         if not entity:
             return {}
         peer = _telegram_user_view(entity)
+        identity["name"] = peer["name"] or peer["username"] or identity.get("name", "")
+        identity["telegram_username"] = peer["username"] or identity.get("telegram_username", "")
         await _remember_external_link(
             identity,
             "getcourse-card",
@@ -5134,6 +5136,58 @@ def _telegram_profile_url(username: Any = "", phone: Any = "") -> str:
     return ""
 
 
+async def _provider_profile_name(provider: str, external_id: str, fallback: str = "") -> str:
+    """Prefer a name observed in the exact provider over the amoCRM card name."""
+
+    provider = _clean(provider, 40).lower()
+    external_id = _clean(external_id, 300)
+    if not external_id:
+        return ""
+    if provider == "vk":
+        name = await _streams_vk_profile_name(external_id)
+        if name:
+            return name
+    source = "telegram_personal" if provider == TELEGRAM_PROVIDER else provider
+    chat = message = event = None
+    db = None
+    try:
+        db = await _connect()
+        chat_type = "telegram" if provider == TELEGRAM_PROVIDER else provider
+        chat = await (await db.execute(
+            """SELECT contact_name FROM wazzup_chats
+               WHERE chat_type=? AND chat_id=? AND contact_name<>''
+               ORDER BY updated_at DESC LIMIT 1""",
+            (chat_type, external_id),
+        )).fetchone()
+        message = await (await db.execute(
+            """SELECT author_name FROM wazzup_messages
+               WHERE chat_type=? AND chat_id=? AND direction='incoming' AND author_name<>''
+               ORDER BY sent_at DESC,id DESC LIMIT 1""",
+            (chat_type, external_id),
+        )).fetchone()
+        event = await (await db.execute(
+            """SELECT client_name FROM notification_events
+               WHERE source=? AND chat_id=? AND client_name<>''
+               ORDER BY sent_at DESC,created_at DESC LIMIT 1""",
+            (source, external_id),
+        )).fetchone()
+    except (RuntimeError, aiosqlite.Error):
+        pass
+    finally:
+        if db is not None:
+            await db.close()
+    for row, field in ((chat, "contact_name"), (message, "author_name"), (event, "client_name")):
+        if row and _clean(row[field], 200):
+            return _clean(row[field], 200)
+    if provider == SALEBOT_PROVIDER:
+        cached = _salebot_history_cache.get(external_id)
+        if cached:
+            for message in reversed(cached[1]):
+                if message.get("direction") == "incoming" and _clean(message.get("author_name"), 200):
+                    return _clean(message.get("author_name"), 200)
+    return _clean(fallback, 200)
+
+
 async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[str, Any]) -> list[dict[str, Any]]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
@@ -5250,6 +5304,22 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     if salebot_id:
         found.setdefault(SALEBOT_PROVIDER, f"{SALEBOT_PROFILE_BASE}/{quote(salebot_id, safe='')}")
 
+    entity_by_provider = {
+        provider: link for provider, link in zip(("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER), entity_links)
+    }
+    vk_name, telegram_name, salebot_name = await asyncio.gather(
+        _provider_profile_name("vk", vk_id, entity_by_provider.get("vk", {}).get("name", "")),
+        _provider_profile_name(
+            TELEGRAM_PROVIDER, telegram_id,
+            entity_by_provider.get(TELEGRAM_PROVIDER, {}).get("name", ""),
+        ),
+        _provider_profile_name(
+            SALEBOT_PROVIDER, salebot_id,
+            entity_by_provider.get(SALEBOT_PROVIDER, {}).get("name", ""),
+        ),
+    )
+    profile_names = {"vk": vk_name, TELEGRAM_PROVIDER: telegram_name, SALEBOT_PROVIDER: salebot_name}
+
     paid_access = False
     try:
         service = _module_service("student-transfer", "service_widget_student")
@@ -5267,7 +5337,9 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     except Exception as exc:
         _log("warning", "Streams badge lookup skipped: %s", exc)
     return [
-        {"kind": kind, "label": PROFILE_LINK_LABELS[kind], "url": found[kind],
+        {"kind": kind,
+         "label": f"{PROFILE_LINK_LABELS[kind]}: {profile_names[kind]}" if profile_names.get(kind) else PROFILE_LINK_LABELS[kind],
+         "url": found[kind],
          **({"paid_access": paid_access} if kind == "getcourse" else {})}
         for kind in PROFILE_LINK_ORDER
         if found.get(kind)
@@ -8425,11 +8497,15 @@ async def widget_channels(request: Request) -> JSONResponse:
                         allow_phone_import=provider == TELEGRAM_PROVIDER,
                     )
                 peer_id = _clean(link.get("external_user_id"), 200)
+                provider_profile_name = ""
                 if peer_id:
                     _, has_chat, _ = await _conversation_rows(
                         channel["channel_id"], channel["transport"], "", 1, exact_chat_id=peer_id,
                     )
                     direct_link = (provider, peer_id)
+                    provider_profile_name = await _provider_profile_name(
+                        provider, peer_id, _clean(link.get("name"), 200),
+                    )
                 if provider == "vk":
                     context = _widget_context(data, mode, device) if deferred_card else {}
                     can_send = bool(peer_id or _identity_field_value(
@@ -8448,6 +8524,7 @@ async def widget_channels(request: Request) -> JSONResponse:
                     reason = "" if peer_id else "Проверка Telegram…" if link.get("pending") else "" if phone else "Telegram клиента не найден"
             return ({
                 **channel,
+                **({"label": f"{('TG Personal' if provider == TELEGRAM_PROVIDER else 'SaleBot' if provider == SALEBOT_PROVIDER else 'VK')}: {provider_profile_name}"} if provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER} and provider_profile_name else {}),
                 "available": can_send,
                 "can_send": can_send,
                 "has_chat": has_chat,

@@ -854,7 +854,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
-            patch.object(router, "_provider_card_link", new=AsyncMock(return_value={"external_user_id": "215204074"})),
+            patch.object(router, "_provider_card_link", new=AsyncMock(return_value={"external_user_id": "215204074", "name": "Иван Иванов"})),
             patch.object(router, "_conversation_rows", new=AsyncMock(return_value=("", False, []))),
         ):
             response = await router.widget_channels(request_for(
@@ -862,8 +862,31 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)["channels"], [{
-            **channel, "available": True, "can_send": True, "has_chat": False, "send_reason": "",
+            **channel, "label": "VK: Иван Иванов",
+            "available": True, "can_send": True, "has_chat": False, "send_reason": "",
         }])
+
+    async def test_direct_channel_names_come_from_the_exact_provider_chat(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.executemany(
+                """INSERT INTO wazzup_chats(
+                   channel_id,chat_type,chat_id,contact_name,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                [
+                    ("telegram-personal:5601500901", "telegram", "700", "Екатерина Петрова", now, now),
+                    ("salebot:project", "salebot", "99001", "Наталья Абрамова", now, now),
+                ],
+            )
+            await db.commit()
+        self.assertEqual(
+            await router._provider_profile_name(router.TELEGRAM_PROVIDER, "700", "Имя из сделки"),
+            "Екатерина Петрова",
+        )
+        self.assertEqual(
+            await router._provider_profile_name(router.SALEBOT_PROVIDER, "99001", "Имя из сделки"),
+            "Наталья Абрамова",
+        )
 
     async def test_telegram_personal_channel_attempts_phone_import_and_stays_clickable(self):
         code = await self._code()

@@ -917,6 +917,13 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertEqual(router.PROFILE_LINK_LABELS["getcourse"], "GetCourse")
         self.assertEqual(router.PROFILE_LINK_LABELS["telegram_personal"], "TG Personal")
 
+    def test_getcourse_card_separates_calls_and_deduplicates_review(self):
+        widget = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertIn("function gcLessonGroups", widget)
+        self.assertIn("Созвоны · только просмотр", widget)
+        self.assertIn("seen[key].value=Boolean(seen[key].value||row.value)", widget)
+        self.assertNotIn("Откройте карточку после", widget)
+
     def test_protected_test_card_loads_the_real_widget_in_test_mode(self):
         module_dir = Path(__file__).resolve().parents[1]
         page = (module_dir / "panel" / "test.html").read_text(encoding="utf-8")
@@ -1060,9 +1067,10 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("Выйти из аккаунта", amo)
         self.assertIn("request('/logout')", amo)
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
+        self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.7.20")
-        self.assertIn("static/amocrm.html?v=5143", script)
+        self.assertEqual(manifest["widget"]["version"], "1.7.23")
+        self.assertIn("static/amocrm.html?v=5148", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)

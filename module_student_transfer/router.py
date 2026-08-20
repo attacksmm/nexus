@@ -33,7 +33,7 @@ MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 SESSION_COOKIE = "student_transfer_session"
 SESSION_TTL_DAYS = 30
 PASSWORD_MIN_LENGTH = 8
-ACCESS_VERIFY_DELAY_SECONDS = 60
+ACCESS_VERIFY_DELAY_SECONDS = 20
 CURATOR_OFFERS = {
     "Куратор 1": 8593080,
     "Куратор 2": 8593081,
@@ -1369,7 +1369,7 @@ async def _student_access_view(enrollment_id: str, *, live: bool = False) -> dic
     pending = await _pending_access(identity)
     if not pending.get("pending"):
         return current
-    if live and current.get("ok") and not current.get("stale") and current.get("source") == "live":
+    if live and current.get("ok") and not current.get("stale") and current.get("source") in {"live", "browser"}:
         verifier = _module("chat-moderators", "service_record_access_verification")
         verification = await asyncio.to_thread(
             verifier.service_record_access_verification,
@@ -2105,22 +2105,32 @@ def _access_view(
 async def _get_access_view(
     identity: dict[str, Any], *, live: bool, force: bool = False, allow_stale: bool = False
 ) -> dict[str, Any]:
-    fields = _module("getcourse-chat-fields", "service_getcourse_access_snapshot")
     access = _module("chat-moderators", "service_access_catalog")
-    snapshot = await fields.service_getcourse_access_snapshot(
-        gc_user_id=_clean(identity.get("gc_user_id"), 100),
-        email=_clean(identity.get("email"), 300),
-        live=live,
-        force=force,
-    )
+    catalog_result = await asyncio.to_thread(access.service_access_catalog)
+    catalog = catalog_result.get("items") or []
+    snapshot: dict[str, Any] = {}
+    if live and _clean(identity.get("gc_user_id"), 100).isdigit():
+        try:
+            browser = _module("getcourse-onboarding", "service_getcourse_browser_access_snapshot")
+            snapshot = await browser.service_getcourse_browser_access_snapshot(
+                gc_user_id=_clean(identity.get("gc_user_id"), 100),
+            )
+        except Exception as exc:
+            snapshot = {"ok": False, "error": _clean(exc, 1000), "groups": []}
+    fields = _module("getcourse-chat-fields", "service_getcourse_access_snapshot")
+    if not snapshot.get("ok"):
+        snapshot = await fields.service_getcourse_access_snapshot(
+            gc_user_id=_clean(identity.get("gc_user_id"), 100),
+            email=_clean(identity.get("email"), 300),
+            live=live,
+            force=force,
+        )
     if not live and not allow_stale and (not snapshot.get("ok") or snapshot.get("refresh_due")):
         snapshot = await fields.service_getcourse_access_snapshot(
             gc_user_id=_clean(identity.get("gc_user_id"), 100),
             email=_clean(identity.get("email"), 300),
             live=True,
         )
-    catalog_result = await asyncio.to_thread(access.service_access_catalog)
-    catalog = catalog_result.get("items") or []
     live_names = {str(item.get("group_id") or ""): _clean(item.get("name"), 500) for item in snapshot.get("catalog") or []}
     for item in catalog:
         if live_names.get(str(item.get("group_id") or "")):
@@ -2193,21 +2203,21 @@ def _access_refresh_key(enrollment_id: str) -> str:
     return f"access_refresh:{_clean(enrollment_id, 100)}"
 
 
-def _access_due_epoch(value: Any, default_delay: int = 60) -> float:
+def _access_due_epoch(value: Any, default_delay: int = 5) -> float:
     raw = _clean(value, 60)
     if raw:
         try:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            return max(time.time() + 15, parsed.timestamp())
+            return max(time.time() + 3, parsed.timestamp())
         except ValueError:
             pass
     return time.time() + default_delay
 
 
 async def _queue_access_refresh(enrollment_id: str, current: dict[str, Any]) -> dict[str, Any]:
-    due = _access_due_epoch(current.get("next_at") or current.get("next_check_at"), 60)
+    due = _access_due_epoch(current.get("next_at") or current.get("next_check_at"), 5)
     key = _access_refresh_key(enrollment_id)
     previous_raw = await _meta_get(key)
     try:
@@ -2252,7 +2262,7 @@ async def _process_pending_access_refresh() -> None:
         try:
             identity = await _access_identity(enrollment_id)
             result = await _get_access_view(identity, live=True, force=True, allow_stale=True)
-            if result.get("ok") and not result.get("stale") and result.get("source") == "live":
+            if result.get("ok") and not result.get("stale") and result.get("source") in {"live", "browser"}:
                 async with _connect() as db:
                     await db.execute("DELETE FROM registry_meta WHERE key=?", (row["key"],))
                     await db.commit()
@@ -2422,18 +2432,9 @@ async def _verify_pending_access() -> None:
     pending = await asyncio.to_thread(access.service_pending_access_verifications, limit=1)
     for request in pending.get("items") or []:
         scheduler = _module("chat-moderators", "service_schedule_access_verification")
-        fields = _module("getcourse-chat-fields", "service_getcourse_access_budget")
-        budget = await fields.service_getcourse_access_budget()
-        if int(budget.get("requests_left_2h") or 0) < int(budget.get("needed_for_verification") or 6):
-            await asyncio.to_thread(
-                scheduler.service_schedule_access_verification,
-                request_id=request["request_id"], delay_seconds=15 * 60,
-                error="Лимит GetCourse API",
-            )
-            continue
         identity = {"gc_user_id": request.get("gc_user_id"), "email": request.get("identifier")}
         actual = await _get_access_after_write(identity)
-        if not actual.get("ok") or actual.get("stale") or actual.get("source") != "live":
+        if not actual.get("ok") or actual.get("stale") or actual.get("source") not in {"live", "browser"}:
             await asyncio.to_thread(
                 scheduler.service_schedule_access_verification,
                 request_id=request["request_id"], delay_seconds=_retry_delay(int((request.get("apply_result") or {}).get("verification_attempts") or 0)),
@@ -2467,13 +2468,10 @@ async def _apply_pending_access() -> None:
                 request_id=request_id,
                 requester_user_id=requester,
             )
-            fields = _module("getcourse-chat-fields", "service_getcourse_access_budget")
-            budget = await fields.service_getcourse_access_budget()
             scheduler = _module("chat-moderators", "service_schedule_access_verification")
             await asyncio.to_thread(
                 scheduler.service_schedule_access_verification,
-                request_id=request_id,
-                delay_seconds=_access_verification_delay(budget),
+                request_id=request_id, delay_seconds=ACCESS_VERIFY_DELAY_SECONDS,
             )
         except Exception as exc:
             attempts = int((request.get("apply_result") or {}).get("apply_attempts") or 0)

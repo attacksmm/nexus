@@ -1,0 +1,14 @@
+{
+  "id": "getcourse-onboarding",
+  "name": "Старт обучения",
+  "version": "1.7.5",
+  "description": "Запускает обучение и переводит Standard → Premium через новый заказ, перенос исходного платежа и проверяемый браузерный сценарий.",
+  "env_vars": {
+    "GETCOURSE_ONBOARDING_TELEGRAM_BOT_TOKEN": "BotFather-токен Telegram-бота, чей входящий webhook остаётся подключён к SaleBot",
+    "TELEGRAM_BOT_TOKEN_ERROR_ALERT": "Необязательный токен служебного Telegram-бота для аварийных уведомлений доплат",
+    "TELEGRAM_CHAT_ID_ERROR_ALERT": "Telegram chat_id владельца для аварийных уведомлений доплат"
+  },
+  "env_required": [
+    "GETCOURSE_ONBOARDING_TELEGRAM_BOT_TOKEN"
+  ]
+}
