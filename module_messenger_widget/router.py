@@ -8577,6 +8577,7 @@ async def widget_channels(request: Request) -> JSONResponse:
 
         phone = _normalize_phone((thread or {}).get("phone") or data.get("phone"))
         gc_id = _clean((thread or {}).get("getcourse_user_id"), 200)
+        card_context = _widget_context(data, mode, device)
         async def resolve_channel(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
             provider = channel.get("provider", "wazzup")
             has_chat = False
@@ -8601,8 +8602,18 @@ async def widget_channels(request: Request) -> JSONResponse:
                 link = await _external_link(
                     peer_id=_clean((thread or {}).get("chat_id"), 200), provider=provider,
                 ) if same_provider else {}
-                context = _widget_context(data, mode, device)
-                if not link:
+                context = card_context
+                exact_amo_provider = (
+                    context["platform"] == "amocrm"
+                    and provider in {"vk", SALEBOT_PROVIDER}
+                )
+                if not link and exact_amo_provider:
+                    # Keep the direct channel in lockstep with the profile
+                    # header.  Historical amoCRM fields may contain generated
+                    # SaleBot/VK URLs or a copied utm_term, so only the exact
+                    # Customer DB resolver may enable these channels.
+                    link = await _provider_card_link(data, mode, device, provider)
+                if not link and not exact_amo_provider:
                     exact_link = await _entity_external_link(
                         context["platform"], context["entity_type"], context["entity_id"], provider,
                     )
@@ -8622,7 +8633,7 @@ async def widget_channels(request: Request) -> JSONResponse:
                         explicit_id = _identity_field_value(
                             context, "vk_id", "vkontakte_id", "senler_id",
                         )
-                    elif provider == SALEBOT_PROVIDER:
+                    elif provider == SALEBOT_PROVIDER and context["platform"] != "amocrm":
                         explicit_id = _identity_field_value(
                             context, "salebot_id", "salebot_client_id", "sb_id",
                         )
@@ -8639,17 +8650,27 @@ async def widget_channels(request: Request) -> JSONResponse:
                         provider, peer_id, _clean(link.get("name"), 200),
                     )
                 if provider == "vk":
-                    can_send = bool(peer_id or _identity_field_value(
-                        context, "vk_id", "vkontakte_id", "senler_id", "platform_id",
+                    can_send = bool(peer_id or (
+                        context["platform"] != "amocrm"
+                        and _identity_field_value(
+                            context, "vk_id", "vkontakte_id", "senler_id", "platform_id",
+                        )
                     ))
                     reason = "" if can_send else "VK клиента не найден"
                 elif provider == SALEBOT_PROVIDER:
-                    context = _widget_context(data, mode, device)
-                    explicit_id = _identity_field_value(context, "salebot_id", "salebot_client_id", "sb_id")
-                    if not explicit_id:
-                        explicit_id = next((value for kind, value in parse_utm_term(_identity_field_value(context, "utm_term")) if kind == "salebot"), "")
+                    explicit_id = ""
+                    if context["platform"] != "amocrm":
+                        explicit_id = _identity_field_value(
+                            context, "salebot_id", "salebot_client_id", "sb_id",
+                        )
+                        if not explicit_id:
+                            explicit_id = next((
+                                value for kind, value in parse_utm_term(
+                                    _identity_field_value(context, "utm_term")
+                                ) if kind == "salebot"
+                            ), "")
                     can_send = bool(peer_id or explicit_id)
-                    reason = "" if can_send else "SaleBot ID не найден. Нужен salebot_id в карточке или utm_term."
+                    reason = "" if can_send else "SaleBot клиента не найден"
                 else:
                     can_send = bool(peer_id)
                     reason = "" if peer_id else "Проверяем пользователя Telegram…" if link.get("pending") else "Пользователь Telegram не найден"

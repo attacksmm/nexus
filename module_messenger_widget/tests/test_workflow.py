@@ -597,6 +597,82 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(views[1]["send_reason"], "Пользователь Telegram не найден")
         self.assertFalse(json.loads(repeated.body)["channels"][1]["can_send"])
 
+    async def test_amocrm_salebot_channel_uses_the_same_exact_card_identity_as_profile(self):
+        code = await self._code()
+        amo_origin = "https://junior.sobakovod.pro"
+        activated = await router.widget_activate(request_for(
+            "/widget/activate",
+            {"code": code, "platform_user_id": "6269974"},
+            origin=amo_origin,
+            platform="amocrm",
+        ))
+        token = json.loads(activated.body)["device_token"]
+        channel = {
+            "channel_id": "salebot:project", "provider": router.SALEBOT_PROVIDER,
+            "transport": "salebot", "channel_transport": "salebot",
+            "name": "Проект", "plain_id": "project", "label": "SaleBot · Проект",
+        }
+        exact_link = AsyncMock(return_value={
+            "external_user_id": "998417306", "name": "Амина Тесаева",
+        })
+        with (
+            patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
+            patch.object(router, "_provider_card_link", new=exact_link),
+            patch.object(router, "_conversation_rows", new=AsyncMock(return_value=("", False, []))),
+        ):
+            response = await router.widget_channels(request_for(
+                "/widget/channels",
+                {
+                    "platform_user_id": "6269974", "entity_type": "lead",
+                    "entity_id": "18101847", "phone": "+79297762777",
+                },
+                origin=amo_origin,
+                token=token,
+                platform="amocrm",
+            ))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["channels"], [{
+            **channel, "label": "SaleBot: Амина Тесаева",
+            "available": True, "can_send": True, "has_chat": False, "send_reason": "",
+        }])
+        exact_link.assert_awaited_once()
+
+    async def test_amocrm_salebot_raw_card_field_does_not_bypass_exact_verification(self):
+        code = await self._code()
+        amo_origin = "https://junior.sobakovod.pro"
+        activated = await router.widget_activate(request_for(
+            "/widget/activate",
+            {"code": code, "platform_user_id": "6269974"},
+            origin=amo_origin,
+            platform="amocrm",
+        ))
+        token = json.loads(activated.body)["device_token"]
+        channel = {
+            "channel_id": "salebot:project", "provider": router.SALEBOT_PROVIDER,
+            "transport": "salebot", "channel_transport": "salebot",
+            "name": "Проект", "plain_id": "project", "label": "SaleBot · Проект",
+        }
+        with (
+            patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
+            patch.object(router, "_provider_card_link", new=AsyncMock(return_value={})),
+        ):
+            response = await router.widget_channels(request_for(
+                "/widget/channels",
+                {
+                    "platform_user_id": "6269974", "entity_type": "lead",
+                    "entity_id": "17894711", "phone": "+79991234567",
+                    "fields": {"salebot_id": "215204074", "utm_term": "215204074"},
+                },
+                origin=amo_origin,
+                token=token,
+                platform="amocrm",
+            ))
+
+        view = json.loads(response.body)["channels"][0]
+        self.assertFalse(view["can_send"])
+        self.assertEqual(view["send_reason"], "SaleBot клиента не найден")
+
     async def test_widget_keeps_verified_telegram_personal_when_wazzup_key_fails(self):
         code = await self._code()
         token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
