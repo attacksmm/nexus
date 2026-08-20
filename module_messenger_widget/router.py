@@ -5355,6 +5355,7 @@ def _module_service(module_id: str, service: str):
 
 async def _widget_getcourse_card_data(
     data: dict[str, Any], mode: str, device: dict[str, Any], *, include_access: bool = True,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
@@ -5370,7 +5371,7 @@ async def _widget_getcourse_card_data(
     service = _module_service("student-transfer", "service_widget_student")
     return await service(
         gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
-        include_access=include_access,
+        include_access=include_access, summary_only=summary_only,
     )
 
 
@@ -6056,6 +6057,15 @@ async def _provider_card_link(
     page_kind, page_id = _page_context(data.get("source_url"))
     gc_id = page_id if page_kind == "user" else _identity_field_value(context, "getcourse_user_id")
     exact_amo_identity = context.get("platform") == "amocrm" and provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER}
+    if context.get("platform") == "amocrm" and provider == TELEGRAM_PROVIDER:
+        # A phone/name link remembered for another card is not proof that the
+        # current amoCRM contact exists in Telegram.  Existing direct threads
+        # are handled before this resolver; a new card must pass a live phone
+        # lookup in Telegram Personal.
+        if existing and mode != "test":
+            await _forget_entity_external_link(context, provider)
+        existing = {}
+        exact_reference = ""
     if existing and exact_amo_identity and (
         not exact_reference
         or _clean(existing.get("external_user_id"), 300) != _clean(exact_reference, 300)
@@ -6118,10 +6128,12 @@ async def _provider_card_link(
         if not peer_id:
             return {}
     else:
-        identity["telegram_id"] = exact_reference or _identity_field_value(context, "telegram_id", "tg_id")
+        identity["telegram_id"] = "" if context.get("platform") == "amocrm" else (
+            exact_reference or _identity_field_value(context, "telegram_id", "tg_id")
+        )
         if context.get("platform") != "amocrm":
             identity["telegram_id"] = identity["telegram_id"] or _identity_field_value(context, "platform_id")
-        identity["telegram_username"] = (
+        identity["telegram_username"] = "" if context.get("platform") == "amocrm" else (
             _identity_field_value(context, "telegram_username", "tg_username")
             or _clean(identity.get("telegram_username"), 200)
         )
@@ -8060,12 +8072,44 @@ async def widget_getcourse_card(request: Request) -> JSONResponse:
         data = await _read_json(request)
         _validate_device_context(device, data, mode)
         enforce_rate_limit(request, "messenger-widget-getcourse-card", limit=180, window_seconds=3600, subject=str(device["id"]))
-        return _widget_response(request, await _widget_getcourse_card_data(data, mode, device, include_access=True))
+        return _widget_response(
+            request,
+            await _widget_getcourse_card_data(
+                data, mode, device, include_access=False, summary_only=True,
+            ),
+        )
     except HTTPException as exc:
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception as exc:
         _log("exception", "Messenger GetCourse card failed")
         return _widget_response(request, {"ok": False, "error": _clean(exc, 300) or "Не удалось загрузить GetCourse"}, 502)
+
+
+@router.post("/widget/getcourse-lessons")
+async def widget_getcourse_lessons(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        enforce_rate_limit(request, "messenger-widget-getcourse-lessons", limit=240, window_seconds=3600, subject=str(device["id"]))
+        card = await _widget_getcourse_card_data(
+            data, mode, device, include_access=False, summary_only=True,
+        )
+        enrollment_id = _clean(data.get("enrollment_id"), 100)
+        if not card.get("found") or enrollment_id != _clean((card.get("item") or {}).get("enrollment_id"), 100):
+            raise HTTPException(404, "Данные ученика не найдены")
+        service = _module_service("student-transfer", "service_widget_lessons")
+        return _widget_response(request, await service(enrollment_id=enrollment_id))
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception as exc:
+        _log("exception", "Messenger GetCourse lessons failed")
+        return _widget_response(request, {"ok": False, "error": _clean(exc, 300) or "Не удалось загрузить ДЗ и созвоны"}, 502)
 
 
 @router.post("/widget/getcourse-access")
@@ -8079,7 +8123,9 @@ async def widget_getcourse_access(request: Request) -> JSONResponse:
             return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
         data = await _read_json(request)
         _validate_device_context(device, data, mode)
-        card = await _widget_getcourse_card_data(data, mode, device, include_access=False)
+        card = await _widget_getcourse_card_data(
+            data, mode, device, include_access=False, summary_only=True,
+        )
         enrollment_id = _clean(data.get("enrollment_id"), 100)
         if not card.get("found") or enrollment_id != _clean((card.get("item") or {}).get("enrollment_id"), 100):
             raise HTTPException(404, "Доступы ученика не найдены")
@@ -8488,13 +8534,12 @@ async def widget_channels(request: Request) -> JSONResponse:
                 link = await _external_link(
                     peer_id=_clean((thread or {}).get("chat_id"), 200), provider=provider,
                 ) if same_provider else {}
-                if not link and thread:
+                if not link and thread and provider != TELEGRAM_PROVIDER:
                     link = await _external_link_for_identity(provider, phone=phone, gc_id=gc_id)
-                deferred_card = not thread and provider == TELEGRAM_PROVIDER
-                if not link and not deferred_card:
+                if not link:
                     link = await _provider_card_link(
                         data, mode, device, provider,
-                        allow_phone_import=provider == TELEGRAM_PROVIDER,
+                        allow_phone_import=False,
                     )
                 peer_id = _clean(link.get("external_user_id"), 200)
                 provider_profile_name = ""
@@ -8507,21 +8552,21 @@ async def widget_channels(request: Request) -> JSONResponse:
                         provider, peer_id, _clean(link.get("name"), 200),
                     )
                 if provider == "vk":
-                    context = _widget_context(data, mode, device) if deferred_card else {}
+                    context = _widget_context(data, mode, device)
                     can_send = bool(peer_id or _identity_field_value(
                         context, "vk_id", "vkontakte_id", "senler_id", "platform_id", "utm_term",
                     ))
                     reason = "" if can_send else "VK клиента не найден"
                 elif provider == SALEBOT_PROVIDER:
-                    context = _widget_context(data, mode, device) if deferred_card else {}
+                    context = _widget_context(data, mode, device)
                     explicit_id = _identity_field_value(context, "salebot_id", "salebot_client_id", "sb_id")
                     if not explicit_id:
                         explicit_id = next((value for kind, value in parse_utm_term(_identity_field_value(context, "utm_term")) if kind == "salebot"), "")
                     can_send = bool(peer_id or explicit_id)
                     reason = "" if can_send else "SaleBot ID не найден. Нужен salebot_id в карточке или utm_term."
                 else:
-                    can_send = bool(peer_id or phone)
-                    reason = "" if peer_id else "Проверка Telegram…" if link.get("pending") else "" if phone else "Telegram клиента не найден"
+                    can_send = bool(peer_id)
+                    reason = "" if peer_id else "Проверяем пользователя Telegram…" if link.get("pending") else "Пользователь Telegram не найден"
             return ({
                 **channel,
                 **({"label": f"{('TG Personal' if provider == TELEGRAM_PROVIDER else 'SaleBot' if provider == SALEBOT_PROVIDER else 'VK')}: {provider_profile_name}"} if provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER} and provider_profile_name else {}),

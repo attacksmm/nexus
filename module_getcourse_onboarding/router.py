@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -936,7 +937,10 @@ async def service_getcourse_browser_access_snapshot(*, gc_user_id: str) -> dict[
     result = await _run_browser_action(
         {
             "action": "read_access",
-            "operation_id": f"access-read-{user_id}-{int(time.time())}",
+            # A foreground widget read and the background refresh worker can
+            # request the same user in the same second.  The browser job file
+            # must still be unique or one request can delete the other's job.
+            "operation_id": f"access-read-{user_id}-{time.time_ns()}",
             "gc_user_id": user_id,
         },
         timeout=45,

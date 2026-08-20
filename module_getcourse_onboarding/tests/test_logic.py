@@ -11,6 +11,22 @@ import router
 
 
 class OnboardingLogicTests(unittest.TestCase):
+    def test_browser_access_jobs_are_unique_for_same_second(self):
+        operation_ids = []
+
+        async def run(payload, *, timeout):
+            operation_ids.append(payload["operation_id"])
+            return {"ok": True, "groups": [], "checked_at": "2026-08-20T17:00:00Z"}
+
+        with (
+            mock.patch.object(router, "_run_browser_action", side_effect=run),
+            mock.patch.object(router.time, "time_ns", side_effect=[1000000001, 1000000002]),
+        ):
+            asyncio.run(router.service_getcourse_browser_access_snapshot(gc_user_id="513317689"))
+            asyncio.run(router.service_getcourse_browser_access_snapshot(gc_user_id="513317689"))
+        self.assertEqual(len(set(operation_ids)), 2)
+        self.assertTrue(all(value.startswith("access-read-513317689-") for value in operation_ids))
+
     def test_completed_monitor_alerts_only_after_three_consecutive_export_delays(self):
         job = {"status": "completed", "attempts": 0}
         self.assertTrue(router._completed_monitor_transient("Файл ещё не создан"))

@@ -1,7 +1,7 @@
 {
   "id": "getcourse-onboarding",
   "name": "Старт обучения",
-  "version": "1.7.5",
+  "version": "1.7.6",
   "description": "Запускает обучение и переводит Standard → Premium через новый заказ, перенос исходного платежа и проверяемый браузерный сценарий.",
   "env_vars": {
     "GETCOURSE_ONBOARDING_TELEGRAM_BOT_TOKEN": "BotFather-токен Telegram-бота, чей входящий webhook остаётся подключён к SaleBot",

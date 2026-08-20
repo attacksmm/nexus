@@ -1300,6 +1300,86 @@ async def _student_by_id(enrollment_id: str) -> dict[str, Any]:
     raise HTTPException(404, "Ученик не найден")
 
 
+async def _widget_student_base(enrollment_id: str) -> dict[str, Any]:
+    """Return immediately usable card facts without rebuilding Streams."""
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                """SELECT e.*,f.teacher AS flow_teacher,f.teacher_code AS flow_teacher_code
+                   FROM enrollments e
+                   LEFT JOIN flow_registry f ON f.course_key=e.course_key AND f.stream=e.stream
+                   WHERE e.id=? AND e.status<>'removed' LIMIT 1""",
+                (_clean(enrollment_id, 100),),
+            )
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Ученик не найден")
+    stored = dict(row)
+    try:
+        source = json.loads(stored.get("source_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source = {}
+    student = {
+        **source,
+        **stored,
+        "enrollment_id": _clean(stored.get("id"), 100),
+        "phone": _clean(source.get("phone") or source.get("user_phone"), 100),
+        "course_assignments": source.get("course_assignments") or [],
+        "lessons": [],
+    }
+    teacher_code = _clean(stored.get("teacher_code") or stored.get("flow_teacher_code"), 100)
+    teacher_name = _clean(stored.get("teacher") or stored.get("flow_teacher"), 200)
+    item = _student_result(
+        {
+            "course_key": _clean(stored.get("course_key"), 50),
+            "course": _clean(stored.get("course"), 100),
+            "stream": _clean(stored.get("stream"), 50),
+            "curator_value": teacher_code,
+        },
+        student,
+    )
+    if teacher_name:
+        item["curator_name"] = teacher_name
+    profile_id = _clean(item.get("gc_user_id"), 100)
+    if profile_id:
+        item["user_url"] = f"https://club.sobakovod.pro/user/control/user/update/id/{quote(profile_id)}"
+    try:
+        await asyncio.wait_for(_enrich_successful_managers([item]), timeout=1.5)
+    except TimeoutError:
+        item.setdefault("manager_name", "")
+        item.setdefault("manager_id", "")
+    return item
+
+
+async def service_widget_lessons(*, enrollment_id: str) -> dict[str, Any]:
+    """Load only lesson and call progress for the mini card."""
+    key = _clean(enrollment_id, 100)
+    async with _connect() as db:
+        exists = await (
+            await db.execute(
+                "SELECT 1 FROM enrollments WHERE id=? AND status<>'removed' LIMIT 1", (key,),
+            )
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Ученик не найден")
+        rows = await (
+            await db.execute(
+                """SELECT lesson_key,label,value FROM lesson_progress
+                   WHERE enrollment_id=? ORDER BY length(lesson_key),lesson_key""",
+                (key,),
+            )
+        ).fetchall()
+    return {
+        "ok": True,
+        "enrollment_id": key,
+        "lessons": [
+            {"key": _clean(row[0], 20), "label": _clean(row[1], 200), "value": bool(row[2])}
+            for row in rows
+        ],
+    }
+
+
 async def service_widget_student(
     *, gc_user_id: str = "", email: str = "", phone: str = "", include_access: bool = True,
     summary_only: bool = False,
@@ -1347,9 +1427,12 @@ async def service_widget_student(
         if matched_gc_id else ""
     )
     if summary_only:
+        item = await _widget_student_base(_clean(row["id"], 100))
         return {
             "ok": True, "found": True, "paid_access": True,
-            "gc_user_id": matched_gc_id, "profile_url": profile_url,
+            "gc_user_id": matched_gc_id,
+            "profile_url": item.get("user_url") or profile_url,
+            "item": item,
         }
     item = await _student_by_id(_clean(row["id"], 100))
     result = {
@@ -1368,6 +1451,19 @@ async def _student_access_view(enrollment_id: str, *, live: bool = False) -> dic
         current = await _queue_access_refresh(enrollment_id, current)
     pending = await _pending_access(identity)
     if not pending.get("pending"):
+        if live and (
+            not current.get("ok")
+            or current.get("stale")
+            or current.get("refresh_due")
+            or current.get("source") not in {"live", "browser"}
+        ):
+            return {
+                **current,
+                "ok": False,
+                "items": [],
+                "current_groups": [],
+                "error": current.get("error") or current.get("warning") or "GetCourse ещё не вернул доступы",
+            }
         return current
     if live and current.get("ok") and not current.get("stale") and current.get("source") in {"live", "browser"}:
         verifier = _module("chat-moderators", "service_record_access_verification")
@@ -2061,6 +2157,7 @@ def _access_view(
         {**item, "group_id": str(item.get("group_id") or ""), "enabled": str(item.get("group_id") or "") in current_ids}
         for item in catalog
         if item.get("managed") and item.get("course_key") in {"puppy", "dog", "mini_muzzle", "mini_leash", "mini_obedience", "mini_15"} and item.get("group_kind") != "bridge"
+        and not (item.get("course_key") == "puppy" and item.get("package_key") == "module_standard")
     ]
     identity = identity or {}
     tariff_key = _tariff_key(identity.get("tariff"))

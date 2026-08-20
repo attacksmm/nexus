@@ -556,7 +556,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "send_reason": "Телефон не найден",
         }])
 
-    async def test_widget_keeps_telegram_personal_when_wazzup_key_fails(self):
+    async def test_widget_keeps_verified_telegram_personal_when_wazzup_key_fails(self):
         code = await self._code()
         token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
         channel = {
@@ -589,7 +589,8 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body)["channels"], [{
-            **channel, "available": True, "can_send": True, "has_chat": False, "send_reason": "",
+            **channel, "label": "TG Personal: Елена",
+            "available": True, "can_send": True, "has_chat": True, "send_reason": "",
         }])
 
     async def test_webhook_stores_incoming_message_without_sending(self):
@@ -888,7 +889,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "Наталья Абрамова",
         )
 
-    async def test_telegram_personal_channel_attempts_phone_import_and_stays_clickable(self):
+    async def test_telegram_personal_stays_disabled_until_exact_user_is_verified(self):
         code = await self._code()
         token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
         channel = {
@@ -905,9 +906,32 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "/widget/channels", {"phone": "+79991234567", "entity_type": "lead", "entity_id": "17759125"}, token=token,
             ))
         view = json.loads(response.body)["channels"][0]
-        self.assertTrue(view["can_send"])
+        self.assertFalse(view["can_send"])
+        self.assertTrue(view["pending"])
+        self.assertEqual(view["send_reason"], "Проверяем пользователя Telegram…")
+        resolver.assert_awaited_once()
+
+    async def test_telegram_personal_is_unavailable_when_phone_has_no_telegram_user(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
+        channel = {
+            "channel_id": "telegram-personal:5601500901", "provider": router.TELEGRAM_PROVIDER,
+            "transport": "telegram", "channel_transport": "personal", "name": "operator",
+            "plain_id": "5601500901", "label": "Telegram Personal · operator",
+        }
+        resolver = AsyncMock(return_value={})
+        with (
+            patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
+            patch.object(router, "_provider_card_link", new=resolver),
+        ):
+            response = await router.widget_channels(request_for(
+                "/widget/channels", {"phone": "+79091440995", "entity_type": "lead", "entity_id": "18232123"}, token=token,
+            ))
+        view = json.loads(response.body)["channels"][0]
+        self.assertFalse(view["can_send"])
         self.assertNotIn("pending", view)
-        resolver.assert_not_awaited()
+        self.assertEqual(view["send_reason"], "Пользователь Telegram не найден")
+        resolver.assert_awaited_once()
 
     async def test_vk_card_link_uses_the_resolved_vk_account(self):
         data = {
@@ -954,7 +978,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         sender.assert_awaited_once_with("700", "mock", author_name="Анна")
 
-    async def test_amocrm_platform_id_resolves_telegram_and_persists_entity_link(self):
+    async def test_amocrm_telegram_requires_live_phone_resolution_and_persists_entity_link(self):
         class User:
             id = 700
             phone = "79108758427"
@@ -967,8 +991,11 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 return True
 
             async def get_entity(self, reference):
-                self.reference = reference
-                return User()
+                raise AssertionError("stale telegram_id must not be trusted for an amoCRM card")
+
+            async def __call__(self, request):
+                self.phone = request.phone
+                return type("Resolved", (), {"users": [User()]})()
 
         client = Client()
 
@@ -986,6 +1013,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             link = await router._provider_card_link(data, "amocrm", device, router.TELEGRAM_PROVIDER)
         self.assertEqual(link["external_user_id"], "700")
+        self.assertEqual(client.phone, "79108758427")
         async with aiosqlite.connect(router._must_db()) as db:
             row = await (await db.execute(
                 "SELECT external_user_id FROM entity_identity_links WHERE platform='amocrm' AND entity_type='lead' AND entity_id='9001'"

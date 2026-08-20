@@ -916,6 +916,7 @@ def test_access_view_separates_getcourse_groups_from_sheet_progress():
         {"group_id": 4059685, "name": "Знакомство. Щенок", "course_key": "puppy", "group_kind": "root", "managed": True},
         {"group_id": 4306384, "name": "Выдача Щенка без процесса", "course_key": "puppy", "group_kind": "bridge", "managed": True},
         {"group_id": 4059687, "name": "1 модуль. Щенок", "course_key": "puppy", "group_kind": "module", "module_index": 1, "managed": True},
+        {"group_id": 4999999, "name": "Помодульно. Щенок", "course_key": "puppy", "group_kind": "package", "package_key": "module_standard", "managed": True},
     ]
     result = module._access_view(
         {"ok": True, "source": "live", "groups": [{"group_id": "4059687", "name": "1 модуль. Щенок"}]},
@@ -1682,6 +1683,9 @@ def test_widget_paid_summary_matches_unique_exact_phone_without_snapshot(tmp_pat
     assert result["paid_access"] is True
     assert result["gc_user_id"] == "505433216"
     assert result["profile_url"].endswith("/user/control/user/update/id/505433216")
+    assert result["item"]["enrollment_id"] == "paid-exact-phone"
+    assert result["item"]["phone"] == "+7 (999) 144-09-95"
+    assert result["item"]["lessons"] == []
 
 
 def test_student_note_is_saved_and_returned(tmp_path, monkeypatch):
