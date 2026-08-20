@@ -3,6 +3,7 @@
 
   var script = document.currentScript;
   var API = String((script && script.dataset && script.dataset.nexusWazzupApi) || "").replace(/\/$/, "");
+  var GUIDE_URL = API.replace(/\/widget$/, "/guide");
   var TEST_MODE = !!(script && script.dataset && script.dataset.nexusWazzupTest === "1");
   var TEST_SOURCE_URL = String((script && script.dataset && script.dataset.nexusWazzupSourceUrl) || "");
   var SUPPORTED = /\/(?:user\/control\/user\/update\/id|sales\/control\/deal\/update\/id)\/\d+(?:\/|$)/i;
@@ -22,6 +23,10 @@
   if (!API || document.getElementById(INBOX_ID)) return;
   var forcedContext = null;
 
+  function openGuide() {
+    window.open(GUIDE_URL, "_blank", "noopener");
+  }
+
   function isAdminShell() {
     if (TEST_MODE) return true;
     if (!document.body || !document.body.classList.contains("gc-user-logined")) return false;
@@ -37,7 +42,7 @@
     var color = /^#[0-9a-f]{6}$/i.test(String(value.color || "")) ? String(value.color) : "#337ab7";
     var positions = ["bottom-left", "bottom-right", "top-left", "top-right"];
     var sizes = ["small", "medium", "large"];
-    var themes = ["light", "dark"];
+    var themes = ["light", "gray", "dark"];
     return {
       color: color,
       theme: themes.indexOf(value.theme) >= 0 ? value.theme : "light",
@@ -56,33 +61,47 @@
     }).join("");
   }
 
+  function shadeColor(hex, factor) {
+    var raw = String(hex || "#337ab7").slice(1);
+    return "#" + [0, 2, 4].map(function (index) {
+      return Math.round(parseInt(raw.slice(index, index + 2), 16) * factor).toString(16).padStart(2, "0");
+    }).join("");
+  }
+
   function applyPrefs(view) {
     if (!view) return;
     var prefs = readPrefs();
+    var accent = prefs.theme === "dark" ? shadeColor(prefs.color, 0.7) : prefs.color;
     view.wrap.dataset.position = prefs.position;
     view.wrap.dataset.inboxSize = prefs.inboxSize;
     view.wrap.dataset.theme = prefs.theme;
-    view.wrap.style.setProperty("--accent", prefs.color);
-    view.wrap.style.setProperty("--accent-soft", mixWhite(prefs.color, 0.82));
-    view.wrap.style.setProperty("--accent-faint", mixWhite(prefs.color, 0.93));
+    view.wrap.style.setProperty("--accent", accent);
+    view.wrap.style.setProperty("--accent-soft", mixWhite(accent, 0.82));
+    view.wrap.style.setProperty("--accent-faint", mixWhite(accent, 0.93));
+    view.wrap.style.setProperty("--outgoing-bg", prefs.theme === "dark" ? shadeColor(prefs.color, 0.45) : mixWhite(accent, prefs.theme === "gray" ? 0.48 : 0.82));
+    view.wrap.style.setProperty("--outgoing-border", accent);
   }
 
   function applyDrawerPrefs(view) {
     if (!view) return;
     var prefs = readPrefs();
+    var accent = prefs.theme === "dark" ? shadeColor(prefs.color, 0.7) : prefs.color;
     view.layer.dataset.drawerSize = prefs.drawerSize;
     view.layer.dataset.theme = prefs.theme;
-    view.layer.style.setProperty("--accent", prefs.color);
-    view.layer.style.setProperty("--accent-soft", mixWhite(prefs.color, 0.82));
-    view.layer.style.setProperty("--accent-faint", mixWhite(prefs.color, 0.93));
+    view.layer.style.setProperty("--accent", accent);
+    view.layer.style.setProperty("--accent-soft", mixWhite(accent, 0.82));
+    view.layer.style.setProperty("--accent-faint", mixWhite(accent, 0.93));
+    view.layer.style.setProperty("--outgoing-bg", prefs.theme === "dark" ? shadeColor(prefs.color, 0.45) : mixWhite(accent, prefs.theme === "gray" ? 0.48 : 0.82));
+    view.layer.style.setProperty("--outgoing-border", accent);
   }
 
   function applyButtonPrefs() {
     var host = document.getElementById(BUTTON_ID);
     if (!host) return;
     var prefs = readPrefs();
-    host.style.setProperty("--accent", prefs.color);
-    host.style.setProperty("--accent-soft", mixWhite(prefs.color, 0.82));
+    var accent = prefs.theme === "dark" ? shadeColor(prefs.color, 0.7) : prefs.color;
+    host.style.setProperty("--accent", accent);
+    host.style.setProperty("--accent-soft", mixWhite(accent, 0.82));
   }
 
   function wheelScrollX(node) {
@@ -214,6 +233,33 @@
     return { platform: "getcourse", phone: findPhone(), email: findEmail(), vk_id: findVkId(), telegram_id: telegram.telegram_id, telegram_username: telegram.telegram_username, name: findName(), source_url: TEST_MODE ? TEST_SOURCE_URL : location.href, fields: fields };
   }
 
+  function optimisticTemplate(body, source) {
+    source = source || {};
+    var fields = source.fields || {}, name = String(source.name || "");
+    var values = {
+      "contact.name": name, "contact.first_name": name.split(/\s+/)[0] || "",
+      "contact.phone": source.phone || "", "contact.email": source.email || "",
+      "manager.name": source.manager_name || fields.manager_name || "",
+      "amo.lead.id": source.entity_type === "lead" ? source.entity_id || "" : "",
+      "amo.contact.id": source.entity_type === "contact" ? source.entity_id || "" : fields.contact_id || "",
+      "getcourse.user.id": source.platform === "getcourse" ? source.entity_id || "" : "",
+      "vk.id": source.vk_id || "", "telegram.id": source.telegram_id || ""
+    };
+    ["source", "medium", "campaign", "content", "term"].forEach(function (key) {
+      values["utm." + key] = fields["utm_" + key] || fields["utm." + key] || "";
+    });
+    return String(body || "").replace(/\{\{\s*([^{}]+?)\s*\}\}/g, function (_, key) {
+      return String(values[key] !== undefined ? values[key] : (fields[key] !== undefined ? fields[key] : fields[key.replace(/\./g, "_")] || ""));
+    });
+  }
+
+  function flashTemplateInput(input) {
+    input.classList.remove("template-applied");
+    void input.offsetWidth;
+    input.classList.add("template-applied");
+    setTimeout(function () { input.classList.remove("template-applied"); }, 360);
+  }
+
   function shadowHost(id) {
     var host = document.createElement("div");
     host.id = id;
@@ -229,20 +275,24 @@
     return [
       ":host{all:initial}",
       "*{box-sizing:border-box}",
-      ".wrap{--accent:#337ab7;--accent-soft:#d6e4f1;--accent-faint:#f1f6fa;--inbox-width:400px;--inbox-height:620px;position:fixed;left:100px;bottom:18px;z-index:2147483500;font-family:Arial,sans-serif;color:#17212b}.wrap[data-inbox-size='small']{--inbox-width:340px;--inbox-height:500px}.wrap[data-inbox-size='large']{--inbox-width:520px;--inbox-height:760px}.wrap[data-position$='right']{left:auto;right:18px}.wrap[data-position^='top']{top:18px;bottom:auto}",
+      ".wrap{--accent:#337ab7;--accent-soft:#d6e4f1;--accent-faint:#f1f6fa;--outgoing-bg:#d6e4f1;--outgoing-border:#337ab7;--inbox-width:620px;--inbox-height:720px;position:fixed;left:100px;bottom:18px;z-index:2147483500;font-family:Arial,sans-serif;color:#17212b}.wrap[data-inbox-size='small']{--inbox-width:380px;--inbox-height:560px}.wrap[data-inbox-size='large']{--inbox-width:920px;--inbox-height:860px}.wrap[data-position$='right']{left:auto;right:18px}.wrap[data-position^='top']{top:18px;bottom:auto}",
       ".launcher{position:absolute;left:0;bottom:0;width:50px;height:50px;display:grid;place-items:center;border:0;border-radius:50%;background:var(--accent);color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(27,54,77,.25);transition:transform .16s,box-shadow .16s}.wrap[data-position$='right'] .launcher{left:auto;right:0}.wrap[data-position^='top'] .launcher{top:0;bottom:auto}.launcher:hover{transform:translateY(-1px);box-shadow:0 10px 28px rgba(27,54,77,.3)}.launcher svg{width:25px;height:25px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.launcher.attention{animation:unanswered 2.4s ease-in-out infinite}",
       ".badge{position:absolute;right:-4px;top:-5px;min-width:21px;height:21px;padding:0 5px;border:2px solid #fff;border-radius:12px;background:#e33b32;color:#fff;font:700 11px/17px Arial,sans-serif;text-align:center}.badge[hidden]{display:none}",
       ".panel{position:absolute;left:0;bottom:62px;width:min(var(--inbox-width),calc(100vw - 20px));height:min(var(--inbox-height),calc(100vh - 96px));display:grid;grid-template-rows:48px minmax(0,1fr);border:1px solid #b9c5ce;border-radius:8px;background:#fff;box-shadow:0 18px 54px rgba(22,42,58,.25);opacity:0;transform:translateY(8px) scale(.985);transform-origin:bottom left;pointer-events:none;transition:opacity .15s,transform .15s,width .16s,height .16s;overflow:hidden}.wrap[data-position$='right'] .panel{left:auto;right:0;transform-origin:bottom right}.wrap[data-position^='top'] .panel{top:62px;bottom:auto;transform:translateY(-8px) scale(.985);transform-origin:top left}.wrap[data-position='top-right'] .panel{transform-origin:top right}",
       ".wrap.open .panel{opacity:1;transform:none;pointer-events:auto}",
       ".panel-head{display:flex;align-items:center;gap:7px;padding:0 9px;border-bottom:1px solid #d7dfe5;background:var(--accent-faint)}.panel-head b{min-width:0;flex:1;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.icon{width:30px;height:30px;border:1px solid #bac5ce;border-radius:5px;background:#fff;color:#334b5c;font:700 16px Arial,sans-serif;cursor:pointer;transition:background-color .12s,transform .1s}.icon:hover{background:var(--accent-soft)}.icon:active{transform:translateY(1px)}.back[hidden]{display:none}",
-      ".list-view{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);background:#fff}.list{min-height:0;overflow-y:auto;overflow-x:hidden;background:#fff}.list,.message-feed,.settings{scrollbar-width:none}.list::-webkit-scrollbar,.message-feed::-webkit-scrollbar,.settings::-webkit-scrollbar{display:none}.inbox-filter{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;padding:7px;border-bottom:1px solid #d7dfe5;background:#fff}.inbox-search{min-width:0;height:32px;padding:0 9px;border:1px solid #bac5ce;border-radius:3px;color:#17212b}.filter-button{height:32px;padding:0 9px;border:1px solid #bac5ce;border-radius:3px;background:#fff;color:#334b5c;font-weight:600;cursor:pointer}.channel-menu{position:absolute;z-index:3;top:43px;right:7px;width:min(290px,calc(100vw - 40px));max-height:260px;overflow:auto;border:1px solid #bac5ce;background:#fff;box-shadow:0 10px 30px rgba(22,42,58,.18);scrollbar-width:none}.channel-menu::-webkit-scrollbar{display:none}.channel-option{display:flex;align-items:center;gap:8px;padding:9px;border-bottom:1px solid #e4e9ed;color:#334b5c;font:12px Arial,sans-serif}.empty{padding:34px 20px;color:#6c7e8c;font:13px/1.5 Arial,sans-serif;text-align:center}.thread{width:100%;min-width:0;display:grid;grid-template-columns:38px minmax(0,1fr) 24px;gap:9px;align-items:center;padding:10px 12px;border:0;border-bottom:1px solid #e3e8ec;background:#fff;color:#17212b;text-align:left;cursor:pointer;transition:background-color .12s,transform .1s}.thread:hover{background:#f3f7fa}.thread:active{transform:translateY(1px)}.thread.new{background:#edf6fc;animation:newMessage .45s ease}.avatar{width:38px;height:38px;display:grid;place-items:center;border-radius:50%;background:#dfeaf2;color:#2d688f;font:700 13px Arial,sans-serif}.copy,.name,.meta,.preview{display:block;min-width:0}.name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 13px/1.25 Arial,sans-serif}.meta,.preview{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#738492;font:11px/1.25 Arial,sans-serif}.preview{color:#415565;font-size:12px}.count{min-width:20px;height:20px;padding:0 5px;border-radius:10px;background:#e33b32;color:#fff;font:700 11px/20px Arial,sans-serif;text-align:center}.count[hidden]{visibility:hidden}",
-      ".chat{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#eef2f5}.chat-tools{display:flex;align-items:center;gap:6px;padding:7px;border-bottom:1px solid #d4dde4;background:#fff;overflow:hidden}.channel-strip{display:flex;flex:1;gap:5px;min-width:0;overflow-x:auto;overscroll-behavior:contain;scrollbar-width:none}.channel-strip::-webkit-scrollbar{display:none}.channel{flex:0 0 auto;height:30px;padding:0 9px;border:1px solid #b8c4ce;border-radius:5px;background:#fff;color:#334b5c;font:600 11px Arial,sans-serif;white-space:nowrap;cursor:pointer;transition:background-color .12s,border-color .12s,transform .1s}.channel:active{transform:translateY(1px)}.channel.active{border-color:var(--accent);background:var(--accent);color:#fff}.channel:disabled{border-color:#d4dbe0;background:#eef1f3;color:#9aa6ad;cursor:default}.card-link{width:32px;padding:0;text-decoration:none;display:grid;place-items:center;color:var(--accent)}.card-link svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.message-feed{min-height:0;overflow:auto;padding:10px}.history-note,.empty-chat{margin:7px auto;padding:7px 9px;width:min(340px,100%);border:1px solid #cad4dc;background:#fff;color:#66788a;text-align:center;font:11px/1.4 Arial,sans-serif}.message-row{display:flex;margin:7px 0}.message-row.outgoing{justify-content:flex-end}.bubble{max-width:82%;padding:8px 9px;border:1px solid #d5dde3;border-radius:8px;background:#fff;color:#17212b;font:12px/1.42 Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{border-color:var(--accent-soft);background:var(--accent-faint)}.message-meta{margin-top:4px;color:#81909b;font-size:9px;text-align:right}.attachment{display:block;margin-top:6px;color:var(--accent)}.message-image-link{display:block;margin:-3px -4px 6px}.message-image{display:block;max-width:100%;max-height:260px;border-radius:5px;object-fit:contain}.composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;padding:8px;border-top:1px solid #ccd6de;background:#fff}.composer textarea{min-height:40px;max-height:100px;resize:vertical;padding:8px;border:1px solid #aab7c2;border-radius:5px;font:12px/1.4 Arial,sans-serif}.send{min-width:82px;border:0;border-radius:5px;background:var(--accent);color:#fff;font:700 11px Arial,sans-serif;cursor:pointer;transition:filter .12s,transform .1s}.send:active{transform:translateY(1px)}.send:disabled{opacity:.5}.compose-error{grid-column:1/-1;color:#a23a3a;font-size:10px}",
+      ".list-view{min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);background:#fff}.list{min-height:0;overflow-y:auto;overflow-x:hidden;background:#fff}.list,.message-feed,.settings{scrollbar-width:none}.list::-webkit-scrollbar,.message-feed::-webkit-scrollbar,.settings::-webkit-scrollbar{display:none}.inbox-filter{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;padding:7px;border-bottom:1px solid #d7dfe5;background:#fff}.inbox-search{min-width:0;height:32px;padding:0 9px;border:1px solid #bac5ce;border-radius:3px;color:#17212b}.filter-button{height:32px;padding:0 9px;border:1px solid #bac5ce;border-radius:3px;background:#fff;color:#334b5c;font-weight:600;cursor:pointer}.channel-menu{position:absolute;z-index:3;top:43px;right:7px;width:min(290px,calc(100vw - 40px));max-height:260px;overflow:auto;border:1px solid #bac5ce;background:#fff;box-shadow:0 10px 30px rgba(22,42,58,.18);scrollbar-width:none}.channel-menu::-webkit-scrollbar{display:none}.channel-option{display:flex;align-items:center;gap:8px;padding:9px;border-bottom:1px solid #e4e9ed;color:#334b5c;font:12px Arial,sans-serif}.empty{padding:34px 20px;color:#6c7e8c;font:13px/1.5 Arial,sans-serif;text-align:center}.inbox-loading{display:flex;min-height:120px;align-items:center;justify-content:center;gap:9px}.inbox-loading .spinner,.icon.busy:before{display:block;width:15px;height:15px;flex:0 0 15px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}.icon.busy{font-size:0;cursor:wait}.icon.busy:before{content:'';margin:auto}.thread{width:100%;min-width:0;display:grid;grid-template-columns:38px minmax(0,1fr) 24px;gap:9px;align-items:center;padding:10px 12px;border:0;border-bottom:1px solid #e3e8ec;background:#fff;color:#17212b;text-align:left;cursor:pointer;transition:background-color .12s,transform .1s}.thread:hover{background:#f3f7fa}.thread:active{transform:translateY(1px)}.thread.new{background:#edf6fc;animation:newMessage .45s ease}.avatar{width:38px;height:38px;display:grid;place-items:center;border-radius:50%;background:#dfeaf2;color:#2d688f;font:700 13px Arial,sans-serif}.copy,.name,.meta,.preview{display:block;min-width:0}.name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 13px/1.25 Arial,sans-serif}.meta,.preview{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#738492;font:11px/1.25 Arial,sans-serif}.preview{color:#415565;font-size:12px}.count{min-width:20px;height:20px;padding:0 5px;border-radius:10px;background:#e33b32;color:#fff;font:700 11px/20px Arial,sans-serif;text-align:center}.count[hidden]{visibility:hidden}",
+      ".chat{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#eef2f5}.chat-tools{display:flex;align-items:center;gap:6px;padding:7px;border-bottom:1px solid #d4dde4;background:#fff;overflow:hidden}.channel-strip{display:flex;flex:1;gap:5px;min-width:0;overflow-x:auto;overscroll-behavior:contain;scrollbar-width:none}.channel-strip::-webkit-scrollbar{display:none}.channel{flex:0 0 auto;height:30px;padding:0 9px;border:1px solid #b8c4ce;border-radius:5px;background:#fff;color:#334b5c;font:600 11px Arial,sans-serif;white-space:nowrap;cursor:pointer;transition:background-color .12s,border-color .12s,transform .1s}.channel:active{transform:translateY(1px)}.channel.active{border-color:var(--accent);background:var(--accent);color:#fff}.channel:disabled{border-color:#d4dbe0;background:#eef1f3;color:#9aa6ad;cursor:default}.card-link{width:32px;padding:0;text-decoration:none;display:grid;place-items:center;color:var(--accent)}.card-link svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.message-feed{min-height:0;overflow:auto;padding:10px}.history-note,.empty-chat{margin:7px auto;padding:7px 9px;width:min(340px,100%);border:1px solid #cad4dc;background:#fff;color:#66788a;text-align:center;font:11px/1.4 Arial,sans-serif}.message-row{display:flex;margin:7px 0}.message-row.outgoing{justify-content:flex-end}.bubble{max-width:82%;padding:8px 9px;border:1px solid #d5dde3;border-radius:8px;background:#fff;color:#17212b;font:12px/1.42 Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{border-color:var(--outgoing-border);background:var(--outgoing-bg)}.message-meta{margin-top:4px;color:#81909b;font-size:9px;text-align:right}.attachment{display:block;margin-top:6px;color:var(--accent)}.message-image-link{display:block;margin:-3px -4px 6px}.message-image{display:block;max-width:100%;max-height:260px;border-radius:5px;object-fit:contain}.composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;padding:8px;border-top:1px solid #ccd6de;background:#fff}.composer textarea{min-height:40px;max-height:100px;resize:none;padding:8px;border:1px solid #aab7c2;border-radius:5px;font:12px/1.4 Arial,sans-serif}.send{min-width:82px;border:0;border-radius:5px;background:var(--accent);color:#fff;font:700 11px Arial,sans-serif;cursor:pointer;transition:filter .12s,transform .1s}.send:active{transform:translateY(1px)}.send:disabled{opacity:.5}.compose-error{grid-column:1/-1;color:#a23a3a;font-size:10px}",
       ".list,.message-feed,.settings{overscroll-behavior:contain;touch-action:pan-y}.composer-menu{position:relative}.composer-more{width:34px;height:42px;border:1px solid #aab7c2;border-radius:5px;background:#fff;color:#334b5c;font:700 18px/1 Arial,sans-serif;cursor:pointer}.composer-popover{position:absolute;right:0;bottom:48px;z-index:5;width:230px;max-height:290px;overflow:auto;border:1px solid #b8c4ce;background:#fff;box-shadow:0 10px 30px rgba(22,42,58,.2);scrollbar-width:none}.composer-popover::-webkit-scrollbar{display:none}.composer-menu-button{display:block;width:100%;padding:10px;border:0;border-bottom:1px solid #e3e8ec;background:#fff;color:#263746;text-align:left;font:600 12px Arial,sans-serif;cursor:pointer}.composer-menu-button:hover{background:#edf3f7}.composer-menu-button small{display:block;margin-top:3px;color:#788895;font:11px/1.3 Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.composer-menu-button.menu-back{color:#66788a}.composer-menu-empty{padding:12px;color:#788895;font:12px Arial,sans-serif}",
-      ".composer-input{position:relative;min-width:0}.composer-input textarea{width:100%;padding-right:40px}.composer-menu{position:absolute;top:5px;right:5px;z-index:4}.composer-more{width:28px;height:28px;border:0;border-radius:3px;background:transparent;color:#334b5c;font:700 16px/1 Arial,sans-serif;cursor:pointer}.composer-popover{top:32px;bottom:auto}.composer-menu.open-up .composer-popover{top:auto;bottom:32px}.channel-option input{width:14px;height:14px;flex:0 0 14px;margin:0;accent-color:var(--accent);cursor:pointer}",
+      ".composer textarea{min-height:52px;max-height:min(45vh,360px);resize:none;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:#87959d transparent;transition:border-color .12s,box-shadow .12s}.composer textarea::-webkit-scrollbar{width:8px}.composer textarea::-webkit-scrollbar-track{background:transparent}.composer textarea::-webkit-scrollbar-thumb{background:#87959d;border:2px solid transparent;background-clip:padding-box;border-radius:8px}.composer textarea.template-applied{border-color:var(--accent);box-shadow:0 0 0 2px rgba(51,122,183,.14)}.composer-menu-button,.composer-more,.template-star{transition:background-color .12s,border-color .12s,transform .1s}.composer-menu-button:active,.composer-more:active,.template-star:active{transform:translateY(1px)}",
+      ".composer-input{position:relative;min-width:0}.composer-input textarea{width:100%;padding-right:40px}.composer-menu{position:absolute;top:5px;right:5px;z-index:4}.composer-more{width:28px;height:28px;border:0;border-radius:3px;background:transparent;color:#334b5c;font:700 16px/1 Arial,sans-serif;cursor:pointer}.composer-popover{top:32px;bottom:auto}.composer-menu.open-up .composer-popover{top:auto;bottom:32px}.channel-option input{width:14px;height:14px;flex:0 0 14px;margin:0;accent-color:var(--accent);cursor:pointer}.composer-template-row[draggable='true']{grid-template-columns:22px minmax(0,1fr) 38px}.template-drag{display:grid;place-items:center;color:#8b98a1;cursor:grab}.composer-template-row.dragging{opacity:.45}.composer-template-row.drag-over{box-shadow:inset 0 2px var(--accent)}.composer-menu-loading{min-height:90px;display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;color:#66788a;font:12px Arial,sans-serif}.composer-menu-loading .spinner{width:15px;height:15px;margin:0}",
       ".send-all{display:flex;align-items:center;gap:5px;flex:0 0 auto;color:#415565;font:600 11px Arial,sans-serif;white-space:nowrap}.send-all input{width:14px;height:14px;margin:0;accent-color:var(--accent)}",
-      ".settings{padding:18px;overflow:auto}.field{display:grid;gap:7px;margin-bottom:18px;color:#415565;font:600 12px Arial,sans-serif}.color{width:100%;height:42px;padding:3px;border:1px solid #bac5ce;border-radius:6px;background:#fff}.positions{display:grid;grid-template-columns:1fr 1fr;gap:7px}.sizes{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.themes{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}.palettes{display:flex;gap:8px}.palette{width:34px;height:34px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #bac5ce;cursor:pointer}.palette.active{box-shadow:0 0 0 2px var(--accent)}.position,.size,.theme,.reset{min-height:36px;border:1px solid #bac5ce;border-radius:6px;background:#fff;color:#334b5c;font:600 12px Arial,sans-serif;cursor:pointer}.position.active,.size.active,.theme.active{border-color:var(--accent);background:var(--accent-soft)}.reset{width:100%}",
-      ".wrap[data-theme='dark'] .panel,.wrap[data-theme='dark'] .panel-head,.wrap[data-theme='dark'] .list-view,.wrap[data-theme='dark'] .list,.wrap[data-theme='dark'] .thread,.wrap[data-theme='dark'] .inbox-filter,.wrap[data-theme='dark'] .chat,.wrap[data-theme='dark'] .chat-tools,.wrap[data-theme='dark'] .composer,.wrap[data-theme='dark'] .settings{background:#17212b;color:#edf3f7;border-color:#344553}.wrap[data-theme='dark'] .thread:hover,.wrap[data-theme='dark'] .composer-menu-button:hover{background:#22313d}.wrap[data-theme='dark'] .thread,.wrap[data-theme='dark'] .composer-menu-button,.wrap[data-theme='dark'] .composer-popover,.wrap[data-theme='dark'] .channel-menu,.wrap[data-theme='dark'] .channel,.wrap[data-theme='dark'] .icon,.wrap[data-theme='dark'] .filter-button,.wrap[data-theme='dark'] .position,.wrap[data-theme='dark'] .size,.wrap[data-theme='dark'] .theme,.wrap[data-theme='dark'] .reset,.wrap[data-theme='dark'] input,.wrap[data-theme='dark'] textarea{background:#1f2d38;color:#edf3f7;border-color:#465968}.wrap[data-theme='dark'] .message-feed{background:#14202a}.wrap[data-theme='dark'] .bubble,.wrap[data-theme='dark'] .history-note,.wrap[data-theme='dark'] .empty-chat{background:#22313d;color:#edf3f7;border-color:#465968}",
-      "@keyframes newMessage{from{background:var(--accent-soft)}to{background:#edf6fc}}@keyframes unanswered{0%,100%{box-shadow:0 8px 24px rgba(27,54,77,.25)}50%{box-shadow:0 8px 24px rgba(27,54,77,.25),0 0 0 8px var(--accent-soft)}}",
+      ".settings{padding:18px;overflow:auto}.field{display:grid;gap:7px;margin-bottom:18px;color:#415565;font:600 12px Arial,sans-serif}.color{width:100%;height:42px;padding:3px;border:1px solid #bac5ce;border-radius:6px;background:#fff}.positions{display:grid;grid-template-columns:1fr 1fr;gap:7px}.sizes,.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.palettes{display:flex;gap:8px}.palette{width:34px;height:34px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #bac5ce;cursor:pointer}.palette.active{box-shadow:0 0 0 2px var(--accent)}.position,.size,.theme,.reset{min-height:36px;border:1px solid #bac5ce;border-radius:6px;background:#fff;color:#334b5c;font:600 12px Arial,sans-serif;cursor:pointer}.position.active,.size.active,.theme.active{border-color:var(--accent);background:var(--accent-soft)}.reset{width:100%}.logout{margin-top:10px;border-color:#bd7474;color:#983a3a}.logout.busy{display:flex;align-items:center;justify-content:center;gap:7px}.logout.busy:before{content:'';width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}",
+      ".notify-loading{min-height:140px;display:flex;align-items:center;justify-content:center;gap:9px;color:#6c7e8c;font:12px Arial,sans-serif}.notify-loading .spinner{width:16px;height:16px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}.notify-card{margin-bottom:10px;padding:12px;border:1px solid #d7dfe5;background:#fff}.notify-card-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.notify-card b{font:700 13px Arial,sans-serif}.notify-state{color:#71828f;font:11px Arial,sans-serif}.notify-state.ok{color:#2d7d46}.notify-state.waiting{display:inline-flex;align-items:center;gap:6px}.notify-state.waiting .spinner{width:11px;height:11px}.notify-help{margin:8px 0;color:#647684;font:11px/1.4 Arial,sans-serif}.notify-actions{display:flex;gap:7px;flex-wrap:wrap}.notify-action{min-height:34px;padding:0 10px;border:1px solid #bac5ce;border-radius:4px;background:#fff;color:#334b5c;font:600 11px Arial,sans-serif;cursor:pointer}.notify-action.primary{border-color:var(--accent);background:var(--accent);color:#fff}.notify-action:disabled{opacity:.58;cursor:wait}.notify-action.busy{display:inline-flex;align-items:center;gap:6px}.notify-action.busy:before{content:'';width:11px;height:11px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}.notify-pairing{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding:9px;border:1px solid #b8c4ce;background:#f4f7f9;color:#334b5c;font:11px/1.45 Arial,sans-serif;overflow-wrap:anywhere}.notify-pairing>span:last-of-type{flex:1 1 260px}.notify-code{font-family:monospace;letter-spacing:.02em}.notify-routing{margin:14px 0;padding:10px 12px;border:1px solid #d7dfe5;color:#415565;font:12px/1.45 Arial,sans-serif}.notify-routing summary{cursor:pointer;font-weight:700}.notify-fallback{display:flex;gap:8px;align-items:flex-start;margin:12px 0;color:#415565;font:12px/1.4 Arial,sans-serif}",
+      ".wrap[data-theme='dark'] .panel,.wrap[data-theme='dark'] .panel-head,.wrap[data-theme='dark'] .list-view,.wrap[data-theme='dark'] .list,.wrap[data-theme='dark'] .thread,.wrap[data-theme='dark'] .inbox-filter,.wrap[data-theme='dark'] .chat,.wrap[data-theme='dark'] .chat-tools,.wrap[data-theme='dark'] .composer,.wrap[data-theme='dark'] .settings{background:#17212b;color:#edf3f7;border-color:#344553}.wrap[data-theme='dark'] .thread:hover,.wrap[data-theme='dark'] .composer-menu-button:hover{background:#22313d}.wrap[data-theme='dark'] .thread,.wrap[data-theme='dark'] .composer-menu-button,.wrap[data-theme='dark'] .composer-popover,.wrap[data-theme='dark'] .channel-menu,.wrap[data-theme='dark'] .channel,.wrap[data-theme='dark'] .icon,.wrap[data-theme='dark'] .filter-button,.wrap[data-theme='dark'] .position,.wrap[data-theme='dark'] .size,.wrap[data-theme='dark'] .theme,.wrap[data-theme='dark'] .reset,.wrap[data-theme='dark'] .notify-card,.wrap[data-theme='dark'] .notify-pairing,.wrap[data-theme='dark'] .notify-action,.wrap[data-theme='dark'] input,.wrap[data-theme='dark'] textarea{background:#1f2d38;color:#edf3f7;border-color:#465968}.wrap[data-theme='dark'] .message-feed{background:#14202a}.wrap[data-theme='dark'] .bubble,.wrap[data-theme='dark'] .history-note,.wrap[data-theme='dark'] .empty-chat{background:#22313d;color:#edf3f7;border-color:#465968}",
+      ".wrap[data-theme='gray'] .panel,.wrap[data-theme='gray'] .panel-head,.wrap[data-theme='gray'] .list-view,.wrap[data-theme='gray'] .list,.wrap[data-theme='gray'] .thread,.wrap[data-theme='gray'] .inbox-filter,.wrap[data-theme='gray'] .chat,.wrap[data-theme='gray'] .chat-tools,.wrap[data-theme='gray'] .composer,.wrap[data-theme='gray'] .settings{background:#d8dde0;color:#24313a;border-color:#9da9b0}.wrap[data-theme='gray'] .message-feed{background:#cbd1d5}.wrap[data-theme='gray'] .bubble,.wrap[data-theme='gray'] .channel,.wrap[data-theme='gray'] .icon,.wrap[data-theme='gray'] input,.wrap[data-theme='gray'] textarea{background:#edf0f1;color:#24313a;border-color:#929fa7}.wrap[data-theme='gray'] .channel.active,.wrap[data-theme='gray'] .submit{background:var(--accent);border-color:var(--accent);color:#fff}",
+      ".wrap[data-theme='gray'] .outgoing .bubble{background:var(--outgoing-bg);border-color:var(--outgoing-border)}",
+      "@keyframes spin{to{transform:rotate(360deg)}}@keyframes newMessage{from{background:var(--accent-soft)}to{background:#edf6fc}}@keyframes unanswered{0%,100%{box-shadow:0 8px 24px rgba(27,54,77,.25)}50%{box-shadow:0 8px 24px rgba(27,54,77,.25),0 0 0 8px var(--accent-soft)}}",
       "@media(max-width:520px){.wrap{left:10px;bottom:72px}.wrap[data-position$='right']{left:auto;right:10px}.wrap[data-position^='top']{top:10px;bottom:auto}.panel,.wrap[data-position$='right'] .panel{position:fixed;left:8px;right:8px;width:auto;height:min(620px,calc(100dvh - 142px));transform-origin:center bottom}.wrap[data-position^='bottom'] .panel{bottom:132px;top:auto}.wrap[data-position^='top'] .panel{top:72px;bottom:auto;transform-origin:center top}}",
       "@media(prefers-reduced-motion:reduce){.launcher,.panel,.icon,.thread,.channel,.send{transition:none}.thread.new,.launcher.attention{animation:none}}"
     ].join("");
@@ -328,23 +378,29 @@
     return [
       ":host{all:initial}",
       "*{box-sizing:border-box}",
-      ".layer{--accent:#337ab7;--accent-soft:#d6e4f1;--accent-faint:#f1f6fa;position:fixed;inset:0;z-index:2147483600;pointer-events:none;font-family:Arial,sans-serif;color:#17212b}",
+      ".layer{--accent:#337ab7;--accent-soft:#d6e4f1;--accent-faint:#f1f6fa;--outgoing-bg:#d6e4f1;--outgoing-border:#337ab7;position:fixed;inset:0;z-index:2147483600;pointer-events:none;font-family:Arial,sans-serif;color:#17212b}",
       ".backdrop{position:absolute;inset:0;background:rgba(10,16,24,.38);opacity:0;transition:opacity .16s;pointer-events:auto}",
-      ".drawer{position:absolute;top:0;right:0;width:50vw;height:100dvh;background:#fff;border-left:1px solid #bac4ce;box-shadow:-18px 0 55px rgba(15,23,42,.2);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);transform:translateX(100%);transition:transform .18s ease,width .16s;pointer-events:auto}.layer[data-drawer-size='small'] .drawer{width:38vw}.layer[data-drawer-size='large'] .drawer{width:68vw}",
+      ".drawer{position:absolute;top:0;right:0;width:62vw;height:100dvh;background:#fff;border-left:1px solid #bac4ce;box-shadow:-18px 0 55px rgba(15,23,42,.2);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);transform:translateX(100%);transition:transform .18s ease,width .16s;pointer-events:auto}.layer[data-drawer-size='small'] .drawer{width:44vw}.layer[data-drawer-size='large'] .drawer{width:84vw}",
       ".layer.open .backdrop{opacity:1}.layer.open .drawer{transform:none}",
       ".head{min-height:56px;display:grid;grid-template-columns:minmax(0,1fr) auto auto auto auto;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #d9e0e7;background:#f6f8fa}",
       ".title{min-width:0;grid-column:1;grid-row:1}.drawer-send-all{grid-column:2;grid-row:1}.copy{grid-column:3;grid-row:1}.drawer-settings{grid-column:4;grid-row:1}.close:not(.drawer-settings){grid-column:5;grid-row:1}.title b{display:block;font-size:14px;line-height:1.25}.title span{display:block;margin-top:2px;color:#66788a;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
       ".copy,.close,.submit,.channel{height:32px;border:1px solid #b8c4ce;border-radius:3px;background:#fff;color:#263746;font:600 12px Arial,sans-serif;cursor:pointer;transition:background-color .12s,border-color .12s,transform .1s}.copy{padding:0 10px}.close{width:32px;font-size:20px;line-height:1}.copy:hover,.close:hover,.channel:hover{background:var(--accent-soft)}.copy:active,.close:active,.channel:active{transform:translateY(1px)}.channels{grid-column:1/-1;grid-row:2;display:flex;gap:5px;min-width:0;overflow:auto;scrollbar-width:none}.channels::-webkit-scrollbar{display:none}.channel{padding:0 8px;white-space:nowrap}.channel.active{border-color:var(--accent);background:var(--accent);color:#fff}.channel:disabled{border-color:#d4dbe0;background:#eef1f3;color:#9aa6ad;cursor:default}",
       ".body{min-width:0;min-height:0;position:relative;background:#eef2f5}.frame{display:block;width:100%;height:100%;border:0;background:#fff}",
       ".state{position:absolute;inset:0;display:grid;place-items:center;padding:24px;background:#eef2f5;text-align:center}.state-card{width:min(360px,100%);color:#526475;font:13px/1.45 Arial,sans-serif}.state-card b{display:block;margin-bottom:6px;color:#17212b;font-size:15px}.state-card p{margin:0 0 14px}.channel-list{display:grid;gap:8px;margin-top:12px}.channel-list .submit{margin:0;text-align:left;padding:0 12px}",
-      ".chat-shell{min-width:0;height:100%;display:grid;grid-template-rows:42px minmax(0,1fr) auto;background:#eef2f5}.chat-tools{display:flex;align-items:center;gap:7px;padding:5px 8px;border-bottom:1px solid #d4dde4;background:#fff}.tool{height:30px;padding:0 9px;border:1px solid #b8c4ce;border-radius:2px;background:#fff;color:#334b5c;font:600 12px Arial,sans-serif;cursor:pointer;transition:background-color .12s,transform .1s}.tool:hover{background:#edf2f6}.tool:active{transform:translateY(1px)}.channel-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#526475;font-size:12px}.message-feed{min-height:0;overflow:auto;padding:14px;scrollbar-width:none}.message-feed::-webkit-scrollbar{display:none}.history-note,.empty-chat{margin:8px auto;padding:8px 10px;width:min(440px,100%);border:1px solid #cad4dc;background:#f7f9fa;color:#66788a;text-align:center;font-size:11px;line-height:1.4}.message-row{display:flex;margin:7px 0}.message-row.outgoing{justify-content:flex-end}.bubble{max-width:78%;padding:8px 10px;border:1px solid #d5dde3;border-radius:3px;background:#fff;color:#17212b;font:13px/1.45 Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{border-color:var(--accent-soft);background:var(--accent-faint)}.message-meta{display:flex;justify-content:flex-end;gap:6px;margin-top:4px;color:#81909b;font-size:10px}.attachment{display:block;margin-top:6px;color:var(--accent);overflow-wrap:anywhere}.message-image-link{display:block;margin:-4px -6px 7px}.message-image{display:block;max-width:min(360px,100%);max-height:360px;border-radius:2px;object-fit:contain;background:#edf2f5}.composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:9px;border-top:1px solid #ccd6de;background:#fff}.composer textarea{min-height:42px;max-height:130px;resize:vertical;padding:9px;border:1px solid #aab7c2;border-radius:2px;color:#17212b;font:13px/1.4 Arial,sans-serif;outline:none}.composer textarea:focus{border-color:var(--accent)}.send{min-width:104px;border:1px solid var(--accent);border-radius:2px;background:var(--accent);color:#fff;font:700 12px Arial,sans-serif;cursor:pointer;transition:filter .12s,transform .1s}.send:active{transform:translateY(1px)}.send:disabled{opacity:.55;cursor:default}.compose-error{grid-column:1/-1;min-height:0;color:#a23a3a;font-size:11px}",
-      ".body{overflow:hidden}.message-feed{overscroll-behavior:contain;touch-action:pan-y}.composer-menu{position:relative}.composer-more{width:34px;height:42px;border:1px solid #aab7c2;border-radius:2px;background:#fff;color:#334b5c;font:700 18px/1 Arial,sans-serif;cursor:pointer}.composer-popover{position:absolute;right:0;bottom:48px;z-index:5;width:230px;max-height:290px;overflow:auto;border:1px solid #b8c4ce;background:#fff;box-shadow:0 10px 30px rgba(22,42,58,.2);scrollbar-width:none}.composer-popover::-webkit-scrollbar{display:none}.composer-menu-button{display:block;width:100%;padding:10px;border:0;border-bottom:1px solid #e3e8ec;background:#fff;color:#263746;text-align:left;font:600 12px Arial,sans-serif;cursor:pointer}.composer-menu-button:hover{background:#edf3f7}.composer-menu-button small{display:block;margin-top:3px;color:#788895;font:11px/1.3 Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.composer-menu-button.menu-back{color:#66788a}.composer-menu-empty{padding:12px;color:#788895;font:12px Arial,sans-serif}",
+      ".chat-shell{min-width:0;height:100%;display:grid;grid-template-rows:42px minmax(0,1fr) auto;background:#eef2f5}.chat-tools{display:flex;align-items:center;gap:7px;padding:5px 8px;border-bottom:1px solid #d4dde4;background:#fff}.tool{height:30px;padding:0 9px;border:1px solid #b8c4ce;border-radius:2px;background:#fff;color:#334b5c;font:600 12px Arial,sans-serif;cursor:pointer;transition:background-color .12s,transform .1s}.tool:hover{background:#edf2f6}.tool:active{transform:translateY(1px)}.channel-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#526475;font-size:12px}.message-feed{min-height:0;overflow:auto;padding:14px;scrollbar-width:none}.message-feed::-webkit-scrollbar{display:none}.history-note,.empty-chat{margin:8px auto;padding:8px 10px;width:min(440px,100%);border:1px solid #cad4dc;background:#f7f9fa;color:#66788a;text-align:center;font-size:11px;line-height:1.4}.message-row{display:flex;margin:7px 0}.message-row.outgoing{justify-content:flex-end}.bubble{max-width:78%;padding:8px 10px;border:1px solid #d5dde3;border-radius:3px;background:#fff;color:#17212b;font:13px/1.45 Arial,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}.outgoing .bubble{border-color:var(--accent-soft);background:var(--accent-faint)}.message-meta{display:flex;justify-content:flex-end;gap:6px;margin-top:4px;color:#81909b;font-size:10px}.attachment{display:block;margin-top:6px;color:var(--accent);overflow-wrap:anywhere}.message-image-link{display:block;margin:-4px -6px 7px}.message-image{display:block;max-width:min(360px,100%);max-height:360px;border-radius:2px;object-fit:contain;background:#edf2f5}.composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:9px;border-top:1px solid #ccd6de;background:#fff}.composer textarea{min-height:42px;max-height:130px;resize:none;padding:9px;border:1px solid #aab7c2;border-radius:2px;color:#17212b;font:13px/1.4 Arial,sans-serif;outline:none}.composer textarea:focus{border-color:var(--accent)}.send{min-width:104px;border:1px solid var(--accent);border-radius:2px;background:var(--accent);color:#fff;font:700 12px Arial,sans-serif;cursor:pointer;transition:filter .12s,transform .1s}.send:active{transform:translateY(1px)}.send:disabled{opacity:.55;cursor:default}.compose-error{grid-column:1/-1;min-height:0;color:#a23a3a;font-size:11px}",
+      ".body{overflow:hidden}.message-feed{overscroll-behavior:contain;touch-action:pan-y}.composer-menu{position:relative}.composer-more{width:34px;height:42px;border:1px solid #aab7c2;border-radius:2px;background:#fff;color:#334b5c;font:700 18px/1 Arial,sans-serif;cursor:pointer}.composer-popover{position:absolute;right:0;bottom:48px;z-index:5;width:250px;max-height:320px;overflow:auto;border:1px solid #b8c4ce;background:#fff;box-shadow:0 10px 30px rgba(22,42,58,.2);scrollbar-width:none}.composer-popover::-webkit-scrollbar{display:none}.composer-menu-button{display:block;width:100%;padding:10px;border:0;border-bottom:1px solid #e3e8ec;background:#fff;color:#263746;text-align:left;font:600 12px Arial,sans-serif;cursor:pointer}.composer-menu-button:hover{background:#edf3f7}.composer-menu-button small{display:block;margin-top:3px;color:#788895;font:11px/1.3 Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.composer-menu-button.menu-back{color:#66788a}.composer-menu-empty{padding:12px;color:#788895;font:12px Arial,sans-serif}.composer-template-row{display:grid;grid-template-columns:minmax(0,1fr) 38px;border-bottom:1px solid #e3e8ec}.composer-template-row .composer-menu-button{min-width:0;border-bottom:0}.template-star{width:38px;border:0;border-left:1px solid #e3e8ec;background:#fff;color:#8b98a1;font-size:20px;line-height:1;cursor:pointer}.template-star:hover{background:#edf3f7}.template-star.active{color:#dfa900}.template-star:disabled{opacity:.5;cursor:default}",
+      ".composer textarea{min-height:52px;max-height:min(45vh,360px);resize:none;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:#87959d transparent;transition:border-color .12s,box-shadow .12s}.composer textarea::-webkit-scrollbar{width:8px}.composer textarea::-webkit-scrollbar-track{background:transparent}.composer textarea::-webkit-scrollbar-thumb{background:#87959d;border:2px solid transparent;background-clip:padding-box;border-radius:8px}.composer textarea.template-applied{border-color:var(--accent);box-shadow:0 0 0 2px rgba(51,122,183,.14)}.composer-menu-button,.composer-more,.template-star{transition:background-color .12s,border-color .12s,transform .1s}.composer-menu-button:active,.composer-more:active,.template-star:active{transform:translateY(1px)}",
       ".composer-input{position:relative;min-width:0}.composer-input textarea{width:100%;padding-right:40px}.composer-menu{position:absolute;top:5px;right:5px;z-index:4}.composer-more{width:28px;height:28px;border:0;border-radius:3px;background:transparent;color:#334b5c;font:700 16px/1 Arial,sans-serif;cursor:pointer}.composer-popover{top:32px;bottom:auto}.composer-menu.open-up .composer-popover{top:auto;bottom:32px}.channel-option input{width:14px;height:14px;flex:0 0 14px;margin:0;accent-color:var(--accent);cursor:pointer}",
-      ".template-settings{height:100%;overflow:auto;padding:14px;background:#fff;scrollbar-width:none}.template-settings::-webkit-scrollbar{display:none}.template-toolbar{display:flex;gap:7px;margin-bottom:12px}.template-toolbar .tool{flex:0 0 auto}.template-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:10px 0;border-bottom:1px solid #e3e8ec}.template-row b,.template-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.template-row small{margin-top:3px;color:#788895}.template-editor{display:grid;gap:8px}.template-editor label{display:grid;gap:4px;color:#526475;font:600 12px Arial,sans-serif}.template-editor input,.template-editor textarea,.template-editor select{width:100%;padding:8px;border:1px solid #aab7c2;background:#fff;color:#17212b;font:13px Arial,sans-serif}.template-editor textarea{min-height:180px;resize:vertical}.variable-list{display:flex;flex-wrap:wrap;gap:6px}.variable-list button{padding:6px 8px;border:1px solid #b8c4ce;background:#f6f8fa;color:#334b5c;cursor:pointer}.variable-list code{font-size:11px}.template-actions{display:flex;gap:7px}.template-actions .tool{flex:1}.template-actions .danger{border-color:#bd7474;color:#983a3a}",
-      ".drawer-preferences{height:100%;overflow:auto;padding:18px;background:#fff}.drawer-preferences .field{display:grid;gap:7px;margin:0 0 18px;color:#415565;font:600 12px Arial,sans-serif}.drawer-preferences .choices{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.drawer-preferences .themes{grid-template-columns:repeat(2,1fr)}.drawer-preferences .palettes{display:flex;gap:8px}.drawer-preferences .palette{width:34px;height:34px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #bac5ce}.drawer-preferences .active{border-color:var(--accent);background:var(--accent-soft)}",
+      ".template-settings{height:100%;overflow:auto;padding:14px;background:#fff;scrollbar-width:none}.template-settings::-webkit-scrollbar{display:none}.template-toolbar{display:flex;gap:7px;margin-bottom:12px}.template-toolbar .tool{flex:0 0 auto}.template-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:10px 0;border-bottom:1px solid #e3e8ec}.template-row b,.template-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.template-row small{margin-top:3px;color:#788895}.template-row-actions{display:flex;align-items:center;gap:6px}.template-row-actions .template-star{height:30px;border:1px solid #b8c4ce;border-radius:2px}.template-editor{display:grid;gap:8px}.template-editor label{display:grid;gap:4px;color:#526475;font:600 12px Arial,sans-serif}.template-editor input,.template-editor textarea,.template-editor select{width:100%;padding:8px;border:1px solid #aab7c2;background:#fff;color:#17212b;font:13px Arial,sans-serif}.template-editor textarea{min-height:180px;resize:vertical}.variable-list{display:flex;flex-wrap:wrap;gap:6px}.variable-list button{padding:6px 8px;border:1px solid #b8c4ce;background:#f6f8fa;color:#334b5c;cursor:pointer}.variable-list code{font-size:11px}.template-actions{display:flex;gap:7px}.template-actions .tool{flex:1}.template-actions .danger{border-color:#bd7474;color:#983a3a}",
+      ".drawer-preferences{height:100%;overflow:auto;padding:18px;background:#fff}.drawer-preferences .field{display:grid;gap:7px;margin:0 0 18px;color:#415565;font:600 12px Arial,sans-serif}.drawer-preferences .choices{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.drawer-preferences .themes{grid-template-columns:repeat(2,1fr)}.drawer-preferences .palettes{display:flex;gap:8px}.drawer-preferences .palette{width:34px;height:34px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #bac5ce}.drawer-preferences .active{border-color:var(--accent);background:var(--accent-soft)}.drawer-preferences .logout{width:100%;margin-top:4px;border-color:#bd7474;color:#983a3a}.drawer-preferences .logout.busy{display:flex;align-items:center;justify-content:center;gap:7px}.drawer-preferences .logout.busy:before{content:'';width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}",
+      ".drawer-preferences .notify-loading{min-height:180px;display:flex;align-items:center;justify-content:center;gap:9px}.drawer-preferences .notify-loading .spinner{width:16px;height:16px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}.drawer-preferences .notify-card{margin-bottom:10px;padding:12px;border:1px solid #d7dfe5;background:#fff}.drawer-preferences .notify-card-head{display:flex;justify-content:space-between;gap:10px}.drawer-preferences .notify-state{color:#71828f;font-size:11px}.drawer-preferences .notify-state.ok{color:#2d7d46}.drawer-preferences .notify-help{font-size:11px;line-height:1.4;color:#647684}.drawer-preferences .notify-actions{display:flex;gap:7px;flex-wrap:wrap}.drawer-preferences .notify-action{min-height:34px;padding:0 10px;border:1px solid #bac5ce;border-radius:4px;background:#fff;color:#334b5c;font:600 11px Arial,sans-serif;cursor:pointer}.drawer-preferences .notify-action.primary{border-color:var(--accent);background:var(--accent);color:#fff}.drawer-preferences .notify-action:disabled{opacity:.58;cursor:wait}.drawer-preferences .notify-action.busy{display:inline-flex;align-items:center;gap:6px}.drawer-preferences .notify-action.busy:before{content:'';width:11px;height:11px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}.drawer-preferences .notify-pairing{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding:9px;border:1px solid #b8c4ce;background:#f4f7f9;overflow-wrap:anywhere}.drawer-preferences .notify-pairing>span:last-of-type{flex:1 1 250px}.drawer-preferences .notify-code{font-family:monospace}.drawer-preferences .notify-routing{margin:14px 0;padding:10px 12px;border:1px solid #d7dfe5;font-size:12px;line-height:1.45}.drawer-preferences .notify-routing summary{cursor:pointer;font-weight:700}.drawer-preferences .notify-fallback{display:flex;gap:8px;align-items:flex-start;margin:12px 0;font-size:12px;line-height:1.4}",
       ".send-all{display:flex;align-items:center;gap:5px;flex:0 0 auto;color:#415565;font:600 11px Arial,sans-serif;white-space:nowrap}.send-all input{width:14px;height:14px;margin:0;accent-color:var(--accent)}",
-      ".layer[data-theme='dark'] .drawer,.layer[data-theme='dark'] .head,.layer[data-theme='dark'] .chat-shell,.layer[data-theme='dark'] .chat-tools,.layer[data-theme='dark'] .composer,.layer[data-theme='dark'] .template-settings,.layer[data-theme='dark'] .drawer-preferences{background:#17212b;color:#edf3f7;border-color:#344553}.layer[data-theme='dark'] .body,.layer[data-theme='dark'] .state,.layer[data-theme='dark'] .message-feed{background:#14202a}.layer[data-theme='dark'] .tool,.layer[data-theme='dark'] .copy,.layer[data-theme='dark'] .close,.layer[data-theme='dark'] .channel,.layer[data-theme='dark'] .composer-menu-button,.layer[data-theme='dark'] .composer-popover,.layer[data-theme='dark'] input,.layer[data-theme='dark'] textarea,.layer[data-theme='dark'] select{background:#1f2d38;color:#edf3f7;border-color:#465968}.layer[data-theme='dark'] .bubble,.layer[data-theme='dark'] .history-note,.layer[data-theme='dark'] .empty-chat{background:#22313d;color:#edf3f7;border-color:#465968}",
-      ".code{width:100%;height:38px;padding:0 10px;border:1px solid #aab7c2;border-radius:3px;background:#fff;color:#17212b;text-align:center;text-transform:uppercase;font:600 15px/1 Arial,sans-serif;letter-spacing:.08em}.submit{width:100%;height:38px;margin-top:8px;border-color:var(--accent);background:var(--accent);color:#fff}.submit:hover{filter:brightness(.92)}.submit:disabled{opacity:.55;cursor:default}",
+      ".layer[data-theme='dark'] .drawer,.layer[data-theme='dark'] .head,.layer[data-theme='dark'] .chat-shell,.layer[data-theme='dark'] .chat-tools,.layer[data-theme='dark'] .composer,.layer[data-theme='dark'] .template-settings,.layer[data-theme='dark'] .drawer-preferences{background:#17212b;color:#edf3f7;border-color:#344553}.layer[data-theme='dark'] .body,.layer[data-theme='dark'] .state,.layer[data-theme='dark'] .message-feed{background:#14202a}.layer[data-theme='dark'] .tool,.layer[data-theme='dark'] .copy,.layer[data-theme='dark'] .close,.layer[data-theme='dark'] .channel,.layer[data-theme='dark'] .composer-menu-button,.layer[data-theme='dark'] .composer-popover,.layer[data-theme='dark'] .template-star,.layer[data-theme='dark'] .notify-card,.layer[data-theme='dark'] .notify-pairing,.layer[data-theme='dark'] .notify-action,.layer[data-theme='dark'] input,.layer[data-theme='dark'] textarea,.layer[data-theme='dark'] select{background:#1f2d38;color:#edf3f7;border-color:#465968}.layer[data-theme='dark'] .template-star.active{color:#ffd35a}.layer[data-theme='dark'] .bubble,.layer[data-theme='dark'] .history-note,.layer[data-theme='dark'] .empty-chat{background:#22313d;color:#edf3f7;border-color:#465968}.layer[data-theme='dark'] .state-card,.layer[data-theme='dark'] .state-card b,.layer[data-theme='dark'] .state-card p{color:#edf3f7}.layer[data-theme='dark'] .submit{background:var(--accent);color:#fff;border-color:var(--accent)}",
+      ".layer[data-theme='gray'] .drawer,.layer[data-theme='gray'] .head,.layer[data-theme='gray'] .chat-shell,.layer[data-theme='gray'] .chat-tools,.layer[data-theme='gray'] .composer,.layer[data-theme='gray'] .template-settings,.layer[data-theme='gray'] .drawer-preferences{background:#d8dde0;color:#24313a;border-color:#9da9b0}.layer[data-theme='gray'] .body,.layer[data-theme='gray'] .state,.layer[data-theme='gray'] .message-feed{background:#cbd1d5}.layer[data-theme='gray'] .tool,.layer[data-theme='gray'] .copy,.layer[data-theme='gray'] .close,.layer[data-theme='gray'] .channel,.layer[data-theme='gray'] input,.layer[data-theme='gray'] textarea,.layer[data-theme='gray'] select,.layer[data-theme='gray'] .bubble{background:#edf0f1;color:#24313a;border-color:#929fa7}.layer[data-theme='gray'] .channel.active,.layer[data-theme='gray'] .submit,.layer[data-theme='gray'] .gc-tabs .active{background:var(--accent);border-color:var(--accent);color:#fff}",
+      ".layer .outgoing .bubble,.layer[data-theme='dark'] .outgoing .bubble{background:var(--outgoing-bg);border-color:var(--outgoing-border)}.template-row{grid-template-columns:22px minmax(0,1fr) auto}.template-row.dragging{opacity:.45}.template-row.drag-over{box-shadow:inset 0 2px var(--accent)}.channel.busy{display:inline-flex;align-items:center;gap:6px}.channel.busy:before,.tool.busy:before{content:'';width:11px;height:11px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}.gc-widget{height:100%;overflow:auto;padding:14px;background:#fff}.gc-facts{display:grid;grid-template-columns:repeat(6,minmax(100px,1fr));border:1px solid #d7dfe5}.gc-fact{padding:9px;border-right:1px solid #d7dfe5;min-width:0}.gc-fact:last-child{border-right:0}.gc-fact span{display:block;color:#788895;font:10px Arial,sans-serif;text-transform:uppercase}.gc-fact b{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 12px Arial,sans-serif}.gc-tabs{display:flex;gap:7px;margin:12px 0}.gc-tabs .active{border-color:var(--accent);background:var(--accent);color:#fff}.gc-pane{font:12px/1.45 Arial,sans-serif}.gc-section{padding:12px;border:1px solid #d7dfe5}.gc-section h3{margin:0 0 10px}.gc-chip-list{display:flex;gap:7px;flex-wrap:wrap}.gc-chip{min-height:34px;padding:6px 9px;border:1px solid #b8c4ce;background:#fff;color:#526475}.gc-chip[type='button']{cursor:pointer}.gc-chip.on{border-color:var(--accent);background:var(--outgoing-bg);color:#17212b}.gc-chip.changed{box-shadow:inset 0 0 0 2px var(--accent)}.gc-notice{padding:11px;border:1px solid #d7dfe5;color:#66788a}.gc-notice.bad{color:#a23a3a}.gc-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:12px}.layer[data-theme='dark'] .gc-widget{background:#17212b;color:#edf3f7}.layer[data-theme='dark'] .gc-facts,.layer[data-theme='dark'] .gc-fact,.layer[data-theme='dark'] .gc-section,.layer[data-theme='dark'] .gc-notice{border-color:#465968}.layer[data-theme='dark'] .gc-chip{background:#1f2d38;color:#edf3f7;border-color:#465968}.layer[data-theme='dark'] .gc-chip.on{background:var(--outgoing-bg);color:#edf3f7}@media(max-width:980px){.gc-facts{grid-template-columns:repeat(2,1fr)}}",
+      ".gc-access-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.gc-access-course,.gc-access-minis{min-width:0;padding:10px;border:1px solid #d7dfe5}.gc-access-course h3,.gc-access-minis h3{margin:0 0 8px}.gc-access-row{display:grid;grid-template-columns:58px minmax(0,1fr);align-items:start;gap:7px;margin-top:6px}.gc-access-row>span{padding-top:7px;color:#788895;font-size:10px;text-transform:uppercase}.gc-access-options{display:flex;gap:4px;flex-wrap:wrap}.gc-access-minis{grid-column:1/-1}.gc-pending,.gc-confirm{margin-top:10px;padding:11px;border:1px solid #d7dfe5}.gc-pending{color:#315f3a;background:#eff9f1}.gc-confirm h3{margin:0 0 8px}.gc-confirm-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.gc-confirm-list{padding:8px;border:1px solid #d7dfe5;white-space:pre-wrap}.gc-confirm-list b{display:block;margin-bottom:5px}.gc-confirm-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:9px}.layer[data-theme='dark'] .gc-access-course,.layer[data-theme='dark'] .gc-access-minis,.layer[data-theme='dark'] .gc-confirm,.layer[data-theme='dark'] .gc-confirm-list{border-color:#465968}.layer[data-theme='dark'] .gc-pending{color:#bde6c6;background:#173122;border-color:#315f3a}@media(max-width:980px){.gc-access-layout,.gc-confirm-grid{grid-template-columns:1fr}.gc-access-minis{grid-column:auto}}",
+      ".code{width:100%;height:38px;padding:0 10px;border:1px solid #aab7c2;border-radius:3px;background:#fff;color:#17212b;text-align:center;text-transform:uppercase;font:600 15px/1 Arial,sans-serif;letter-spacing:.08em}.submit{width:100%;height:38px;margin-top:8px;border-color:var(--accent);background:var(--accent);color:#fff}.submit:hover{filter:brightness(.92)}.submit:disabled{opacity:.55;cursor:default}.submit.busy{display:flex;align-items:center;justify-content:center;gap:7px}.submit.busy:before{content:'';width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}",
+      ".layer[data-theme='gray'] .outgoing .bubble{background:var(--outgoing-bg);border-color:var(--outgoing-border)}",
       ".error{min-height:18px;margin-top:8px;color:#a23a3a;font-size:12px}.spinner{width:24px;height:24px;margin:0 auto 12px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}",
       "@keyframes spin{to{transform:rotate(360deg)}}",
       "@media(max-width:900px){.drawer,.layer[data-drawer-size] .drawer{width:100%;border-left:0}.head{grid-template-columns:minmax(0,1fr) auto auto}.title{grid-column:1;grid-row:1}.drawer-settings{grid-column:2;grid-row:1}.close:not(.drawer-settings){grid-column:3;grid-row:1}.drawer-send-all{grid-column:1;grid-row:2}.copy{grid-column:2/4;grid-row:2;max-width:none}.channels{grid-column:1/-1;grid-row:3;height:40px}}",
@@ -360,6 +416,10 @@
   var conversationSignature = "";
   var conversationCache = new Map();
   var conversationGeneration = 0;
+  var getcourseCard = null;
+  var getcourseCardLoading = false;
+  var getcourseCardLoadingText = "Ищем пользователя GetCourse…";
+  var getcourseCardKey = "";
   var inbox = null;
   var inboxTimer = null;
   var inboxSignature = "";
@@ -413,9 +473,10 @@
   }
 
   function activationForm(message) {
-    var card = setState("Активация сотрудника", message || "Введите код сотрудника из панели интеграции.", '<input class="code" autocomplete="one-time-code" inputmode="text" maxlength="16" placeholder="XXXX-XXXX-XXXX"><button class="submit" type="button">Активировать</button>');
+    var card = setState("Активация сотрудника", message || "Введите код сотрудника из панели интеграции.", '<input class="code" autocomplete="one-time-code" inputmode="text" maxlength="16" placeholder="XXXX-XXXX-XXXX"><button class="submit" type="button">Активировать</button><button class="submit guide-button" type="button">Открыть инструкцию</button>');
     var input = card.querySelector(".code");
     var submit = card.querySelector(".submit");
+    card.querySelector(".guide-button").addEventListener("click", openGuide);
     submit.addEventListener("click", function () { activate(input.value, submit, card.querySelector(".error")); });
     input.addEventListener("keydown", function (event) { if (event.key === "Enter") submit.click(); });
     setTimeout(function () { input.focus(); }, 30);
@@ -423,13 +484,15 @@
 
   async function request(path, options) {
     var settings = Object.assign({ method: "POST", mode: TEST_MODE ? "same-origin" : "cors", credentials: TEST_MODE ? "same-origin" : "omit" }, options || {});
+    var timeoutMs = Math.max(1000, Number(settings.timeoutMs) || REQUEST_TIMEOUT_MS);
+    delete settings.timeoutMs;
     settings.headers = Object.assign(
       { "Content-Type": "application/json" },
       TEST_MODE ? { "X-Nexus-Wazzup-Test": "1" } : {},
       (options && options.headers) || {}
     );
     var controller = new AbortController();
-    var timer = setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+    var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
     settings.signal = controller.signal;
     try {
       var response = await fetch(API + path, settings);
@@ -441,14 +504,50 @@
       }
       return data;
     } catch (error) {
-      if (error && error.name === "AbortError") throw new Error("Сервер не ответил за 15 секунд. Повторите.");
+      if (error && error.name === "AbortError") throw new Error("Сервер не ответил за " + Math.round(timeoutMs / 1000) + " секунд. Нажмите «Повторить».");
       throw error;
     } finally {
       clearTimeout(timer);
     }
   }
 
+  function resizeComposerTextarea(input) {
+    if (!input || input.tagName !== "TEXTAREA") return;
+    var computed = window.getComputedStyle(input);
+    var minimum = parseFloat(computed.minHeight) || 40;
+    var maximum = parseFloat(computed.maxHeight);
+    if (!Number.isFinite(maximum) || maximum <= 0) maximum = Math.min(window.innerHeight * 0.45, 360);
+    input.style.height = "auto";
+    var desired = Math.max(minimum, Math.min(input.scrollHeight, maximum));
+    input.style.height = Math.ceil(desired) + "px";
+    input.style.overflowY = input.scrollHeight > maximum + 1 ? "auto" : "hidden";
+  }
+
+  function bindComposerTextarea(input) {
+    if (!input || input.dataset.composerBound === "1") return;
+    input.dataset.composerBound = "1";
+    input.addEventListener("keydown", function (event) {
+      event.stopPropagation();
+      if ((event.key === " " || event.key === "Spacebar" || event.code === "Space") && !event.ctrlKey && !event.metaKey && !event.altKey && !input.disabled && !input.readOnly) {
+        event.preventDefault();
+        var start = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+        var end = typeof input.selectionEnd === "number" ? input.selectionEnd : start;
+        input.setRangeText(" ", start, end, "end");
+        input.dispatchEvent(new Event("input", { bubbles: false }));
+      }
+    });
+    ["keypress", "keyup", "beforeinput"].forEach(function (type) {
+      input.addEventListener(type, function (event) { event.stopPropagation(); });
+    });
+    input.addEventListener("input", function (event) {
+      event.stopPropagation();
+      resizeComposerTextarea(input);
+    });
+    setTimeout(function () { resizeComposerTextarea(input); }, 0);
+  }
+
   function attachTemplates(composer, input, payloadFactory) {
+    bindComposerTextarea(input);
     composer.style.gridTemplateColumns = "minmax(0,1fr) auto";
     var inputWrap = document.createElement("div");
     inputWrap.className = "composer-input";
@@ -476,6 +575,7 @@
     var base = function () { return Object.assign({}, payloadFactory ? payloadFactory() : context()); };
     var templates = [];
     var variables = [];
+    var templateDragId = 0;
 
     function payload(next) { return Object.assign(base(), next || {}); }
     function clearMenu() { popover.innerHTML = ""; }
@@ -522,12 +622,27 @@
     function showScopes() {
       clearMenu();
       menuButton("← Назад", showRoot).classList.add("menu-back");
+      menuButton("★ Избранное", showFavorites);
       menuButton("Общие", function () { showFolders("shared"); });
       menuButton("Личные", function () { showFolders("personal"); });
+    }
+    function favoriteRows() {
+      return templates.filter(function (template) { return template.favorite; }).sort(function (left, right) {
+        return Number(left.favorite_order || 0) - Number(right.favorite_order || 0);
+      });
+    }
+    function showFavorites() {
+      clearMenu();
+      menuButton("← Шаблоны", showScopes).classList.add("menu-back");
+      showTemplateRows(favoriteRows(), true);
     }
     function showFolders(scope) {
       clearMenu();
       menuButton("← Шаблоны", showScopes).classList.add("menu-back");
+      if (scope === "personal") {
+        showTemplateRows(templates.filter(function (template) { return template.scope === "personal"; }), false);
+        return;
+      }
       var folders = [];
       templates.filter(function (template) { return template.scope === scope; }).forEach(function (template) {
         var folder = String(template.folder || "Без папки");
@@ -545,20 +660,111 @@
     function showTemplates(scope, folder) {
       clearMenu();
       menuButton("← Папки", function () { showFolders(scope); }).classList.add("menu-back");
-      templates.filter(function (template) { return template.scope === scope && String(template.folder || "Без папки") === folder; }).forEach(function (template) {
-        var button = menuButton(template.title, function () { applyTemplate(template); });
+      showTemplateRows(templates.filter(function (template) {
+        return template.scope === scope && String(template.folder || "Без папки") === folder;
+      }), false);
+    }
+    async function moveTemplate(sourceId, targetId, before, refresh) {
+      var sourceIndex = templates.findIndex(function (row) { return Number(row.id) === Number(sourceId); });
+      var targetIndex = templates.findIndex(function (row) { return Number(row.id) === Number(targetId); });
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+      var source = templates.splice(sourceIndex, 1)[0];
+      var adjusted = templates.findIndex(function (row) { return Number(row.id) === Number(targetId); });
+      templates.splice(adjusted + (before ? 0 : 1), 0, source);
+      clearMenu();
+      var loading = document.createElement("div");
+      loading.className = "composer-menu-loading";
+      loading.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Сохраняем ваш порядок шаблонов…</span>';
+      popover.appendChild(loading);
+      try {
+        await request("/templates", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({ action: "reorder", template_ids: templates.map(function (row) { return Number(row.id); }) })) });
+        refresh();
+      } catch (error) {
+        window.alert(error.message || "Не удалось сохранить порядок");
+        loadTemplates().then(refresh);
+      }
+    }
+    function showTemplateRows(rows, favoritesOnly) {
+      if (!rows.length) {
+        var empty = document.createElement("div");
+        empty.className = "composer-menu-empty";
+        empty.textContent = favoritesOnly ? "Избранных шаблонов нет" : "Шаблонов нет";
+        popover.appendChild(empty);
+        return;
+      }
+      rows.forEach(function (template) {
+        var row = document.createElement("div");
+        row.className = "composer-template-row";
+        if (!favoritesOnly) {
+          var drag = document.createElement("span");
+          drag.className = "template-drag";
+          drag.textContent = "⋮⋮";
+          drag.title = "Перетащите шаблон";
+          row.draggable = true;
+          row.dataset.templateId = template.id;
+          row.addEventListener("dragstart", function (event) { templateDragId = Number(template.id); row.classList.add("dragging"); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(template.id)); });
+          row.addEventListener("dragend", function () { templateDragId = 0; row.classList.remove("dragging"); popover.querySelectorAll(".drag-over").forEach(function (node) { node.classList.remove("drag-over"); }); });
+          row.addEventListener("dragover", function (event) { event.preventDefault(); row.classList.add("drag-over"); });
+          row.addEventListener("dragleave", function () { row.classList.remove("drag-over"); });
+          row.addEventListener("drop", function (event) { event.preventDefault(); row.classList.remove("drag-over"); var before = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2; moveTemplate(templateDragId, template.id, before, function () { if (template.scope === "personal") showFolders("personal"); else showTemplates(template.scope, String(template.folder || "Без папки")); }); });
+          row.appendChild(drag);
+        }
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "composer-menu-button";
+        button.textContent = template.title;
         var preview = document.createElement("small");
         preview.textContent = String(template.body || "").replace(/\s+/g, " ").slice(0, 90);
         button.appendChild(preview);
+        button.addEventListener("click", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          applyTemplate(template);
+        });
+        var star = document.createElement("button");
+        star.type = "button";
+        star.className = "template-star" + (template.favorite ? " active" : "");
+        star.textContent = template.favorite ? "★" : "☆";
+        star.setAttribute("aria-label", template.favorite ? "Убрать из избранного" : "Добавить в избранное");
+        star.title = star.getAttribute("aria-label");
+        star.addEventListener("click", async function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          star.disabled = true;
+          try {
+            var next = !template.favorite;
+            await request("/templates", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({ action: "favorite", id: Number(template.id), favorite: next })) });
+            template.favorite = next;
+            if (next) template.favorite_order = templates.reduce(function (maximum, item) { return Math.max(maximum, Number(item.favorite_order || 0)); }, -1) + 1;
+            if (favoritesOnly) showFavorites();
+            else {
+              star.classList.toggle("active", next);
+              star.textContent = next ? "★" : "☆";
+              star.setAttribute("aria-label", next ? "Убрать из избранного" : "Добавить в избранное");
+              star.title = star.getAttribute("aria-label");
+            }
+          } catch (error) { window.alert(error.message || "Не удалось изменить избранное"); }
+          finally { star.disabled = false; }
+        });
+        row.appendChild(button);
+        row.appendChild(star);
+        popover.appendChild(row);
       });
     }
     async function applyTemplate(template) {
+      var optimistic = optimisticTemplate(template.body, base());
+      input.value = optimistic;
+      resizeComposerTextarea(input);
+      input.focus();
+      flashTemplateInput(input);
+      closeMenu();
       try {
         var data = await request("/template-preview", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({ id: Number(template.id) })) });
-        input.value = data.text || "";
-        input.focus();
+        if (input.value === optimistic) {
+          input.value = data.text || "";
+          resizeComposerTextarea(input);
+        }
       } catch (error) { window.alert(error.message || "Не удалось применить шаблон"); }
-      finally { closeMenu(); }
     }
     more.addEventListener("click", function () {
       popover.hidden = !popover.hidden;
@@ -587,33 +793,38 @@
       body: JSON.stringify(Object.assign({}, payloadFor(targets[0]), { body: rawText }))
     }) : { text: "" };
     var sent = [];
+    var queued = [];
     var failed = [];
-    for (var index = 0; index < targets.length; index += 1) {
-      var channel = targets[index];
+    var batchId = window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(36).slice(2);
+    await Promise.all(targets.map(async function (channel, index) {
       if (attachment && attachment.attachment_url && channel.provider !== "salebot") {
         failed.push(channelLabel(channel) + ": вложения поддерживает SaleBot");
-        continue;
+        return;
       }
       try {
         var result = await request("/send", {
           headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-          body: JSON.stringify(Object.assign({}, payloadFor(channel), attachment || {}, { text: preview.text }))
+          body: JSON.stringify(Object.assign({}, payloadFor(channel), attachment || {}, { text: preview.text, request_id: batchId + ":" + index }))
         });
-        if (result.sent === false) failed.push(channelLabel(channel) + (result.notice ? ": " + result.notice : ""));
+        if (result.queued) queued.push(channelLabel(channel));
+        else if (result.sent === false) failed.push(channelLabel(channel) + (result.notice ? ": " + result.notice : ""));
         else sent.push(channelLabel(channel));
       } catch (error) {
         failed.push(channelLabel(channel) + ": " + (error.message || "ошибка"));
       }
-    }
+    }));
     return {
       sent: sent,
+      queued: queued,
       failed: failed,
-      status: [sent.length ? "Отправлено: " + sent.join(", ") : "", failed.length ? "Не отправлено: " + failed.join("; ") : ""].filter(Boolean).join(" · ")
+      status: [sent.length ? "Отправлено: " + sent.join(", ") : "", queued.length ? "В очереди: " + queued.join(", ") : "", failed.length ? "Не отправлено: " + failed.join("; ") : ""].filter(Boolean).join(" · ")
     };
   }
 
   async function activate(code, button, errorNode) {
     button.disabled = true;
+    button.classList.add("busy");
+    button.textContent = "Входим…";
     errorNode.textContent = "";
     try {
       var data = await request("/activate", { body: JSON.stringify({ code: String(code || "").trim() }) });
@@ -624,8 +835,29 @@
       await showChannelMenu();
     } catch (error) {
       errorNode.textContent = error.message || "Не удалось активировать устройство";
+    } finally {
+      button.classList.remove("busy");
+      button.textContent = "Активировать";
       button.disabled = false;
     }
+  }
+
+  async function logoutDevice(button) {
+    if (!window.confirm("Выйти из виджета на этом компьютере?")) return;
+    button.disabled = true;
+    button.classList.add("busy");
+    button.textContent = "Выходим…";
+    var token = localStorage.getItem(STORAGE_KEY) || "";
+    try {
+      if (token) await request("/logout", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(context()) });
+    } catch (error) {}
+    localStorage.removeItem(STORAGE_KEY);
+    stopConversationPoll();
+    if (inboxTimer) clearTimeout(inboxTimer);
+    inboxTimer = null;
+    conversationCache.clear();
+    if (inbox) inbox.wrap.classList.remove("open");
+    activationForm("Введите личный код сотрудника, чтобы снова войти.");
   }
 
   function inboxInitials(name) {
@@ -635,7 +867,7 @@
   function ensureInbox() {
     if (inbox) return inbox;
     var pair = shadowHost(INBOX_ID);
-    pair.root.innerHTML = '<style>' + inboxCss() + '</style><div class="wrap"><button class="launcher" type="button" aria-label="Сообщения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15a4 4 0 0 1-4 4H9l-5 3 1.6-4.8A7 7 0 0 1 3 12V9a7 7 0 0 1 7-7h6a5 5 0 0 1 5 5z"/></svg><span class="badge" hidden></span></button><section class="panel" aria-label="Сообщения"><header class="panel-head"><button class="icon back" type="button" aria-label="Назад" hidden>←</button><b>Диалоги</b><label class="send-all inbox-send-all" hidden><input type="checkbox" checked><span>Отправить везде</span></label><button class="icon refresh" type="button" aria-label="Обновить">↻</button><button class="icon settings-button" type="button" aria-label="Настройки">⚙</button><button class="icon panel-close" type="button" aria-label="Закрыть">×</button></header><div class="list"><div class="empty">Загрузка…</div></div></section></div>';
+    pair.root.innerHTML = '<style>' + inboxCss() + '</style><div class="wrap"><button class="launcher" type="button" aria-label="Сообщения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15a4 4 0 0 1-4 4H9l-5 3 1.6-4.8A7 7 0 0 1 3 12V9a7 7 0 0 1 7-7h6a5 5 0 0 1 5 5z"/></svg><span class="badge" hidden></span></button><section class="panel" aria-label="Сообщения"><header class="panel-head"><button class="icon back" type="button" aria-label="Назад" hidden>←</button><b>Диалоги</b><button class="icon refresh" type="button" aria-label="Обновить">↻</button><button class="icon settings-button" type="button" aria-label="Настройки">⚙</button><button class="icon panel-close" type="button" aria-label="Закрыть">×</button></header><div class="list"><div class="empty inbox-loading"><span class="spinner" aria-hidden="true"></span><span>Загружаем диалоги…</span></div></div></section></div>';
     document.body.appendChild(pair.host);
     var wrap = pair.root.querySelector(".wrap");
     var launcher = pair.root.querySelector(".launcher");
@@ -646,7 +878,10 @@
     });
     pair.root.querySelector(".panel-close").addEventListener("click", function () { wrap.classList.remove("open"); });
     pair.root.querySelector(".refresh").addEventListener("click", function () { loadInbox(false); });
-    pair.root.querySelector(".back").addEventListener("click", showInboxList);
+    pair.root.querySelector(".back").addEventListener("click", function () {
+      if (inbox && inbox.view === "notification-settings") showInboxSettings();
+      else showInboxList();
+    });
     pair.root.querySelector(".settings-button").addEventListener("click", showInboxSettings);
     inbox = {
       host: pair.host,
@@ -660,7 +895,6 @@
       back: pair.root.querySelector(".back"),
       settingsButton: pair.root.querySelector(".settings-button"),
       refresh: pair.root.querySelector(".refresh"),
-      sendAll: pair.root.querySelector(".inbox-send-all"),
       view: "list",
       items: [],
       channels: []
@@ -684,7 +918,6 @@
     view.back.hidden = !back;
     view.settingsButton.hidden = !settings;
     view.refresh.hidden = !refresh;
-    view.sendAll.hidden = true;
   }
 
   function showInboxList() {
@@ -705,17 +938,221 @@
     applyButtonPrefs();
   }
 
+  function notificationApi(path, options) {
+    var token = localStorage.getItem(STORAGE_KEY) || "";
+    return request("/notifications" + path, Object.assign({
+      headers: { "Authorization": "Bearer " + token }, body: "{}"
+    }, options || {}));
+  }
+
+  async function notificationBusy(button, label, action) {
+    var original = button.textContent;
+    button.disabled = true;
+    button.classList.add("busy");
+    button.textContent = label;
+    try { return await action(); }
+    finally { button.disabled = false; button.classList.remove("busy"); button.textContent = original; }
+  }
+
+  function notificationLoading(container, text) {
+    container.innerHTML = '<div class="notify-loading"><span class="spinner" aria-hidden="true"></span><span></span></div>';
+    container.querySelector(".notify-loading span:last-child").textContent = text;
+  }
+
+  function notificationButton(label, className, action) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "notify-action" + (className ? " " + className : "");
+    button.textContent = label;
+    button.addEventListener("click", action);
+    return button;
+  }
+
+  function renderNotificationSettings(container, data, restore) {
+    container.innerHTML = "";
+    var toolbar = document.createElement("div");
+    toolbar.className = "notify-actions";
+    toolbar.style.marginBottom = "12px";
+    toolbar.appendChild(notificationButton("Назад", "", restore));
+    if (!container.classList.contains("settings")) container.appendChild(toolbar);
+    [["telegram", "Telegram", "Личные уведомления через @attackpng_notify_bot."], ["vk", "VK", "Личные сообщения от подключённого сообщества VK."], ["browser", "Браузер", "Системные уведомления на этом компьютере. Клик открывает сделку amoCRM."]].forEach(function (item) {
+      var provider = item[0];
+      var destination = (data.destinations || {})[provider] || {};
+      var card = document.createElement("section");
+      card.className = "notify-card";
+      var head = document.createElement("div");
+      head.className = "notify-card-head";
+      var title = document.createElement("b");
+      title.textContent = item[1];
+      var state = document.createElement("span");
+      state.className = "notify-state" + (destination.connected && destination.enabled ? " ok" : "");
+      state.textContent = destination.connected && destination.enabled ? "Подключено · " + (destination.label || "готово") : destination.connected ? "Нужно переподключить" : "Не подключено";
+      head.append(title, state);
+      var help = document.createElement("p");
+      help.className = "notify-help";
+      help.textContent = destination.last_error || item[2];
+      var actions = document.createElement("div");
+      actions.className = "notify-actions";
+      function openBrowserPage(button) {
+        notificationBusy(button, "Готовим страницу…", async function () {
+          var result = await notificationApi("/browser/open", { body: "{}" });
+          window.open(result.url, "_blank", "noopener");
+          var spinner = document.createElement("span"), label = document.createElement("span");
+          spinner.className = "spinner"; label.textContent = "Ожидаем разрешение браузера…";
+          state.className = "notify-state waiting"; state.replaceChildren(spinner, label);
+          for (var attempt = 0; attempt < 60 && state.isConnected; attempt += 1) {
+            await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+            var next = await notificationApi("/settings");
+            if (next.destinations && next.destinations.browser && next.destinations.browser.enabled) {
+              renderNotificationSettings(container, next, restore);
+              return;
+            }
+          }
+          if (state.isConnected) { state.className = "notify-state"; state.textContent = "Разрешение пока не получено — нажмите «Подключить» ещё раз."; }
+        }).catch(function (error) { state.textContent = error.message; state.className = "notify-state"; });
+      }
+      if (destination.connected && destination.enabled) {
+        var test = provider === "browser" ? notificationButton("Открыть страницу", "", function () { openBrowserPage(test); }) : notificationButton("Проверить", "", function () {
+          notificationBusy(test, "Отправляю…", async function () {
+            var result = await notificationApi("/test", { body: JSON.stringify({ provider: provider }) });
+            state.textContent = result.message || "Тест отправлен";
+          }).catch(function (error) { state.textContent = error.message; state.className = "notify-state"; });
+        });
+        var disconnect = notificationButton("Отключить", "", function () {
+          notificationBusy(disconnect, "Отключаю…", async function () {
+            var next = await notificationApi("/disconnect", { body: JSON.stringify({ provider: provider }) });
+            renderNotificationSettings(container, Object.assign({}, data, next), restore);
+          }).catch(function (error) { state.textContent = error.message; state.className = "notify-state"; });
+        });
+        actions.append(test, disconnect);
+      } else {
+        var connect = notificationButton("Подключить", "primary", function () {
+          if (provider === "browser") { openBrowserPage(connect); return; }
+          notificationBusy(connect, "Готовлю подключение…", async function () {
+            var pairing = await notificationApi("/pair", { body: JSON.stringify({ provider: provider }) });
+            var pairBox = document.createElement("div");
+            pairBox.className = "notify-pairing";
+            var spinner = document.createElement("span");
+            spinner.className = "spinner";
+            var pairText = document.createElement("span");
+            pairText.textContent = provider === "telegram"
+              ? "1. В открывшемся боте нажмите Start. 2. Дождитесь сообщения «Уведомления Nexus подключены». Сейчас ожидаем подтверждение…"
+              : "1. Нажмите код ниже — он скопируется. 2. В открывшемся диалоге VK вставьте код и отправьте его сообществу. Сейчас ожидаем подтверждение…";
+            pairBox.append(spinner, pairText);
+            if (provider === "vk") {
+              var code = notificationButton(pairing.command, "notify-code", function () {
+                var copy = navigator.clipboard ? navigator.clipboard.writeText(pairing.command) : Promise.reject();
+                copy.then(function () { code.textContent = pairing.command + " · скопирован"; }).catch(function () { window.prompt("Скопируйте код", pairing.command); });
+              });
+              pairBox.appendChild(code);
+              if (navigator.clipboard) navigator.clipboard.writeText(pairing.command).then(function () { code.textContent = pairing.command + " · скопирован"; }).catch(function () {});
+            }
+            card.appendChild(pairBox);
+            window.open(pairing.url, "_blank", "noopener");
+            var checks = 0;
+            async function check() {
+              if (!container.isConnected || checks >= 60) {
+                pairBox.classList.remove("notify-loading");
+                pairText.textContent = "Подтверждение пока не получено. Можно нажать «Подключить» ещё раз.";
+                return;
+              }
+              checks += 1;
+              try {
+                var next = await notificationApi("/settings");
+                var ready = next.destinations && next.destinations[provider] && next.destinations[provider].enabled;
+                if (ready) { renderNotificationSettings(container, next, restore); return; }
+              } catch (error) {
+                pairBox.classList.remove("notify-loading");
+                pairText.textContent = error.message || "Не удалось проверить подключение";
+                return;
+              }
+              setTimeout(check, 2000);
+            }
+            setTimeout(check, 1500);
+          }).catch(function (error) { state.textContent = error.message; state.className = "notify-state"; });
+        });
+        actions.appendChild(connect);
+      }
+      card.append(head, help, actions);
+      container.appendChild(card);
+    });
+    var routing = document.createElement("details");
+    routing.className = "notify-routing";
+    routing.innerHTML = "<summary>Как Nexus выбирает нужного менеджера</summary><p>В amoCRM у сделки есть ответственный. В разделе Nexus «Сотрудники» его amoCRM ID привязан к сотруднику Nexus. Когда этот сотрудник открывает виджет, его устройство также принадлежит ему. Поэтому входящее сообщение получает тот менеджер, который назначен ответственным в сделке.</p><p>Если ответственный сменился, Nexus использует нового после следующего открытия карточки или обновления связи. Сообщения без найденного ответственного никому не рассылаются, кроме администраторов с резервной настройкой ниже.</p>";
+    container.appendChild(routing);
+    if (data.admin_role === "admin") {
+      var fallback = document.createElement("label");
+      fallback.className = "notify-fallback";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = !!data.fallback_unassigned;
+      var fallbackText = document.createElement("span");
+      fallbackText.textContent = "Получать резервные уведомления, если у клиента не найден ответственный менеджер amoCRM";
+      fallback.append(checkbox, fallbackText);
+      checkbox.addEventListener("change", async function () {
+        checkbox.disabled = true;
+        fallbackText.textContent = "Сохраняю настройку…";
+        try {
+          var next = await notificationApi("/settings", { method: "PUT", body: JSON.stringify({ fallback_unassigned: checkbox.checked }) });
+          renderNotificationSettings(container, Object.assign({}, data, next, { admin_role: data.admin_role }), restore);
+        } catch (error) {
+          checkbox.checked = !checkbox.checked;
+          fallbackText.textContent = error.message || "Не удалось сохранить";
+        } finally { checkbox.disabled = false; }
+      });
+      container.appendChild(fallback);
+    }
+  }
+
+  async function loadNotificationSettings(container, restore) {
+    notificationLoading(container, "Загружаем подключения уведомлений…");
+    try {
+      var data = await notificationApi("/settings");
+      renderNotificationSettings(container, data, restore);
+    } catch (error) {
+      container.innerHTML = "";
+      var retry = notificationButton("Повторить загрузку", "", function () { loadNotificationSettings(container, restore); });
+      var message = document.createElement("p");
+      message.className = "notify-help";
+      message.textContent = error.message || "Не удалось загрузить уведомления";
+      container.append(message, retry);
+    }
+  }
+
+  function showInboxNotificationSettings() {
+    var view = ensureInbox();
+    view.view = "notification-settings";
+    setInboxHeader("Уведомления", true, false, false);
+    view.body.className = "settings";
+    loadNotificationSettings(view.body, showInboxSettings);
+  }
+
+  function showDrawerNotificationSettings() {
+    stopConversationPoll();
+    var d = ensureDrawer();
+    d.root.querySelector(".title b").textContent = "Уведомления";
+    d.subtitle.textContent = "Новые сообщения клиентов";
+    d.channels.hidden = true;
+    d.copy.hidden = true;
+    d.sendAll.hidden = true;
+    d.body.innerHTML = '<div class="drawer-preferences notification-settings-view"></div>';
+    d.layer.classList.add("open");
+    loadNotificationSettings(d.body.querySelector(".notification-settings-view"), showDrawerSettings);
+  }
+
   function showInboxSettings() {
     var view = ensureInbox();
     view.view = "settings";
     setInboxHeader("Настройки", true, false, false);
     var prefs = readPrefs();
     view.body.className = "settings";
-    view.body.innerHTML = '<button class="reset templates-settings" type="button">Шаблоны</button><div class="field">Тема<div class="themes"></div></div><div class="field">Палитра<div class="palettes"></div></div><label class="field">Цвет<input class="color" type="color" value="' + prefs.color + '"></label><div class="field">Положение<div class="positions"></div></div><div class="field">Диалоги<div class="sizes inbox-sizes"></div></div><div class="field">Карточка<div class="sizes drawer-sizes"></div></div><button class="reset" type="button">Сбросить</button>';
+    view.body.innerHTML = '<button class="reset notifications-settings" type="button">Уведомления</button><button class="reset templates-settings" type="button">Шаблоны</button><button class="reset guide-settings" type="button">Инструкция</button><div class="field">Тема<div class="themes"></div></div><div class="field">Палитра<div class="palettes"></div></div><label class="field">Цвет<input class="color" type="color" value="' + prefs.color + '"></label><div class="field">Положение<div class="positions"></div></div><div class="field">Диалоги<div class="sizes inbox-sizes"></div></div><div class="field">Карточка<div class="sizes drawer-sizes"></div></div><button class="reset prefs-reset" type="button">Сбросить</button><button class="reset logout" type="button">Выйти из аккаунта</button>';
     wheelScrollY(view.body);
     view.body.querySelector(".templates-settings").addEventListener("click", showDrawerTemplateSettings);
+    view.body.querySelector(".notifications-settings").addEventListener("click", showInboxNotificationSettings);
+    view.body.querySelector(".guide-settings").addEventListener("click", openGuide);
     view.body.querySelector(".color").addEventListener("input", function (event) { writePrefs({ color: event.target.value }); });
-    [["light", "Светлая"], ["dark", "Тёмная"]].forEach(function (item) {
+    [["light", "Светлая"], ["gray", "Серая"], ["dark", "Тёмная"]].forEach(function (item) {
       var button = document.createElement("button");
       button.type = "button";
       button.className = "theme" + (prefs.theme === item[0] ? " active" : "");
@@ -754,7 +1191,8 @@
     }
     addSizes(".inbox-sizes", "inboxSize");
     addSizes(".drawer-sizes", "drawerSize");
-    view.body.querySelector(".reset").addEventListener("click", function () { localStorage.removeItem(PREFS_KEY); applyPrefs(view); applyDrawerPrefs(drawer); applyButtonPrefs(); showInboxSettings(); });
+    view.body.querySelector(".prefs-reset").addEventListener("click", function () { localStorage.removeItem(PREFS_KEY); applyPrefs(view); applyDrawerPrefs(drawer); applyButtonPrefs(); showInboxSettings(); });
+    view.body.querySelector(".logout").addEventListener("click", function (event) { logoutDevice(event.currentTarget); });
   }
 
   function showDrawerSettings() {
@@ -766,12 +1204,15 @@
     d.channels.hidden = true;
     d.copy.hidden = true;
     d.sendAll.hidden = true;
-    d.body.innerHTML = '<div class="drawer-preferences"><div class="template-toolbar"><button class="tool templates" type="button">Шаблоны</button><button class="tool back" type="button">Назад</button></div><div class="field">Тема<div class="choices themes"></div></div><div class="field">Палитра<div class="palettes"></div></div><label class="field">Цвет<input class="color" type="color" value="' + prefs.color + '"></label><div class="field">Размер<div class="choices sizes"></div></div></div>';
+    d.body.innerHTML = '<div class="drawer-preferences"><div class="template-toolbar"><button class="tool notifications" type="button">Уведомления</button><button class="tool templates" type="button">Шаблоны</button><button class="tool guide" type="button">Инструкция</button><button class="tool back" type="button">Назад</button></div><div class="field">Тема<div class="choices themes"></div></div><div class="field">Палитра<div class="palettes"></div></div><label class="field">Цвет<input class="color" type="color" value="' + prefs.color + '"></label><div class="field">Размер<div class="choices sizes"></div></div><button class="tool logout" type="button">Выйти из аккаунта</button></div>';
     d.layer.classList.add("open");
     d.body.querySelector(".templates").addEventListener("click", showDrawerTemplateSettings);
+    d.body.querySelector(".notifications").addEventListener("click", showDrawerNotificationSettings);
+    d.body.querySelector(".guide").addEventListener("click", openGuide);
     d.body.querySelector(".back").addEventListener("click", showChannelMenu);
+    d.body.querySelector(".logout").addEventListener("click", function (event) { logoutDevice(event.currentTarget); });
     d.body.querySelector(".color").addEventListener("input", function (event) { writePrefs({ color: event.target.value }); });
-    [["light", "Светлая"], ["dark", "Тёмная"]].forEach(function (item) {
+    [["light", "Светлая"], ["gray", "Серая"], ["dark", "Тёмная"]].forEach(function (item) {
       var button = document.createElement("button");
       button.type = "button";
       button.className = "tool" + (prefs.theme === item[0] ? " active" : "");
@@ -813,6 +1254,7 @@
     var settings = d.body.querySelector(".template-settings");
     var templates = [];
     var canManageShared = false;
+    var templateDragId = 0;
     var payload = function (extra) { return Object.assign({}, context(), extra || {}); };
 
     function restore() { showDrawerSettings(); }
@@ -834,28 +1276,68 @@
       templates.forEach(function (template) {
         var row = document.createElement("div");
         row.className = "template-row";
+        row.draggable = true;
+        row.dataset.templateId = template.id;
+        var drag = document.createElement("span");
+        drag.className = "template-drag";
+        drag.textContent = "⋮⋮";
+        drag.title = "Перетащите шаблон";
+        row.appendChild(drag);
+        row.addEventListener("dragstart", function (event) { templateDragId = Number(template.id); row.classList.add("dragging"); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(template.id)); });
+        row.addEventListener("dragend", function () { templateDragId = 0; row.classList.remove("dragging"); list.querySelectorAll(".drag-over").forEach(function (node) { node.classList.remove("drag-over"); }); });
+        row.addEventListener("dragover", function (event) { event.preventDefault(); row.classList.add("drag-over"); });
+        row.addEventListener("dragleave", function () { row.classList.remove("drag-over"); });
+        row.addEventListener("drop", async function (event) {
+          event.preventDefault(); row.classList.remove("drag-over");
+          var sourceIndex = templates.findIndex(function (item) { return Number(item.id) === templateDragId; }), targetIndex = templates.findIndex(function (item) { return Number(item.id) === Number(template.id); });
+          if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+          var source = templates.splice(sourceIndex, 1)[0], adjusted = templates.findIndex(function (item) { return Number(item.id) === Number(template.id); }), before = event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
+          templates.splice(adjusted + (before ? 0 : 1), 0, source);
+          list.innerHTML = '<div class="empty-chat"><span class="spinner" aria-hidden="true"></span><br>Сохраняем личный порядок шаблонов…</div>';
+          try { await request("/templates", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({ action: "reorder", template_ids: templates.map(function (item) { return Number(item.id); }) })) }); renderList(); }
+          catch (error) { window.alert(error.message || "Не удалось сохранить порядок"); load(); }
+        });
         var text = document.createElement("div");
         var title = document.createElement("b");
-        title.textContent = (template.scope === "personal" ? "Личные" : "Общие") + " · " + (template.folder || "Без папки") + " · " + template.title;
+        title.textContent = template.scope === "personal" ? "Личный · " + template.title : "Общий · " + (template.folder || "Без папки") + " · " + template.title;
         var preview = document.createElement("small");
         preview.textContent = String(template.body || "").replace(/\s+/g, " ");
         text.appendChild(title);
         text.appendChild(preview);
         row.appendChild(text);
-        if (template.editable) row.appendChild(button("Изменить", function () { edit(template); }));
+        var actions = document.createElement("div");
+        actions.className = "template-row-actions";
+        var star = button(template.favorite ? "★" : "☆", async function () {
+          star.disabled = true;
+          try {
+            var next = !template.favorite;
+            await request("/templates", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({ action: "favorite", id: Number(template.id), favorite: next })) });
+            template.favorite = next;
+            renderList();
+          } catch (error) { window.alert(error.message || "Не удалось изменить избранное"); }
+          finally { star.disabled = false; }
+        }, "template-star" + (template.favorite ? " active" : ""));
+        star.setAttribute("aria-label", template.favorite ? "Убрать из избранного" : "Добавить в избранное");
+        star.title = star.getAttribute("aria-label");
+        actions.appendChild(star);
+        if (template.editable) actions.appendChild(button("Изменить", function () { edit(template); }));
+        row.appendChild(actions);
         list.appendChild(row);
       });
     }
     function edit(template) {
       var current = template || { scope: "personal", folder: "", title: "", body: "" };
-      settings.innerHTML = '<div class="template-toolbar"><button class="tool template-back" type="button">← Шаблоны</button></div><form class="template-editor"><label>Тип<select name="scope"><option value="personal">Личный</option><option value="shared">Общий</option></select></label><label>Папка<input name="folder" maxlength="120"></label><label>Название<input name="title" maxlength="120" required></label><label>Содержание<textarea name="body" maxlength="20000" required></textarea></label><div class="variable-list"></div><div class="template-actions"><button class="tool" type="submit">Сохранить</button></div></form>';
+      settings.innerHTML = '<div class="template-toolbar"><button class="tool template-back" type="button">← Шаблоны</button></div><form class="template-editor"><label>Тип<select name="scope"><option value="personal">Личный</option><option value="shared">Общий</option></select></label><label class="folder-field">Папка<input name="folder" maxlength="120"></label><label>Название<input name="title" maxlength="120" required></label><label>Содержание<textarea name="body" maxlength="20000" required></textarea></label><div class="variable-list"></div><div class="template-actions"><button class="tool" type="submit">Сохранить</button></div></form>';
       var form = settings.querySelector("form");
       var scope = form.elements.scope;
       scope.value = current.scope;
       scope.disabled = !!template;
       scope.querySelector('option[value="shared"]').disabled = !canManageShared;
       if (!canManageShared && scope.value === "shared") scope.value = "personal";
+      var syncFolder = function () { form.querySelector(".folder-field").hidden = scope.value === "personal"; if (scope.value === "personal") form.elements.folder.value = ""; };
+      scope.addEventListener("change", syncFolder);
       form.elements.folder.value = current.folder || "";
+      syncFolder();
       form.elements.title.value = current.title || "";
       form.elements.body.value = current.body || "";
       variables.forEach(function (item) {
@@ -883,7 +1365,7 @@
         try {
           await request("/templates", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(payload({
             action: template ? "update" : "create", id: template && template.id, scope: scope.value,
-            folder: form.elements.folder.value.trim(), title: form.elements.title.value.trim(), body: form.elements.body.value.trim()
+            folder: scope.value === "personal" ? "" : form.elements.folder.value.trim(), title: form.elements.title.value.trim(), body: form.elements.body.value.trim()
           })) });
           load();
         } catch (error) {
@@ -934,7 +1416,15 @@
     });
     var data = await request("/channels", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(body) });
     var rows = Array.isArray(data.channels) ? data.channels : [];
-    if (!item) inbox.channels = rows;
+    if (!item) {
+      inbox.channels = rows;
+      if (rows.length) {
+        var saved = readPrefs().inboxChannels;
+        var current = new Set(rows.map(function (row) { return String(row.channel_id || ""); }));
+        var valid = saved.filter(function (channelId) { return current.has(channelId); });
+        if (valid.length !== saved.length) writePrefs({ inboxChannels: valid });
+      }
+    }
     return rows;
   }
 
@@ -944,9 +1434,8 @@
     view.view = "chat";
     view.activeChannel = channel;
     setInboxHeader(item.name || item.phone || "Клиент", true, false, true);
-    view.sendAll.hidden = false;
     view.body.className = "chat";
-    view.body.innerHTML = '<div class="chat-tools"><div class="channel-strip"></div></div><div class="message-feed"><div class="empty-chat">Загрузка…</div></div><div class="composer"><textarea maxlength="4000" placeholder="Сообщение…"></textarea><button class="send" type="button">Отправить</button><div class="compose-error"></div></div>';
+    view.body.innerHTML = '<div class="chat-tools"><div class="channel-strip"></div></div><div class="message-feed"><div class="empty-chat inbox-loading"><span class="spinner" aria-hidden="true"></span><span>Загружаем переписку…</span></div></div><div class="composer"><textarea maxlength="4000" placeholder="Сообщение…"></textarea><button class="send" type="button">Отправить</button><div class="compose-error"></div></div>';
     var tools = view.body.querySelector(".chat-tools");
     var strip = view.body.querySelector(".channel-strip");
     wheelScrollX(strip);
@@ -962,13 +1451,18 @@
       strip.appendChild(button);
     });
     if (item.getcourse_user_id) {
-      var link = document.createElement("a");
-      link.className = "channel card-link";
-      link.href = "/user/control/user/update/id/" + encodeURIComponent(item.getcourse_user_id);
-      link.setAttribute("aria-label", "Открыть карточку");
-      link.title = "Открыть карточку";
-      link.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21a7.5 7.5 0 0 1 15 0"></path></svg>';
+      var link = document.createElement("button");
+      link.type = "button";
+      link.className = "channel gc-channel busy";
+      link.disabled = true;
+      link.textContent = "GetCourse · проверяем покупку…";
+      link.title = "Ищем оплаченный доступ в /streams/";
       tools.appendChild(link);
+      request("/getcourse-card", { headers: { "Authorization": "Bearer " + (localStorage.getItem(STORAGE_KEY) || "") }, body: JSON.stringify({ platform: "getcourse", phone: item.phone || "", name: item.name || "", entity_type: "user", entity_id: item.getcourse_user_id || "" }) }).then(function (card) {
+        link.disabled = false; link.classList.remove("busy"); link.textContent = "GetCourse";
+        if (card.found && card.paid_access) { link.classList.add("active"); link.title = "Купивший найден в /streams/"; link.onclick = function () { showGetCourseMini(card); }; }
+        else { link.title = "Открыть пользователя GetCourse"; link.onclick = function () { window.open("/user/control/user/update/id/" + encodeURIComponent(item.getcourse_user_id), "_blank", "noopener"); }; }
+      }).catch(function () { link.disabled = false; link.classList.remove("busy"); link.textContent = "GetCourse"; link.onclick = function () { window.open("/user/control/user/update/id/" + encodeURIComponent(item.getcourse_user_id), "_blank", "noopener"); }; });
     }
     var send = view.body.querySelector(".send");
     var input = view.body.querySelector("textarea");
@@ -993,19 +1487,20 @@
       var attachment = { attachment_url: input.dataset.attachmentUrl || "", attachment_type: input.dataset.attachmentType || "" };
       if (!text && !attachment.attachment_url) return;
       send.disabled = true;
+      send.classList.add("busy");
+      send.textContent = "Отправляем…";
       errorNode.textContent = "";
       try {
         var token = localStorage.getItem(STORAGE_KEY) || "";
-        var targets = view.sendAll.querySelector("input").checked ? view.channels : [channel];
-        var result = await sendComposerText(text, targets, payloadFor, token, attachment);
-        if (result.sent.length) { input.value = ""; delete input.dataset.attachmentUrl; delete input.dataset.attachmentType; }
+        var result = await sendComposerText(text, [channel], payloadFor, token, attachment);
+        if (result.sent.length || result.queued.length) { input.value = ""; resizeComposerTextarea(input); delete input.dataset.attachmentUrl; delete input.dataset.attachmentType; }
         conversationSignature = "";
         send.textContent = "Отправка…";
         await Promise.all([loadInboxConversation(false), loadInbox(true, true)]);
         errorNode.textContent = result.status;
       } catch (error) {
         errorNode.textContent = error.message || "Ошибка отправки";
-      } finally { send.textContent = "Отправить"; send.disabled = false; }
+      } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
     });
   }
 
@@ -1159,13 +1654,24 @@
   async function loadInbox(silent, skipConversation) {
     var token = localStorage.getItem(STORAGE_KEY) || "";
     if (!token) return;
+    var view = ensureInbox();
+    var refreshButton = view.refresh;
+    if (!silent) {
+      refreshButton.disabled = true;
+      refreshButton.classList.add("busy");
+      refreshButton.setAttribute("aria-busy", "true");
+      if (view.view === "list") {
+        view.body.className = "list";
+        view.body.innerHTML = '<div class="empty inbox-loading"><span class="spinner" aria-hidden="true"></span><span>Загружаем диалоги…</span></div>';
+        view.list = view.body;
+      }
+    }
     try {
-      var view = ensureInbox();
       var data = await request("/inbox", {
         headers: { "Authorization": "Bearer " + token },
         body: JSON.stringify({ query: view.query || "", channel_ids: readPrefs().inboxChannels })
       });
-      renderInbox(data);
+      renderInbox(data, !silent);
       if (!skipConversation && inbox && inbox.view === "chat") await loadInboxConversation(true);
     } catch (error) {
       if (error.reauth) {
@@ -1176,6 +1682,12 @@
         var list = ensureInbox().list;
         list.innerHTML = '<div class="empty">Не удалось загрузить входящие<br><button class="reset inbox-retry" type="button">Повторить</button></div>';
         list.querySelector(".inbox-retry").addEventListener("click", function () { loadInbox(false); });
+      }
+    } finally {
+      if (!silent && inbox && inbox.refresh === refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.classList.remove("busy");
+        refreshButton.removeAttribute("aria-busy");
       }
     }
   }
@@ -1231,7 +1743,70 @@
       button.addEventListener("click", function () { openConversation(channel); });
       d.channels.appendChild(button);
     });
+    var ctx = context();
+    if (getcourseCardLoading || getcourseCard || ctx.entity_type === "user" || ctx.entity_type === "order") {
+      var gcButton = document.createElement("button");
+      gcButton.className = "channel gc-channel" + (getcourseCard && getcourseCard.paid_access ? " active" : "") + (getcourseCardLoading ? " busy" : "");
+      gcButton.type = "button";
+      gcButton.disabled = getcourseCardLoading;
+      gcButton.textContent = getcourseCardLoading ? getcourseCardLoadingText : getcourseCard && getcourseCard.error ? "GetCourse · повторить" : "GetCourse";
+      gcButton.title = getcourseCard && getcourseCard.paid_access ? "Купивший найден в /streams/" : "Открыть пользователя GetCourse";
+      gcButton.addEventListener("click", function () { if (getcourseCard && getcourseCard.found) showGetCourseMini(getcourseCard); else if (getcourseCard && getcourseCard.error) { getcourseCard = null; ensureGetCourseCard(ctx); } else { var id = ctx.entity_type === "user" ? ctx.entity_id : ""; if (id) window.open("/user/control/user/update/id/" + encodeURIComponent(id), "_blank", "noopener"); } });
+      d.channels.appendChild(gcButton);
+    }
     d.channels.hidden = false;
+  }
+
+  async function ensureGetCourseCard(ctx) {
+    ctx = ctx || context();
+    var key = [ctx.entity_type || "", ctx.entity_id || "", ctx.phone || "", ctx.email || ""].join("|");
+    if (key !== getcourseCardKey) {
+      getcourseCardKey = key;
+      getcourseCard = null;
+      getcourseCardLoading = false;
+    }
+    if (getcourseCardLoading || getcourseCard) return;
+    var token = localStorage.getItem(STORAGE_KEY) || "";
+    getcourseCardLoading = true;
+    getcourseCardLoadingText = "Ищем пользователя GetCourse…";
+    renderChannels(cardChannels, activeChannel);
+    var steps = ["Ищем пользователя GetCourse…", "Загружаем ДЗ…", "Проверяем доступы…", "GetCourse отвечает медленно — ждём…"], phase = 0;
+    var progress = setInterval(function () { phase = Math.min(phase + 1, steps.length - 1); getcourseCardLoadingText = steps[phase]; renderChannels(cardChannels, activeChannel); }, 8000);
+    try {
+      getcourseCard = await request("/getcourse-card", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(ctx), timeoutMs: 90000 });
+    } catch (error) {
+      getcourseCard = { found: false, error: error.message || "GetCourse недоступен" };
+    } finally {
+      clearInterval(progress);
+      getcourseCardLoading = false;
+      renderChannels(cardChannels, activeChannel);
+    }
+  }
+
+  function gcNode(tag, className, text) { var node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; }
+  function gcGroupLabel(row) { return row.group_kind === "module" ? String(row.module_index !== undefined && row.module_index !== null ? row.module_index : row.name || row.group_id) : ({ standard:"Стандарт", premium:"Премиум", vip:"ВИП", mentorship:"Наставничество", module_standard:"Помодульно" })[row.package_key] || row.name || row.group_id; }
+  function gcLessonLabel(row) { return String(row.label || row.key || "").trim().replace(/^(?:ВИП|VIP)\s*(\d+)$/i,"Созвон $1").replace(/^(\d+)[.,]0$/,"$1"); }
+  function gcFriendlyAccessError(value) { var text=String(value||""); return /снимок доступов не найден/i.test(text)?"Доступы ещё не загружены. Нажмите «Загрузить доступы».":text||"Доступы временно не загрузились."; }
+  function gcAccessTime(value) { var date=new Date(value||""); return !value||Number.isNaN(date.valueOf())?"в ближайшее время":date.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"}); }
+  function gcAccessRequest(item,payload) { return request("/getcourse-access",{headers:{"Authorization":"Bearer "+localStorage.getItem(STORAGE_KEY)},body:JSON.stringify(Object.assign({},context(),payload,{enrollment_id:item.enrollment_id})),timeoutMs:90000}); }
+  function showGetCourseMini(card) {
+    stopConversationPoll();
+    var d=ensureDrawer(),item=card.item||{},access=card.access||{},draft=card._draft||(card._draft={}),preview=card._preview||null,groups=Array.isArray(access.items)?access.items:[];
+    d.root.querySelector(".title b").textContent="GetCourse · "+(item.name||"ученик");d.subtitle.textContent=item.email||item.phone||"";d.copy.hidden=true;d.sendAll.hidden=true;d.channels.hidden=false;
+    d.body.innerHTML="";var root=gcNode("div","gc-widget"),toolbar=gcNode("div","template-toolbar"),back=gcNode("button","tool","← Диалоги"),profile=gcNode("a","tool",item.email||"Открыть GetCourse");back.type="button";back.onclick=showChannelMenu;profile.href=card.profile_url||"#";profile.target="_blank";profile.rel="noopener";toolbar.append(back,profile);root.append(toolbar);
+    var facts=gcNode("div","gc-facts");[["Курс",item.course_display||item.course],["Поток",item.stream_display||item.stream],["Куратор",item.curator_name||item.curator],["Тариф",item.tariff],["Телефон",item.phone],["Менеджер",item.manager_name]].forEach(function(pair){var fact=gcNode("div","gc-fact"),label=gcNode("span","",pair[0]),value=gcNode("b","",pair[1]||"—");fact.append(label,value);facts.append(fact)});root.append(facts);
+    var pane=gcNode("div","gc-pane");root.append(pane);d.body.append(root);d.layer.classList.add("open");
+    var lessons=Array.isArray(item.lessons)?item.lessons:[],section=gcNode("section","gc-section"),title=gcNode("h3","","ДЗ · только просмотр · выполнено "+lessons.filter(function(row){return row.value}).length+" из "+lessons.length),lessonList=gcNode("div","gc-chip-list");lessons.forEach(function(row){lessonList.append(gcNode("span","gc-chip"+(row.value?" on":""),(row.value?"✓ ":"○ ")+gcLessonLabel(row)))});if(!lessons.length)lessonList.append(gcNode("span","gc-notice","Данные ДЗ пока не найдены."));section.append(title,lessonList);pane.append(section);
+    if(card._accessError) pane.append(gcNode("div","gc-notice bad",card._accessError));
+    function busy(button,text){button.disabled=true;button.classList.add("busy");button.textContent=text}
+    function loadLive(button){busy(button,"Проверяем GetCourse…");gcAccessRequest(item,{action:"read",live:true}).then(function(data){card.access=data.access;card._draft={};card._preview=null;card._accessError="";showGetCourseMini(card)}).catch(function(error){card._accessError=error.message||"Не удалось загрузить доступы";showGetCourseMini(card)})}
+    if(!access.ok){var failure=gcNode("div","gc-notice bad",gcFriendlyAccessError(access.error)),retry=gcNode("button","tool","Загрузить доступы");retry.type="button";retry.onclick=function(){loadLive(retry)};failure.append(document.createElement("br"),document.createElement("br"),retry);pane.append(failure);return}
+    if(access.pending) pane.append(gcNode("div","gc-pending","Изменения отправлены в GetCourse. Nexus сам проверит результат "+gcAccessTime(access.next_check_at)+". Это окно можно закрыть."));
+    if(preview){var confirmBox=gcNode("section","gc-confirm"),confirmTitle=gcNode("h3","","Проверьте изменения"),confirmGrid=gcNode("div","gc-confirm-grid");[["Добавим",preview.added||[]],["Уберём",preview.removed||[]]].forEach(function(pair){var list=gcNode("div","gc-confirm-list"),heading=gcNode("b","",pair[0]);list.append(heading,document.createTextNode(pair[1].length?pair[1].join("\n"):"Ничего"));confirmGrid.append(list)});var confirmActions=gcNode("div","gc-confirm-actions"),cancel=gcNode("button","tool","Отмена"),send=gcNode("button","tool","Отправить изменения");cancel.type=send.type="button";cancel.onclick=function(){card._preview=null;showGetCourseMini(card)};send.onclick=async function(){busy(send,"Отправляем в GetCourse…");try{var result=await gcAccessRequest(item,{action:"apply",request_id:preview.request_id});card.access=result.access||preview.access;card._draft={};card._preview=null;card._accessError="";showGetCourseMini(card)}catch(error){card._accessError=error.message||"Не удалось изменить доступы";card._preview=null;showGetCourseMini(card)}};confirmActions.append(cancel,send);confirmBox.append(confirmTitle,confirmGrid,confirmActions);pane.append(confirmBox)}
+    function accessChip(group,label){var key=String(group.group_id),value=Object.prototype.hasOwnProperty.call(draft,key)?draft[key]:Boolean(group.enabled),chip=gcNode("button","gc-chip"+(value?" on":"")+(Object.prototype.hasOwnProperty.call(draft,key)?" changed":""),(value?"✓ ":"")+(label||gcGroupLabel(group)));chip.type="button";chip.disabled=Boolean(access.pending);chip.title=group.name||"";chip.onclick=function(){var next=!value;if(next&&group.group_kind==="package")groups.filter(function(row){return row.course_key===group.course_key&&row.group_kind==="package"&&String(row.group_id)!==key}).forEach(function(row){draft[String(row.group_id)]=false});draft[key]=next;card._preview=null;Object.keys(draft).forEach(function(id){var original=groups.find(function(row){return String(row.group_id)===id});if(original&&Boolean(original.enabled)===draft[id])delete draft[id]});showGetCourseMini(card)};return chip}
+    var layout=gcNode("div","gc-access-layout");["puppy","dog"].forEach(function(course){var courseBox=gcNode("section","gc-access-course"),heading=gcNode("h3","",course==="puppy"?"Щенок":"Собака");courseBox.append(heading);[["Тариф",groups.filter(function(row){return row.course_key===course&&row.group_kind==="package"})],["Модули",groups.filter(function(row){return row.course_key===course&&row.group_kind==="module"}).sort(function(a,b){return Number(a.module_index)-Number(b.module_index)})]].forEach(function(pair){var row=gcNode("div","gc-access-row"),label=gcNode("span","",pair[0]),options=gcNode("div","gc-access-options");if(pair[1].length)pair[1].forEach(function(group){options.append(accessChip(group))});else options.textContent="—";row.append(label,options);courseBox.append(row)});layout.append(courseBox)});
+    var mini=gcNode("section","gc-access-minis"),miniTitle=gcNode("h3","","Мини-курсы"),miniOptions=gcNode("div","gc-access-options");[["4842617","Намордник"],["4842619","Намордник + ОС"],["4119459","Поводок"],["4217019","Послушание"],["4443745","За 15 минут"]].forEach(function(def){var group=groups.find(function(row){return String(row.group_id)===def[0]});if(group)miniOptions.append(accessChip(group,def[1]));else{var missing=gcNode("button","gc-chip",def[1]);missing.type="button";missing.disabled=true;miniOptions.append(missing)}});mini.append(miniTitle,miniOptions);layout.append(mini);pane.append(layout);
+    var actions=gcNode("div","gc-actions"),refresh=gcNode("button","tool","Обновить"),apply=gcNode("button","tool","Проверить изменения");refresh.type=apply.type="button";refresh.disabled=Boolean(access.pending);apply.disabled=!Object.keys(draft).length||Boolean(preview)||Boolean(access.pending);refresh.onclick=function(){loadLive(refresh)};apply.onclick=async function(){busy(apply,"Сверяем с GetCourse…");try{var changes=Object.entries(draft).map(function(pair){return{group_id:pair[0],enabled:pair[1]}}),result=await gcAccessRequest(item,{action:"preview",changes:changes});card.access=result.access||card.access;card._preview=result;card._accessError="";showGetCourseMini(card)}catch(error){card._accessError=error.message||"Не удалось проверить изменения";showGetCourseMini(card)}};actions.append(refresh,apply);pane.append(actions);
   }
 
   async function showChannelMenu() {
@@ -1252,6 +1827,7 @@
       if (!channels.length) throw new Error("Нет доступных каналов.");
       cardChannels = channels;
       renderChannels(cardChannels, null);
+      ensureGetCourseCard(ctx);
       var preferred = channels.find(function (channel) { return channel.has_chat && channel.can_send !== false; }) || channels.find(function (channel) { return channel.can_send !== false; });
       if (preferred) {
         await openConversation(preferred);
@@ -1493,19 +2069,21 @@
         var attachment = { attachment_url: input.dataset.attachmentUrl || "", attachment_type: input.dataset.attachmentType || "" };
         if (!text && !attachment.attachment_url) return;
         send.disabled = true;
+        send.classList.add("busy");
+        send.textContent = "Отправляем…";
         errorNode.textContent = "";
         try {
           var token = localStorage.getItem(STORAGE_KEY) || "";
           var targets = d.sendAll.querySelector("input").checked ? cardChannels : [channel];
           var result = await sendComposerText(text, targets, conversationPayload, token, attachment);
-          if (result.sent.length) { input.value = ""; delete input.dataset.attachmentUrl; delete input.dataset.attachmentType; }
+          if (result.sent.length || result.queued.length) { input.value = ""; resizeComposerTextarea(input); delete input.dataset.attachmentUrl; delete input.dataset.attachmentType; }
           conversationSignature = "";
           send.textContent = "Отправка…";
           await Promise.all([fetchConversation(channel, feed, false), loadInbox(true, true)]);
           errorNode.textContent = result.status;
         } catch (error) {
           errorNode.textContent = error.message || "Не удалось отправить сообщение";
-        } finally { send.textContent = "Отправить"; send.disabled = false; }
+        } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
       });
       composer.appendChild(input);
       composer.appendChild(send);

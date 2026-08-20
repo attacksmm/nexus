@@ -62,6 +62,11 @@ def numeric_id(value: Any) -> str:
     return text if re.fullmatch(r"\d{3,20}", text) else ""
 
 
+def ym_uid(value: Any) -> str:
+    """Yandex Metrica user id is numeric; discard copied UI punctuation safely."""
+    return re.sub(r"\D+", "", clean(value, MAX_VARIABLE_VALUE))[:64]
+
+
 def parse_object(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -441,6 +446,81 @@ class IdentityIndex:
         except sqlite3.Error:
             return ""
 
+    def telegram_target_for_utm_term(self, value: Any) -> dict[str, Any]:
+        """Resolve an exact Telegram client from an order UTM value.
+
+        ``platform_id`` is interpreted as the Senler Telegram user id for this
+        workflow. ``salebot_id`` is only an identity bridge; no SaleBot network
+        request is involved.
+        """
+
+        parsed = parse_utm_term(value)
+        if not parsed:
+            return {"ok": False, "status": "not_found", "platform_id": "", "source": "", "matches": []}
+        direct: set[str] = set()
+        salebot: set[str] = set()
+        for kind, candidate in parsed:
+            if not re.fullmatch(r"\d{1,24}", candidate or ""):
+                continue
+            if kind == "vk_platform":
+                direct.add(candidate)
+            elif kind == "salebot":
+                salebot.add(candidate)
+            elif kind == "candidate":
+                direct.add(candidate)
+                salebot.add(candidate)
+        matches: dict[str, set[str]] = {}
+        try:
+            with self._open_source() as source:
+                if "cdb_telegram_clients" not in self._tables(source):
+                    return {"ok": False, "status": "unavailable", "platform_id": "", "source": "", "matches": []}
+                for candidate in direct:
+                    row = source.execute(
+                        "SELECT DISTINCT platform_id FROM cdb_telegram_clients WHERE platform_id=? LIMIT 2",
+                        (candidate,),
+                    ).fetchall()
+                    if len(row) == 1:
+                        matches.setdefault(clean(row[0][0], 300), set()).add("senler_platform_id")
+                for candidate in salebot:
+                    rows = source.execute(
+                        "SELECT platform_id,custom_fields FROM cdb_telegram_clients WHERE custom_fields LIKE ? LIMIT 50",
+                        (f"%{candidate}%",),
+                    ).fetchall()
+                    for platform_id, raw_fields in rows:
+                        exact = {
+                            strong_id(item)
+                            for key, item in scalars(parse_object(raw_fields))
+                            if key.rsplit(".", 1)[-1] in {"salebot_id", "salebot_client_id", "sb_id"}
+                        }
+                        if candidate in exact:
+                            matches.setdefault(clean(platform_id, 300), set()).add("salebot_id")
+        except sqlite3.Error as exc:
+            return {
+                "ok": False,
+                "status": "error",
+                "platform_id": "",
+                "source": "",
+                "matches": [],
+                "error": clean(exc, 300),
+            }
+        matches.pop("", None)
+        if len(matches) != 1:
+            return {
+                "ok": False,
+                "status": "conflict" if len(matches) > 1 else "not_found",
+                "platform_id": "",
+                "source": "",
+                "matches": sorted(matches),
+            }
+        platform_id, sources = next(iter(matches.items()))
+        return {
+            "ok": True,
+            "status": "resolved",
+            "platform_id": platform_id,
+            "source": "+".join(sorted(sources)),
+            "matches": [platform_id],
+        }
+
     def provider_id_for_exact_context(self, target_service: str, context: dict[str, Any]) -> str:
         """Resolve a provider from the exact source card without traversing merged identities."""
         source_service = clean(context.get("service") or context.get("platform"), 40).casefold()
@@ -464,8 +544,59 @@ class IdentityIndex:
                         )
                     )
 
+                # A Streams student is a GetCourse user, but Customer DB may
+                # know that person only through an order.  Resolve those
+                # order rows by exact contact data as part of the same card
+                # context.  This is deliberately an exact match (not a graph
+                # traversal), so an unrelated merged identity cannot leak a
+                # messenger id into the current card.
+                if source_service == "getcourse" and "cdb_getcourse_orders" in tables:
+                    context_fields = context.get("fields") if isinstance(context.get("fields"), dict) else {}
+                    phones, emails = contact_identity({**context_fields, **context})
+                    gc_ids = {
+                        value
+                        for value in (
+                            numeric_id(context.get("getcourse_user_id")),
+                            numeric_id(context.get("gc_user_id")),
+                            numeric_id(context_fields.get("getcourse_user_id")),
+                            numeric_id(context_fields.get("gc_user_id")),
+                            numeric_id(source_id),
+                        )
+                        if value
+                    }
+                    clauses: list[str] = []
+                    params: list[str] = []
+                    for email in sorted(emails):
+                        clauses.append("custom_fields LIKE ?")
+                        params.append(f"%{email}%")
+                    for phone in sorted(phones):
+                        clauses.append("custom_fields LIKE ?")
+                        params.append(f"%{phone.removeprefix('+')[-10:]}%")
+                    for gc_id in sorted(gc_ids):
+                        clauses.append("custom_fields LIKE ?")
+                        params.append(f"%{gc_id}%")
+                    if clauses:
+                        rows = source.execute(
+                            "SELECT custom_fields FROM cdb_getcourse_orders WHERE "
+                            + " OR ".join(clauses)
+                            + " ORDER BY updated_at DESC,id DESC LIMIT 200",
+                            params,
+                        ).fetchall()
+                        for row in rows:
+                            fields = parse_object(row[0])
+                            row_phones, row_emails = contact_identity(fields)
+                            row_gc_ids = {
+                                numeric_id(value)
+                                for key, value in identity_scalars(fields)
+                                if key.rsplit(".", 1)[-1] in {"gc_user_id", "getcourse_user_id", "user_id"}
+                            }
+                            row_gc_ids.discard("")
+                            if phones & row_phones or emails & row_emails or gc_ids & row_gc_ids:
+                                field_sets.append(fields)
+
                 explicit: set[str] = set()
                 salebot_explicit: set[str] = set()
+                vk_dialog_explicit: set[str] = set()
                 utm_values: set[tuple[str, str]] = set()
                 direct_keys = {
                     "vk": {"vk_id", "vkontakte_id", "senler_id", "vk_platform_id"},
@@ -481,9 +612,30 @@ class IdentityIndex:
                             salebot_explicit.add(current)
                         if leaf == "utm_term":
                             utm_values.update(parse_utm_term(value))
+                        text = clean(value, 4000)
+                        for match in re.finditer(
+                            r"https?://(?:www\.)?vk\.(?:com|ru)/gim\d+/convo/(\d+)", text, re.I,
+                        ):
+                            vk_dialog_explicit.add(match.group(1))
+                        for match in re.finditer(
+                            r"https?://(?:www\.)?vk\.(?:com|ru)/gim\d+\?[^\s#]*?\bsel=c?(\d+)",
+                            text,
+                            re.I,
+                        ):
+                            vk_dialog_explicit.add(match.group(1))
 
                 if target_service == "vk":
-                    explicit.update(value for kind, value in utm_values if kind in {"vk_platform", "candidate"})
+                    explicit.update(value for kind, value in utm_values if kind == "vk_platform")
+                    explicit.update(
+                        value for kind, value in utm_values
+                        if kind == "candidate" and value not in salebot_explicit
+                    )
+                    # amoCRM often stores a SaleBot client id in both utm_term
+                    # and a community-dialog URL.  Even when the same number
+                    # happens to exist as somebody else's VK id, it is not a
+                    # verified VK identity for this deal.
+                    explicit.difference_update(salebot_explicit - vk_dialog_explicit)
+                    explicit.update(vk_dialog_explicit)
                     matches = {
                         candidate
                         for candidate in explicit
@@ -495,6 +647,10 @@ class IdentityIndex:
 
                 salebot_candidates = set(salebot_explicit)
                 salebot_candidates.update(value for kind, value in utm_values if kind in {"salebot", "candidate"})
+                # amoCRM automations sometimes copy a VK dialog id or UTM
+                # value into a field named ``salebot_id``.  A label alone is
+                # therefore not proof that the person exists in SaleBot: the
+                # id must be confirmed by the Telegram/SaleBot bridge below.
                 telegram_ids = set(explicit) if target_service == "telegram" else set()
                 if "cdb_telegram_clients" in tables:
                     for candidate in salebot_candidates:
@@ -523,6 +679,30 @@ class IdentityIndex:
                             ).fetchone()
                         }
                 return next(iter(telegram_ids)) if len(telegram_ids) == 1 else ""
+        except sqlite3.Error:
+            return ""
+
+    def telegram_username_for_platform_id(self, platform_id: Any) -> str:
+        """Return one verified public Telegram username for a Telegram client id."""
+        candidate = numeric_id(platform_id)
+        if not candidate:
+            return ""
+        try:
+            with self._open_source() as source:
+                if "cdb_telegram_clients" not in self._tables(source):
+                    return ""
+                usernames = {
+                    username
+                    for row in source.execute(
+                        "SELECT custom_fields FROM cdb_telegram_clients "
+                        "WHERE platform_id=? ORDER BY updated_at DESC,id DESC LIMIT 3",
+                        (candidate,),
+                    )
+                    for key, value in identity_scalars(parse_object(row[0]))
+                    if key.rsplit(".", 1)[-1] in {"telegram_username", "tg_username", "username"}
+                    if (username := normalize_username(value))
+                }
+                return next(iter(usernames)) if len(usernames) == 1 else ""
         except sqlite3.Error:
             return ""
 
@@ -732,6 +912,9 @@ def build_variables(records: list[dict[str, Any]], context: dict[str, Any], crm_
     put("contact.phone", context.get("phone"), "current", "Телефон")
     put("contact.email", context.get("email"), "current", "Email")
     put("manager.name", context.get("manager_name"), "manager", "Менеджер")
+    put("yclid", context.get("yclid") or first_safe_value(context_fields, ("yclid",)), "current", "yclid")
+    put("ym_uid", ym_uid(context.get("ym_uid") or first_safe_value(context_fields, ("ym_uid", "user_ym_uid", "_ym_uid"))), "current", "ym_uid")
+    put("conversation_id", context.get("conversation_id") or first_safe_value(context_fields, ("conversation_id", "conversationid")), "current", "conversation_id")
     platform = variable_key(context.get("platform") or context.get("service"))
     entity_type = variable_key(context.get("entity_type"))
     if platform and context.get("entity_id"):
@@ -772,6 +955,12 @@ def build_variables(records: list[dict[str, Any]], context: dict[str, Any], crm_
             put("contact.phone", first_value(fields, ("phone", "telephone")), record.get("service", "related"), "Телефон")
         if "contact.email" not in variables:
             put("contact.email", first_value(fields, ("email", "e_mail")), record.get("service", "related"), "Email")
+        if "yclid" not in variables:
+            put("yclid", first_safe_value(fields, ("yclid",)), record.get("service", "related"), "yclid")
+        if "ym_uid" not in variables:
+            put("ym_uid", ym_uid(first_safe_value(fields, ("ym_uid", "user_ym_uid", "_ym_uid"))), record.get("service", "related"), "ym_uid")
+        if "conversation_id" not in variables:
+            put("conversation_id", first_safe_value(fields, ("conversation_id", "conversationid")), record.get("service", "related"), "conversation_id")
     for suffix, value in (crm_utm or {}).items():
         if suffix in {"source", "medium", "campaign", "content", "term"}:
             put(f"utm.{suffix}", value, "amoCRM", f"UTM {suffix}")

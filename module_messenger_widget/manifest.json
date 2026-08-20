@@ -1,8 +1,8 @@
 {
   "id": "messenger-widget",
   "name": "Виджет мессенжеров",
-  "version": "5.8.3",
-  "description": "Общие диалоги и шаблоны в GetCourse и amoCRM.",
+  "version": "5.14.5",
+  "description": "Общие диалоги, надёжные уведомления менеджерам и браузерный канал.",
   "replaces": "getcourse-wazzup",
   "env_required": [],
   "env_vars": {
@@ -13,6 +13,9 @@
     "NEXUS_MESSENGER_WIDGET_VK_GROUP_TOKEN": "Ключ сообщества VK",
     "NEXUS_MESSENGER_WIDGET_VK_GROUP_ID": "ID сообщества VK",
     "NEXUS_MESSENGER_WIDGET_TELEGRAM_SESSION_FILE": "Telethon session; по умолчанию используется сессия Nexus",
+    "NEXUS_MESSENGER_NOTIFY_TELEGRAM_BOT_TOKEN": "Токен отдельного бота уведомлений @attackpng_notify_bot",
+    "AMO_BASE_URL": "Базовый URL аккаунта amoCRM для задач по входящим сообщениям",
+    "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с правом создавать задачи",
     "SALEBOT_API_KEY": "Ключ проекта SaleBot",
     "TELEGRAM_API_ID": "Telegram API ID",
     "TELEGRAM_API_HASH": "Telegram API hash"

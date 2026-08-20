@@ -2,9 +2,9 @@ define(['jquery'], function ($) {
   'use strict';
   const Widget = function () {
     const self = this;
-    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=583';
-    const AMO_REQUEST_TIMEOUT = 1500;
-    const CONTEXT_TIMEOUT = 2000;
+    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=5143';
+    const AMO_REQUEST_TIMEOUT = 6000;
+    const CONTEXT_TIMEOUT = 20000;
 
     function currentUser() {
       const app = window.APP || window.AMOCRM || {};
@@ -162,13 +162,29 @@ define(['jquery'], function ($) {
       closeModal();
       const frameUrl = widgetUrl();
       const layer = $('<div id="nexus-messenger-modal" role="dialog" aria-modal="true"></div>').css({position:'fixed',inset:0,zIndex:10000,background:'rgba(20,29,35,.48)',display:'grid',placeItems:'center',padding:'22px'});
-      const shell = $('<div></div>').css({width:'min(1180px,96vw)',height:'min(760px,92vh)',minWidth:'680px',minHeight:'460px',maxWidth:'96vw',maxHeight:'92vh',resize:'both',overflow:'hidden',background:'#111c25',boxShadow:'0 18px 70px rgba(0,0,0,.35)',position:'relative'});
-      const loading = $('<div>Загрузка…</div>').css({position:'absolute',inset:0,display:'grid',placeItems:'center',color:'#8193a0',background:'#111c25'});
-      const frame = $('<iframe title="Виджет мессенжеров"></iframe>').attr('src', frameUrl).css({width:'100%',height:'100%',border:0,background:'#111c25',opacity:0});
+      const shell = $('<div></div>').css({width:'min(1180px,96vw)',height:'min(760px,92vh)',minWidth:'680px',minHeight:'460px',maxWidth:'96vw',maxHeight:'92vh',resize:'both',overflow:'hidden',background:'#f5f7f8',boxShadow:'0 18px 70px rgba(0,0,0,.35)',position:'relative'});
+      const loading = $('<div></div>').css({position:'absolute',inset:0,display:'grid',placeItems:'center',color:'#5f707b',background:'#f5f7f8'});
+      const frame = $('<iframe title="Виджет мессенжеров"></iframe>').attr('src', frameUrl).css({width:'100%',height:'100%',border:0,background:'#f5f7f8',opacity:0});
       if (window.innerWidth <= 680) { layer.css('padding', 0); shell.css({width:'100vw',height:'100dvh',minWidth:0,minHeight:0,maxWidth:'none',maxHeight:'none',resize:'none'}); }
       const targetOrigin = new URL(frameUrl).origin;
       let contextDelivered = false;
       let frameDeadline;
+      let loadingTheme = 'light';
+      function applyLoadingTheme(theme) {
+        loadingTheme = ['dark','gray'].indexOf(String(theme || '')) >= 0 ? String(theme) : 'light';
+        const palette = loadingTheme === 'dark'
+          ? {background:'#111c25', color:'#c5d0d7'}
+          : loadingTheme === 'gray'
+            ? {background:'#cbd1d5', color:'#334650'}
+            : {background:'#f5f7f8', color:'#5f707b'};
+        shell.css('background', palette.background); loading.css(palette); frame.css('background', palette.background);
+      }
+      function paintLoading(label) {
+        const spinner = $('<span aria-hidden="true"></span>').css({width:'22px',height:'22px',border:'2px solid currentColor',borderRightColor:'#46b45f',borderRadius:'50%',display:'inline-block',flex:'0 0 auto'});
+        if (spinner[0] && typeof spinner[0].animate === 'function') spinner[0].animate([{transform:'rotate(0deg)'},{transform:'rotate(360deg)'}],{duration:700,iterations:Infinity});
+        loading.empty().append($('<div></div>').css({display:'flex',alignItems:'center',gap:'10px'}).append(spinner,$('<span></span>').text(label)));
+      }
+      paintLoading('Получаем данные клиента…');
       function paint() { clearTimeout(frameDeadline); frame.css('opacity', 1); loading.remove(); }
       function armFrameDeadline() {
         clearTimeout(frameDeadline);
@@ -178,22 +194,31 @@ define(['jquery'], function ($) {
           loading.empty().append($('<div>Виджет не загрузился</div>'), retry);
           retry.on('click', function () {
             contextDelivered = false;
-            loading.text('Загрузка…');
+            paintLoading('Получаем данные клиента…');
             frame.attr('src', frameUrl);
             armFrameDeadline();
           });
-        }, 15000);
+        }, 30000);
       }
       async function sendContext() {
         if (contextDelivered || !frame[0].contentWindow) return;
+        const resolvedContext = await fastContext();
+        if (contextDelivered || !frame[0].contentWindow) return;
         contextDelivered = true;
-        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:await fastContext()}, targetOrigin);
+        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:resolvedContext}, targetOrigin);
         setTimeout(paint, 1200);
       }
       async function ready(event) {
         if (event.source !== frame[0].contentWindow || event.origin !== targetOrigin || !event.data) return;
         if (event.data.type === 'nexus-messenger-close') { closeModal(); return; }
+        if (event.data.type === 'nexus-messenger-theme') { applyLoadingTheme(event.data.theme); return; }
         if (event.data.type === 'nexus-messenger-painted') { paint(); return; }
+        if (event.data.type === 'nexus-messenger-resize' && window.innerWidth > 680) {
+          const allowed = {small:['820px','620px'],medium:['1180px','760px'],large:['1500px','900px']};
+          const size = allowed[String(event.data.size || '')] || allowed.medium;
+          shell.css({width:'min(' + size[0] + ',96vw)',height:'min(' + size[1] + ',92vh)'});
+          return;
+        }
         if (event.data.type === 'nexus-messenger-amo-template-export') {
           try {
             frame[0].contentWindow.postMessage({type:'nexus-messenger-amo-template-export-result', request_id:event.data.request_id, templates:await amoTemplates()}, targetOrigin);

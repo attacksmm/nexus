@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import tempfile
@@ -60,6 +61,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         router._logger = logging.getLogger("getcourse-wazzup-tests")
         router._telegram_state_cache = (time.monotonic() + 3600, {"api": False, "authorized": False, "account": {}})
         router._telegram_history_cache.clear()
+        router._wazzup_history_inflight.clear()
         router._telegram_auth_pending.clear()
         router._card_link_cache.clear()
         await router._init_db()
@@ -150,6 +152,37 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result["code"], code)
         self.assertIsNone(await router._device(request_for("/widget/context", {}, token=activated["device_token"])))
 
+    async def test_widget_logout_revokes_current_device(self):
+        code = await self._code()
+        activated = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)
+        token = activated["device_token"]
+        response = await router.widget_logout(request_for("/widget/logout", {}, token=token))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(json.loads(response.body)["ok"])
+        self.assertIsNone(await router._device(request_for("/widget/context", {}, token=token)))
+
+    async def test_wazzup_history_is_scheduled_without_blocking_the_request(self):
+        started = asyncio.Event()
+
+        async def history(*_args, **_kwargs):
+            started.set()
+            return {"status": "imported", "imported": 0, "complete": True}
+
+        channel = {"channel_id": "max-1", "transport": "max"}
+        with (
+            patch.object(router, "_record_history_sync", new=AsyncMock()),
+            patch.object(router, "_import_wazzup_history", new=history),
+        ):
+            router._schedule_wazzup_history(
+                {"id": 1, "admin_id": self.admin_id}, channel, "+79990000000", name="Клиент",
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            for _ in range(20):
+                if not router._wazzup_history_inflight:
+                    break
+                await asyncio.sleep(0)
+        self.assertFalse(router._wazzup_history_inflight)
+
     async def test_salebot_history_runs_only_after_explicit_channel_open(self):
         channel = {
             "channel_id": "salebot:project", "transport": "salebot", "channel_transport": "salebot",
@@ -184,11 +217,121 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             link_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(client_links)")).fetchall()}
             template_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(message_templates)")).fetchall()}
         names = {row[0] for row in rows}
-        self.assertTrue({"client_links", "inbox_devices", "inbox_reads", "external_identity_links"} <= names)
+        self.assertTrue({"client_links", "inbox_devices", "inbox_reads", "external_identity_links", "template_favorites"} <= names)
         self.assertIn("role", admin_columns)
         self.assertIn("responsible_admin_id", chat_columns)
         self.assertIn("responsible_admin_id", link_columns)
         self.assertIn("folder", template_columns)
+
+    async def test_template_favorites_are_private_to_each_module_user(self):
+        token = "favorite-device-token-000000000000000"
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            other = await db.execute(
+                "INSERT INTO admins(wazzup_user_id,name,enabled,created_at,updated_at) VALUES(?,?,1,?,?)",
+                ("other-user", "Другой сотрудник", now, now),
+            )
+            other_admin_id = int(other.lastrowid)
+            await db.execute(
+                """INSERT INTO devices(admin_id,token_hash,token_hint,created_at,last_used_at,expires_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (self.admin_id, router._hash(token), "favorite", now, now, "2999-01-01T00:00:00Z"),
+            )
+            shared = await db.execute(
+                """INSERT INTO message_templates(owner_admin_id,folder,title,body,enabled,sort_order,created_at,updated_at)
+                   VALUES(NULL,'Собака','Общий','Текст',1,0,?,?)""",
+                (now, now),
+            )
+            personal = await db.execute(
+                """INSERT INTO message_templates(owner_admin_id,folder,title,body,enabled,sort_order,created_at,updated_at)
+                   VALUES(?,'Личные','Мой','Текст',1,0,?,?)""",
+                (self.admin_id, now, now),
+            )
+            foreign = await db.execute(
+                """INSERT INTO message_templates(owner_admin_id,folder,title,body,enabled,sort_order,created_at,updated_at)
+                   VALUES(?,'Личные','Чужой','Текст',1,0,?,?)""",
+                (other_admin_id, now, now),
+            )
+            shared_id, personal_id, foreign_id = int(shared.lastrowid), int(personal.lastrowid), int(foreign.lastrowid)
+            await db.commit()
+
+        for template_id in (shared_id, personal_id):
+            response = await router.widget_templates(request_for(
+                "/widget/templates", {"action": "favorite", "id": template_id, "favorite": True}, token=token,
+            ))
+            self.assertEqual(response.status_code, 200)
+
+        listed = await router.widget_templates(request_for(
+            "/widget/templates", {"action": "list"}, token=token,
+        ))
+        rows = json.loads(listed.body)["templates"]
+        favorites = {row["id"]: row for row in rows if row["favorite"]}
+        self.assertEqual(set(favorites), {shared_id, personal_id})
+        self.assertEqual([favorites[shared_id]["favorite_order"], favorites[personal_id]["favorite_order"]], [0, 1])
+        self.assertFalse((await router._template_rows(other_admin_id))[0]["favorite"])
+
+        denied = await router.widget_templates(request_for(
+            "/widget/templates", {"action": "favorite", "id": foreign_id, "favorite": True}, token=token,
+        ))
+        self.assertEqual(denied.status_code, 404)
+
+        removed = await router.widget_templates(request_for(
+            "/widget/templates", {"action": "favorite", "id": shared_id, "favorite": False}, token=token,
+        ))
+        self.assertFalse(json.loads(removed.body)["favorite"])
+        self.assertFalse(next(row for row in await router._template_rows(self.admin_id) if row["id"] == shared_id)["favorite"])
+
+    async def test_admin_manages_one_employees_personal_templates_and_shared_favorites(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            other = await db.execute(
+                "INSERT INTO admins(wazzup_user_id,name,enabled,created_at,updated_at) VALUES(?,?,1,?,?)",
+                ("employee-templates", "Наталья Абрамова", now, now),
+            )
+            employee_id = int(other.lastrowid)
+            shared = await db.execute(
+                """INSERT INTO message_templates(owner_admin_id,folder,title,body,enabled,sort_order,created_at,updated_at)
+                   VALUES(NULL,'amoCRM','Общий','Здравствуйте, {{contact.name}}!',1,0,?,?)""",
+                (now, now),
+            )
+            foreign = await db.execute(
+                """INSERT INTO message_templates(owner_admin_id,folder,title,body,enabled,sort_order,created_at,updated_at)
+                   VALUES(?,'Личные','Чужой','Не менять',1,0,?,?)""",
+                (self.admin_id, now, now),
+            )
+            shared_id, foreign_id = int(shared.lastrowid), int(foreign.lastrowid)
+            await db.commit()
+
+        admin_user = AsyncMock(return_value={"username": "nikita"})
+        with patch.object(router, "_require_admin", new=admin_user):
+            created = await router.create_admin_template(employee_id, request_for(
+                f"/admins/{employee_id}/templates",
+                {"folder": "Личные", "title": "Перезвон", "body": "Перезвоню {{contact.name}}!"},
+            ))
+            personal_id = int(created["template"]["id"])
+            listed = await router.list_admin_templates(employee_id, request_for(f"/admins/{employee_id}/templates"))
+            rows = {row["id"]: row for row in listed["templates"]}
+            self.assertEqual(listed["admin"]["name"], "Наталья Абрамова")
+            self.assertTrue(rows[personal_id]["editable"])
+            self.assertFalse(rows[shared_id]["editable"])
+            self.assertNotIn(foreign_id, rows)
+
+            favorite = await router.set_admin_template_favorite(employee_id, shared_id, request_for(
+                f"/admins/{employee_id}/templates/{shared_id}/favorite", {"favorite": True},
+            ))
+            self.assertTrue(favorite["favorite"])
+            updated = await router.update_admin_template(employee_id, personal_id, request_for(
+                f"/admins/{employee_id}/templates/{personal_id}",
+                {"folder": "Личные", "title": "Перезвон", "body": "Добрый день, {{contact.name}}!", "enabled": True},
+            ))
+            self.assertEqual(updated["template"]["body"], "Добрый день, {{contact.name}}!")
+            await router.delete_admin_template(employee_id, personal_id, request_for(
+                f"/admins/{employee_id}/templates/{personal_id}",
+            ))
+
+        rows = await router._template_rows(employee_id)
+        self.assertTrue(next(row for row in rows if row["id"] == shared_id)["favorite"])
+        self.assertFalse(any(row["id"] == personal_id for row in rows))
 
     async def test_amocrm_admin_imports_shared_templates_without_deal_routes(self):
         token = "amo-template-import-token-000000000000"
@@ -273,8 +416,17 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         administrator = await router._inbox_items(
             {"id": device_ids[1], "admin_id": self.admin_id, "admin_role": "admin"}, [channel]
         )
+        administrator_with_stale_filter = await router._inbox_items(
+            {"id": device_ids[1], "admin_id": self.admin_id, "admin_role": "admin"},
+            [channel],
+            selected_channel_ids=["retired-channel"],
+        )
         self.assertEqual([row["chat_id"] for row in employee["items"]], ["owned"])
         self.assertEqual({row["chat_id"] for row in administrator["items"]}, {"owned", "other"})
+        self.assertEqual(
+            {row["chat_id"] for row in administrator_with_stale_filter["items"]},
+            {"owned", "other"},
+        )
 
     async def test_snippet_uses_stable_widget_url(self):
         with patch.object(router, "_require_admin", new=AsyncMock(return_value={"username": "admin"})):
@@ -584,6 +736,32 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             )).fetchone()
         self.assertEqual(row, ("failed", "Проверка MAX"))
 
+    async def test_temporary_channel_error_is_queued_with_idempotency(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
+
+        async def fake_wazzup(method, path, body=None, **_kwargs):
+            if (method, path) == ("GET", "/channels"):
+                return [{"channelId": "max-1", "transport": "max", "state": "active", "name": "MAX"}]
+            raise router.HTTPException(429, "Wazzup HTTP 429: Too Many Requests")
+
+        payload = {
+            "request_id": "batch-1:max", "phone": "+79108758427", "name": "Елена",
+            "source_url": "https://club.sobakovod.pro/user/control/user/update/id/42",
+            "channel_id": "max-1", "transport": "max", "text": "Позвоните мне",
+        }
+        with patch.object(router, "_wazzup_request", new=fake_wazzup):
+            response = await router.widget_send(request_for("/widget/send", payload, token=token))
+            duplicate = await router.widget_send(request_for("/widget/send", payload, token=token))
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(json.loads(response.body)["queued"])
+        self.assertTrue(json.loads(duplicate.body)["queued"])
+        async with aiosqlite.connect(router._must_db()) as db:
+            row = await (await db.execute(
+                "SELECT request_key,status,attempts FROM outbound_jobs WHERE request_key='batch-1:max'"
+            )).fetchone()
+        self.assertEqual(row, ("batch-1:max", "retry", 1))
+
     async def test_empty_max_chat_history_is_scoped_to_the_current_phone(self):
         now = router._iso()
         async with aiosqlite.connect(router._must_db()) as db:
@@ -636,6 +814,36 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT count(*) FROM wazzup_messages WHERE external_id='vk:225075265:700:991'"
             )).fetchone())[0]
         self.assertEqual(count, 1)
+
+    async def test_vk_manager_message_uses_out_flag_and_repairs_cached_direction(self):
+        now = router._iso()
+        external_id = "vk:225075265:700:992"
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES(?,'vk:225075265','vk','700','incoming','delivered','Ответ менеджера','Клиент',?,?,?)""",
+                (external_id, now, json.dumps({"id": 992, "from_id": 555}), now),
+            )
+            await db.commit()
+        row = {
+            "id": 992,
+            "conversation_message_id": 79,
+            "from_id": 555,
+            "out": 1,
+            "date": 1_785_500_100,
+            "text": "Ответ менеджера",
+        }
+        with (
+            patch.object(router, "_vk_channel_id", return_value="vk:225075265"),
+            patch.object(router, "_vk_group_id", return_value="225075265"),
+        ):
+            await router._store_vk_messages("700", [row], {"name": "Клиент"})
+        async with aiosqlite.connect(router._must_db()) as db:
+            stored = await (await db.execute(
+                "SELECT direction,author_name FROM wazzup_messages WHERE external_id=?", (external_id,)
+            )).fetchone()
+        self.assertEqual(stored, ("outgoing", "Сообщество"))
 
     async def test_vk_channel_can_start_with_an_exact_card_identity(self):
         code = await self._code()
@@ -721,7 +929,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 token=token,
             ))
         self.assertEqual(response.status_code, 200)
-        sender.assert_awaited_once_with("700", "mock")
+        sender.assert_awaited_once_with("700", "mock", author_name="Анна")
 
     async def test_amocrm_platform_id_resolves_telegram_and_persists_entity_link(self):
         class User:
@@ -747,7 +955,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         device = {"admin_id": self.admin_id, "admin_name": "Анна"}
         data = {
             "entity_type": "lead", "entity_id": "9001", "name": "Елена",
-            "phone": "+79108758427", "fields": {"platform_id": "700", "salebot_id": "sb-1"},
+            "phone": "+79108758427", "fields": {"telegram_id": "700", "salebot_id": "sb-1"},
         }
         with (
             patch.object(router, "resolve_client_identity", new=AsyncMock(return_value={})),

@@ -13,6 +13,14 @@ SPEC.loader.exec_module(graph)
 
 
 class IdentityGraphTests(unittest.TestCase):
+    def test_marketing_and_conversation_variables_are_available_without_namespace(self):
+        variables = graph.build_variables([], {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "72",
+            "fields": {"yclid": "yclid-1", "ym_uid": "1786735599256964564¶", "conversation_id": "conv-3"},
+        })
+        self.assertEqual(variables["yclid"]["value"], "yclid-1")
+        self.assertEqual(variables["ym_uid"]["value"], "1786735599256964564")
+        self.assertEqual(variables["conversation_id"]["value"], "conv-3")
     def test_disk_index_resolves_related_accounts_and_variables(self):
         with tempfile.TemporaryDirectory() as temp:
             customer_db = Path(temp) / "customer.db"
@@ -123,6 +131,23 @@ class IdentityGraphTests(unittest.TestCase):
             self.assertEqual(index.platform_id_for_service("vk", "215204074"), "215204074")
             self.assertEqual(index.platform_id_for_service("vk", "789663225"), "")
 
+    def test_telegram_username_is_returned_only_for_the_exact_client(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                db.execute(
+                    "CREATE TABLE cdb_telegram_clients(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO cdb_telegram_clients VALUES(1,'789663225',?,?,?)",
+                    (json.dumps({"tg_username": "@anna_dog"}), "", ""),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            self.assertEqual(index.telegram_username_for_platform_id("789663225"), "anna_dog")
+            self.assertEqual(index.telegram_username_for_platform_id("not-an-id"), "")
+
     def test_provider_lookup_survives_unrelated_identity_conflict(self):
         with tempfile.TemporaryDirectory() as temp:
             customer_db = Path(temp) / "customer.db"
@@ -164,6 +189,87 @@ class IdentityGraphTests(unittest.TestCase):
             self.assertEqual(index.provider_id_for_exact_context("salebot", {"service":"amo","entity_id":"18152963"}), "1001756083")
             self.assertEqual(index.provider_id_for_exact_context("telegram", {"service":"amo","entity_id":"18152963"}), "1956029416")
             self.assertEqual(index.provider_id_for_exact_context("telegram", {"service":"getcourse","entity_id":"464555326"}), "653335302")
+
+    def test_amocrm_salebot_id_is_never_reused_as_somebody_elses_vk_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                for table in ("cdb_amo_deals", "cdb_vk_clients", "cdb_telegram_clients"):
+                    db.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)")
+                db.execute(
+                    "INSERT INTO cdb_amo_deals VALUES(1,'18262373',?,?,?)",
+                    (json.dumps({"salebot_id":"1105209997","utm_term":"1105209997"}), "", "3"),
+                )
+                db.execute(
+                    "INSERT INTO cdb_vk_clients VALUES(1,'1105209997',?,?,?)",
+                    (json.dumps({"name":"Другой пользователь"}), "", "2"),
+                )
+                db.execute(
+                    "INSERT INTO cdb_telegram_clients VALUES(1,'5447488280',?,?,?)",
+                    (json.dumps({"salebot_id":"1105209997"}), "", "2"),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            context = {"service":"amo", "entity_id":"18262373"}
+            self.assertEqual(index.provider_id_for_exact_context("salebot", context), "1105209997")
+            self.assertEqual(index.provider_id_for_exact_context("vk", context), "")
+
+    def test_explicit_amocrm_vk_dialog_wins_over_same_numeric_salebot_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                for table in ("cdb_amo_deals", "cdb_vk_clients"):
+                    db.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)")
+                db.execute(
+                    "INSERT INTO cdb_amo_deals VALUES(1,'18245183',?,?,?)",
+                    (json.dumps({
+                        "salebot_id": "854650343",
+                        "utm_term": "854650343",
+                        "custom_fields_values": [{
+                            "field_name": "Диалог ВК",
+                            "values": [{"value": "https://vk.com/gim225075265/convo/854650343"}],
+                        }],
+                    }), "", "3"),
+                )
+                db.execute(
+                    "INSERT INTO cdb_vk_clients VALUES(1,'854650343',?,?,?)",
+                    (json.dumps({"name": "Вик"}), "", "2"),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            context = {"service": "amo", "entity_id": "18245183"}
+            self.assertEqual(index.provider_id_for_exact_context("salebot", context), "")
+            self.assertEqual(index.provider_id_for_exact_context("vk", context), "854650343")
+
+    def test_getcourse_user_context_uses_exact_matching_order_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                for table in ("cdb_getcourse_users", "cdb_getcourse_orders", "cdb_telegram_clients"):
+                    db.execute(f"CREATE TABLE {table}(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)")
+                db.execute(
+                    "INSERT INTO cdb_getcourse_orders VALUES(1,'878441704',?,?,?)",
+                    (json.dumps({
+                        "gc_user_id": "512573745", "email": "sokolova.ann87@gmail.com",
+                        "phone": "+79265755007", "utm_term": "1007094687",
+                    }), "", "3"),
+                )
+                db.execute(
+                    "INSERT INTO cdb_telegram_clients VALUES(1,'294658480',?,?,?)",
+                    (json.dumps({"salebot_id": "1007094687"}), "", "2"),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            context = {
+                "service": "getcourse", "entity_id": "512573745",
+                "getcourse_user_id": "512573745", "email": "sokolova.ann87@gmail.com",
+                "phone": "+79265755007", "fields": {"email": "sokolova.ann87@gmail.com"},
+            }
+            self.assertEqual(index.provider_id_for_exact_context("telegram", context), "294658480")
+            self.assertEqual(index.provider_id_for_exact_context("salebot", context), "1007094687")
 
 
 if __name__ == "__main__":

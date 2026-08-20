@@ -1,7 +1,10 @@
 import asyncio
 import json
+import os
+import sqlite3
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,6 +12,262 @@ import router
 
 
 class GetCourseWazzupLogicTests(unittest.TestCase):
+    def test_salutation_guard_blocks_name_from_another_client(self):
+        self.assertEqual(
+            router._salutation_name_mismatch("Здравствуйте, Екатерина! Чем помочь?", "Ирина Скуратова"),
+            ("Екатерина", "Ирина"),
+        )
+        self.assertIsNone(router._salutation_name_mismatch("Здравствуйте, Ирина!", "Ирина Скуратова"))
+        self.assertIsNone(router._salutation_name_mismatch("Расскажу подробнее о курсе", "Ирина Скуратова"))
+
+    def test_delivery_retry_honors_telegram_flood_wait(self):
+        error = router.HTTPException(502, "Telegram: A wait of 37 seconds is required")
+        self.assertTrue(router._delivery_error_is_transient(error))
+        self.assertEqual(router._delivery_retry_delay(error, 1), 39)
+
+    def test_auto_markup_completes_allow_listed_urls_without_replacing_existing_values(self):
+        domains = "club.sobakovod.pro;sobakovod.pro;start.bizon365.ru"
+        tail = "?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}"
+        text = (
+            "https://club.sobakovod.pro/lesson "
+            "https://sobakovod.pro/a?foo=1#part "
+            "https://start.bizon365.ru/room/7?utm_source=vk "
+            "https://example.org/nope."
+        )
+        result = router._apply_auto_markup(text, domains, tail)
+        self.assertIn("https://club.sobakovod.pro/lesson?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}", result)
+        self.assertIn("https://sobakovod.pro/a?foo=1&utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}#part", result)
+        self.assertEqual(
+            router._apply_auto_markup("https://sobakovod.pro/dog#program", domains, tail),
+            "https://sobakovod.pro/dog?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}#program",
+        )
+        self.assertIn(
+            "https://start.bizon365.ru/room/7?utm_source=vk&utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}",
+            result,
+        )
+        self.assertIn("https://example.org/nope.", result)
+        self.assertEqual(result.count("utm_term={{utm.term}}"), 3)
+
+    def test_auto_markup_adds_every_missing_configured_parameter_before_fragment(self):
+        tail = (
+            "?utm_term={{utm.term}}&utm_source={{utm.source}}&utm_medium={{utm.medium}}"
+            "&utm_campaign={{utm.campaign}}&utm_content={{utm.content}}"
+            "&param1={{ym_uid}}&param2={{conversation_id}}"
+        )
+        result = router._apply_auto_markup(
+            "https://sobakovod.pro/dog?utm_source=1&utm_medium=2#program",
+            "sobakovod.pro",
+            tail,
+        )
+        self.assertEqual(
+            result,
+            "https://sobakovod.pro/dog?utm_source=1&utm_medium=2"
+            "&utm_term={{utm.term}}&utm_campaign={{utm.campaign}}"
+            "&utm_content={{utm.content}}&param1={{ym_uid}}"
+            "&param2={{conversation_id}}#program",
+        )
+        self.assertEqual(result.count("utm_source="), 1)
+        self.assertEqual(result.count("utm_medium="), 1)
+
+    def test_auto_markup_accepts_ampersand_tail_and_rejects_invalid_tail(self):
+        self.assertEqual(
+            router._apply_auto_markup("https://club.sobakovod.pro/a", "club.sobakovod.pro", "&utm_source=x"),
+            "https://club.sobakovod.pro/a?utm_source=x",
+        )
+        with self.assertRaises(router.HTTPException):
+            router._auto_markup_tail("?utm_source=x#fragment")
+
+    def test_send_auto_markup_renders_only_the_configured_tail_variables(self):
+        async def setting(key):
+            return {
+                "auto_markup_domains": "sobakovod.pro",
+                "auto_markup_tail": "?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}",
+            }[key]
+
+        original = router._setting
+        router._setting = setting
+        try:
+            result = asyncio.run(router._auto_markup_for_send(
+                "https://sobakovod.pro/course_tour",
+                {"utm.term": {"value": "152867794"}, "ym_uid": {"value": "1786735599256964564"}},
+            ))
+        finally:
+            router._setting = original
+        self.assertEqual(
+            result,
+            "https://sobakovod.pro/course_tour?utm_term=152867794&param1=1786735599256964564&param2=",
+        )
+
+    def test_send_auto_markup_completes_partial_tail_with_rendered_values(self):
+        async def setting(key):
+            return {
+                "auto_markup_domains": "sobakovod.pro",
+                "auto_markup_tail": router.AUTO_MARKUP_DEFAULT_TAIL,
+            }[key]
+
+        original = router._setting
+        router._setting = setting
+        try:
+            result = asyncio.run(router._auto_markup_for_send(
+                "https://sobakovod.pro/course_tour?utm_source=1&utm_medium=2#program",
+                {
+                    "utm.term": {"value": "term"},
+                    "utm.source": {"value": "source-from-card"},
+                    "utm.medium": {"value": "medium-from-card"},
+                    "utm.campaign": {"value": "campaign"},
+                    "utm.content": {"value": "content"},
+                    "ym_uid": {"value": "ym-1"},
+                    "conversation_id": {"value": "conversation-1"},
+                },
+            ))
+        finally:
+            router._setting = original
+        self.assertEqual(
+            result,
+            "https://sobakovod.pro/course_tour?utm_source=1&utm_medium=2"
+            "&utm_term=term&utm_campaign=campaign&utm_content=content"
+            "&param1=ym-1&param2=conversation-1#program",
+        )
+
+    def test_vk_callback_handles_disconnected_request_body(self):
+        class Request:
+            async def body(self):
+                raise router.ClientDisconnect()
+
+        previous = dict(router._vk_callback_config)
+        router._vk_callback_config["key"] = "callback-key"
+        try:
+            response = asyncio.run(router.vk_callback("callback-key", Request()))
+        finally:
+            router._vk_callback_config.update(previous)
+        self.assertEqual(response.status_code, 400)
+
+    def test_telegram_session_is_copied_to_module_private_storage(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data_dir = root / "modules" / "messenger-widget" / "data"
+            shared = root / "modules" / "course-chat-creator" / "data" / "telegram.session"
+            data_dir.mkdir(parents=True)
+            shared.parent.mkdir(parents=True)
+            with sqlite3.connect(shared) as db:
+                db.execute("CREATE TABLE sessions(id INTEGER PRIMARY KEY, value TEXT)")
+                db.execute("INSERT INTO sessions(value) VALUES('auth')")
+
+            previous_db = router._db_path
+            previous_reader = router._read_env_values
+            previous_env = {
+                key: os.environ.pop(key, None)
+                for key in (
+                    router.TELEGRAM_SESSION_ENV_KEY,
+                    router.LEGACY_TELEGRAM_SESSION_ENV_KEY,
+                    "TELEGRAM_SESSION_FILE",
+                )
+            }
+            router._db_path = data_dir / "messenger-widget.db"
+            router._read_env_values = lambda: {}
+            try:
+                private = router._telegram_session_file()
+                self.assertEqual(private, data_dir / "telegram-personal.session")
+                self.assertTrue(private.is_file())
+                with sqlite3.connect(f"file:{private.as_posix()}?mode=ro", uri=True) as db:
+                    self.assertEqual(db.execute("SELECT value FROM sessions").fetchone()[0], "auth")
+                self.assertEqual(router._telegram_session_file(), private)
+            finally:
+                router._db_path = previous_db
+                router._read_env_values = previous_reader
+                for key, value in previous_env.items():
+                    if value is not None:
+                        os.environ[key] = value
+
+    def test_vk_transfer_reuses_deterministic_random_id(self):
+        calls = []
+
+        async def send(method, payload):
+            self.assertEqual(method, "messages.send")
+            calls.append(payload)
+            return 991
+
+        previous = router._vk_request
+        router._vk_request = send
+        try:
+            first = asyncio.run(router.service_send_transfer_message(
+                provider="vk", recipient_id="123", content="Проверка", operation_id="order-stage-chunk",
+            ))
+            second = asyncio.run(router.service_send_transfer_message(
+                provider="vk", recipient_id="123", content="Проверка", operation_id="order-stage-chunk",
+            ))
+        finally:
+            router._vk_request = previous
+        self.assertTrue(first["ok"] and second["ok"])
+        self.assertEqual(calls[0]["random_id"], calls[1]["random_id"])
+        self.assertGreater(calls[0]["random_id"], 0)
+
+    def test_onboarding_target_prefers_direct_telegram_and_falls_back_to_vk(self):
+        async def telegram_ready(**_kwargs):
+            return {"ok": True, "platform_id": "5601500901", "source": "salebot_id"}
+
+        async def telegram_missing(**_kwargs):
+            return {"ok": False, "status": "not_found", "error": "missing"}
+
+        async def vk_ready(**_kwargs):
+            return {"ok": True, "status": "ready", "provider": "vk", "recipient_id": "1105209997"}
+
+        original_tg = router.service_resolve_onboarding_telegram_target
+        original_fallback = router.service_transfer_delivery_target
+        try:
+            router.service_resolve_onboarding_telegram_target = telegram_ready
+            router.service_transfer_delivery_target = vk_ready
+            result = asyncio.run(router.service_resolve_onboarding_target(utm_term="salebot_id=1"))
+            self.assertEqual((result["provider"], result["recipient_id"]), ("telegram", "5601500901"))
+
+            router.service_resolve_onboarding_telegram_target = telegram_missing
+            result = asyncio.run(router.service_resolve_onboarding_target(utm_term="platform_id=1105209997"))
+            self.assertEqual((result["provider"], result["recipient_id"]), ("vk", "1105209997"))
+        finally:
+            router.service_resolve_onboarding_telegram_target = original_tg
+            router.service_transfer_delivery_target = original_fallback
+
+    def test_onboarding_targets_keep_vk_when_telegram_is_unavailable(self):
+        async def telegram_missing(**_kwargs):
+            return {"ok": False, "status": "not_found", "error": "telegram missing"}
+
+        async def recipients(**_kwargs):
+            return {"ok": True, "telegram": "", "vk": "1105209997"}
+
+        async def fallback(**_kwargs):
+            return {"ok": False, "status": "not_found"}
+
+        async def vk(method, params):
+            self.assertEqual(method, "messages.isMessagesFromGroupAllowed")
+            self.assertEqual(params["user_id"], "1105209997")
+            return {"is_allowed": 1}
+
+        originals = (
+            router.service_resolve_onboarding_telegram_target,
+            router.service_transfer_recipients,
+            router.service_transfer_delivery_target,
+            router._vk_request,
+        )
+        try:
+            router.service_resolve_onboarding_telegram_target = telegram_missing
+            router.service_transfer_recipients = recipients
+            router.service_transfer_delivery_target = fallback
+            router._vk_request = vk
+            result = asyncio.run(router.service_resolve_onboarding_targets(
+                utm_term="", email="student@example.test", phone="+79990000000",
+            ))
+        finally:
+            (
+                router.service_resolve_onboarding_telegram_target,
+                router.service_transfer_recipients,
+                router.service_transfer_delivery_target,
+                router._vk_request,
+            ) = originals
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["candidates"], [{
+            "provider": "vk", "recipient_id": "1105209997", "source": "identity",
+        }])
+
     def test_transfer_delivery_uses_verified_utm_recipient(self):
         class Index:
             def provider_id_for_exact_context(self, provider, _context):
@@ -30,6 +289,34 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             router._identity_index, router._vk_request = previous_index, previous_request
         self.assertTrue(result["ok"])
         self.assertEqual((result["provider"], result["recipient_id"]), ("vk", "268030521"))
+
+    def test_transfer_delivery_resolves_verified_vk_page_url(self):
+        class Index:
+            def provider_id_for_exact_context(self, provider, context):
+                if provider == "vk" and context.get("fields", {}).get("vk_platform_id") == "1105209997":
+                    return "1105209997"
+                return ""
+
+        async def peer_id(reference):
+            self.assertEqual(reference, "https://vk.ru/tehpod_sobakovodpro")
+            return "1105209997"
+
+        async def allowed(method, params):
+            self.assertEqual(method, "messages.isMessagesFromGroupAllowed")
+            self.assertEqual(params["user_id"], "1105209997")
+            return {"is_allowed": 1}
+
+        previous = router._identity_index, router._vk_peer_id, router._vk_request
+        router._identity_index, router._vk_peer_id, router._vk_request = Index(), peer_id, allowed
+        try:
+            result = asyncio.run(router.service_transfer_delivery_target(
+                email="student@example.com", gc_user_id="1", phone="+79991112233",
+                utm_term="https://vk.ru/tehpod_sobakovodpro",
+            ))
+        finally:
+            router._identity_index, router._vk_peer_id, router._vk_request = previous
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["provider"], result["recipient_id"]), ("vk", "1105209997"))
 
     def test_normalizes_russian_and_international_phones(self):
         self.assertEqual(router._normalize_phone("8 (911) 447-40-13"), "+79114474013")
@@ -64,11 +351,100 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
 
     def test_salebot_history_result_normalizes_directions_and_attachment(self):
         messages = router._salebot_messages({"result": [
-            {"id": 1, "client_replica": True, "message_from_outside": 3, "text": "Вопрос"},
+            {"id": 1, "client_replica": True, "message_from_outside": 0, "text": "Вопрос"},
             {"id": 2, "client_replica": False, "message_from_outside": 0, "text": "Ответ", "attachment_url": "https://example.test/file.pdf"},
+            {"id": 3, "client_replica": False, "message_from_outside": 3, "text": "callback_amoCRM"},
+            {"id": 4, "client_replica": False, "message_from_outside": 2, "text": "Комментарий CRM"},
+            {"id": 5, "client_replica": True, "message_from_outside": 0, "answered": False, "text": "instagram"},
         ]})
         self.assertEqual([row["direction"] for row in messages], ["incoming", "outgoing"])
         self.assertEqual(messages[1]["attachments"][0]["content_uri"], "https://example.test/file.pdf")
+
+    def test_salebot_telegram_attachment_is_proxied_without_exposing_bot_token(self):
+        previous = router._salebot_key
+        router._salebot_key = lambda: "test-signing-secret"
+        try:
+            messages = router._salebot_messages({"result": [{
+                "id": 7, "client_replica": True, "message_from_outside": 0, "text": "",
+                "attachments": ["https://api.telegram.org/file/botSECRET/photos/client.jpg"],
+            }]}, "99001")
+            url = messages[0]["attachments"][0]["content_uri"]
+            self.assertTrue(url.startswith(router.PUBLIC_API_BASE + "/streams/salebot-attachment/"))
+            self.assertNotIn("SECRET", url)
+            self.assertEqual(messages[0]["attachments"][0]["content_type"], "image")
+            token = url.rsplit("/", 1)[-1]
+            self.assertEqual(router._salebot_attachment_claims(token), ("99001", "7", 0))
+        finally:
+            router._salebot_key = previous
+
+    def test_salebot_external_attachment_is_proxied_for_streams_and_private_hosts_are_rejected(self):
+        previous = router._salebot_key
+        router._salebot_key = lambda: "test-signing-secret"
+        try:
+            messages = router._salebot_messages({"result": [{
+                "id": 8, "client_replica": False, "message_from_outside": 0, "text": "",
+                "attachments": [{
+                    "attachment_url": "https://cdn.example.test/photos/client.jpg",
+                    "attachment_type": "image",
+                }],
+            }]}, "99001")
+            url = messages[0]["attachments"][0]["content_uri"]
+            self.assertTrue(url.startswith(router.PUBLIC_API_BASE + "/streams/salebot-attachment/"))
+            self.assertNotIn("cdn.example.test", url)
+            self.assertEqual(router._salebot_remote_attachment_url("https://127.0.0.1/private.jpg"), "")
+            self.assertEqual(router._salebot_remote_attachment_url("https://localhost/private.jpg"), "")
+            self.assertEqual(router._salebot_remote_attachment_url("https://user:pass@example.test/a.jpg"), "")
+            self.assertEqual(
+                router._salebot_remote_attachment_url("https://cdn.example.test/a.jpg#secret"),
+                "https://cdn.example.test/a.jpg",
+            )
+        finally:
+            router._salebot_key = previous
+
+    def test_salebot_attachment_fetch_uses_shared_telegram_proxy(self):
+        source = Path(router.__file__).read_text(encoding="utf-8")
+        block = source.split("async def streams_salebot_attachment", 1)[1].split("@router", 1)[0]
+        self.assertIn("httpx_client_kwargs", block)
+        self.assertIn("except httpx.HTTPError", block)
+        self.assertIn("_salebot_attachment_claims(token)", block)
+        self.assertIn("_require_public_attachment_host", block)
+        self.assertIn("SALEBOT_SAFE_MEDIA_TYPES", block)
+        self.assertIn('"trust_env": False', block)
+        self.assertNotIn("verify_token_from_request(request)", block)
+
+    def test_streams_recipient_does_not_use_graph_fallback_for_vk(self):
+        class Index:
+            def provider_id_for_exact_context(self, provider, _context):
+                return {"salebot": "99001"}.get(provider, "")
+
+            def platform_id_for_context(self, provider, _context):
+                return {"telegram": "778899", "vk": "unrelated-vk"}.get(provider, "")
+
+            def telegram_username_for_platform_id(self, platform_id):
+                self_assert.assertEqual(platform_id, "778899")
+                return "exact_user"
+
+        self_assert = self
+        previous = router._identity_index
+        router._identity_index = Index()
+        try:
+            result = asyncio.run(router.service_transfer_recipients(
+                email="exact@example.test", gc_user_id="123", phone="+79990001122",
+            ))
+        finally:
+            router._identity_index = previous
+        self.assertEqual(result["telegram"], "778899")
+        self.assertEqual(result["vk"], "")
+        self.assertEqual(result["salebot"], "99001")
+
+    def test_salebot_history_keeps_voice_placeholder_without_public_url(self):
+        messages = router._salebot_messages({"result": [{
+            "id": 1, "client_replica": True, "message_from_outside": 0, "text": "",
+            "attachments": [{"attachment_url": "", "attachment_type": "audio"}],
+        }]})
+        self.assertEqual(messages[0]["attachments"], [{
+            "content_uri": "", "content_type": "audio", "filename": "", "unavailable": True,
+        }])
 
     def test_template_variables_include_exact_contact_name(self):
         variables = router.build_context_variables([], {
@@ -208,10 +584,42 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertEqual(router._vk_reference("123456"), "123456")
         self.assertEqual(router._vk_reference("https://vk.com/id654321"), "654321")
         self.assertEqual(router._vk_reference("https://vk.com/client.name"), "client.name")
+        self.assertEqual(router._vk_reference("https://vk.ru/tehpod_sobakovodpro"), "tehpod_sobakovodpro")
         self.assertEqual(router._vk_callback_secret("Abc123"), "Abc123")
         generated = router._vk_callback_secret("bad-secret_with-symbols")
         self.assertTrue(generated.isalnum())
         self.assertLessEqual(len(generated), 50)
+
+    def test_vk_callback_queue_is_durable_and_deduplicated(self):
+        previous_db = router._db_path
+        processed = []
+        previous_processor = router._process_vk_callback_payload
+
+        async def processor(payload):
+            processed.append(payload["type"])
+
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                router._db_path = Path(directory) / "messenger-widget.db"
+                router._process_vk_callback_payload = processor
+
+                async def scenario():
+                    await router._init_vk_callback_queue()
+                    body = b'{"type":"message_new","event_id":"same"}'
+                    payload = json.loads(body)
+                    await router._enqueue_vk_callback(body, payload)
+                    await router._enqueue_vk_callback(body, payload)
+                    with sqlite3.connect(router._vk_callback_queue_path()) as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM callback_events").fetchone()[0], 1)
+                    self.assertEqual(await router._drain_vk_callback_queue(), 1)
+                    with sqlite3.connect(router._vk_callback_queue_path()) as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM callback_events").fetchone()[0], 0)
+
+                asyncio.run(scenario())
+        finally:
+            router._db_path = previous_db
+            router._process_vk_callback_payload = previous_processor
+        self.assertEqual(processed, ["message_new"])
 
     def test_vk_photo_uses_largest_image(self):
         files = router._vk_attachment_views([
@@ -269,7 +677,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("wheelScrollX(drawer.channels)", widget)
         self.assertIn('pair.host.style.width = Math.ceil(targetRect.width) + "px"', widget)
         self.assertIn("REQUEST_TIMEOUT_MS = 15000", widget)
-        self.assertIn("Сервер не ответил за 15 секунд. Повторите.", widget)
+        self.assertIn('"Сервер не ответил за " + Math.round(timeoutMs / 1000)', widget)
+        self.assertIn('timeoutMs: 90000', widget)
         self.assertIn('deferred_card = not thread and provider == TELEGRAM_PROVIDER', backend)
         self.assertIn("if not state and not refresh:\n        db = await _connect()", backend)
         self.assertNotIn("if not state and not refresh and _telegram_lock.locked()", backend)
@@ -289,6 +698,13 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertNotIn('>Написать через Wazzup</button>', widget)
         self.assertIn('inputWrap.className = "composer-input"', widget)
         self.assertIn('inputWrap.appendChild(menu)', widget)
+        self.assertIn("function bindComposerTextarea(input)", widget)
+        self.assertIn('input.setRangeText(" ", start, end, "end")', widget)
+        self.assertIn('["keypress", "keyup", "beforeinput"]', widget)
+        self.assertIn("function resizeComposerTextarea(input)", widget)
+        self.assertIn('input.style.overflowY = input.scrollHeight > maximum + 1 ? "auto" : "hidden"', widget)
+        self.assertGreaterEqual(widget.count("resizeComposerTextarea(input)"), 6)
+        self.assertNotIn("resize:vertical;overflow-y:auto", widget)
         self.assertIn('function placeMenu()', widget)
         self.assertIn('composer-menu.open-up', widget)
         self.assertIn('.channel-option input{width:14px', widget)
@@ -302,9 +718,16 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('request("/templates"', widget)
         self.assertIn('className = "composer-more"', widget)
         self.assertIn('<span>Отправить везде</span>', widget)
+        self.assertEqual(widget.count('<span>Отправить везде</span>'), 1)
+        self.assertNotIn("inbox-send-all", widget)
+        self.assertIn("Загружаем диалоги…", widget)
+        self.assertIn('refreshButton.setAttribute("aria-busy", "true")', widget)
+        self.assertIn("WITH visible(channel_id,chat_type,chat_id) AS (VALUES", backend)
+        self.assertIn("known_selected = selected.intersection(channel_map)", backend)
         self.assertIn('async function sendComposerText(', widget)
         self.assertIn('body: JSON.stringify(Object.assign({}, payloadFor(targets[0]), { body: rawText }))', widget)
-        self.assertIn('for (var index = 0; index < targets.length; index += 1)', widget)
+        self.assertIn('await Promise.all(targets.map(async function (channel, index)', widget)
+        self.assertIn('request_id: batchId + ":" + index', widget)
         self.assertIn('event.stopPropagation();', widget)
         self.assertIn('Тема<div class="themes"', widget)
         self.assertIn('Палитра<div class="palettes"', widget)
@@ -317,6 +740,9 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('.channels{grid-column:1/-1;grid-row:2;', widget)
         self.assertIn('.drawer-send-all{grid-column:1;grid-row:2}', widget)
         self.assertIn('folder || "Без папки"', widget)
+        self.assertIn('menuButton("★ Избранное", showFavorites)', widget)
+        self.assertIn('action: "favorite"', widget)
+        self.assertIn('className = "template-star"', widget)
         self.assertIn("Виджет мессенжеров", panel)
         self.assertIn('id="templatesView"', panel)
         self.assertIn('id="identityView"', panel)
@@ -324,6 +750,10 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('class="input role-select"', panel)
         self.assertIn('class="input amo-select"', panel)
         self.assertIn("api('/staff/catalog')", panel)
+        self.assertIn('id="employeeTemplatesModal"', panel)
+        self.assertIn("employee-templates", panel)
+        self.assertIn("/admins/${employeeTemplateState.admin.id}/templates", panel)
+        self.assertIn("Метки для личного шаблона", panel)
         self.assertNotIn("prompt('ID сотрудника GetCourse:'", panel)
 
     def test_telegram_personal_user_view_is_exact(self):
@@ -341,6 +771,152 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             "name": "Анна Петрова",
         })
 
+    def test_profile_links_accept_only_direct_allowlisted_profiles(self):
+        links = router._profile_links_from_values([{
+            "vk": "https://vk.com/id123456",
+            "telegram": "t.me/Exact_User",
+            "telegram_phone": "https://t.me/+79991234567?profile",
+            "max": "https://max.ru/u/abcdefghijklmnop",
+            "salebot": "https://salebot.pro/projects/397724/clients/99001",
+            "salebot_bad": "https://salebot.pro/projects/397724/clients/tg/user",
+            "unsafe": "https://example.test/id123456",
+            "vk_group": "https://vk.com/club123456",
+            "telegram_join": "https://t.me/+invite",
+        }])
+        self.assertEqual(links, {
+            "vk": "https://vk.com/id123456",
+            "telegram_personal": "https://t.me/Exact_User",
+            "salebot": "https://salebot.pro/projects/397724/clients/99001",
+            "max": "https://max.ru/u/abcdefghijklmnop",
+        })
+
+    def test_telegram_profile_url_prefers_username_and_supports_private_phone(self):
+        self.assertEqual(
+            router._telegram_profile_url("@Exact_User", "+79991234567"),
+            "https://t.me/Exact_User?profile",
+        )
+        self.assertEqual(
+            router._telegram_profile_url("", "8 (999) 123-45-67"),
+            "https://t.me/+79991234567?profile",
+        )
+        self.assertEqual(router._telegram_profile_url("", "123"), "")
+
+    def test_salebot_profile_also_resolves_exact_telegram_phone_profile(self):
+        class Index:
+            def provider_id_for_exact_context(self, provider, _context):
+                return {"salebot": "99001", "telegram": "123456789"}.get(provider, "")
+
+            def telegram_username_for_platform_id(self, platform_id):
+                self_assert.assertEqual(platform_id, "123456789")
+                return ""
+
+        async def no_rules(_context):
+            return None
+
+        async def resolved(_data, _mode, _device):
+            return {"accounts": [], "variables": {}}
+
+        async def no_entity_link(*_args):
+            return {}
+
+        self_assert = self
+        previous = (
+            router._identity_index,
+            router._apply_identity_rules,
+            router._resolve_widget_context,
+            router._entity_external_link,
+        )
+        router._identity_index = Index()
+        router._apply_identity_rules = no_rules
+        router._resolve_widget_context = resolved
+        router._entity_external_link = no_entity_link
+        try:
+            links = asyncio.run(router._widget_profile_links(
+                {
+                    "entity_type": "lead",
+                    "entity_id": "18222875",
+                    "phone": "8 (999) 123-45-67",
+                },
+                "amocrm",
+                {"admin_name": "Татьяна"},
+            ))
+        finally:
+            (
+                router._identity_index,
+                router._apply_identity_rules,
+                router._resolve_widget_context,
+                router._entity_external_link,
+            ) = previous
+        self.assertEqual(links, [
+            {
+                "kind": "telegram_personal",
+                "label": "TG Personal",
+                "url": "https://t.me/+79991234567?profile",
+            },
+            {
+                "kind": "salebot",
+                "label": "SaleBot",
+                "url": "https://salebot.pro/projects/397724/clients/99001",
+            },
+        ])
+
+    def test_amocrm_profile_ignores_unverified_salebot_import_url_and_stale_link(self):
+        class Index:
+            def provider_id_for_exact_context(self, _provider, _context):
+                return ""
+
+        async def no_rules(_context):
+            return None
+
+        async def resolved(_data, _mode, _device):
+            return {
+                "accounts": [],
+                "variables": {
+                    "amo.lead.csv_import.fields.dialog_salebot": {
+                        "value": "https://salebot.pro/projects/397724/clients/765266654",
+                    },
+                },
+            }
+
+        async def stale_entity_link(_platform, _entity_type, _entity_id, provider):
+            if provider == router.SALEBOT_PROVIDER:
+                return {"external_user_id": "765266654"}
+            return {}
+
+        previous = (
+            router._identity_index,
+            router._apply_identity_rules,
+            router._resolve_widget_context,
+            router._entity_external_link,
+        )
+        router._identity_index = Index()
+        router._apply_identity_rules = no_rules
+        router._resolve_widget_context = resolved
+        router._entity_external_link = stale_entity_link
+        try:
+            links = asyncio.run(router._widget_profile_links(
+                {
+                    "entity_type": "lead",
+                    "entity_id": "17894711",
+                    "fields": {"salebot_id": "765266654", "utm_term": "765266654"},
+                },
+                "amocrm",
+                {"admin_name": "Евгения"},
+            ))
+        finally:
+            (
+                router._identity_index,
+                router._apply_identity_rules,
+                router._resolve_widget_context,
+                router._entity_external_link,
+            ) = previous
+        self.assertNotIn("salebot", {row["kind"] for row in links})
+
+    def test_profile_link_labels_have_stable_sales_order(self):
+        self.assertEqual(router.PROFILE_LINK_ORDER, ("getcourse", "vk", "telegram_personal", "salebot", "max"))
+        self.assertEqual(router.PROFILE_LINK_LABELS["getcourse"], "GetCourse")
+        self.assertEqual(router.PROFILE_LINK_LABELS["telegram_personal"], "TG Personal")
+
     def test_protected_test_card_loads_the_real_widget_in_test_mode(self):
         module_dir = Path(__file__).resolve().parents[1]
         page = (module_dir / "panel" / "test.html").read_text(encoding="utf-8")
@@ -349,7 +925,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('+7 (996) 415-85-37', page)
         self.assertIn("entity_id:'15462823'", page)
         self.assertIn('data-nexus-wazzup-test="1"', page)
-        self.assertIn('src="../static/widget.js?v=583"', page)
+        self.assertIn('src="../static/widget.js?v=5143"', page)
         self.assertIn('"X-Nexus-Wazzup-Test": "1"', widget)
         self.assertIn("TEST_SOURCE_URL", widget)
         self.assertIn("if (!target && TEST_MODE) target = actions[actions.length - 1]", widget)
@@ -362,13 +938,66 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("fields:{utm_term:v.utm,utm_source:'yandex_dk_NW_ai'", page)
         self.assertIn("responsible_user_id:'6269974'", page)
 
+    def test_public_user_guide_is_responsive_and_linked_from_widgets(self):
+        module_dir = Path(__file__).resolve().parents[1]
+        guide = (module_dir / "panel" / "docs.html").read_text(encoding="utf-8")
+        guide_js = (module_dir / "static" / "guide.js").read_text(encoding="utf-8")
+        widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
+        amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertIn("Как пользоваться виджетом сообщений", guide)
+        self.assertIn("Первый вход", guide)
+        self.assertIn("Галочка «Отправить везде»", guide)
+        self.assertIn("Как добавить шаблон в избранное", guide)
+        self.assertIn("Как добавить вложение", guide)
+        self.assertNotIn("HTML", guide)
+        self.assertNotIn("для бабуш", guide.casefold())
+        self.assertNotIn("Короткая памятка", guide)
+        self.assertIn('id="articleSearchInput"', guide)
+        self.assertIn('id="articleSearchResults"', guide)
+        self.assertIn('<script src="../static/guide.js?v=5927"></script>', guide)
+        self.assertNotIn('<script>', guide)
+        self.assertIn('main section[id]', guide_js)
+        self.assertIn('history.pushState(null,"","#"+article.id)', guide_js)
+        self.assertIn('className="heading-anchor"', guide_js)
+        self.assertIn('const snippetFor=', guide_js)
+        self.assertIn('const appendHighlighted=', guide_js)
+        self.assertIn('className="search-result-snippet"', guide_js)
+        self.assertIn('words.every(word=>article.search.includes(word))', guide_js)
+        self.assertIn('.search-results{position:absolute;top:100%;left:0;width:100%', guide)
+        for internal_term in ("разметк", "callback", "message_from_outside", "utm_term"):
+            self.assertNotIn(internal_term, guide.casefold())
+        self.assertIn("@media(max-width:860px)", guide)
+        self.assertNotIn("overflow-x:auto", guide)
+        self.assertIn('API.replace(/\\/widget$/, "/guide")', widget)
+        self.assertIn("Открыть инструкцию", widget)
+        self.assertNotIn("прост", (guide + widget + amo).casefold())
+        self.assertIn("GUIDE=API.replace(/\\/widget$/,'/guide')", amo)
+        self.assertIn('id="help"', amo)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "data").mkdir()
+            (root / "panel").mkdir()
+            (root / "panel" / "docs.html").write_text(guide, encoding="utf-8")
+            previous = router._db_path
+            router._db_path = root / "data" / "messenger-widget.db"
+            try:
+                response = asyncio.run(router.user_guide())
+            finally:
+                router._db_path = previous
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("no-cache, must-revalidate", response.headers["cache-control"])
+            self.assertIn("script-src 'self'", response.headers["content-security-policy"])
+            self.assertIn("Как пользоваться виджетом сообщений", response.body.decode("utf-8"))
+
     def test_amocrm_widget_has_one_size_setting_and_valid_manifest_settings(self):
         module_dir = Path(__file__).resolve().parents[1]
         page = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
         manifest = json.loads((module_dir / "amocrm_widget" / "manifest.json").read_text(encoding="utf-8"))
+        backend = (module_dir / "router.py").read_text(encoding="utf-8")
         self.assertIn("Размер виджета", page)
         self.assertIn("more-wrap.open-up", page)
-        self.assertIn("$('feed').innerHTML='<div class=\"empty\">'+esc(error.message)+'</div>'", page)
+        self.assertIn("empty.textContent=error.message", page)
         self.assertEqual(manifest["settings"], {
             "nexus_url": {
                 "name": "settings.nexus_url",
@@ -378,8 +1007,15 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         })
         amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertIn("[hidden]{display:none!important}", amo)
-        self.assertIn("button.onclick=()=>openThread(row)", amo)
-        self.assertIn("placeholder=\"Имя, телефон или ID\"", amo)
+        self.assertNotIn("<aside>", amo)
+        self.assertNotIn("placeholder=\"Имя, телефон или ID\"", amo)
+        self.assertIn('id="profileLinks"', amo)
+        self.assertIn("request('/profile-links')", amo)
+        self.assertIn("function appendRichText", amo)
+        self.assertIn("function appendAttachment", amo)
+        self.assertIn("media=document.createElement('audio')", amo)
+        self.assertIn("Голосовое сообщение — файл недоступен в истории SaleBot", amo)
+        self.assertIn("TG Personal", router.PROFILE_LINK_LABELS.values())
         self.assertIn("PAGE=12", amo)
         self.assertIn('id="more"', amo)
         self.assertIn('id="templateSettings"', amo)
@@ -389,20 +1025,25 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('id="sendAll" type="checkbox" checked>Отправить везде', amo)
         self.assertIn("async function sendText(raw,rows,attachment)", amo)
         self.assertIn("const preview=raw?await request('/template-preview',{body:raw,...threadFields()}):{text:''}", amo)
-        self.assertIn("for(const row of targets)", amo)
+        self.assertIn("Promise.all(targets.map", amo)
+        self.assertIn("request_id:batchId+':'+index", amo)
         self.assertIn("event.stopPropagation()", amo)
         self.assertIn('Тема<div class="choices themes"', amo)
         self.assertIn('Палитра<div class="palettes"', amo)
         self.assertIn("del.type='button'", amo)
         self.assertIn("function placeMenu()", amo)
+        self.assertIn("menuButton('★ Избранное',favoriteMenu)", amo)
+        self.assertIn("action:'favorite'", amo)
+        self.assertIn("className='template-star'", amo)
         self.assertIn(".shell{grid-template-rows:minmax(0,1fr)}", amo)
         self.assertIn(".shell .main{min-height:0;grid-template-rows:50px auto minmax(0,1fr) auto}", amo)
-        self.assertIn("@media(max-width:680px){.shell{grid-template-columns:minmax(0,1fr)}", amo)
+        self.assertIn("@media(max-width:680px){.composer{grid-template-columns:minmax(0,1fr) auto}", amo)
         self.assertIn("function showActiveChannel", amo)
         self.assertIn("function wheelX(node)", amo)
         self.assertIn("wheelX($('channels'))", amo)
         self.assertIn("REQUEST_TIMEOUT=15000", amo)
-        self.assertIn("Сервер не ответил за 15 секунд. Повторите.", amo)
+        self.assertIn("Сервер не ответил за ${Math.round(timeout/1000)} секунд", amo)
+        self.assertIn("timeout:90000", amo)
         self.assertIn("const conversationCache=new Map()", amo)
         self.assertIn("conversationCache.get(key)", amo)
         self.assertIn("channelRefreshAttempts>=3", amo)
@@ -412,23 +1053,51 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertNotIn("await openChannel(active)", amo)
         self.assertIn("insertAdjacentHTML('beforeend'", amo)
         self.assertIn("nexus-messenger-painted", amo)
-        self.assertIn("mobile-inbox", amo)
+        self.assertNotIn("mobile-inbox", amo)
         self.assertIn(".channels button:disabled::after", amo)
+        self.assertIn("Загружаем историю переписки…", amo)
+        self.assertIn("data.history_status!=='syncing'", amo)
+        self.assertIn("Выйти из аккаунта", amo)
+        self.assertIn("request('/logout')", amo)
+        self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
+        self.assertEqual(manifest["widget"]["version"], "1.7.20")
+        self.assertIn("static/amocrm.html?v=5143", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
-        self.assertIn("const CONTEXT_TIMEOUT = 2000", script)
-        self.assertIn("context:await fastContext()", script)
+        self.assertIn("const AMO_REQUEST_TIMEOUT = 6000", script)
+        self.assertIn("const CONTEXT_TIMEOUT = 20000", script)
+        self.assertIn("context:resolvedContext", script)
+        self.assertIn("Получаем данные клиента…", script)
+        self.assertIn("spinner[0].animate", script)
         self.assertIn("setTimeout(paint, 1200)", script)
         self.assertIn("function armFrameDeadline()", script)
         self.assertIn("Виджет не загрузился", script)
-        self.assertIn("}, 15000);", script)
-        self.assertIn("addEventListener('resize',()=>showActiveChannel())", amo)
+        self.assertIn("}, 30000);", script)
+        self.assertIn("addEventListener('resize',()=>{showActiveChannel();sizeMessageInput()})", amo)
         self.assertIn("resize:'both'", script)
         self.assertIn("variable-list", amo)
         self.assertIn("setRangeText", amo)
         self.assertNotIn("scrollIntoView", amo)
+        widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
+        self.assertIn("function optimisticTemplate", amo)
+        self.assertIn("function optimisticTemplate", widget)
+        self.assertIn("height:76px;min-height:76px;max-height:min(58vh,460px);resize:none", amo)
+        self.assertIn("function sizeMessageInput()", amo)
+        self.assertIn("$('message').addEventListener('input',sizeMessageInput)", amo)
+        self.assertIn("input.value=optimistic;sizeMessageInput()", amo)
+        self.assertIn("$('message').value='';sizeMessageInput()", amo)
+        self.assertIn("$('send').classList.add('busy')", amo)
+        self.assertIn("max-height:min(45vh,360px)", widget)
+        self.assertIn("scrollbar-width:thin", amo)
+        self.assertIn("scrollbar-width:thin", widget)
+        self.assertIn('request("/logout"', widget)
+        self.assertIn("Выйти из аккаунта", widget)
+        self.assertIn("function logoutDevice", widget)
+        self.assertIn("_schedule_wazzup_history(", backend)
+        self.assertLess(amo.index("input.value=optimistic"), amo.index("await request('/template-preview',{id:Number(row.id)})"))
+        self.assertLess(widget.index("input.value = optimistic"), widget.index('await request("/template-preview"'))
 
     def test_admin_panel_has_a_bounded_scroll_workspace(self):
         panel = (Path(__file__).resolve().parents[1] / "panel" / "index.html").read_text(encoding="utf-8")
@@ -451,6 +1120,114 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertTrue(router._card_link_matches_context(good, context, "42"))
         self.assertFalse(router._card_link_matches_context({**good, "phone": "+79990000000"}, context, "42"))
         self.assertFalse(router._card_link_matches_context({**good, "getcourse_user_id": "43"}, context, "42"))
+
+    def test_streams_conversations_exposes_exact_salebot_history(self):
+        async def recipients(**_kwargs):
+            return {"ok": True, "telegram": "", "vk": "123456", "salebot": "965776230"}
+
+        async def channels(**_kwargs):
+            return [{
+                "channel_id": "salebot:project", "transport": "salebot",
+                "provider": "salebot", "label": "SaleBot · Проект",
+            }]
+
+        async def history(client_id):
+            self.assertEqual(client_id, "965776230")
+            return [{
+                "external_id": "salebot:1", "direction": "incoming", "status": "delivered",
+                "text": "Здравствуйте", "author_name": "Алина в SaleBot",
+                "sent_at": "2026-08-17T05:00:00Z",
+            }]
+
+        async def vk_request(method, params):
+            self.assertEqual((method, params), ("users.get", {"user_ids": "123456"}))
+            return [{"id": 123456, "first_name": "Алина", "last_name": "Соколова"}]
+
+        async def admin(_operator_name):
+            return {"id": 1, "name": "Никита Попов"}
+
+        async def templates(_admin_id, *, can_edit_shared):
+            self.assertFalse(can_edit_shared)
+            return []
+
+        originals = (
+            router.service_transfer_recipients, router._all_channels, router._salebot_history,
+            router._streams_admin, router._template_rows, router._vk_request,
+        )
+        router.service_transfer_recipients = recipients
+        router._all_channels = channels
+        router._salebot_history = history
+        router._streams_admin = admin
+        router._template_rows = templates
+        router._vk_request = vk_request
+        try:
+            result = asyncio.run(router.service_streams_conversations(
+                email="mail.ru789@mail.ru", gc_user_id="505433216",
+                name="Соколова Алина", phone="79819793382", operator_name="Никита Попов",
+            ))
+        finally:
+            (
+                router.service_transfer_recipients, router._all_channels, router._salebot_history,
+                router._streams_admin, router._template_rows, router._vk_request,
+            ) = originals
+
+        self.assertEqual(len(result["channels"]), 1)
+        self.assertEqual(result["channels"][0]["chat_id"], "965776230")
+        self.assertTrue(result["channels"][0]["has_chat"])
+        self.assertTrue(result["channels"][0]["can_send"])
+        self.assertEqual(result["channels"][0]["messages"][0]["text"], "Здравствуйте")
+        self.assertEqual(result["profile_links"], [
+            {"kind": "vk", "label": "VK: Алина Соколова", "url": "https://vk.com/id123456"},
+            {
+                "kind": "salebot", "label": "SaleBot: Алина в SaleBot",
+                "url": "https://salebot.pro/projects/397724/clients/965776230",
+            },
+        ])
+
+    def test_streams_send_uses_salebot_client_id(self):
+        calls = []
+
+        async def channel(channel_id, transport, provider):
+            self.assertEqual((channel_id, transport, provider), ("salebot:project", "salebot", "salebot"))
+            return {"channel_id": channel_id, "transport": transport, "provider": provider}
+
+        async def admin(_operator_name):
+            return {"id": 1, "wazzup_user_id": "streams-1", "name": "Никита Попов", "role": "employee"}
+
+        async def send(client_id, text, attachment_url="", attachment_type=""):
+            calls.append((client_id, text, attachment_url, attachment_type))
+            return {"ok": True}
+
+        originals = router._requested_channel, router._streams_admin, router._salebot_send
+        router._requested_channel, router._streams_admin, router._salebot_send = channel, admin, send
+        try:
+            result = asyncio.run(router.service_streams_send(
+                channel_id="salebot:project", transport="salebot", provider="salebot",
+                chat_id="965776230", phone="79819793382", text="Проверка",
+                operator_name="Никита Попов", email="mail.ru789@mail.ru",
+                gc_user_id="505433216", name="Соколова Алина", record_communication=False,
+            ))
+        finally:
+            router._requested_channel, router._streams_admin, router._salebot_send = originals
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [("965776230", "Проверка", "", "")])
+
+    def test_getcourse_widget_uses_inline_confirmation_and_plain_labels(self):
+        module_dir = Path(__file__).resolve().parents[1]
+        amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
+        widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
+        panel = (module_dir / "panel" / "index.html").read_text(encoding="utf-8")
+        for source in (amo, widget):
+            self.assertIn("Проверить изменения", source)
+            self.assertIn("Отправить изменения", source)
+            self.assertIn("GetCourse отвечает", source)
+        self.assertNotIn("if(!confirm((details", amo)
+        self.assertNotIn("window.confirm((text", widget)
+        self.assertIn("replace(/^(\\d+)[.,]0$/", amo)
+        self.assertIn("replace(/^(\\d+)[.,]0$/", widget)
+        self.assertIn('{"client_id":"123456","text":"Здравствуйте"}', panel)
+        self.assertNotIn('"message_id":"sb-987"', panel)
 
 
 if __name__ == "__main__":

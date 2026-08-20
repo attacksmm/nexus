@@ -33,7 +33,7 @@ const responses = {
 function jquery() { throw new Error('DOM access is not expected'); }
 jquery.ajax = async options => {
   const path = options.url;
-  assert.equal(options.timeout, 1500);
+  assert.equal(options.timeout, 6000);
   calls.push(path);
   if (!responses[path]) throw new Error('Unexpected request: ' + path);
   return responses[path];
@@ -43,7 +43,7 @@ const sandbox = {
   window: {APP: {data: {current_card: currentCard}, constant: key => key === 'user' ? {id: 6269974, login: 'manager@example.test'} : {}}},
   location: {pathname: '/leads/detail/15462823', href: 'https://sobakovodpro.amocrm.ru/leads/detail/15462823'},
   URL,
-  setTimeout,
+  setTimeout: (fn, delay) => setTimeout(fn, Math.min(delay, 20)),
 };
 vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
 const widget = Object.create(Widget.prototype);
@@ -74,5 +74,5 @@ Widget.call(widget);
   const started = Date.now();
   const fallback = await widget.__nexusFastContext();
   assert.equal(fallback.entity_id, '15462823');
-  assert(Date.now() - started < 2500, 'context fallback exceeded its deadline');
+  assert(Date.now() - started < 250, 'context fallback exceeded its deadline');
 })().catch(error => { console.error(error); process.exitCode = 1; });

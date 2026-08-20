@@ -12,7 +12,9 @@ EXCLUDED_PARTS = {"data", "dist", "output", "__pycache__", ".pytest_cache", "tes
 
 def included(path: Path) -> bool:
     relative = path.relative_to(ROOT)
-    return not any(part in EXCLUDED_PARTS for part in relative.parts) and path.suffix not in {".pyc", ".pyo"}
+    if relative.as_posix() == "static/downloads/widget.zip":
+        return True
+    return not any(part in EXCLUDED_PARTS for part in relative.parts) and path.suffix not in {".pyc", ".pyo", ".zip"}
 
 
 def main() -> None:
@@ -28,7 +30,11 @@ def main() -> None:
     with zipfile.ZipFile(OUTPUT) as archive:
         if archive.testzip():
             raise SystemExit("Module ZIP CRC check failed")
-        if "manifest.json" not in archive.namelist() or any(name.startswith("data/") for name in archive.namelist()):
+        if (
+            "manifest.json" not in archive.namelist()
+            or "static/downloads/widget.zip" not in archive.namelist()
+            or any(name.startswith("data/") for name in archive.namelist())
+        ):
             raise SystemExit("Module ZIP contract failed")
     print(OUTPUT)
 

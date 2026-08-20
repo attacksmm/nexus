@@ -1,23 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import hmac
 import importlib.util
+import inspect
+import ipaddress
 import json
 import os
 import re
 import secrets
+import socket
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlsplit, urlunsplit
 
 import aiosqlite
 import httpx
+from jose import jwt
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.requests import ClientDisconnect
 
 from orchestrator.auth import (
     _read_env_values,
@@ -26,6 +39,10 @@ from orchestrator.auth import (
     enforce_rate_limit,
     require_admin,
     verify_token_from_request,
+)
+from orchestrator.telegram_proxy import (
+    httpx_client_kwargs,
+    telegram_bot_api_base,
 )
 
 
@@ -117,7 +134,16 @@ VK_HISTORY_PAGE_SIZE = CONVERSATION_PAGE_SIZE
 TELEGRAM_PROVIDER = "telegram_personal"
 SALEBOT_PROVIDER = "salebot"
 SALEBOT_API_BASE = "https://chatter.salebot.pro/api"
+SALEBOT_PROFILE_BASE = "https://salebot.pro/projects/397724/clients"
 SALEBOT_HISTORY_CACHE_SECONDS = 120
+SALEBOT_ATTACHMENT_TTL_SECONDS = 60 * 60
+SALEBOT_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+SALEBOT_SAFE_MEDIA_TYPES = {
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp",
+    "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/webm",
+    "video/mp4", "video/webm", "video/quicktime", "application/pdf",
+}
+SALEBOT_CALLBACK_MARKERS = {"instagram"}
 TELEGRAM_SESSION_ENV_KEY = "NEXUS_MESSENGER_WIDGET_TELEGRAM_SESSION_FILE"
 LEGACY_TELEGRAM_SESSION_ENV_KEY = "NEXUS_GETCOURSE_WAZZUP_TELEGRAM_SESSION_FILE"
 TELEGRAM_SYNC_SECONDS = 30
@@ -145,7 +171,34 @@ TEMPLATE_VARIABLES = [
     {"key": "getcourse.order.id", "label": "Заказ GetCourse"},
     {"key": "vk.id", "label": "VK ID"},
     {"key": "telegram.id", "label": "Telegram ID"},
+    {"key": "yclid", "label": "yclid"},
+    {"key": "ym_uid", "label": "ym_uid"},
+    {"key": "conversation_id", "label": "conversation_id"},
 ]
+AUTO_MARKUP_DEFAULT_DOMAINS = "club.sobakovod.pro;sobakovod.pro;start.bizon365.ru"
+AUTO_MARKUP_DEFAULT_TAIL = "?utm_term={{utm.term}}&utm_source={{utm.source}}&utm_medium={{utm.medium}}&utm_campaign={{utm.campaign}}&utm_content={{utm.content}}&param1={{ym_uid}}&param2={{conversation_id}}"
+AUTO_MARKUP_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+NOTIFY_TELEGRAM_TOKEN_ENV_KEY = "NEXUS_MESSENGER_NOTIFY_TELEGRAM_BOT_TOKEN"
+NOTIFY_TELEGRAM_USERNAME = "attackpng_notify_bot"
+# A short debounce produced several amoCRM tasks while a client was still
+# typing.  Keep one rolling five-minute batch per dialog instead.
+NOTIFY_BATCH_SECONDS = 5 * 60
+NOTIFY_PAIRING_TTL_MINUTES = 10
+NOTIFY_MAX_ATTEMPTS = 8
+NOTIFY_EVENT_RETENTION_DAYS = 30
+NOTIFY_RETRY_SECONDS = (30, 120, 600, 1800, 3600, 10800, 21600, 43200)
+NOTIFY_SOURCES = {"max", "vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER}
+BROWSER_NOTIFY_CLAIM_SECONDS = 45
+BROWSER_NOTIFY_PAGE_SIZE = 20
+WEB_PUSH_RECORD_SIZE = 4096
+WEB_PUSH_MAX_PAYLOAD = 3500
+WEB_PUSH_SUBJECT = "mailto:admin@sobakovod.pro"
+DEVICE_TOUCH_INTERVAL_SECONDS = 300
+OUTBOUND_MAX_ATTEMPTS = 8
+OUTBOUND_RETRY_SECONDS = (15, 45, 120, 300, 900, 1800, 3600, 10800)
+AMO_TASK_MAX_ATTEMPTS = 8
+AMO_TASK_RETRY_SECONDS = (30, 120, 300, 900, 1800, 3600, 10800, 21600)
+COMMUNICATION_RETENTION_DAYS = 730
 
 _db_path: Path | None = None
 _logger = None
@@ -154,13 +207,23 @@ _vk_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _telegram_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _salebot_history_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _telegram_history_inflight: set[tuple[str, int]] = set()
+_wazzup_history_inflight: set[tuple[str, str, int]] = set()
 _card_link_cache: dict[tuple[str, ...], tuple[float, dict[str, str]]] = {}
 _telegram_state_cache: tuple[float, dict[str, Any]] = (0.0, {})
 _telegram_auth_pending: dict[str, dict[str, Any]] = {}
 _telegram_lock = asyncio.Lock()
+_vk_queue_lock = asyncio.Lock()
+_vk_callback_config: dict[str, str] = {"key": "", "secret": "", "confirmation": ""}
 _identity_index: Any = None
 _identity_index_status: dict[str, Any] = {"status": "pending", "records": 0}
 _staff_catalog_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
+_notification_wakeup = asyncio.Event()
+_outbound_wakeup = asyncio.Event()
+_amo_task_wakeup = asyncio.Event()
+_notification_bot_poll_at = ""
+_notification_bot_poll_error = ""
+_module_lifecycle: Any = None
+_telegram_realtime_task: asyncio.Task[Any] | None = None
 
 
 def _remember_direct_history(
@@ -195,18 +258,48 @@ def _remember_card_link(key: tuple[str, ...], link: dict[str, str]) -> None:
 
 
 async def setup(ctx) -> None:
-    global _db_path, _logger, _identity_index
+    global _db_path, _logger, _identity_index, _module_lifecycle, _telegram_realtime_task
     _db_path = Path(ctx.db_path)
     _logger = getattr(ctx, "logger", None)
     await _init_db()
-    await _cleanup()
+    await _init_vk_callback_queue()
+    await _refresh_vk_callback_config()
     _identity_index = IdentityIndex(_customer_db_path(), _must_db().parent / "identity-index.db")
     _identity_index.cleanup_staging()
     lifecycle = getattr(ctx, "lifecycle", None)
+    _module_lifecycle = lifecycle
     if lifecycle is not None:
         lifecycle.create_task(vk_background_loop(), name="messenger-widget-vk-sync")
+        lifecycle.create_task(vk_callback_queue_loop(), name="messenger-widget-vk-callback-queue")
+        lifecycle.create_task(maintenance_loop(), name="messenger-widget-maintenance")
         lifecycle.create_task(telegram_background_loop(), name="messenger-widget-telegram-sync")
+        _telegram_realtime_task = lifecycle.create_task(
+            telegram_realtime_loop(), name="messenger-widget-telegram-realtime",
+        )
         lifecycle.create_task(identity_index_loop(), name="messenger-widget-identity-index")
+        lifecycle.create_task(notification_delivery_loop(), name="messenger-widget-notification-delivery")
+        lifecycle.create_task(notification_telegram_poll_loop(), name="messenger-widget-notification-telegram")
+        for worker_id in range(1, 5):
+            lifecycle.create_task(
+                outbound_delivery_loop(worker_id), name=f"messenger-widget-outbound-{worker_id}",
+            )
+        lifecycle.create_task(amo_task_delivery_loop(), name="messenger-widget-amo-tasks")
+
+
+async def on_telegram_proxy_changed() -> dict[str, Any]:
+    global _telegram_realtime_task
+    task = _telegram_realtime_task
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    if _module_lifecycle is not None:
+        _telegram_realtime_task = _module_lifecycle.create_task(
+            telegram_realtime_loop(), name="messenger-widget-telegram-realtime",
+        )
+    return {"ok": True, "reconnected": _telegram_realtime_task is not None}
 
 
 def _must_db() -> Path:
@@ -221,6 +314,17 @@ def _now_dt() -> datetime:
 
 def _iso(value: datetime | None = None) -> str:
     return (value or _now_dt()).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    raw = _clean(value, 80)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _clean(value: Any, limit: int = 1000) -> str:
@@ -378,6 +482,15 @@ async def _read_json(request: Request) -> dict[str, Any]:
 def _log(level: str, message: str, *args: Any) -> None:
     if _logger:
         getattr(_logger, level, _logger.info)(message, *args)
+
+
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    raw = value.encode("ascii")
+    return base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
 
 
 async def _connect():
@@ -546,6 +659,20 @@ async def _init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS template_favorites (
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                template_id INTEGER NOT NULL REFERENCES message_templates(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(admin_id,template_id)
+            );
+            CREATE TABLE IF NOT EXISTS template_user_order (
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                template_id INTEGER NOT NULL REFERENCES message_templates(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(admin_id,template_id)
+            );
             CREATE TABLE IF NOT EXISTS identity_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -579,6 +706,197 @@ async def _init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(platform,entity_type,entity_id,provider)
             );
+            CREATE TABLE IF NOT EXISTS notification_destinations (
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                recipient_id TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                connected_at TEXT NOT NULL,
+                verified_at TEXT NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(admin_id,provider),
+                UNIQUE(provider,recipient_id)
+            );
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                admin_id INTEGER PRIMARY KEY REFERENCES admins(id) ON DELETE CASCADE,
+                fallback_unassigned INTEGER NOT NULL DEFAULT 0,
+                course_chats INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notification_route_policies (
+                source_admin_id INTEGER PRIMARY KEY REFERENCES admins(id) ON DELETE CASCADE,
+                configured INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notification_routes (
+                source_admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                recipient_admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(source_admin_id,recipient_admin_id)
+            );
+            CREATE TABLE IF NOT EXISTS notification_pairings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                code_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conversation_contexts (
+                provider TEXT NOT NULL,
+                external_user_id TEXT NOT NULL,
+                admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                platform TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                entity_id TEXT NOT NULL DEFAULT '',
+                entity_url TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider,external_user_id)
+            );
+            CREATE TABLE IF NOT EXISTS notification_events (
+                external_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                thread_key TEXT NOT NULL,
+                channel_id TEXT NOT NULL DEFAULT '',
+                chat_type TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                target_admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                client_name TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL,
+                available_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL REFERENCES notification_events(external_id) ON DELETE CASCADE,
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                recipient_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                external_message_id TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(event_id,admin_id,provider)
+            );
+            CREATE TABLE IF NOT EXISTS browser_notification_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_hint TEXT NOT NULL DEFAULT '',
+                label TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                enabled_at TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                push_endpoint TEXT NOT NULL DEFAULT '',
+                push_p256dh TEXT NOT NULL DEFAULT '',
+                push_auth TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(device_id)
+            );
+            CREATE TABLE IF NOT EXISTS browser_notification_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL REFERENCES browser_notification_subscriptions(id) ON DELETE CASCADE,
+                event_id TEXT NOT NULL REFERENCES notification_events(external_id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                claimed_at TEXT NOT NULL DEFAULT '',
+                shown_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(subscription_id,event_id)
+            );
+            CREATE TABLE IF NOT EXISTS communication_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                external_id TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL,
+                channel_id TEXT NOT NULL DEFAULT '',
+                chat_type TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                content_uri TEXT NOT NULL DEFAULT '',
+                client_name TEXT NOT NULL DEFAULT '',
+                phone_hash TEXT NOT NULL DEFAULT '',
+                platform TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                entity_id TEXT NOT NULL DEFAULT '',
+                entity_url TEXT NOT NULL DEFAULT '',
+                amo_lead_id TEXT NOT NULL DEFAULT '',
+                admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                manager_name TEXT NOT NULL DEFAULT '',
+                transport_author TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER,
+                error TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS outbound_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_key TEXT NOT NULL UNIQUE,
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+                provider TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                chat_id TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                client_name TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                getcourse_user_id TEXT NOT NULL DEFAULT '',
+                platform TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                entity_id TEXT NOT NULL DEFAULT '',
+                entity_url TEXT NOT NULL DEFAULT '',
+                amo_lead_id TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                attachment_url TEXT NOT NULL DEFAULT '',
+                attachment_type TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'processing',
+                attempts INTEGER NOT NULL DEFAULT 1,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                external_id TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                queued_at TEXT NOT NULL,
+                started_at TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS amo_task_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_key TEXT NOT NULL UNIQUE,
+                communication_id INTEGER REFERENCES communication_messages(id) ON DELETE SET NULL,
+                amo_lead_id TEXT NOT NULL,
+                responsible_user_id TEXT NOT NULL DEFAULT '',
+                messenger TEXT NOT NULL,
+                client_name TEXT NOT NULL DEFAULT '',
+                message_text TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                amo_task_id TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS ix_gcw_devices_token ON devices(token_hash);
             CREATE INDEX IF NOT EXISTS ix_gcw_codes_hash ON activation_codes(code_hash);
             CREATE INDEX IF NOT EXISTS ix_gcw_events_created ON events(created_at DESC,id DESC);
@@ -593,9 +911,33 @@ async def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS ix_gcw_external_links_gc ON external_identity_links(provider,getcourse_user_id);
             CREATE INDEX IF NOT EXISTS ix_mw_manager_admin ON manager_bindings(admin_id,platform);
             CREATE INDEX IF NOT EXISTS ix_mw_templates_owner ON message_templates(owner_admin_id,folder,enabled,sort_order,id);
+            CREATE INDEX IF NOT EXISTS ix_mw_template_favorites_template ON template_favorites(template_id,admin_id);
+            CREATE INDEX IF NOT EXISTS ix_mw_template_user_order ON template_user_order(admin_id,sort_order,template_id);
             CREATE INDEX IF NOT EXISTS ix_mw_rules_priority ON identity_rules(enabled,priority,id);
             CREATE INDEX IF NOT EXISTS ix_mw_entity_links_external ON entity_identity_links(provider,external_user_id);
+            CREATE INDEX IF NOT EXISTS ix_mw_notify_pairings ON notification_pairings(provider,expires_at,used_at);
+            CREATE INDEX IF NOT EXISTS ix_mw_notify_context_admin ON conversation_contexts(admin_id,updated_at DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_notify_events_due ON notification_events(status,available_at,thread_key);
+            CREATE INDEX IF NOT EXISTS ix_mw_notify_delivery_due ON notification_deliveries(status,next_attempt_at,updated_at);
+            CREATE INDEX IF NOT EXISTS ix_mw_notify_routes_recipient ON notification_routes(recipient_admin_id,source_admin_id);
+            CREATE INDEX IF NOT EXISTS ix_mw_browser_sub_admin ON browser_notification_subscriptions(admin_id,enabled,last_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_browser_delivery_due ON browser_notification_deliveries(subscription_id,status,claimed_at);
+            CREATE INDEX IF NOT EXISTS ix_mw_communications_time ON communication_messages(sent_at DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_communications_admin ON communication_messages(admin_id,sent_at DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_communications_client ON communication_messages(amo_lead_id,chat_id,sent_at DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_communications_provider ON communication_messages(provider,direction,status,sent_at DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_outbound_due ON outbound_jobs(status,next_attempt_at,id);
+            CREATE INDEX IF NOT EXISTS ix_mw_outbound_metrics ON outbound_jobs(provider,status,created_at DESC);
+            CREATE INDEX IF NOT EXISTS ix_mw_amo_tasks_due ON amo_task_jobs(status,next_attempt_at,id);
             """
+        )
+        cursor = await db.execute(
+            "UPDATE outbound_jobs SET status='retry',next_attempt_at=?,updated_at=? WHERE status='processing'",
+            (_iso(), _iso()),
+        )
+        await db.execute(
+            "UPDATE amo_task_jobs SET status='retry',next_attempt_at=?,updated_at=? WHERE status='processing'",
+            (_iso(), _iso()),
         )
         columns = {row[1] for row in await (await db.execute("PRAGMA table_info(admins)")).fetchall()}
         if "phone" not in columns:
@@ -611,6 +953,13 @@ async def _init_db() -> None:
         template_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(message_templates)")).fetchall()}
         if "folder" not in template_columns:
             await db.execute("ALTER TABLE message_templates ADD COLUMN folder TEXT NOT NULL DEFAULT ''")
+        browser_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(browser_notification_subscriptions)")).fetchall()}
+        for name in ("push_endpoint", "push_p256dh", "push_auth"):
+            if name not in browser_columns:
+                await db.execute(f"ALTER TABLE browser_notification_subscriptions ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+        preference_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(notification_preferences)")).fetchall()}
+        if "course_chats" not in preference_columns:
+            await db.execute("ALTER TABLE notification_preferences ADD COLUMN course_chats INTEGER NOT NULL DEFAULT 0")
         await db.execute("CREATE INDEX IF NOT EXISTS ix_mw_chats_responsible ON wazzup_chats(responsible_admin_id,last_message_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS ix_mw_external_links_phone ON external_identity_links(provider,phone)")
         await db.execute(
@@ -628,6 +977,58 @@ async def _init_db() -> None:
         await db.execute(
             "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('webhook_secret',?,?)",
             (secrets.token_urlsafe(32), now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('auto_markup_domains',?,?)",
+            (AUTO_MARKUP_DEFAULT_DOMAINS, now),
+        )
+        vapid_row = await (await db.execute(
+            "SELECT value FROM module_settings WHERE key='webpush_vapid_private'"
+        )).fetchone()
+        if not vapid_row or not _clean(vapid_row["value"], 10000):
+            private_key = ec.generate_private_key(ec.SECP256R1())
+            private_pem = private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode("ascii")
+            public_raw = private_key.public_key().public_bytes(
+                serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint,
+            )
+            await db.executemany(
+                "INSERT OR REPLACE INTO module_settings(key,value,updated_at) VALUES(?,?,?)",
+                (
+                    ("webpush_vapid_private", private_pem, now),
+                    ("webpush_vapid_public", _b64url(public_raw), now),
+                ),
+            )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('auto_markup_tail',?,?)",
+            (AUTO_MARKUP_DEFAULT_TAIL, now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_live_since',?,?)",
+            (now, now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_telegram_callback_secret',?,?)",
+            (secrets.token_urlsafe(32), now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_salebot_secret',?,?)",
+            (secrets.token_urlsafe(32), now),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_telegram_update_offset','0',?)",
+            (now,),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_telegram_poll_at','',?)",
+            (now,),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO module_settings(key,value,updated_at) VALUES('notification_telegram_poll_error','',?)",
+            (now,),
         )
         defaults = (
             ("getcourse", "user", "id", "ID пользователя", "getcourse_user", 10),
@@ -665,10 +1066,69 @@ async def _cleanup() -> None:
         await db.execute("DELETE FROM activation_codes WHERE expires_at<? OR used_at<>''", (now,))
         await db.execute("DELETE FROM events WHERE created_at<?", (cutoff,))
         await db.execute("DELETE FROM webhook_events WHERE received_at<?", (_iso(_now_dt() - timedelta(days=14)),))
-        await db.execute("DELETE FROM wazzup_messages WHERE created_at<?", (_iso(_now_dt() - timedelta(days=180)),))
+        await db.execute(
+            "DELETE FROM notification_pairings WHERE expires_at<? OR used_at<>''",
+            (_iso(_now_dt() - timedelta(days=1)),),
+        )
+        await db.execute(
+            "DELETE FROM notification_events WHERE created_at<?",
+            (_iso(_now_dt() - timedelta(days=NOTIFY_EVENT_RETENTION_DAYS)),),
+        )
+        await db.execute(
+            "DELETE FROM browser_notification_subscriptions WHERE enabled=0 AND updated_at<?",
+            (_iso(_now_dt() - timedelta(days=30)),),
+        )
+        await db.execute(
+            "DELETE FROM communication_messages WHERE created_at<?",
+            (_iso(_now_dt() - timedelta(days=COMMUNICATION_RETENTION_DAYS)),),
+        )
+        completed_cutoff = _iso(_now_dt() - timedelta(days=180))
+        await db.execute(
+            "DELETE FROM outbound_jobs WHERE status IN ('sent','failed') AND created_at<?", (completed_cutoff,),
+        )
+        await db.execute(
+            "DELETE FROM amo_task_jobs WHERE status IN ('sent','failed') AND created_at<?", (completed_cutoff,),
+        )
         await db.commit()
     finally:
         await db.close()
+    message_cutoff = _iso(_now_dt() - timedelta(days=180))
+    last_id = 0
+    while True:
+        db = await _connect()
+        try:
+            rows = await (await db.execute(
+                "SELECT id FROM wazzup_messages WHERE id>? AND created_at<? ORDER BY id LIMIT 750",
+                (last_id, message_cutoff),
+            )).fetchall()
+            ids = [int(row[0]) for row in rows]
+            if not ids:
+                break
+            last_id = ids[-1]
+            placeholders = ",".join("?" for _ in ids)
+            cursor = await db.execute(f"DELETE FROM wazzup_messages WHERE id IN ({placeholders})", ids)
+            deleted = max(0, cursor.rowcount)
+            await db.commit()
+        finally:
+            await db.close()
+        if deleted < len(ids):
+            break
+        # Retention must never monopolise the 2+ GB message database while a
+        # manager is opening templates or a conversation.
+        await asyncio.sleep(0.2)
+
+
+async def maintenance_loop() -> None:
+    # Let the user-facing APIs and channel workers become usable first.
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await _cleanup()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("error", "Messenger maintenance failed: %s", exc)
+        await asyncio.sleep(6 * 60 * 60)
 
 
 async def _audit(
@@ -828,7 +1288,10 @@ def _vk_attachment_views(rows: Any) -> list[dict[str, str]]:
     return result
 
 
-async def _store_vk_messages(peer_id: str, rows: list[dict[str, Any]], identity: dict[str, Any]) -> int:
+async def _store_vk_messages(
+    peer_id: str, rows: list[dict[str, Any]], identity: dict[str, Any], *, outgoing_author_name: str = "",
+    course_context: dict[str, Any] | None = None,
+) -> int:
     channel_id = _vk_channel_id()
     group_id = _vk_group_id()
     if not channel_id or not peer_id:
@@ -836,13 +1299,21 @@ async def _store_vk_messages(peer_id: str, rows: list[dict[str, Any]], identity:
     now = _iso()
     inserted = 0
     name = _clean(identity.get("name"), 200) or f"VK {peer_id}"
+    notification_records: list[dict[str, str]] = []
     db = await _connect()
     try:
         for row in rows:
             message_id = _clean(row.get("id") or row.get("conversation_message_id"), 200)
             if not message_id:
                 continue
-            direction = "outgoing" if _clean(row.get("from_id"), 200).lstrip("-") == group_id else "incoming"
+            # VK may keep the real employee in ``from_id`` when a manager
+            # answers on behalf of the community. ``out`` is the authoritative
+            # side-of-dialog flag; fall back to the community id for old rows.
+            out_flag = row.get("out")
+            outgoing = bool(out_flag) if out_flag is not None else (
+                _clean(row.get("from_id"), 200).lstrip("-") == group_id
+            )
+            direction = "outgoing" if outgoing else "incoming"
             sent_at = _message_time(row.get("date"))
             text_value = _clean(row.get("text"), 20_000)
             attachments = _vk_attachment_views(row.get("attachments"))
@@ -851,12 +1322,26 @@ async def _store_vk_messages(peer_id: str, rows: list[dict[str, Any]], identity:
             raw["nexus_attachments"] = attachments
             external_id = f"vk:{group_id}:{peer_id}:{message_id}"
             cursor = await db.execute(
-                """INSERT OR IGNORE INTO wazzup_messages(
+                """INSERT INTO wazzup_messages(
                    external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (external_id, channel_id, "vk", peer_id, "", direction, "delivered", text_value, first["content_uri"], name if direction == "incoming" else "Сообщество", sent_at, json.dumps(raw, ensure_ascii=False, separators=(",", ":"))[:50_000], now),
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET
+                   direction=excluded.direction,status=excluded.status,text=excluded.text,
+                   content_uri=excluded.content_uri,
+                   author_name=CASE
+                     WHEN wazzup_messages.direction='outgoing' AND wazzup_messages.author_name NOT IN ('','Сообщество')
+                     THEN wazzup_messages.author_name ELSE excluded.author_name END,
+                   sent_at=excluded.sent_at,raw_json=excluded.raw_json""",
+                (external_id, channel_id, "vk", peer_id, "", direction, "delivered", text_value, first["content_uri"], name if direction == "incoming" else (_clean(outgoing_author_name, 200) or "Сообщество"), sent_at, json.dumps(raw, ensure_ascii=False, separators=(",", ":"))[:50_000], now),
             )
             inserted += max(0, cursor.rowcount)
+            if (
+                direction == "incoming" and not _messenger_button_event(row)
+                and not (course_context and course_context.get("suppress_notification"))
+            ):
+                notification_records.append({
+                    "external_id": external_id, "text": text_value,
+                    "content_type": first["content_type"], "sent_at": sent_at,
+                })
             preview = text_value or ("Изображение" if first["content_type"] == "image" else "Вложение")
             await db.execute(
                 """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,phone_hash,contact_name,last_message_at,last_message_preview,created_at,updated_at)
@@ -869,6 +1354,13 @@ async def _store_vk_messages(peer_id: str, rows: list[dict[str, Any]], identity:
         await db.commit()
     finally:
         await db.close()
+    for record in notification_records:
+        await _enqueue_notification_message(
+            external_id=record["external_id"], channel_id=channel_id, chat_type="vk",
+            chat_id=peer_id, provider="vk", client_name=name, text=record["text"],
+            content_type=record["content_type"], sent_at=record["sent_at"],
+            course_context=course_context,
+        )
     return inserted
 
 
@@ -991,6 +1483,7 @@ async def _load_vk_history(peer_id: str, *, offset: int = 0, identity: dict[str,
 
 
 async def vk_background_loop() -> None:
+    await asyncio.sleep(30)
     while True:
         try:
             if _vk_token() and _vk_group_id():
@@ -1085,8 +1578,2146 @@ async def _set_setting(key: str, value: Any) -> None:
             (_clean(key, 120), _clean(value, 4000), _iso()),
         )
         await db.commit()
+        cache_key = {
+            "vk_callback_key": "key",
+            "vk_callback_secret": "secret",
+            "vk_confirmation_code": "confirmation",
+        }.get(key)
+        if cache_key:
+            _vk_callback_config[cache_key] = _clean(value, 1000)
     finally:
         await db.close()
+
+
+class NotificationDeliveryError(RuntimeError):
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+def _notification_bot_token() -> str:
+    values = _read_env_values()
+    return _clean(
+        os.environ.get(NOTIFY_TELEGRAM_TOKEN_ENV_KEY)
+        or values.get(NOTIFY_TELEGRAM_TOKEN_ENV_KEY),
+        1000,
+    )
+
+
+async def _notification_tg_call(method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    token = _notification_bot_token()
+    if not token:
+        raise NotificationDeliveryError("Токен Telegram-бота уведомлений не задан")
+    try:
+        async with httpx.AsyncClient(**httpx_client_kwargs(timeout=httpx.Timeout(20, connect=10))) as client:
+            response = await client.post(
+                f"{telegram_bot_api_base().rstrip('/')}/bot{token}/{method}",
+                json=payload or {},
+            )
+        body = response.json() if response.content else {}
+    except (httpx.HTTPError, ValueError) as exc:
+        raise NotificationDeliveryError(f"Telegram недоступен: {type(exc).__name__}: {_clean(exc, 240)}") from exc
+    if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
+        description = _clean(body.get("description") if isinstance(body, dict) else "", 300)
+        code = int(body.get("error_code") or response.status_code) if isinstance(body, dict) else response.status_code
+        raise NotificationDeliveryError(
+            f"Telegram {code}: {description or 'ошибка Bot API'}",
+            permanent=code in {400, 403},
+        )
+    result = body.get("result")
+    return result if isinstance(result, dict) else {"value": result}
+
+
+def _notification_source(channel_id: str, chat_type: str, provider: str = "") -> str:
+    provider = _clean(provider, 40).lower()
+    chat_type = _clean(chat_type, 40).lower()
+    if provider == SALEBOT_PROVIDER or channel_id.startswith("salebot:") or chat_type == "salebot":
+        return SALEBOT_PROVIDER
+    if provider == TELEGRAM_PROVIDER or channel_id.startswith("telegram-personal:"):
+        return TELEGRAM_PROVIDER
+    if provider == "vk" or channel_id.startswith("vk:"):
+        return "vk"
+    if chat_type in {"max", "maxgroup"}:
+        return "max"
+    return ""
+
+
+def _messenger_button_event(payload: Any) -> bool:
+    """Recognise explicit keyboard/callback events without guessing from text."""
+
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("payload") not in (None, "", {}, []):
+        return True
+    event_type = _clean(
+        payload.get("event_type") or payload.get("eventType") or payload.get("type"), 100,
+    ).casefold().replace("-", "_")
+    return event_type in {
+        "callback", "callback_query", "button", "button_click", "button_pressed",
+        "keyboard", "message_event", "postback", "quick_reply",
+    }
+
+
+def _notification_entity_url(context: dict[str, Any]) -> str:
+    if _clean(context.get("platform"), 40) != "amocrm" or not _amo_origin():
+        return ""
+    entity_id = _clean(context.get("entity_id"), 200)
+    entity_type = _clean(context.get("entity_type"), 40).lower()
+    if not entity_id or entity_type not in {"lead", "contact", "company", "customer"}:
+        return ""
+    plural = {"lead": "leads", "contact": "contacts", "company": "companies", "customer": "customers"}[entity_type]
+    return f"{_amo_origin()}/{plural}/detail/{quote(entity_id, safe='')}"
+
+
+def _person_key(value: Any) -> str:
+    translit = str.maketrans({
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sh",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    })
+    return re.sub(r"[^a-z0-9]+", "", _clean(value, 200).casefold().translate(translit))
+
+
+async def _course_chat_context(provider: str, chat_id: str, title: str = "") -> dict[str, Any]:
+    platform = "telegram" if provider == TELEGRAM_PROVIDER else "vk" if provider == "vk" else ""
+    if not platform:
+        return {}
+    try:
+        service = _module_service("course-chat-creator", "service_notification_chat_context")
+        result = service(platform=platform, chat_id=_clean(chat_id, 250), title=_clean(title, 500))
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, dict) and result.get("found") else {}
+    except Exception:
+        return {}
+
+
+async def _course_chat_target(context: dict[str, Any]) -> int | None:
+    curator_key = _person_key(context.get("curator_name"))
+    if not curator_key:
+        return None
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            """SELECT a.id,a.name FROM admins a
+               JOIN notification_preferences p ON p.admin_id=a.id
+               WHERE a.enabled=1 AND p.course_chats=1 ORDER BY a.id"""
+        )).fetchall()
+    finally:
+        await db.close()
+    matches = []
+    for row in rows:
+        admin_key = _person_key(row["name"])
+        if admin_key == curator_key or admin_key.startswith(curator_key) or curator_key.startswith(admin_key):
+            matches.append(int(row["id"]))
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _remember_notification_context(
+    context: dict[str, Any], provider: str, external_user_id: str, admin_id: int | None,
+) -> None:
+    provider = _clean(provider, 40).lower()
+    external_user_id = _clean(external_user_id, 250)
+    if not provider or not external_user_id:
+        return
+    now = _iso()
+    db = await _connect()
+    try:
+        await db.execute(
+            """INSERT INTO conversation_contexts(
+               provider,external_user_id,admin_id,platform,entity_type,entity_id,entity_url,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(provider,external_user_id) DO UPDATE SET
+               admin_id=COALESCE(excluded.admin_id,conversation_contexts.admin_id),
+               platform=CASE WHEN excluded.platform<>'' THEN excluded.platform ELSE conversation_contexts.platform END,
+               entity_type=CASE WHEN excluded.entity_type<>'' THEN excluded.entity_type ELSE conversation_contexts.entity_type END,
+               entity_id=CASE WHEN excluded.entity_id<>'' THEN excluded.entity_id ELSE conversation_contexts.entity_id END,
+               entity_url=CASE WHEN excluded.entity_url<>'' THEN excluded.entity_url ELSE conversation_contexts.entity_url END,
+               updated_at=excluded.updated_at""",
+            (
+                provider, external_user_id, admin_id, _clean(context.get("platform"), 40),
+                _clean(context.get("entity_type"), 40), _clean(context.get("entity_id"), 200),
+                _clean(context.get("entity_url"), 2000) or _notification_entity_url(context), now,
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def _notification_owner(
+    db: aiosqlite.Connection, *, source: str, channel_id: str, chat_type: str,
+    chat_id: str, phone_hash: str,
+) -> int | None:
+    row = await (await db.execute(
+        "SELECT responsible_admin_id FROM wazzup_chats WHERE channel_id=? AND chat_type=? AND chat_id=?",
+        (channel_id, chat_type, chat_id),
+    )).fetchone()
+    if row and row["responsible_admin_id"]:
+        return int(row["responsible_admin_id"])
+    row = await (await db.execute(
+        "SELECT admin_id FROM conversation_contexts WHERE provider=? AND external_user_id=?",
+        (source, chat_id),
+    )).fetchone()
+    if row and row["admin_id"]:
+        return int(row["admin_id"])
+    if phone_hash:
+        row = await (await db.execute(
+            "SELECT responsible_admin_id FROM client_links WHERE phone_hash=?",
+            (phone_hash,),
+        )).fetchone()
+        if row and row["responsible_admin_id"]:
+            return int(row["responsible_admin_id"])
+    return None
+
+
+async def _enqueue_notification_message(
+    *, external_id: str, channel_id: str, chat_type: str, chat_id: str,
+    phone_hash: str = "", provider: str = "", client_name: str = "",
+    text: str = "", content_type: str = "", sent_at: str = "",
+    course_context: dict[str, Any] | None = None,
+) -> bool:
+    source = _notification_source(channel_id, chat_type, provider)
+    external_id = _clean(external_id, 250)
+    chat_id = _clean(chat_id, 250)
+    sent_at = _message_time(sent_at)
+    if source not in NOTIFY_SOURCES or not external_id or not chat_id:
+        return False
+    # Pairing commands and messenger keyboard/callback payloads are service
+    # traffic, not a message which a sales manager should answer.
+    if re.fullmatch(r"(?:NEXUS|НЕКСУС)[-\s]+[A-Z0-9]{8,24}", _clean(text, 200).upper()):
+        return False
+    live_since = await _setting("notification_live_since")
+    if live_since and sent_at < live_since:
+        return False
+    now = _iso()
+    available_at = _iso(_now_dt() + timedelta(seconds=NOTIFY_BATCH_SECONDS))
+    thread_key = f"{source}:{_clean(channel_id, 200)}:{chat_id}"
+    course_context = course_context if isinstance(course_context, dict) and course_context.get("found") else {}
+    direct_target = await _course_chat_target(course_context) if course_context else None
+    if course_context and not direct_target:
+        return False
+    if course_context:
+        await _remember_notification_context(
+            {
+                "platform": "course_chat", "entity_type": "chat",
+                "entity_id": _clean(course_context.get("chat_id") or chat_id, 200),
+                "entity_url": _clean(course_context.get("chat_url"), 2000),
+            },
+            source, chat_id, direct_target,
+        )
+    db = await _connect()
+    inserted = False
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        owner_id = direct_target or await _notification_owner(
+            db, source=source, channel_id=_clean(channel_id, 200),
+            chat_type=_clean(chat_type, 40).lower(), chat_id=chat_id,
+            phone_hash=_clean(phone_hash, 100),
+        )
+        if owner_id is None:
+            linked_lead = await (await db.execute(
+                """SELECT 1 FROM conversation_contexts
+                   WHERE provider=? AND external_user_id=? AND platform='amocrm' AND entity_type='lead' AND entity_id<>''
+                   UNION ALL
+                   SELECT 1 FROM entity_identity_links
+                   WHERE provider=? AND external_user_id=? AND platform='amocrm' AND entity_type='lead' AND entity_id<>''
+                   LIMIT 1""",
+                (source, chat_id, source, chat_id),
+            )).fetchone()
+            if not linked_lead:
+                await db.rollback()
+                return False
+        # Rolling debounce: every new client message postpones the whole open
+        # group, so a burst becomes one notification and one amoCRM task.
+        await db.execute(
+            """UPDATE notification_events SET available_at=?,updated_at=?
+               WHERE status='pending' AND thread_key=? AND target_admin_id IS ?""",
+            (available_at, now, thread_key, owner_id),
+        )
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO notification_events(
+               external_id,source,thread_key,channel_id,chat_type,chat_id,target_admin_id,
+               client_name,text,content_type,sent_at,available_at,status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+            (
+                external_id, source, thread_key, _clean(channel_id, 200),
+                _clean(chat_type, 40).lower(), chat_id, owner_id,
+                _clean(client_name, 200), _clean(text, 3500), _clean(content_type, 100),
+                sent_at, available_at, now, now,
+            ),
+        )
+        inserted = cursor.rowcount > 0
+        await db.commit()
+    finally:
+        await db.close()
+    if inserted:
+        context = await _communication_context(
+            source, chat_id, channel_id=_clean(channel_id, 200), chat_type=_clean(chat_type, 40).lower(),
+        )
+        communication_id = await _record_communication(
+            dedupe_key=f"incoming:{external_id}", external_id=external_id, provider=source,
+            channel_id=channel_id, chat_type=chat_type, chat_id=chat_id,
+            direction="incoming", status="received", text=text, sent_at=sent_at,
+            client_name=client_name, phone_hash=phone_hash, admin_id=owner_id,
+            transport_author=client_name, context=context,
+        )
+        task_text = _clean(text, 2000) or {
+            "audio": "Голосовое сообщение", "voice": "Голосовое сообщение",
+            "image": "Изображение", "video": "Видео", "document": "Вложение",
+        }.get(_clean(content_type, 100).lower(), "Вложение без текста")
+        await _enqueue_amo_task_for_message(
+            message_key=f"incoming:{external_id}", communication_id=communication_id,
+            context=context, messenger=_notification_label(source),
+            client_name=client_name, message_text=task_text,
+        )
+        _notification_wakeup.set()
+    return inserted
+
+
+def _notification_label(source: str) -> str:
+    return {
+        "max": "MAX",
+        "vk": "VK",
+        TELEGRAM_PROVIDER: "Telegram Personal",
+        SALEBOT_PROVIDER: "SaleBot",
+    }.get(source, source.upper())
+
+
+async def _notification_context(source: str, chat_id: str) -> dict[str, str]:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT * FROM conversation_contexts WHERE provider=? AND external_user_id=?",
+            (source, chat_id),
+        )).fetchone()
+    finally:
+        await db.close()
+    return dict(row) if row else {}
+
+
+async def _notification_text(rows: list[dict[str, Any]]) -> tuple[str, list[tuple[str, str]]]:
+    first = rows[0]
+    name = _clean(first.get("client_name"), 200) or "Клиент"
+    context = await _notification_context(first["source"], first["chat_id"])
+    course_chat = _clean(context.get("platform"), 40) == "course_chat"
+    lines = [
+        f"💬 Новое сообщение · {_notification_label(first['source'])}",
+        f"{'Учебный чат' if course_chat else 'Клиент'}: {name}", "",
+    ]
+    for row in rows[:12]:
+        value = _clean(row.get("text"), 1200)
+        if not value:
+            content_type = _clean(row.get("content_type"), 100).lower()
+            value = {
+                "audio": "🎤 Голосовое сообщение",
+                "voice": "🎤 Голосовое сообщение",
+                "image": "🖼 Изображение",
+                "video": "🎬 Видео",
+                "document": "📎 Вложение",
+            }.get(content_type)
+            if not value:
+                value = (
+                    "🎤 Голосовое сообщение" if content_type.startswith("audio/")
+                    else "🖼 Изображение" if content_type.startswith("image/")
+                    else "🎬 Видео" if content_type.startswith("video/")
+                    else "📎 Вложение"
+                )
+        lines.append(value)
+    if len(rows) > 12:
+        lines.append(f"…ещё сообщений: {len(rows) - 12}")
+    links: list[tuple[str, str]] = []
+    entity_url = _clean(context.get("entity_url"), 2000)
+    if entity_url:
+        links.append(("Открыть учебный чат" if course_chat else "Открыть сделку amoCRM", entity_url))
+    if not course_chat and first["source"] == "vk" and str(first["chat_id"]).isdigit():
+        links.append(("Профиль VK", f"https://vk.com/id{first['chat_id']}"))
+    elif first["source"] == SALEBOT_PROVIDER:
+        links.append(("Профиль SaleBot", f"{SALEBOT_PROFILE_BASE}/{quote(str(first['chat_id']), safe='')}"))
+    if links:
+        lines.extend(["", *[f"{label}: {url}" for label, url in links]])
+    return "\n".join(lines)[:4000], links
+
+
+async def _send_notification_destination(
+    provider: str, recipient_id: str, text_value: str, links: list[tuple[str, str]],
+) -> str:
+    if provider == "telegram":
+        payload: dict[str, Any] = {
+            "chat_id": recipient_id,
+            "text": text_value,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if links:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": label, "url": url}] for label, url in links[:3]]
+            }
+        result = await _notification_tg_call("sendMessage", payload)
+        return _clean(result.get("message_id"), 200)
+    if provider == "vk":
+        try:
+            result = await _vk_request("messages.send", {
+                "group_id": _vk_group_id(), "peer_id": recipient_id,
+                "random_id": secrets.randbelow(2_000_000_000) + 1,
+                "message": text_value,
+            })
+        except HTTPException as exc:
+            detail = _clean(exc.detail, 300)
+            raise NotificationDeliveryError(detail, permanent=any(code in detail for code in ("VK 901", "VK 902", "VK 917"))) from exc
+        return _clean(result.get("message_id") if isinstance(result, dict) else result, 200)
+    raise NotificationDeliveryError("Неизвестный канал уведомлений", permanent=True)
+
+
+def _webpush_encrypt(payload: bytes, receiver_key: str, auth_secret: str) -> bytes:
+    if not payload or len(payload) > WEB_PUSH_MAX_PAYLOAD:
+        raise NotificationDeliveryError("Некорректный размер Web Push", permanent=True)
+    try:
+        receiver_raw = _b64url_decode(receiver_key)
+        auth_raw = _b64url_decode(auth_secret)
+        receiver = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), receiver_raw)
+    except Exception as exc:
+        raise NotificationDeliveryError("Повреждены ключи браузера", permanent=True) from exc
+    sender = ec.generate_private_key(ec.SECP256R1())
+    sender_raw = sender.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint,
+    )
+    shared = sender.exchange(ec.ECDH(), receiver)
+    ikm = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=auth_raw,
+        info=b"WebPush: info\x00" + receiver_raw + sender_raw,
+    ).derive(shared)
+    salt = os.urandom(16)
+    key = HKDF(
+        algorithm=hashes.SHA256(), length=16, salt=salt,
+        info=b"Content-Encoding: aes128gcm\x00",
+    ).derive(ikm)
+    nonce = HKDF(
+        algorithm=hashes.SHA256(), length=12, salt=salt,
+        info=b"Content-Encoding: nonce\x00",
+    ).derive(ikm)
+    encrypted = AESGCM(key).encrypt(nonce, payload + b"\x02", None)
+    return salt + WEB_PUSH_RECORD_SIZE.to_bytes(4, "big") + bytes((len(sender_raw),)) + sender_raw + encrypted
+
+
+async def _webpush_vapid_headers(endpoint: str) -> dict[str, str]:
+    parsed = urlsplit(endpoint)
+    audience = f"{parsed.scheme}://{parsed.netloc}"
+    private_pem = await _setting("webpush_vapid_private")
+    public_key = await _setting("webpush_vapid_public")
+    if not private_pem or not public_key:
+        raise NotificationDeliveryError("Web Push ещё не настроен")
+    token = jwt.encode(
+        {"aud": audience, "exp": int(time.time()) + 12 * 3600, "sub": WEB_PUSH_SUBJECT},
+        private_pem, algorithm="ES256",
+    )
+    return {
+        "Authorization": f"vapid t={token}, k={public_key}",
+        "Content-Encoding": "aes128gcm",
+        "Content-Type": "application/octet-stream",
+        "TTL": "86400",
+        "Urgency": "high",
+    }
+
+
+async def _require_public_push_endpoint(endpoint: str) -> str:
+    parsed = urlsplit(_clean(endpoint, 4000))
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise NotificationDeliveryError("Некорректный адрес Web Push", permanent=True)
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo, parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise NotificationDeliveryError("Сервис Web Push временно недоступен") from exc
+    if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+        raise NotificationDeliveryError("Запрещённый адрес Web Push", permanent=True)
+    return endpoint
+
+
+async def _send_webpush_destination(destination: dict[str, Any], payload: dict[str, Any]) -> str:
+    endpoint = await _require_public_push_endpoint(destination.get("push_endpoint") or "")
+    body = _webpush_encrypt(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        _clean(destination.get("push_p256dh"), 1000),
+        _clean(destination.get("push_auth"), 1000),
+    )
+    headers = await _webpush_vapid_headers(endpoint)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8), follow_redirects=False) as client:
+            response = await client.post(endpoint, content=body, headers=headers)
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise NotificationDeliveryError("Сервис Web Push временно недоступен") from exc
+    if response.status_code in {200, 201, 202}:
+        return _clean(response.headers.get("location") or f"push-{int(time.time())}", 300)
+    permanent = response.status_code in {400, 404, 410}
+    raise NotificationDeliveryError(f"Web Push HTTP {response.status_code}", permanent=permanent)
+
+
+async def _browser_push_destinations(admin_id: int) -> list[dict[str, Any]]:
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            """SELECT * FROM browser_notification_subscriptions
+               WHERE admin_id=? AND enabled=1 AND push_endpoint<>'' AND push_p256dh<>'' AND push_auth<>''
+               ORDER BY id""",
+            (admin_id,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _webpush_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    first = rows[0]
+    context = await _notification_context(first["source"], first["chat_id"])
+    text_value = _clean(first.get("text"), 420) or {
+        "audio": "Голосовое сообщение", "voice": "Голосовое сообщение",
+        "image": "Изображение", "video": "Видео", "document": "Вложение",
+    }.get(_clean(first.get("content_type"), 100).lower(), "Новое вложение")
+    if len(rows) > 1:
+        text_value = f"{text_value}\nЕщё сообщений: {len(rows) - 1}"
+    return {
+        "title": f"{_notification_label(first['source'])} · {_clean(first.get('client_name'), 120) or 'Клиент'}",
+        "body": text_value,
+        "url": _clean(context.get("entity_url"), 2000),
+        "tag": "nexus-" + hashlib.sha256(first["thread_key"].encode()).hexdigest()[:20],
+    }
+
+
+async def _notification_targets(target_admin_id: int | None, *, direct: bool = False) -> list[int]:
+    db = await _connect()
+    try:
+        if target_admin_id:
+            if direct:
+                row = await (await db.execute(
+                    "SELECT id FROM admins WHERE id=? AND enabled=1", (target_admin_id,),
+                )).fetchone()
+                return [int(row["id"])] if row else []
+            policy = await (await db.execute(
+                "SELECT configured FROM notification_route_policies WHERE source_admin_id=?",
+                (target_admin_id,),
+            )).fetchone()
+            if policy:
+                rows = await (await db.execute(
+                    """SELECT a.id FROM notification_routes r JOIN admins a ON a.id=r.recipient_admin_id
+                       WHERE r.source_admin_id=? AND a.enabled=1 ORDER BY a.name,a.id""",
+                    (target_admin_id,),
+                )).fetchall()
+                return [int(row["id"]) for row in rows]
+            row = await (await db.execute("SELECT id FROM admins WHERE id=? AND enabled=1", (target_admin_id,))).fetchone()
+            return [int(row["id"])] if row else []
+        rows = await (await db.execute(
+            """SELECT a.id FROM admins a JOIN notification_preferences p ON p.admin_id=a.id
+               WHERE a.enabled=1 AND a.role='admin' AND p.fallback_unassigned=1 ORDER BY a.id"""
+        )).fetchall()
+        return [int(row["id"]) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _notification_destinations(admin_id: int) -> list[dict[str, Any]]:
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            "SELECT * FROM notification_destinations WHERE admin_id=? AND enabled=1 ORDER BY provider",
+            (admin_id,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _notification_delivery_state(
+    event_ids: list[str], admin_id: int, provider: str,
+) -> list[dict[str, Any]]:
+    placeholders = ",".join("?" for _ in event_ids)
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            f"SELECT * FROM notification_deliveries WHERE event_id IN ({placeholders}) AND admin_id=? AND provider=?",
+            (*event_ids, admin_id, provider),
+        )).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _record_notification_delivery(
+    event_ids: list[str], admin_id: int, provider: str, recipient_id: str,
+    *, status: str, attempts: int, next_attempt_at: str = "",
+    external_message_id: str = "", error: str = "",
+) -> None:
+    now = _iso()
+    db = await _connect()
+    try:
+        await db.executemany(
+            """INSERT INTO notification_deliveries(
+               event_id,admin_id,provider,recipient_id,status,attempts,next_attempt_at,
+               external_message_id,last_error,sent_at,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id,admin_id,provider) DO UPDATE SET
+               recipient_id=excluded.recipient_id,status=excluded.status,attempts=excluded.attempts,
+               next_attempt_at=excluded.next_attempt_at,external_message_id=excluded.external_message_id,
+               last_error=excluded.last_error,sent_at=excluded.sent_at,updated_at=excluded.updated_at""",
+            [(
+                event_id, admin_id, provider, recipient_id, status, attempts, next_attempt_at,
+                external_message_id, _clean(error, 500), now if status == "sent" else "", now, now,
+            ) for event_id in event_ids],
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def _next_notification_group() -> list[dict[str, Any]]:
+    now = _iso()
+    db = await _connect()
+    try:
+        first = await (await db.execute(
+            """SELECT * FROM notification_events WHERE status='pending' AND available_at<=?
+               ORDER BY available_at,created_at LIMIT 1""",
+            (now,),
+        )).fetchone()
+        if not first:
+            return []
+        rows = await (await db.execute(
+            """SELECT * FROM notification_events
+               WHERE status='pending' AND available_at<=? AND thread_key=? AND target_admin_id IS ?
+               ORDER BY sent_at,created_at LIMIT 50""",
+            (now, first["thread_key"], first["target_admin_id"]),
+        )).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _finish_notification_events(event_ids: list[str], status: str, available_at: str = "") -> None:
+    placeholders = ",".join("?" for _ in event_ids)
+    db = await _connect()
+    try:
+        if available_at:
+            await db.execute(
+                f"UPDATE notification_events SET available_at=?,updated_at=? WHERE external_id IN ({placeholders})",
+                (available_at, _iso(), *event_ids),
+            )
+        else:
+            await db.execute(
+                f"UPDATE notification_events SET status=?,updated_at=? WHERE external_id IN ({placeholders})",
+                (status, _iso(), *event_ids),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def _deliver_notification_group(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    event_ids = [row["external_id"] for row in rows]
+    first_context = await _notification_context(rows[0]["source"], rows[0]["chat_id"])
+    if rows[0].get("target_admin_id") is None and not (
+        _clean(first_context.get("platform"), 40) == "amocrm"
+        and _clean(first_context.get("entity_type"), 40) == "lead"
+        and _clean(first_context.get("entity_id"), 100)
+    ):
+        await _finish_notification_events(event_ids, "no_destination")
+        return
+    targets = await _notification_targets(
+        rows[0].get("target_admin_id"), direct=_clean(first_context.get("platform"), 40) == "course_chat",
+    )
+    if not targets:
+        await _finish_notification_events(event_ids, "no_destination")
+        return
+    text_value, links = await _notification_text(rows)
+    webpush_payload = await _webpush_payload(rows)
+    had_destination = False
+    retry_at_values: list[str] = []
+    for admin_id in targets:
+        destinations = await _notification_destinations(admin_id)
+        destinations.extend({**row, "provider": f"browser:{row['id']}", "recipient_id": str(row["id"]), "_browser": True} for row in await _browser_push_destinations(admin_id))
+        for destination in destinations:
+            had_destination = True
+            provider = destination["provider"]
+            states = await _notification_delivery_state(event_ids, admin_id, provider)
+            if states and all(row["status"] in {"sent", "dead"} for row in states) and len(states) == len(event_ids):
+                continue
+            attempts = max([int(row.get("attempts") or 0) for row in states] or [0]) + 1
+            future = [row["next_attempt_at"] for row in states if row.get("next_attempt_at") and row["next_attempt_at"] > _iso()]
+            if future:
+                retry_at_values.append(min(future))
+                continue
+            try:
+                if destination.get("_browser"):
+                    external_message_id = await _send_webpush_destination(destination, webpush_payload)
+                else:
+                    external_message_id = await _send_notification_destination(
+                        provider, destination["recipient_id"], text_value, links,
+                    )
+                await _record_notification_delivery(
+                    event_ids, admin_id, provider, destination["recipient_id"],
+                    status="sent", attempts=attempts, external_message_id=external_message_id,
+                )
+            except NotificationDeliveryError as exc:
+                dead = exc.permanent or attempts >= NOTIFY_MAX_ATTEMPTS
+                next_attempt = "" if dead else _iso(
+                    _now_dt() + timedelta(seconds=NOTIFY_RETRY_SECONDS[min(attempts - 1, len(NOTIFY_RETRY_SECONDS) - 1)])
+                )
+                await _record_notification_delivery(
+                    event_ids, admin_id, provider, destination["recipient_id"],
+                    status="dead" if dead else "failed", attempts=attempts,
+                    next_attempt_at=next_attempt, error=str(exc),
+                )
+                if dead and exc.permanent:
+                    db = await _connect()
+                    try:
+                        if destination.get("_browser"):
+                            await db.execute(
+                                "UPDATE browser_notification_subscriptions SET enabled=0,updated_at=? WHERE id=?",
+                                (_iso(), destination["id"]),
+                            )
+                        else:
+                            await db.execute(
+                                "UPDATE notification_destinations SET enabled=0,last_error=?,updated_at=? WHERE admin_id=? AND provider=?",
+                                (_clean(exc, 500), _iso(), admin_id, provider),
+                            )
+                        await db.commit()
+                    finally:
+                        await db.close()
+                elif next_attempt:
+                    retry_at_values.append(next_attempt)
+    if not had_destination:
+        await _finish_notification_events(event_ids, "no_destination")
+    elif retry_at_values:
+        await _finish_notification_events(event_ids, "pending", min(retry_at_values))
+    else:
+        await _finish_notification_events(event_ids, "delivered")
+
+
+async def notification_delivery_loop() -> None:
+    await asyncio.sleep(2)
+    while True:
+        try:
+            rows = await _next_notification_group()
+            if rows:
+                await _deliver_notification_group(rows)
+                continue
+            _notification_wakeup.clear()
+            try:
+                await asyncio.wait_for(_notification_wakeup.wait(), timeout=5)
+            except TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log("exception", "Notification delivery loop failed")
+            await asyncio.sleep(5)
+
+
+def _amo_deal_delivery_details(lead_id: str) -> dict[str, str]:
+    clean_id = _clean(lead_id, 64)
+    path = _customer_db_path()
+    if not clean_id or not path.is_file():
+        return {}
+    try:
+        with sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True, timeout=3) as db:
+            row = db.execute(
+                "SELECT custom_fields FROM cdb_amo_deals WHERE platform_id=? ORDER BY updated_at DESC LIMIT 1",
+                (clean_id,),
+            ).fetchone()
+        payload = json.loads(row[0]) if row and row[0] else {}
+    except (sqlite3.Error, json.JSONDecodeError, TypeError):
+        return {}
+    contact = payload.get("contact_fields") if isinstance(payload.get("contact_fields"), dict) else {}
+    amo = payload.get("amo") if isinstance(payload.get("amo"), dict) else {}
+    return {
+        "responsible_user_id": _clean(amo.get("responsible_user_id") or payload.get("responsible_user_id"), 64),
+        "client_name": _clean(contact.get("name") or payload.get("deal_name"), 200),
+        "entity_url": _clean(payload.get("deal_url"), 1000),
+    }
+
+
+async def _communication_context(
+    provider: str, chat_id: str, *, channel_id: str = "", chat_type: str = "",
+) -> dict[str, Any]:
+    db = await _connect()
+    try:
+        context = await (await db.execute(
+            "SELECT * FROM conversation_contexts WHERE provider=? AND external_user_id=?",
+            (_clean(provider, 40), _clean(chat_id, 250)),
+        )).fetchone()
+        entity = await (await db.execute(
+            """SELECT platform,entity_type,entity_id FROM entity_identity_links
+               WHERE provider=? AND external_user_id=? ORDER BY updated_at DESC LIMIT 1""",
+            (_clean(provider, 40), _clean(chat_id, 250)),
+        )).fetchone()
+        chat = await (await db.execute(
+            """SELECT contact_name,phone_hash,responsible_admin_id FROM wazzup_chats
+               WHERE channel_id=? AND chat_type=? AND chat_id=?""",
+            (_clean(channel_id, 200), _clean(chat_type, 40), _clean(chat_id, 250)),
+        )).fetchone()
+    finally:
+        await db.close()
+    result = dict(context) if context else {}
+    if entity:
+        for key in ("platform", "entity_type", "entity_id"):
+            result.setdefault(key, entity[key])
+    if chat:
+        result.setdefault("client_name", _clean(chat["contact_name"], 200))
+        result.setdefault("phone_hash", _clean(chat["phone_hash"], 100))
+        result.setdefault("admin_id", chat["responsible_admin_id"])
+    result["amo_lead_id"] = (
+        _clean(result.get("entity_id"), 64)
+        if result.get("platform") == "amocrm" and result.get("entity_type") == "lead"
+        else ""
+    )
+    if result["amo_lead_id"]:
+        details = await asyncio.to_thread(_amo_deal_delivery_details, result["amo_lead_id"])
+        if not result.get("client_name"):
+            result["client_name"] = details.get("client_name", "")
+        if not result.get("entity_url"):
+            result["entity_url"] = details.get("entity_url", "")
+        result["responsible_user_id"] = details.get("responsible_user_id", "")
+    return result
+
+
+async def _record_communication(
+    *, dedupe_key: str, external_id: str, provider: str, channel_id: str,
+    chat_type: str, chat_id: str, direction: str, status: str, text: str,
+    sent_at: str, client_name: str = "", phone_hash: str = "",
+    admin_id: int | None = None, manager_name: str = "", transport_author: str = "",
+    attempts: int = 0, latency_ms: int | None = None, error: str = "",
+    context: dict[str, Any] | None = None,
+) -> int:
+    context = context or await _communication_context(
+        provider, chat_id, channel_id=channel_id, chat_type=chat_type,
+    )
+    now = _iso()
+    db = await _connect()
+    try:
+        await db.execute(
+            """INSERT INTO communication_messages(
+               dedupe_key,external_id,provider,channel_id,chat_type,chat_id,direction,status,text,
+               client_name,phone_hash,platform,entity_type,entity_id,entity_url,amo_lead_id,
+               admin_id,manager_name,transport_author,attempts,latency_ms,error,sent_at,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(dedupe_key) DO UPDATE SET
+               external_id=CASE WHEN excluded.external_id<>'' THEN excluded.external_id ELSE communication_messages.external_id END,
+               status=excluded.status,text=excluded.text,
+               admin_id=COALESCE(excluded.admin_id,communication_messages.admin_id),
+               manager_name=CASE WHEN excluded.manager_name<>'' THEN excluded.manager_name ELSE communication_messages.manager_name END,
+               transport_author=CASE WHEN excluded.transport_author<>'' THEN excluded.transport_author ELSE communication_messages.transport_author END,
+               attempts=MAX(communication_messages.attempts,excluded.attempts),latency_ms=excluded.latency_ms,
+               error=excluded.error,updated_at=excluded.updated_at""",
+            (
+                _clean(dedupe_key, 300), _clean(external_id, 250), _clean(provider, 40),
+                _clean(channel_id, 200), _clean(chat_type, 40), _clean(chat_id, 250),
+                _clean(direction, 20), _clean(status, 40), _clean(text, 20_000),
+                _clean(client_name or context.get("client_name"), 200),
+                _clean(phone_hash or context.get("phone_hash"), 100),
+                _clean(context.get("platform"), 40), _clean(context.get("entity_type"), 40),
+                _clean(context.get("entity_id"), 100), _clean(context.get("entity_url"), 1000),
+                _clean(context.get("amo_lead_id"), 64), admin_id or context.get("admin_id"),
+                _clean(manager_name, 200), _clean(transport_author, 200), max(0, attempts),
+                latency_ms, _clean(error, 1000), _message_time(sent_at), now, now,
+            ),
+        )
+        row = await (await db.execute(
+            "SELECT id FROM communication_messages WHERE dedupe_key=?", (_clean(dedupe_key, 300),),
+        )).fetchone()
+        await db.commit()
+        return int(row["id"]) if row else 0
+    finally:
+        await db.close()
+
+
+async def _enqueue_amo_task_for_message(
+    *, message_key: str, communication_id: int, context: dict[str, Any],
+    messenger: str, client_name: str, message_text: str,
+) -> bool:
+    lead_id = _clean(context.get("amo_lead_id"), 64)
+    if not lead_id:
+        return False
+    details = await asyncio.to_thread(_amo_deal_delivery_details, lead_id)
+    now = _iso()
+    due_at = _iso(_now_dt() + timedelta(seconds=NOTIFY_BATCH_SECONDS))
+    db = await _connect()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        open_job = await (await db.execute(
+            """SELECT id,messenger,message_text FROM amo_task_jobs
+               WHERE amo_lead_id=? AND status IN ('pending','retry')
+               ORDER BY id DESC LIMIT 1""",
+            (lead_id,),
+        )).fetchone()
+        if open_job:
+            messengers = [item.strip() for item in _clean(open_job["messenger"], 400).split(",") if item.strip()]
+            current_messenger = _clean(messenger, 80)
+            if current_messenger and current_messenger not in messengers:
+                messengers.append(current_messenger)
+            previous = _clean(open_job["message_text"], 5000)
+            addition = _clean(f"{current_messenger}: {message_text}" if current_messenger else message_text, 2200)
+            combined = "\n".join(part for part in (previous, addition) if part)[-5000:]
+            await db.execute(
+                """UPDATE amo_task_jobs SET communication_id=?,responsible_user_id=?,messenger=?,
+                   client_name=?,message_text=?,status='pending',next_attempt_at=?,error='',updated_at=?
+                   WHERE id=?""",
+                (
+                    communication_id or None, _clean(details.get("responsible_user_id"), 64),
+                    ", ".join(messengers), _clean(client_name or details.get("client_name"), 200),
+                    combined, due_at, now, open_job["id"],
+                ),
+            )
+            await db.commit()
+            _amo_task_wakeup.set()
+            return True
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO amo_task_jobs(
+               message_key,communication_id,amo_lead_id,responsible_user_id,messenger,
+               client_name,message_text,status,attempts,next_attempt_at,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,'pending',0,?,?,?)""",
+            (
+                _clean(message_key, 300), communication_id or None, lead_id,
+                _clean(details.get("responsible_user_id"), 64), _clean(messenger, 80),
+                _clean(client_name or details.get("client_name"), 200),
+                _clean(message_text, 2000), due_at, now, now,
+            ),
+        )
+        inserted = cursor.rowcount > 0
+        await db.commit()
+    finally:
+        await db.close()
+    if inserted:
+        _amo_task_wakeup.set()
+    return inserted
+
+
+class AmoTaskDeliveryError(RuntimeError):
+    def __init__(self, message: str, *, permanent: bool = False, retry_after: int = 0):
+        super().__init__(message)
+        self.permanent = permanent
+        self.retry_after = max(0, retry_after)
+
+
+def _retry_after_seconds_header(value: str) -> int:
+    try:
+        return max(0, min(86400, int(float(_clean(value, 100)))))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _send_amo_task(job: dict[str, Any]) -> str:
+    values = _read_env_values()
+    base_url = _clean(os.environ.get("AMO_BASE_URL") or values.get("AMO_BASE_URL"), 1000).rstrip("/")
+    token = _clean(os.environ.get("AMO_ACCESS_TOKEN") or values.get("AMO_ACCESS_TOKEN"), 5000)
+    if not base_url or not token:
+        raise AmoTaskDeliveryError("AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы")
+    preview = _clean(job.get("message_text"), 1300) or "Вложение без текста"
+    messenger = _clean(job.get("messenger"), 80)
+    client_name = _clean(job.get("client_name"), 200) or "Клиент"
+    task: dict[str, Any] = {
+        "entity_id": int(job["amo_lead_id"]), "entity_type": "leads", "task_type_id": 1,
+        "text": _clean(f"Новое сообщение · {messenger}\n{client_name}: {preview}", 2000),
+        "complete_till": int(time.time()) + 24 * 60 * 60,
+    }
+    responsible = _clean(job.get("responsible_user_id"), 64)
+    if responsible.isdigit():
+        task["responsible_user_id"] = int(responsible)
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                base_url + "/api/v4/tasks", json=[task],
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        raise AmoTaskDeliveryError(f"amoCRM недоступен: {type(exc).__name__}") from exc
+    if response.status_code == 429 or response.status_code >= 500:
+        raise AmoTaskDeliveryError(
+            f"amoCRM HTTP {response.status_code}: {_clean(response.text, 400)}",
+            retry_after=_retry_after_seconds_header(response.headers.get("Retry-After", "")),
+        )
+    if response.status_code >= 400:
+        raise AmoTaskDeliveryError(
+            f"amoCRM HTTP {response.status_code}: {_clean(response.text, 400)}", permanent=True,
+        )
+    try:
+        return _clean((((response.json().get("_embedded") or {}).get("tasks") or [{}])[0].get("id")), 64)
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+
+async def _claim_amo_task_job() -> dict[str, Any] | None:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT * FROM amo_task_jobs WHERE status IN ('pending','retry')
+               AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY id LIMIT 1""", (_iso(),),
+        )).fetchone()
+        if not row:
+            return None
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (await db.execute(
+            """SELECT * FROM amo_task_jobs WHERE status IN ('pending','retry')
+               AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY id LIMIT 1""", (_iso(),),
+        )).fetchone()
+        if not row:
+            await db.commit()
+            return None
+        await db.execute(
+            "UPDATE amo_task_jobs SET status='processing',attempts=attempts+1,updated_at=? WHERE id=?",
+            (_iso(), row["id"]),
+        )
+        await db.commit()
+        result = dict(row)
+        result["attempts"] = int(row["attempts"] or 0) + 1
+        return result
+    finally:
+        await db.close()
+
+
+async def _process_amo_task_job(job: dict[str, Any]) -> None:
+    try:
+        task_id = await _send_amo_task(job)
+        status, next_at, error = "sent", "", ""
+    except AmoTaskDeliveryError as exc:
+        dead = exc.permanent or int(job["attempts"]) >= AMO_TASK_MAX_ATTEMPTS
+        delay = exc.retry_after or AMO_TASK_RETRY_SECONDS[min(int(job["attempts"]) - 1, len(AMO_TASK_RETRY_SECONDS) - 1)]
+        status, next_at, error, task_id = (
+            "failed" if dead else "retry",
+            "" if dead else _iso(_now_dt() + timedelta(seconds=delay)),
+            str(exc), "",
+        )
+    db = await _connect()
+    try:
+        await db.execute(
+            "UPDATE amo_task_jobs SET status=?,next_attempt_at=?,amo_task_id=?,error=?,updated_at=? WHERE id=?",
+            (status, next_at, task_id, _clean(error, 1000), _iso(), job["id"]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def amo_task_delivery_loop() -> None:
+    await asyncio.sleep(3)
+    while True:
+        try:
+            job = await _claim_amo_task_job()
+            if job:
+                await _process_amo_task_job(job)
+                continue
+            _amo_task_wakeup.clear()
+            try:
+                await asyncio.wait_for(_amo_task_wakeup.wait(), timeout=5)
+            except TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log("exception", "amoCRM task delivery loop failed")
+            await asyncio.sleep(5)
+
+
+def _delivery_retry_delay(error: Any, attempts: int) -> int:
+    text_value = _clean(getattr(error, "detail", error), 1000)
+    match = re.search(r"(?:FLOOD_WAIT_|wait of\s+)(\d+)", text_value, re.I)
+    if match:
+        return max(5, min(86400, int(match.group(1)) + 2))
+    return OUTBOUND_RETRY_SECONDS[min(max(0, attempts - 1), len(OUTBOUND_RETRY_SECONDS) - 1)]
+
+
+def _delivery_error_is_transient(error: Any) -> bool:
+    status_code = int(getattr(error, "status_code", 0) or 0)
+    text_value = _clean(getattr(error, "detail", error), 1000).casefold()
+    return status_code in {408, 425, 429, 500, 502, 503, 504} or any(token in text_value for token in (
+        "too many requests", "flood_wait", "wait of", "timeout", "timed out",
+        "временно", "недоступен", "connection", "transport", "http 429",
+        "http 500", "http 502", "http 503", "http 504",
+    ))
+
+
+def _salutation_name_mismatch(text: str, client_name: str) -> tuple[str, str] | None:
+    """Catch a pasted greeting addressed to another person before any channel sends it."""
+
+    expected = _clean(client_name, 200).split(" ", 1)[0].strip(" ,.!?:;—–-")
+    if len(expected) < 2:
+        return None
+    match = re.match(
+        r"^\s*(?:здравствуйте|добрый\s+(?:день|вечер)|доброе\s+утро|привет)"
+        r"\s*[,!]?\s+([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z'-]{1,40})\b",
+        _clean(text, 4000), re.I,
+    )
+    addressed = match.group(1) if match else ""
+    normalize = lambda value: value.casefold().replace("ё", "е")
+    if addressed and normalize(addressed) != normalize(expected):
+        return addressed, expected
+    return None
+
+
+async def _start_outbound_job(
+    *, request_key: str, device: dict[str, Any], provider: str, channel_id: str,
+    chat_type: str, chat_id: str, phone: str, client_name: str, email: str,
+    getcourse_user_id: str, text: str, attachment_url: str, attachment_type: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    request_key = _clean(request_key, 300) or secrets.token_urlsafe(24)
+    now = _iso()
+    amo_lead_id = (
+        _clean(context.get("entity_id"), 64)
+        if context.get("platform") == "amocrm" and context.get("entity_type") == "lead" else ""
+    )
+    db = await _connect()
+    try:
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO outbound_jobs(
+               request_key,admin_id,device_id,provider,channel_id,chat_type,chat_id,phone,
+               client_name,email,getcourse_user_id,platform,entity_type,entity_id,entity_url,
+               amo_lead_id,text,attachment_url,attachment_type,status,attempts,queued_at,started_at,
+               created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'processing',1,?,?,?,?)""",
+            (
+                request_key, int(device["admin_id"]), int(device["id"]), _clean(provider, 40),
+                _clean(channel_id, 200), _clean(chat_type, 40), _clean(chat_id, 250),
+                _normalize_phone(phone), _clean(client_name, 200), _clean(email, 320),
+                _clean(getcourse_user_id, 200), _clean(context.get("platform"), 40),
+                _clean(context.get("entity_type"), 40), _clean(context.get("entity_id"), 100),
+                _clean(context.get("entity_url"), 1000), amo_lead_id, _clean(text, 4000),
+                _clean(attachment_url, 4000), _clean(attachment_type, 100), now, now, now, now,
+            ),
+        )
+        row = await (await db.execute(
+            "SELECT * FROM outbound_jobs WHERE request_key=?", (request_key,),
+        )).fetchone()
+        await db.commit()
+        result = dict(row) if row else {}
+        result["_fresh"] = cursor.rowcount > 0
+        result["manager_name"] = _clean(device.get("admin_name"), 200)
+        return result
+    finally:
+        await db.close()
+
+
+async def _widget_delivery_context(
+    data: dict[str, Any], mode: str, device: dict[str, Any], provider: str,
+    chat_id: str, channel_id: str, transport: str,
+) -> dict[str, Any]:
+    context = await _communication_context(
+        provider, chat_id, channel_id=channel_id, chat_type=transport,
+    )
+    card = _widget_context(data, mode, device)
+    for key in ("platform", "entity_type", "entity_id", "entity_url"):
+        if not context.get(key):
+            context[key] = card.get(key, "")
+    if not context.get("client_name"):
+        context["client_name"] = _clean(data.get("name"), 200)
+    if context.get("platform") == "amocrm" and context.get("entity_type") == "lead":
+        context["amo_lead_id"] = _clean(context.get("entity_id"), 64)
+    return context
+
+
+def _outbound_duplicate_payload(job: dict[str, Any]) -> dict[str, Any] | None:
+    if job.get("_fresh"):
+        return None
+    status = _clean(job.get("status"), 40)
+    if status == "sent":
+        return {"ok": True, "sent": True, "duplicate": True, "message": {
+            "external_id": _clean(job.get("external_id"), 250), "direction": "outgoing",
+            "status": "sent", "text": _clean(job.get("text"), 4000),
+            "author_name": _clean(job.get("manager_name"), 200),
+            "sent_at": _clean(job.get("sent_at"), 80) or _iso(),
+        }}
+    if status in {"pending", "processing", "retry"}:
+        return {
+            "ok": True, "sent": False, "queued": True, "duplicate": True,
+            "notice": "Сообщение уже в очереди. Nexus доставит его автоматически.",
+        }
+    return None
+
+
+async def _finish_outbound_job(
+    job: dict[str, Any], message: dict[str, Any], *, status: str = "sent", error: str = "",
+) -> None:
+    now = _iso()
+    started = _parse_iso(job.get("started_at") or job.get("queued_at"))
+    latency_ms = max(0, int((_now_dt() - started).total_seconds() * 1000)) if started else None
+    external_id = _clean(message.get("external_id"), 250)
+    db = await _connect()
+    try:
+        await db.execute(
+            """UPDATE outbound_jobs SET status=?,next_attempt_at='',external_id=?,error=?,
+               sent_at=?,latency_ms=?,updated_at=? WHERE id=?""",
+            (status, external_id, _clean(error, 1000), now if status == "sent" else "", latency_ms, now, job["id"]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    manager_name = _clean(job.get("manager_name"), 200)
+    await _record_communication(
+        dedupe_key=f"outbound:{job['request_key']}", external_id=external_id,
+        provider=job["provider"], channel_id=job["channel_id"], chat_type=job["chat_type"],
+        chat_id=_clean(message.get("chat_id") or job.get("chat_id"), 250),
+        direction="outgoing", status=status, text=job["text"], sent_at=message.get("sent_at") or now,
+        client_name=job.get("client_name", ""), phone_hash=_phone_hash(job.get("phone")),
+        admin_id=int(job["admin_id"]), manager_name=manager_name,
+        transport_author=_clean(message.get("author_name"), 200),
+        attempts=int(job.get("attempts") or 1), latency_ms=latency_ms, error=error,
+        context={
+            "platform": job.get("platform", ""), "entity_type": job.get("entity_type", ""),
+            "entity_id": job.get("entity_id", ""), "entity_url": job.get("entity_url", ""),
+            "amo_lead_id": job.get("amo_lead_id", ""),
+        },
+    )
+
+
+async def _fail_or_retry_outbound_job(job: dict[str, Any], error: Any) -> bool:
+    attempts = int(job.get("attempts") or 1)
+    retry = _delivery_error_is_transient(error) and attempts < OUTBOUND_MAX_ATTEMPTS
+    delay = _delivery_retry_delay(error, attempts)
+    next_at = _iso(_now_dt() + timedelta(seconds=delay)) if retry else ""
+    detail = _clean(getattr(error, "detail", error), 1000)
+    db = await _connect()
+    try:
+        await db.execute(
+            "UPDATE outbound_jobs SET status=?,next_attempt_at=?,error=?,updated_at=? WHERE id=?",
+            ("retry" if retry else "failed", next_at, detail, _iso(), job["id"]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    if retry:
+        _outbound_wakeup.set()
+    else:
+        await _finish_outbound_job(job, {}, status="failed", error=detail)
+    return retry
+
+
+async def _claim_outbound_job() -> dict[str, Any] | None:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT j.*,a.name AS manager_name FROM outbound_jobs j JOIN admins a ON a.id=j.admin_id
+               WHERE j.status='retry' AND (j.next_attempt_at='' OR j.next_attempt_at<=?)
+               ORDER BY j.next_attempt_at,j.id LIMIT 1""", (_iso(),),
+        )).fetchone()
+        if not row:
+            return None
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (await db.execute(
+            """SELECT j.*,a.name AS manager_name FROM outbound_jobs j JOIN admins a ON a.id=j.admin_id
+               WHERE j.status='retry' AND (j.next_attempt_at='' OR j.next_attempt_at<=?)
+               ORDER BY j.next_attempt_at,j.id LIMIT 1""", (_iso(),),
+        )).fetchone()
+        if not row:
+            await db.commit()
+            return None
+        now = _iso()
+        await db.execute(
+            "UPDATE outbound_jobs SET status='processing',attempts=attempts+1,started_at=?,updated_at=? WHERE id=?",
+            (now, now, row["id"]),
+        )
+        await db.commit()
+        result = dict(row)
+        result["attempts"] = int(row["attempts"] or 0) + 1
+        result["started_at"] = now
+        return result
+    finally:
+        await db.close()
+
+
+async def _retry_outbound_job(job: dict[str, Any]) -> None:
+    try:
+        result = await service_streams_send(
+            channel_id=job["channel_id"], transport=job["chat_type"], provider=job["provider"],
+            chat_id=job["chat_id"], phone=job["phone"], text=job["text"],
+            operator_name=job["manager_name"], email=job["email"],
+            gc_user_id=job["getcourse_user_id"], name=job["client_name"],
+            attachment_url=job["attachment_url"], attachment_type=job["attachment_type"],
+            idempotency_key=job["request_key"], record_communication=False,
+        )
+        await _finish_outbound_job(job, result.get("message") or {})
+    except Exception as exc:
+        await _fail_or_retry_outbound_job(job, exc)
+
+
+async def outbound_delivery_loop(worker_id: int) -> None:
+    await asyncio.sleep(2 + worker_id * 0.15)
+    while True:
+        try:
+            job = await _claim_outbound_job()
+            if job:
+                await _retry_outbound_job(job)
+                continue
+            _outbound_wakeup.clear()
+            try:
+                await asyncio.wait_for(_outbound_wakeup.wait(), timeout=3)
+            except TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log("exception", "Outbound worker %s failed", worker_id)
+            await asyncio.sleep(3)
+
+
+def _notification_pairing_value(provider: str, text_value: Any) -> str:
+    text_value = _clean(text_value, 500).strip()
+    if provider == "telegram":
+        match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]+)?\s+nx_([A-Za-z0-9_-]{20,100})", text_value)
+        return match.group(1) if match else ""
+    match = re.fullmatch(r"(?:NEXUS|НЕКСУС)[-\s]+([A-Z0-9]{8,24})", text_value.upper())
+    return match.group(1) if match else ""
+
+
+async def _consume_notification_pairing(
+    provider: str, text_value: Any, recipient_id: Any, label: Any = "", received_at: Any = "",
+) -> dict[str, Any] | None:
+    code = _notification_pairing_value(provider, text_value)
+    recipient_id = _clean(recipient_id, 200)
+    if not code or not recipient_id:
+        return None
+    code_hash = _hash(code)
+    now = _iso()
+    observed_at = _message_time(received_at) if received_at else now
+    db = await _connect()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        pairing = await (await db.execute(
+            """SELECT p.*,a.name,a.enabled FROM notification_pairings p
+               JOIN admins a ON a.id=p.admin_id
+               WHERE p.provider=? AND p.code_hash=? AND p.used_at=''
+                 AND p.created_at<=? AND p.expires_at>=?""",
+            (provider, code_hash, observed_at, observed_at),
+        )).fetchone()
+        if not pairing or not pairing["enabled"]:
+            await db.rollback()
+            return None
+        await db.execute(
+            "DELETE FROM notification_destinations WHERE provider=? AND recipient_id=? AND admin_id<>?",
+            (provider, recipient_id, pairing["admin_id"]),
+        )
+        await db.execute(
+            """INSERT INTO notification_destinations(
+               admin_id,provider,recipient_id,label,enabled,connected_at,verified_at,last_error,updated_at
+               ) VALUES(?,?,?,?,1,?,?,?,?) ON CONFLICT(admin_id,provider) DO UPDATE SET
+               recipient_id=excluded.recipient_id,label=excluded.label,enabled=1,
+               verified_at=excluded.verified_at,last_error='',updated_at=excluded.updated_at""",
+            (
+                pairing["admin_id"], provider, recipient_id, _clean(label, 200),
+                now, now, "", now,
+            ),
+        )
+        await db.execute("UPDATE notification_pairings SET used_at=? WHERE id=?", (now, pairing["id"]))
+        await db.commit()
+        return {"admin_id": int(pairing["admin_id"]), "admin_name": pairing["name"], "provider": provider}
+    finally:
+        await db.close()
+
+
+async def _handle_notification_telegram_update(payload: Any) -> bool:
+    """Consume one Bot API update; delayed updates use their original Telegram timestamp."""
+    if not isinstance(payload, dict):
+        return False
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    sender = message.get("from") if isinstance(message.get("from"), dict) else {}
+    chat_id = _clean(chat.get("id"), 200)
+    if not chat_id:
+        return False
+    label = " ".join(filter(None, (
+        _clean(sender.get("first_name"), 100), _clean(sender.get("last_name"), 100),
+    ))).strip() or ("@" + _clean(sender.get("username"), 100) if sender.get("username") else chat_id)
+    timestamp = message.get("date")
+    try:
+        received_at = _iso(datetime.fromtimestamp(float(timestamp), timezone.utc)) if timestamp else ""
+    except (TypeError, ValueError, OverflowError):
+        received_at = ""
+    paired = await _consume_notification_pairing(
+        "telegram", message.get("text"), chat_id, label, received_at=received_at,
+    )
+    if not paired:
+        return False
+    try:
+        await _notification_tg_call("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"✅ Уведомления Nexus подключены для {paired['admin_name']}.",
+        })
+    except NotificationDeliveryError:
+        _log("warning", "Telegram notification pairing confirmation failed chat=%s", chat_id)
+    return True
+
+
+async def notification_telegram_poll_loop() -> None:
+    """Poll the dedicated notification bot so public webhook reachability cannot block pairing."""
+    global _notification_bot_poll_at, _notification_bot_poll_error
+    await asyncio.sleep(2.5)
+    try:
+        offset = max(0, int(await _setting("notification_telegram_update_offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    while True:
+        try:
+            if not _notification_bot_token():
+                _notification_bot_poll_error = "Токен бота уведомлений не задан"
+                await asyncio.sleep(15)
+                continue
+            expected = f"{PUBLIC_API_BASE}/notifications/telegram/{await _setting('notification_telegram_callback_secret')}"
+            webhook = await _notification_tg_call("getWebhookInfo")
+            current_url = _clean(webhook.get("url"), 4000)
+            if current_url and current_url != expected:
+                _notification_bot_poll_error = "У бота настроен чужой webhook"
+                await asyncio.sleep(30)
+                continue
+            if current_url == expected:
+                await _notification_tg_call("deleteWebhook", {"drop_pending_updates": False})
+            result = await _notification_tg_call("getUpdates", {
+                "offset": offset, "timeout": 15, "allowed_updates": ["message"],
+            })
+            updates = result.get("value") if isinstance(result.get("value"), list) else []
+            next_offset = offset
+            for update in updates:
+                if not isinstance(update, dict):
+                    continue
+                await _handle_notification_telegram_update(update)
+                next_offset = max(next_offset, int(update.get("update_id") or -1) + 1)
+            if next_offset != offset:
+                offset = next_offset
+                await _set_setting("notification_telegram_update_offset", str(offset))
+            _notification_bot_poll_at = _iso()
+            _notification_bot_poll_error = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _notification_bot_poll_error = _clean(exc, 300)
+            _log("warning", "Telegram notification polling failed: %s", exc)
+            await asyncio.sleep(5)
+
+
+async def _notification_recipient(provider: str, recipient_id: str) -> bool:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT 1 FROM notification_destinations WHERE provider=? AND recipient_id=? AND enabled=1",
+            (provider, _clean(recipient_id, 200)),
+        )).fetchone()
+        return bool(row)
+    finally:
+        await db.close()
+
+
+async def _notification_settings_view(admin_id: int) -> dict[str, Any]:
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            "SELECT provider,recipient_id,label,enabled,connected_at,last_error FROM notification_destinations WHERE admin_id=?",
+            (admin_id,),
+        )).fetchall()
+        pref = await (await db.execute(
+            "SELECT fallback_unassigned FROM notification_preferences WHERE admin_id=?",
+            (admin_id,),
+        )).fetchone()
+        browser_rows = await (await db.execute(
+            """SELECT label,enabled,last_seen_at FROM browser_notification_subscriptions
+               WHERE admin_id=? ORDER BY enabled DESC,last_seen_at DESC""",
+            (admin_id,),
+        )).fetchall()
+    finally:
+        await db.close()
+    destinations = {
+        provider: {"connected": False, "enabled": False, "label": "", "last_error": ""}
+        for provider in ("telegram", "vk", "browser")
+    }
+    for row in rows:
+        destinations[row["provider"]] = {
+            "connected": True, "enabled": bool(row["enabled"]),
+            "label": row["label"] or row["recipient_id"],
+            "connected_at": row["connected_at"], "last_error": row["last_error"],
+        }
+    enabled_browsers = [row for row in browser_rows if row["enabled"]]
+    destinations["browser"] = {
+        "connected": bool(browser_rows),
+        "enabled": bool(enabled_browsers),
+        "label": (
+            (enabled_browsers[0]["label"] or "этот браузер")
+            if len(enabled_browsers) == 1 else f"браузеров: {len(enabled_browsers)}"
+        ) if enabled_browsers else "",
+        "last_seen_at": enabled_browsers[0]["last_seen_at"] if enabled_browsers else "",
+        "last_error": "",
+    }
+    return {
+        "destinations": destinations,
+        "fallback_unassigned": bool(pref["fallback_unassigned"]) if pref else False,
+        "telegram_bot": f"@{NOTIFY_TELEGRAM_USERNAME}",
+    }
+
+
+async def _browser_notification_subscription(request: Request, *, allow_disabled: bool = True) -> dict[str, Any]:
+    auth = _clean(request.headers.get("authorization"), 5000)
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(401, "Страница уведомлений не подключена")
+    raw = auth[7:].strip()
+    if len(raw) < 32:
+        raise HTTPException(401, "Страница уведомлений не подключена")
+    now = _iso()
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT s.*,a.name AS admin_name,a.enabled AS admin_enabled,d.revoked_at
+               FROM browser_notification_subscriptions s
+               JOIN admins a ON a.id=s.admin_id JOIN devices d ON d.id=s.device_id
+               WHERE s.token_hash=?""",
+            (_hash(raw),),
+        )).fetchone()
+        if not row or not row["admin_enabled"] or row["revoked_at"] or (not allow_disabled and not row["enabled"]):
+            raise HTTPException(401, "Страница уведомлений отключена. Откройте её заново из виджета Nexus")
+        result = dict(row)
+        last_seen = _parse_iso(row["last_seen_at"])
+        if not last_seen or last_seen <= _now_dt() - timedelta(seconds=60):
+            try:
+                await db.execute(
+                    "UPDATE browser_notification_subscriptions SET last_seen_at=?,updated_at=? WHERE id=?",
+                    (now, now, row["id"]),
+                )
+                await db.commit()
+                result["last_seen_at"] = now
+            except sqlite3.OperationalError:
+                await db.rollback()
+        return result
+    finally:
+        await db.close()
+
+
+async def _browser_notification_status(subscription: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "enabled": bool(subscription.get("enabled")),
+        "manager": _clean(subscription.get("admin_name"), 200),
+        "label": _clean(subscription.get("label"), 200),
+        "last_seen_at": _clean(subscription.get("last_seen_at"), 80),
+        "subscribed": bool(subscription.get("push_endpoint") and subscription.get("push_p256dh") and subscription.get("push_auth")),
+        "vapid_public_key": await _setting("webpush_vapid_public"),
+    }
+
+
+@router.post("/widget/notifications/browser/open")
+async def widget_notification_browser_open(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        raw = secrets.token_urlsafe(36)
+        now = _iso()
+        label = f"{device['admin_name']} · браузер"
+        db = await _connect()
+        try:
+            await db.execute(
+                """INSERT INTO browser_notification_subscriptions(
+                   admin_id,device_id,token_hash,token_hint,label,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET
+                   admin_id=excluded.admin_id,token_hash=excluded.token_hash,token_hint=excluded.token_hint,
+                   label=excluded.label,updated_at=excluded.updated_at""",
+                (device["admin_id"], device["id"], _hash(raw), raw[-6:], label, now, now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        public_root = PUBLIC_API_BASE.rsplit("/api", 1)[0]
+        url = f"{public_root}/static/notifications.html#token={quote(raw, safe='')}"
+        return _widget_response(request, {"ok": True, "url": url})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+@router.post("/browser-notifications/status")
+async def browser_notification_status(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _browser_notification_status(await _browser_notification_subscription(request)))
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+
+
+@router.post("/browser-notifications/enable")
+async def browser_notification_enable(request: Request) -> JSONResponse:
+    try:
+        subscription = await _browser_notification_subscription(request)
+        data = await _read_json(request)
+        label = _clean(data.get("label"), 200) or _clean(subscription.get("label"), 200) or "Браузер"
+        push = data.get("subscription") if isinstance(data.get("subscription"), dict) else {}
+        keys = push.get("keys") if isinstance(push.get("keys"), dict) else {}
+        endpoint = _clean(push.get("endpoint"), 4000)
+        p256dh = _clean(keys.get("p256dh"), 1000)
+        auth_secret = _clean(keys.get("auth"), 1000)
+        if not endpoint or not p256dh or not auth_secret:
+            raise HTTPException(400, "Браузер не создал подписку Web Push")
+        try:
+            await _require_public_push_endpoint(endpoint)
+        except NotificationDeliveryError as exc:
+            raise HTTPException(400 if exc.permanent else 503, str(exc)) from exc
+        try:
+            if len(_b64url_decode(p256dh)) != 65 or len(_b64url_decode(auth_secret)) < 16:
+                raise ValueError
+        except Exception as exc:
+            raise HTTPException(400, "Браузер передал повреждённые ключи") from exc
+        now = _iso()
+        enabled_at = subscription.get("enabled_at") if subscription.get("enabled") else now
+        db = await _connect()
+        try:
+            await db.execute(
+                """UPDATE browser_notification_subscriptions SET enabled=1,enabled_at=?,label=?,
+                   push_endpoint=?,push_p256dh=?,push_auth=?,last_seen_at=?,updated_at=? WHERE id=?""",
+                (enabled_at or now, label, endpoint, p256dh, auth_secret, now, now, subscription["id"]),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        subscription.update({"enabled": 1, "enabled_at": enabled_at or now, "label": label, "last_seen_at": now,
+                             "push_endpoint": endpoint, "push_p256dh": p256dh, "push_auth": auth_secret})
+        return JSONResponse(await _browser_notification_status(subscription))
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+
+
+@router.post("/browser-notifications/disable")
+async def browser_notification_disable(request: Request) -> JSONResponse:
+    try:
+        subscription = await _browser_notification_subscription(request)
+        db = await _connect()
+        try:
+            await db.execute(
+                "UPDATE browser_notification_subscriptions SET enabled=0,updated_at=? WHERE id=?",
+                (_iso(), subscription["id"]),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        subscription["enabled"] = 0
+        return JSONResponse(await _browser_notification_status(subscription))
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+
+
+@router.post("/browser-notifications/test")
+async def browser_notification_test(request: Request) -> JSONResponse:
+    try:
+        subscription = await _browser_notification_subscription(request, allow_disabled=False)
+        external_id = await _send_webpush_destination(subscription, {
+            "title": "Тест Nexus", "body": "Уведомления работают. Эту страницу теперь можно закрыть.",
+            "url": "", "tag": "nexus-webpush-test",
+        })
+        return JSONResponse({"ok": True, "external_id": external_id})
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+    except NotificationDeliveryError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+
+@router.post("/browser-notifications/feed")
+async def browser_notification_feed(request: Request) -> JSONResponse:
+    try:
+        subscription = await _browser_notification_subscription(request, allow_disabled=False)
+        now = _iso()
+        stale_claim = _iso(_now_dt() - timedelta(seconds=BROWSER_NOTIFY_CLAIM_SECONDS))
+        claim_marker = now + ":" + secrets.token_hex(4)
+        db = await _connect()
+        try:
+            pref = await (await db.execute(
+                "SELECT fallback_unassigned FROM notification_preferences WHERE admin_id=?",
+                (subscription["admin_id"],),
+            )).fetchone()
+            fallback = bool(pref and pref["fallback_unassigned"])
+            candidates = await (await db.execute(
+                """SELECT e.* FROM notification_events e
+                   LEFT JOIN browser_notification_deliveries d
+                     ON d.subscription_id=? AND d.event_id=e.external_id
+                   WHERE e.created_at>=? AND (
+                     e.target_admin_id=? OR (
+                       e.target_admin_id IS NULL AND ?=1 AND EXISTS(
+                         SELECT 1 FROM conversation_contexts c
+                         WHERE c.provider=e.source AND c.external_user_id=e.chat_id
+                           AND c.platform='amocrm' AND c.entity_type='lead' AND c.entity_id<>''
+                       )
+                     )
+                   )
+                     AND (d.id IS NULL OR d.status='pending' OR (d.status='claimed' AND d.claimed_at<=?))
+                   ORDER BY e.created_at,e.external_id LIMIT ?""",
+                (subscription["id"], subscription["enabled_at"], subscription["admin_id"],
+                 1 if fallback else 0, stale_claim, BROWSER_NOTIFY_PAGE_SIZE),
+            )).fetchall()
+            rows = []
+            if candidates:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.executemany(
+                    """INSERT OR IGNORE INTO browser_notification_deliveries(
+                       subscription_id,event_id,status,created_at,updated_at
+                       ) VALUES(?,?,'pending',?,?)""",
+                    ((subscription["id"], row["external_id"], now, now) for row in candidates),
+                )
+                placeholders = ",".join("?" for _ in candidates)
+                await db.execute(
+                    f"""UPDATE browser_notification_deliveries SET status='claimed',claimed_at=?,updated_at=?
+                        WHERE subscription_id=? AND event_id IN ({placeholders})
+                          AND (status='pending' OR (status='claimed' AND claimed_at<=?))""",
+                    (claim_marker, now, subscription["id"], *(row["external_id"] for row in candidates), stale_claim),
+                )
+                rows = await (await db.execute(
+                    """SELECT e.* FROM browser_notification_deliveries d
+                       JOIN notification_events e ON e.external_id=d.event_id
+                       WHERE d.subscription_id=? AND d.claimed_at=? ORDER BY e.created_at,e.external_id""",
+                    (subscription["id"], claim_marker),
+                )).fetchall()
+                await db.commit()
+        finally:
+            await db.close()
+        notifications = []
+        for row in rows:
+            item = dict(row)
+            context = await _notification_context(item["source"], item["chat_id"])
+            body = _clean(item.get("text"), 500) or {
+                "audio": "Голосовое сообщение", "voice": "Голосовое сообщение",
+                "image": "Изображение", "video": "Видео", "document": "Вложение",
+            }.get(_clean(item.get("content_type"), 100).lower(), "Новое вложение")
+            notifications.append({
+                "event_id": item["external_id"],
+                "title": f"{_notification_label(item['source'])} · {_clean(item.get('client_name'), 120) or 'Клиент'}",
+                "body": body,
+                "url": _clean(context.get("entity_url"), 2000),
+                "sent_at": item["sent_at"],
+            })
+        return JSONResponse({"ok": True, "notifications": notifications, "checked_at": now})
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+
+
+@router.post("/browser-notifications/ack")
+async def browser_notification_ack(request: Request) -> JSONResponse:
+    try:
+        subscription = await _browser_notification_subscription(request, allow_disabled=False)
+        data = await _read_json(request)
+        event_ids = [_clean(value, 250) for value in data.get("event_ids", []) if _clean(value, 250)][:BROWSER_NOTIFY_PAGE_SIZE]
+        if event_ids:
+            placeholders = ",".join("?" for _ in event_ids)
+            now = _iso()
+            db = await _connect()
+            try:
+                await db.execute(
+                    f"UPDATE browser_notification_deliveries SET status='shown',shown_at=?,updated_at=? WHERE subscription_id=? AND event_id IN ({placeholders})",
+                    (now, now, subscription["id"], *event_ids),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        return JSONResponse({"ok": True})
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+
+
+async def _notification_widget_device(request: Request) -> tuple[str, dict[str, Any]]:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        raise HTTPException(403, "origin not allowed")
+    device = await _device(request)
+    if not device:
+        raise HTTPException(401, "Требуется повторная активация")
+    return mode, device
+
+
+@router.post("/widget/notifications/settings")
+async def widget_notification_settings(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        data = await _read_json(request)
+        if "fallback_unassigned" in data:
+            if device["admin_role"] != "admin":
+                raise HTTPException(403, "Резервные уведомления доступны администратору")
+            db = await _connect()
+            try:
+                await db.execute(
+                    """INSERT INTO notification_preferences(admin_id,fallback_unassigned,updated_at)
+                       VALUES(?,?,?) ON CONFLICT(admin_id) DO UPDATE SET
+                       fallback_unassigned=excluded.fallback_unassigned,updated_at=excluded.updated_at""",
+                    (device["admin_id"], 1 if data.get("fallback_unassigned") else 0, _iso()),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        return _widget_response(request, {
+            "ok": True, "admin_role": device["admin_role"],
+            **await _notification_settings_view(int(device["admin_id"])),
+        })
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+@router.put("/widget/notifications/settings")
+async def widget_notification_settings_save(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        data = await _read_json(request)
+        if device["admin_role"] != "admin" and "fallback_unassigned" in data:
+            raise HTTPException(403, "Резервные уведомления доступны администратору")
+        db = await _connect()
+        try:
+            await db.execute(
+                """INSERT INTO notification_preferences(admin_id,fallback_unassigned,updated_at)
+                   VALUES(?,?,?) ON CONFLICT(admin_id) DO UPDATE SET
+                   fallback_unassigned=excluded.fallback_unassigned,updated_at=excluded.updated_at""",
+                (device["admin_id"], 1 if data.get("fallback_unassigned") else 0, _iso()),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        return _widget_response(request, {"ok": True, **await _notification_settings_view(int(device["admin_id"]))})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+@router.post("/widget/notifications/pair")
+async def widget_notification_pair(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        data = await _read_json(request)
+        provider = _clean(data.get("provider"), 40).lower()
+        if provider not in {"telegram", "vk"}:
+            raise HTTPException(400, "Выберите Telegram или VK")
+        if provider == "telegram":
+            if not _notification_bot_token():
+                raise HTTPException(503, "Администратор ещё не подключил Telegram-бот уведомлений")
+            me = await _notification_tg_call("getMe")
+            username = _clean(me.get("username"), 200)
+            if username.casefold() != NOTIFY_TELEGRAM_USERNAME.casefold():
+                raise HTTPException(503, f"В Nexus подключён другой Telegram-бот: @{username or 'unknown'}")
+        if provider == "vk" and (not _vk_token() or not _vk_group_id()):
+            raise HTTPException(503, "Сообщество VK ещё не подключено")
+        raw = secrets.token_urlsafe(24) if provider == "telegram" else "".join(secrets.choice(CODE_ALPHABET) for _ in range(10))
+        now = _iso()
+        expires_at = _iso(_now_dt() + timedelta(minutes=NOTIFY_PAIRING_TTL_MINUTES))
+        db = await _connect()
+        try:
+            await db.execute(
+                "DELETE FROM notification_pairings WHERE admin_id=? AND provider=? AND used_at=''",
+                (device["admin_id"], provider),
+            )
+            await db.execute(
+                "INSERT INTO notification_pairings(admin_id,provider,code_hash,expires_at,created_at) VALUES(?,?,?,?,?)",
+                (device["admin_id"], provider, _hash(raw), expires_at, now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        if provider == "telegram":
+            url = f"https://t.me/{NOTIFY_TELEGRAM_USERNAME}?start=nx_{raw}"
+            command = "/start"
+        else:
+            url = f"https://vk.me/club{_vk_group_id()}"
+            command = f"NEXUS-{raw}"
+        return _widget_response(request, {
+            "ok": True, "provider": provider, "url": url,
+            "command": command, "expires_at": expires_at,
+        })
+    except NotificationDeliveryError as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc)}, 503)
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+@router.post("/widget/notifications/disconnect")
+async def widget_notification_disconnect(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        data = await _read_json(request)
+        provider = _clean(data.get("provider"), 40).lower()
+        if provider not in {"telegram", "vk", "browser"}:
+            raise HTTPException(400, "Выберите Telegram, VK или браузер")
+        db = await _connect()
+        try:
+            if provider == "browser":
+                await db.execute(
+                    "UPDATE browser_notification_subscriptions SET enabled=0,updated_at=? WHERE admin_id=?",
+                    (_iso(), device["admin_id"]),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM notification_destinations WHERE admin_id=? AND provider=?",
+                    (device["admin_id"], provider),
+                )
+            await db.commit()
+        finally:
+            await db.close()
+        return _widget_response(request, {"ok": True, **await _notification_settings_view(int(device["admin_id"]))})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+@router.post("/widget/notifications/test")
+async def widget_notification_test(request: Request) -> JSONResponse:
+    try:
+        _, device = await _notification_widget_device(request)
+        data = await _read_json(request)
+        provider = _clean(data.get("provider"), 40).lower()
+        destinations = await _notification_destinations(int(device["admin_id"]))
+        destination = next((row for row in destinations if row["provider"] == provider), None)
+        if not destination:
+            raise HTTPException(404, "Сначала подключите этот канал")
+        await _send_notification_destination(
+            provider, destination["recipient_id"],
+            "✅ Тест Nexus\nУведомления о новых сообщениях подключены.", [],
+        )
+        return _widget_response(request, {"ok": True, "message": "Тестовое уведомление отправлено"})
+    except NotificationDeliveryError as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc)}, 502)
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail), "reauth": exc.status_code == 401}, exc.status_code)
+
+
+def _auto_markup_domains(value: Any) -> set[str]:
+    """Normalize the explicit host allow-list without accepting URL paths."""
+    domains: set[str] = set()
+    for raw in _clean(value, 2000).split(";"):
+        host = raw.strip().lower().removeprefix("http://").removeprefix("https://").split("/", 1)[0]
+        host = host.removeprefix("www.").rstrip(".")
+        if re.fullmatch(r"[a-z0-9.-]{1,253}", host) and "." in host:
+            domains.add(host)
+    return domains
+
+
+def _auto_markup_tail(value: Any) -> str:
+    tail = _clean(value, 2000).strip()
+    if not tail:
+        return ""
+    if "#" in tail or any(char.isspace() for char in tail):
+        raise HTTPException(400, "Хвост разметки не должен содержать пробелы или #")
+    return tail if tail.startswith(("?", "&")) else "?" + tail
+
+
+def _url_needs_auto_markup(url: str, domains: set[str]) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().removeprefix("www.").rstrip(".")
+    return bool(host and any(host == domain or host.endswith("." + domain) for domain in domains))
+
+
+def _missing_auto_markup_tail(query: str, tail: str) -> str:
+    """Return raw configured query parts whose keys are absent from the URL."""
+    existing_keys = {
+        unquote(part.partition("=")[0]).casefold()
+        for part in query.split("&")
+        if part.partition("=")[0]
+    }
+    missing: list[str] = []
+    for part in tail.lstrip("?&").split("&"):
+        key = unquote(part.partition("=")[0]).casefold()
+        if not key or key in existing_keys:
+            continue
+        missing.append(part)
+        existing_keys.add(key)
+    return "&".join(missing)
+
+
+def _apply_auto_markup(text: Any, domains_value: Any, tail_value: Any) -> str:
+    """Complete allow-listed URLs with parameters missing from the configured tail."""
+    source = _clean(text, 20_000)
+    domains = _auto_markup_domains(domains_value)
+    tail = _auto_markup_tail(tail_value)
+    if not source or not domains or not tail:
+        return source
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        suffix = ""
+        while raw and raw[-1] in ".,;:!?)]}":
+            suffix = raw[-1] + suffix
+            raw = raw[:-1]
+        if not raw or not _url_needs_auto_markup(raw, domains):
+            return raw + suffix
+        parsed = urlsplit(raw)
+        missing_tail = _missing_auto_markup_tail(parsed.query, tail)
+        if not missing_tail:
+            return raw + suffix
+        appended = ("&" if parsed.query else "?") + missing_tail
+        base = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        marked = base + appended + ("#" + parsed.fragment if parsed.fragment else "")
+        return marked + suffix
+
+    return AUTO_MARKUP_URL_RE.sub(replace, source)
+
+
+async def _auto_markup_message(text: Any) -> str:
+    domains, tail = await asyncio.gather(_setting("auto_markup_domains"), _setting("auto_markup_tail"))
+    return _apply_auto_markup(text, domains, tail)
+
+
+async def _auto_markup_for_send(text: Any, variables: dict[str, Any]) -> str:
+    """Render only the configured automatic tail before appending it to a message."""
+    domains, tail = await asyncio.gather(_setting("auto_markup_domains"), _setting("auto_markup_tail"))
+    rendered_tail = render_message_template(tail, variables).get("text", "") if tail else ""
+    return _apply_auto_markup(text, domains, rendered_tail)
+
+
+async def _refresh_vk_callback_config() -> None:
+    _vk_callback_config.update(
+        key=await _setting("vk_callback_key"),
+        secret=await _setting("vk_callback_secret"),
+        confirmation=await _setting("vk_confirmation_code"),
+    )
+
+
+def _vk_callback_queue_path() -> Path:
+    return _must_db().with_name("vk-callback-queue.db")
+
+
+async def _connect_vk_callback_queue():
+    db = await aiosqlite.connect(_vk_callback_queue_path(), timeout=5)
+    await db.execute("PRAGMA busy_timeout=5000")
+    db.row_factory = aiosqlite.Row
+    return db
+
+
+async def _init_vk_callback_queue() -> None:
+    async with _vk_queue_lock:
+        db = await _connect_vk_callback_queue()
+        try:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS callback_events (
+                   event_key TEXT PRIMARY KEY,
+                   payload_json TEXT NOT NULL,
+                   attempts INTEGER NOT NULL DEFAULT 0,
+                   available_at TEXT NOT NULL,
+                   created_at TEXT NOT NULL,
+                   last_error TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS ix_callback_events_ready "
+                "ON callback_events(available_at,created_at)"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+
+async def _enqueue_vk_callback(body: bytes, payload: dict[str, Any]) -> None:
+    event_key = hashlib.sha256(body).hexdigest()
+    now = _iso()
+    async with _vk_queue_lock:
+        db = await _connect_vk_callback_queue()
+        try:
+            await db.execute(
+                "INSERT OR IGNORE INTO callback_events"
+                "(event_key,payload_json,available_at,created_at) VALUES(?,?,?,?)",
+                (event_key, json.dumps(payload, ensure_ascii=False, separators=(",", ":")), now, now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+
+async def _process_vk_callback_payload(payload: dict[str, Any]) -> None:
+    obj = payload.get("object") if isinstance(payload.get("object"), dict) else {}
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+    peer_id = _clean(message.get("peer_id"), 200) if isinstance(message, dict) else ""
+    if peer_id and isinstance(message, dict):
+        paired = await _consume_notification_pairing(
+            "vk", message.get("text"), peer_id, f"VK {peer_id}",
+        )
+        if paired:
+            await _vk_request("messages.send", {
+                "group_id": _vk_group_id(), "peer_id": peer_id,
+                "random_id": secrets.randbelow(2_000_000_000) + 1,
+                "message": f"✅ Уведомления Nexus подключены для {paired['admin_name']}.",
+            })
+            return
+        if bool(message.get("out")) and await _notification_recipient("vk", peer_id):
+            return
+    course_context: dict[str, Any] = {}
+    if peer_id.isdigit() and int(peer_id) > 2_000_000_000:
+        course_context = await _course_chat_context("vk", peer_id)
+        if not course_context:
+            return
+        sender_id = _clean(message.get("from_id"), 200) if isinstance(message, dict) else ""
+        sender_name = "Участник"
+        sender_screen_name = ""
+        if sender_id.isdigit() and int(sender_id) < 2_000_000_000:
+            try:
+                profiles = await _vk_request("users.get", {"user_ids": sender_id})
+                profile = profiles[0] if isinstance(profiles, list) and profiles else {}
+                sender_name = " ".join(filter(None, (
+                    _clean(profile.get("first_name"), 120), _clean(profile.get("last_name"), 120),
+                ))).strip() or sender_name
+                sender_screen_name = _clean(profile.get("screen_name"), 200).lstrip("@").casefold()
+            except Exception:
+                pass
+        course_context["suppress_notification"] = bool(
+            sender_id and (
+                sender_id == _clean(course_context.get("curator_vk_id"), 200)
+                or sender_screen_name == _clean(course_context.get("curator_vk_ref"), 200).lstrip("@").casefold()
+            )
+        )
+        link = {
+            "name": f"{sender_name} · {_clean(course_context.get('title'), 300) or 'учебный чат'}",
+            "external_user_id": peer_id,
+        }
+    else:
+        link = await _external_link(peer_id=peer_id)
+    if not link and peer_id:
+        identity = resolve_vk_identity(peer_id)
+        await _remember_external_link(
+            identity or {"name": f"VK {peer_id}"}, "callback", external_user_id=peer_id,
+        )
+        link = await _external_link(peer_id=peer_id)
+    if peer_id and link and isinstance(message, dict):
+        await _store_vk_messages(peer_id, [message], link, course_context=course_context)
+
+
+async def _drain_vk_callback_queue(limit: int = 50) -> int:
+    async with _vk_queue_lock:
+        db = await _connect_vk_callback_queue()
+        try:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM callback_events WHERE available_at<=? "
+                    "ORDER BY created_at LIMIT ?",
+                    (_iso(), limit),
+                )
+            ).fetchall()
+        finally:
+            await db.close()
+    processed = 0
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+            await _process_vk_callback_payload(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            attempts = int(row["attempts"] or 0) + 1
+            delay = min(300, 2 ** min(attempts, 8))
+            available_at = _iso(_now_dt() + timedelta(seconds=delay))
+            async with _vk_queue_lock:
+                db = await _connect_vk_callback_queue()
+                try:
+                    await db.execute(
+                        "UPDATE callback_events SET attempts=?,available_at=?,last_error=? "
+                        "WHERE event_key=?",
+                        (attempts, available_at, _clean(exc, 500), row["event_key"]),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+            continue
+        async with _vk_queue_lock:
+            db = await _connect_vk_callback_queue()
+            try:
+                await db.execute("DELETE FROM callback_events WHERE event_key=?", (row["event_key"],))
+                await db.commit()
+            finally:
+                await db.close()
+        processed += 1
+    return processed
+
+
+async def vk_callback_queue_loop() -> None:
+    while True:
+        processed = await _drain_vk_callback_queue()
+        await asyncio.sleep(0.1 if processed else 1.0)
 
 
 def _vk_token() -> str:
@@ -1131,7 +3762,7 @@ def _vk_reference(value: Any) -> str:
     match = re.search(r"(?:^|/)id(\d+)(?:$|[/?#])", text, re.I)
     if match:
         return match.group(1)
-    match = re.search(r"(?:vk\.com|vkontakte\.ru)/([A-Za-z0-9_.]+)", text, re.I)
+    match = re.search(r"(?:vk\.com|vk\.ru|vkontakte\.ru)/([A-Za-z0-9_.]+)", text, re.I)
     return match.group(1) if match else ""
 
 
@@ -1282,6 +3913,34 @@ async def _remember_entity_external_link(
         await db.close()
 
 
+async def _forget_entity_external_link(context: dict[str, Any], provider: str) -> None:
+    platform = _clean(context.get("platform"), 40)
+    entity_type = _clean(context.get("entity_type"), 40)
+    entity_id = _clean(context.get("entity_id"), 200)
+    if not platform or not entity_type or not entity_id or not provider:
+        return
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT external_user_id FROM entity_identity_links
+               WHERE platform=? AND entity_type=? AND entity_id=? AND provider=?""",
+            (platform, entity_type, entity_id, provider),
+        )).fetchone()
+        await db.execute(
+            "DELETE FROM entity_identity_links WHERE platform=? AND entity_type=? AND entity_id=? AND provider=?",
+            (platform, entity_type, entity_id, provider),
+        )
+        if row:
+            await db.execute(
+                """DELETE FROM conversation_contexts
+                   WHERE provider=? AND external_user_id=? AND platform=? AND entity_type=? AND entity_id=?""",
+                (provider, row["external_user_id"], platform, entity_type, entity_id),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def _vk_card_link(data: dict[str, Any]) -> dict[str, str]:
     page_kind, gc_id = _page_context(data.get("source_url"))
     if page_kind != "user" or not gc_id:
@@ -1328,11 +3987,29 @@ def _telegram_session_file() -> Path:
     if explicit:
         return Path(explicit).expanduser()
     db_path = _must_db()
+    private = db_path.parent / "telegram-personal.session"
+    if private.is_file():
+        return private
     if len(db_path.parents) >= 3:
         shared = db_path.parents[2] / "course-chat-creator" / "data" / "telegram.session"
         if shared.is_file():
-            return shared
-    return db_path.parent / "telegram-personal.session"
+            staging = private.with_name(f".{private.name}.{os.getpid()}.tmp")
+            try:
+                with sqlite3.connect(
+                    f"file:{shared.resolve().as_posix()}?mode=ro", uri=True, timeout=10
+                ) as source, sqlite3.connect(staging, timeout=10) as target:
+                    source.backup(target)
+                    if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                        raise sqlite3.DatabaseError("Telegram session copy failed quick_check")
+                os.chmod(staging, 0o600)
+                os.replace(staging, private)
+                _log("info", "Telegram Personal session isolated from the shared module session")
+                return private
+            except Exception as exc:
+                staging.unlink(missing_ok=True)
+                _log("warning", "Telegram Personal session isolation failed: %s", type(exc).__name__)
+                return shared
+    return private
 
 
 def _telegram_credentials() -> tuple[int, str]:
@@ -1518,14 +4195,32 @@ async def _telegram_store_messages(
     entity: Any,
     rows: list[Any],
     link: dict[str, Any],
+    *,
+    outgoing_author_name: str = "",
+    course_context: dict[str, Any] | None = None,
 ) -> int:
-    peer = _telegram_user_view(entity)
+    if _telegram_is_user(entity):
+        peer = _telegram_user_view(entity)
+    else:
+        peer = {
+            "id": _clean(getattr(entity, "id", ""), 200),
+            "name": _clean(getattr(entity, "title", "") or getattr(entity, "name", ""), 300),
+            "username": _clean(getattr(entity, "username", ""), 200),
+            "phone": "",
+        }
     peer_id = peer["id"]
     phone = _normalize_phone(link.get("phone") or peer.get("phone"))
     phone_hash = _phone_hash(phone)
-    name = _clean(link.get("name") or peer.get("name") or peer.get("username"), 200) or peer_id
+    # The Telegram peer is authoritative for the dialog title.  A CRM card
+    # label can be stale or belong to another deal and must not rename the
+    # person whose account actually sent the message.
+    name = _clean(peer.get("name") or peer.get("username") or link.get("name"), 200) or peer_id
     now = _iso()
     records: list[dict[str, str]] = []
+    notify_incoming = (
+        _clean(peer.get("username"), 200).lstrip("@").casefold()
+        != NOTIFY_TELEGRAM_USERNAME.casefold()
+    )
     for message in rows:
         message_id = _clean(getattr(message, "id", ""), 200)
         if not message_id:
@@ -1550,7 +4245,7 @@ async def _telegram_store_messages(
             "direction": "outgoing" if outgoing else "incoming",
             "text": text_value,
             "content_uri": "",
-            "author_name": "Telegram" if outgoing else name,
+            "author_name": (_clean(outgoing_author_name, 200) or "Telegram") if outgoing else name,
             "sent_at": sent_at,
             "raw_json": json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
         })
@@ -1562,7 +4257,10 @@ async def _telegram_store_messages(
                 """INSERT INTO wazzup_messages(
                    external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
                    ) VALUES(?,?,?,?,?,?,'delivered',?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET
-                   text=excluded.text,content_uri=excluded.content_uri,author_name=excluded.author_name,
+                   text=excluded.text,content_uri=excluded.content_uri,
+                   author_name=CASE
+                     WHEN wazzup_messages.direction='outgoing' AND wazzup_messages.author_name NOT IN ('','Telegram')
+                     THEN wazzup_messages.author_name ELSE excluded.author_name END,
                    sent_at=excluded.sent_at,raw_json=excluded.raw_json""",
                 (record["external_id"], channel["channel_id"], "telegram", peer_id, phone_hash,
                  record["direction"], record["text"], record["content_uri"], record["author_name"],
@@ -1583,6 +4281,22 @@ async def _telegram_store_messages(
         await db.commit()
     finally:
         await db.close()
+    for record in records:
+        if record["direction"] != "incoming" or not notify_incoming:
+            continue
+        try:
+            raw = json.loads(record["raw_json"])
+        except json.JSONDecodeError:
+            raw = {}
+        if course_context and course_context.get("suppress_notification"):
+            continue
+        await _enqueue_notification_message(
+            external_id=record["external_id"], channel_id=channel["channel_id"],
+            chat_type="telegram", chat_id=peer_id, phone_hash=phone_hash,
+            provider=TELEGRAM_PROVIDER, client_name=name, text=record["text"],
+            content_type=_clean(raw.get("contentType"), 100), sent_at=record["sent_at"],
+            course_context=course_context,
+        )
     return inserted
 
 
@@ -1667,7 +4381,9 @@ def _schedule_telegram_history(peer_id: str, identity: dict[str, Any]) -> None:
     asyncio.create_task(run())
 
 
-async def _telegram_send_text(peer_id: str, text: str, *, identity: dict[str, Any] | None = None) -> dict[str, Any]:
+async def _telegram_send_text(
+    peer_id: str, text: str, *, identity: dict[str, Any] | None = None, author_name: str = "",
+) -> dict[str, Any]:
     channel = await _telegram_channel()
     link = await _external_link(peer_id=peer_id, provider=TELEGRAM_PROVIDER) or identity
     if not channel or not link:
@@ -1681,14 +4397,16 @@ async def _telegram_send_text(peer_id: str, text: str, *, identity: dict[str, An
         except Exception as exc:
             raise HTTPException(404, "Диалог Telegram не найден") from exc
         message = await client.send_message(entity, text)
-        await _telegram_store_messages(channel, entity, [message], link)
+        await _telegram_store_messages(
+            channel, entity, [message], link, outgoing_author_name=author_name,
+        )
         return {
             "external_id": f"{channel['channel_id']}:{peer_id}:{_clean(getattr(message, 'id', ''), 200)}",
             "direction": "outgoing",
             "status": "delivered",
             "text": text,
             "content_uri": "",
-            "author_name": "Telegram",
+            "author_name": _clean(author_name, 200) or "Telegram",
             "sent_at": _iso(getattr(message, "date", None)),
         }
 
@@ -1707,12 +4425,20 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
         limit = TELEGRAM_DIALOG_LIMIT if full else TELEGRAM_BACKGROUND_DIALOG_LIMIT
         async for dialog in client.iter_dialogs(limit=limit):
             entity = getattr(dialog, "entity", None)
-            if not _telegram_is_user(entity):
-                continue
-            peer = _telegram_user_view(entity)
+            course_context: dict[str, Any] = {}
+            if _telegram_is_user(entity):
+                peer = _telegram_user_view(entity)
+            else:
+                course_context = await _course_chat_context(
+                    TELEGRAM_PROVIDER, _clean(getattr(entity, "id", ""), 200),
+                    _clean(getattr(dialog, "name", "") or getattr(entity, "title", ""), 500),
+                )
+                if not course_context:
+                    continue
+                peer = {"id": _clean(getattr(entity, "id", ""), 200), "phone": "", "name": _clean(getattr(dialog, "name", ""), 300), "username": ""}
             if not peer["id"]:
                 continue
-            link = await _external_link(peer_id=peer["id"], provider=TELEGRAM_PROVIDER)
+            link = await _external_link(peer_id=peer["id"], provider=TELEGRAM_PROVIDER) if not course_context else {"name": peer["name"]}
             if not link and peer["phone"]:
                 db = await _connect()
                 try:
@@ -1735,7 +4461,9 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
             dialogs += 1
             latest = getattr(dialog, "message", None)
             if latest:
-                messages += await _telegram_store_messages(channel, entity, [latest], link)
+                messages += await _telegram_store_messages(
+                    channel, entity, [latest], link, course_context=course_context,
+                )
         await _set_setting("telegram_last_sync_at", _iso())
         return {"dialogs": dialogs, "messages": messages}
 
@@ -1743,12 +4471,105 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
 
 
 async def telegram_background_loop() -> None:
+    await asyncio.sleep(30)
     while True:
         try:
             await _sync_telegram_dialogs()
         except Exception:
             _log("warning", "Telegram Personal reconciliation failed")
         await asyncio.sleep(TELEGRAM_SYNC_SECONDS)
+
+
+async def _telegram_string_session() -> str:
+    async def export(client: Any) -> str:
+        if not await client.is_user_authorized():
+            return ""
+        try:
+            from telethon.sessions import StringSession
+            return _clean(StringSession.save(client.session), 10_000)
+        except Exception as exc:
+            _log("warning", "Telegram realtime session export failed: %s", type(exc).__name__)
+            return ""
+
+    return await _telegram_run(export)
+
+
+async def telegram_realtime_loop() -> None:
+    """Receive Telegram Personal messages immediately without holding the SQLite session open."""
+    await asyncio.sleep(8)
+    while True:
+        client = None
+        try:
+            session_value = await _telegram_string_session()
+            channel = await _telegram_channel()
+            if not session_value or not channel:
+                await asyncio.sleep(30)
+                continue
+            from telethon import TelegramClient, events
+            from telethon.sessions import StringSession
+            from orchestrator.telegram_proxy import telethon_proxy_config
+
+            api_id, api_hash = _telegram_credentials()
+            connection, proxy = telethon_proxy_config()
+            kwargs: dict[str, Any] = {
+                "connection_retries": 3, "request_retries": 2, "timeout": 10,
+            }
+            if connection and proxy:
+                kwargs.update({"connection": connection, "proxy": proxy})
+            client = TelegramClient(StringSession(session_value), api_id, api_hash, **kwargs)
+
+            async def on_message(event: Any) -> None:
+                try:
+                    entity = await event.get_chat()
+                    course_context: dict[str, Any] = {}
+                    if _telegram_is_user(entity):
+                        peer = _telegram_user_view(entity)
+                    else:
+                        course_context = await _course_chat_context(
+                            TELEGRAM_PROVIDER, _clean(getattr(entity, "id", ""), 200),
+                            _clean(getattr(entity, "title", ""), 500),
+                        )
+                        if not course_context:
+                            return
+                        sender = await event.get_sender()
+                        sender_username = _clean(getattr(sender, "username", ""), 200).lstrip("@").casefold()
+                        course_context["suppress_notification"] = bool(
+                            sender_username and sender_username == _clean(course_context.get("curator_telegram"), 200)
+                        )
+                        peer = {"id": _clean(getattr(entity, "id", ""), 200), "phone": "", "name": _clean(getattr(entity, "title", ""), 300), "username": ""}
+                    link = await _external_link(peer_id=peer["id"], provider=TELEGRAM_PROVIDER) if not course_context else {"name": peer["name"]}
+                    if not link:
+                        await _remember_external_link(
+                            {"phone": peer["phone"], "name": peer["name"] or peer["username"]},
+                            "telegram-realtime", provider=TELEGRAM_PROVIDER,
+                            external_user_id=peer["id"],
+                        )
+                        link = await _external_link(peer_id=peer["id"], provider=TELEGRAM_PROVIDER)
+                    await _telegram_store_messages(
+                        channel, entity, [event.message], link, course_context=course_context,
+                    )
+                except Exception:
+                    _log("exception", "Telegram realtime message store failed")
+
+            client.add_event_handler(on_message, events.NewMessage(incoming=True))
+            await client.connect()
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                client = None
+                await asyncio.sleep(30)
+                continue
+            await client.run_until_disconnected()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("warning", "Telegram realtime listener reconnect: %s", type(exc).__name__)
+            await asyncio.sleep(5)
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
 
 async def _vk_channel() -> dict[str, str] | None:
@@ -1941,6 +4762,7 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
     db = await _connect()
     inserted = updated = 0
     link_candidates: dict[str, str] = {}
+    notification_records: list[dict[str, str]] = []
     try:
         await db.execute(
             "INSERT INTO webhook_events(received_at,payload_json) VALUES(?,?)",
@@ -1980,6 +4802,13 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
                 (external_id, channel_id, chat_type, chat_id, phone_hash, direction, _clean(row.get("status"), 80), message_text, content_uri, author_name, sent_at, raw, now),
             )
             inserted += max(0, cursor.rowcount)
+            if direction == "incoming" and not _messenger_button_event(row):
+                notification_records.append({
+                    "external_id": external_id, "channel_id": channel_id,
+                    "chat_type": chat_type, "chat_id": chat_id, "phone_hash": phone_hash,
+                    "client_name": author_name, "text": message_text,
+                    "content_type": content["content_type"], "sent_at": sent_at,
+                })
             await db.execute(
                 """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,phone_hash,contact_name,last_message_at,last_message_preview,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(channel_id,chat_type,chat_id) DO UPDATE SET
@@ -2012,6 +4841,8 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
             name=name,
             source="webhook",
         )
+    for record in notification_records:
+        await _enqueue_notification_message(**record)
     return {"messages": inserted, "statuses": updated}
 
 
@@ -2035,12 +4866,21 @@ async def _device(request: Request) -> dict[str, Any] | None:
         ).fetchone()
         if not row or row["revoked_at"] or row["expires_at"] <= now or not row["enabled"]:
             return None
-        await db.execute(
-            "UPDATE devices SET last_used_at=?,expires_at=? WHERE id=?",
-            (now, expires, row["id"]),
-        )
-        await db.commit()
-        return dict(row)
+        result = dict(row)
+        last_used = _parse_iso(row["last_used_at"])
+        if not last_used or last_used <= _now_dt() - timedelta(seconds=DEVICE_TOUCH_INTERVAL_SECONDS):
+            try:
+                await db.execute(
+                    "UPDATE devices SET last_used_at=?,expires_at=? WHERE id=?",
+                    (now, expires, row["id"]),
+                )
+                await db.commit()
+                result.update({"last_used_at": now, "expires_at": expires})
+            except sqlite3.OperationalError as exc:
+                await db.rollback()
+                if "locked" not in str(exc).casefold():
+                    raise
+        return result
     finally:
         await db.close()
 
@@ -2168,7 +5008,11 @@ async def _assign_client_threads(
                 (admin_id, phone_hash),
             )
         for provider, peer_id in direct_links:
-            channel_prefix = "vk:" if provider == "vk" else "telegram-personal:"
+            channel_prefix = (
+                "vk:" if provider == "vk"
+                else "salebot:" if provider == SALEBOT_PROVIDER
+                else "telegram-personal:"
+            )
             await db.execute(
                 "UPDATE wazzup_chats SET responsible_admin_id=? WHERE channel_id LIKE ? AND chat_id=?",
                 (admin_id, channel_prefix + "%", _clean(peer_id, 250)),
@@ -2211,31 +5055,297 @@ async def _resolve_widget_context(data: dict[str, Any], mode: str, device: dict[
     return await asyncio.to_thread(_identity_index.resolve, context)
 
 
-async def service_transfer_recipients(*, email: str = "", gc_user_id: str = "", name: str = "") -> dict[str, Any]:
+PROFILE_LINK_LABELS = {
+    "getcourse": "GetCourse",
+    "vk": "VK",
+    "telegram_personal": "TG Personal",
+    "salebot": "SaleBot",
+    "max": "MAX",
+}
+PROFILE_LINK_ORDER = ("getcourse", "vk", "telegram_personal", "salebot", "max")
+
+
+def _scalar_texts(value: Any, *, depth: int = 0) -> list[str]:
+    if depth > 5:
+        return []
+    if isinstance(value, dict):
+        result: list[str] = []
+        for item in list(value.values())[:500]:
+            result.extend(_scalar_texts(item, depth=depth + 1))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in list(value)[:500]:
+            result.extend(_scalar_texts(item, depth=depth + 1))
+        return result
+    if isinstance(value, (str, int)):
+        text = _clean(value, 4000)
+        return [text] if text else []
+    return []
+
+
+def _profile_links_from_values(values: list[Any]) -> dict[str, str]:
+    """Extract only direct, allow-listed social profile URLs from trusted card data."""
+
+    found: dict[str, str] = {}
+    pattern = re.compile(
+        r"(?:https?://)?(?:www\.)?(?:vk\.com|vk\.ru|t\.me|max\.ru|salebot\.pro)/[^\s<>\"']+",
+        re.I,
+    )
+    reserved_vk = {"app", "away", "club", "feed", "gim", "id", "im", "photo", "public", "video", "wall"}
+    for raw in values:
+        for text in _scalar_texts(raw):
+            for match in pattern.finditer(text):
+                candidate = match.group(0).rstrip(".,;:!?)]}")
+                if not candidate.lower().startswith(("http://", "https://")):
+                    candidate = "https://" + candidate
+                parsed = urlsplit(candidate)
+                host = (parsed.hostname or "").lower().removeprefix("www.")
+                parts = [part for part in parsed.path.split("/") if part]
+                if host in {"vk.com", "vk.ru"} and len(parts) == 1:
+                    slug = parts[0]
+                    if re.fullmatch(r"id\d+", slug, re.I) or (
+                        re.fullmatch(r"[A-Za-z0-9_.]{3,64}", slug)
+                        and slug.casefold() not in reserved_vk
+                        and not re.fullmatch(r"(?:club|public|wall|photo|video)\d+.*", slug, re.I)
+                    ):
+                        found.setdefault("vk", f"https://vk.com/{slug}")
+                elif host == "t.me" and len(parts) == 1 and re.fullmatch(r"[A-Za-z0-9_]{5,32}", parts[0]):
+                    found.setdefault("telegram_personal", f"https://t.me/{parts[0]}")
+                elif host == "t.me" and len(parts) == 1 and re.fullmatch(r"\+\d{8,15}", parts[0]):
+                    found.setdefault("telegram_personal", f"https://t.me/{parts[0]}?profile")
+                elif host == "max.ru" and len(parts) == 2 and parts[0].casefold() == "u" and re.fullmatch(r"[A-Za-z0-9_-]{16,160}", parts[1]):
+                    found.setdefault("max", f"https://max.ru/u/{parts[1]}")
+                elif host == "salebot.pro" and len(parts) == 4 and parts[0] == "projects" and parts[2] == "clients" and parts[1].isdigit():
+                    client_id = quote(unquote(parts[3]), safe="")
+                    if client_id:
+                        found.setdefault("salebot", f"https://salebot.pro/projects/{parts[1]}/clients/{client_id}")
+    return found
+
+
+def _telegram_profile_url(username: Any = "", phone: Any = "") -> str:
+    public_username = _clean(username, 200).lstrip("@")
+    if re.fullmatch(r"[A-Za-z0-9_]{5,32}", public_username):
+        return f"https://t.me/{public_username}?profile"
+    normalized_phone = _normalize_phone(phone)
+    phone_digits = normalized_phone.removeprefix("+")
+    if re.fullmatch(r"\d{8,15}", phone_digits):
+        return f"https://t.me/+{phone_digits}?profile"
+    return ""
+
+
+async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[str, Any]) -> list[dict[str, Any]]:
+    context = _widget_context(data, mode, device)
+    await _apply_identity_rules(context)
+    resolved = await _resolve_widget_context(data, mode, device)
+    found = _profile_links_from_values([context, resolved.get("variables", {})])
+    accounts = [row for row in resolved.get("accounts", []) if isinstance(row, dict)]
+    exact_ids: dict[str, str] = {}
+    if context.get("platform") == "amocrm" and _identity_index is not None:
+        # Historical amoCRM imports contain generated ``Диалог SaleBot`` URLs
+        # whose client id was copied blindly from utm_term.  Those URLs are
+        # useful as archival text, but they are not proof that the current
+        # lead exists in SaleBot.  Only the exact Customer DB bridge below may
+        # create a SaleBot profile button for an amoCRM card.
+        found.pop(SALEBOT_PROVIDER, None)
+        vk_exact, telegram_exact, salebot_exact = await asyncio.gather(*(
+            asyncio.to_thread(_identity_index.provider_id_for_exact_context, provider, context)
+            for provider in ("vk", "telegram", SALEBOT_PROVIDER)
+        ))
+        exact_ids = {
+            "vk": _clean(vk_exact, 300) or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id"),
+            TELEGRAM_PROVIDER: _clean(telegram_exact, 300) or _identity_field_value(context, "telegram_id", "tg_id"),
+            SALEBOT_PROVIDER: _clean(salebot_exact, 300),
+        }
+        # A graph/phone match is useful for discovery, but it must never turn
+        # into a profile button in an amoCRM deal unless the exact deal row
+        # confirms the provider identifier.
+        accounts = []
+
+    gc_id = ""
+    if context.get("platform") == "getcourse" and context.get("entity_type") in {"user", "contact"}:
+        gc_id = re.sub(r"\D+", "", _clean(context.get("entity_id"), 100))
+    if not gc_id:
+        gc_id = re.sub(r"\D+", "", _identity_field_value(context, "getcourse_user_id", "gc_user_id", "user_id"))
+    if not gc_id and _identity_index is not None and context.get("phone"):
+        resolver = getattr(_identity_index, "platform_id_for_context", None)
+        if callable(resolver):
+            gc_id = re.sub(r"\D+", "", await asyncio.to_thread(resolver, "getcourse", context))
+    if gc_id:
+        found["getcourse"] = f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
+
+    entity_links = await asyncio.gather(*(
+        _entity_external_link(context["platform"], context["entity_type"], context["entity_id"], provider)
+        for provider in ("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER)
+    ))
+    account_ids: dict[str, str] = {}
+    for row in accounts:
+        service = _clean(row.get("service"), 80).lower()
+        platform_id = _clean(row.get("platform_id"), 300)
+        if service == "vk" and platform_id:
+            account_ids.setdefault("vk", platform_id)
+        elif service in {"telegram", "telegram_personal"} and platform_id:
+            account_ids.setdefault(TELEGRAM_PROVIDER, platform_id)
+        elif service == SALEBOT_PROVIDER and platform_id:
+            account_ids.setdefault(SALEBOT_PROVIDER, platform_id)
+    for provider, link in zip(("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER), entity_links):
+        if link and (
+            context.get("platform") != "amocrm"
+            or (
+                bool(exact_ids.get(provider))
+                and _clean(link.get("external_user_id"), 300) == exact_ids.get(provider)
+            )
+        ):
+            account_ids.setdefault(provider, _clean(link.get("external_user_id"), 300))
+    for provider, external_id in exact_ids.items():
+        if external_id:
+            account_ids[provider] = external_id
+
+    # Use the same exact card resolver as the SaleBot channel.  A card can have
+    # a verified SaleBot id in Customer DB even before an entity link has been
+    # persisted by the channel request.
+    if SALEBOT_PROVIDER not in account_ids and _identity_index is not None:
+        exact_salebot_id = await asyncio.to_thread(
+            _identity_index.provider_id_for_exact_context, SALEBOT_PROVIDER, context,
+        )
+        if exact_salebot_id:
+            account_ids[SALEBOT_PROVIDER] = exact_salebot_id
+
+    # SaleBot stores the messenger platform id, while the public Telegram link
+    # may live only in the linked Customer DB record. Resolve that exact edge
+    # before falling back to the phone from the current card.
+    if TELEGRAM_PROVIDER not in account_ids and SALEBOT_PROVIDER in account_ids and _identity_index is not None:
+        exact_telegram_id = await asyncio.to_thread(
+            _identity_index.provider_id_for_exact_context, "telegram", context,
+        )
+        if exact_telegram_id:
+            account_ids[TELEGRAM_PROVIDER] = exact_telegram_id
+
+    vk_value = account_ids.get("vk")
+    if context.get("platform") != "amocrm":
+        vk_value = vk_value or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id")
+    vk_id = re.sub(r"\D+", "", vk_value or "")
+    if vk_id:
+        found.setdefault("vk", f"https://vk.com/id{vk_id}")
+
+    telegram_id = account_ids.get(TELEGRAM_PROVIDER)
+    telegram_username = ""
+    if context.get("platform") != "amocrm":
+        telegram_id = telegram_id or _identity_field_value(context, "telegram_id", "tg_id")
+        telegram_username = _identity_field_value(context, "telegram_username", "tg_username").lstrip("@")
+    if not telegram_username and telegram_id and _identity_index is not None:
+        telegram_username = await asyncio.to_thread(_identity_index.telegram_username_for_platform_id, telegram_id)
+    telegram_profile_url = _telegram_profile_url(
+        telegram_username,
+        context.get("phone") if telegram_id else "",
+    )
+    if telegram_profile_url:
+        found.setdefault(TELEGRAM_PROVIDER, telegram_profile_url)
+
+    salebot_id = account_ids.get(SALEBOT_PROVIDER)
+    if not salebot_id and context.get("platform") != "amocrm":
+        salebot_id = _identity_field_value(context, "salebot_id", "salebot_client_id", "sb_id")
+    if not salebot_id and context.get("platform") != "amocrm":
+        salebot_id = next((value for kind, value in parse_utm_term(_identity_field_value(context, "utm_term")) if kind == "salebot"), "")
+    if salebot_id:
+        found.setdefault(SALEBOT_PROVIDER, f"{SALEBOT_PROFILE_BASE}/{quote(salebot_id, safe='')}")
+
+    paid_access = False
+    try:
+        service = _module_service("student-transfer", "service_widget_student")
+        stream_card = await service(
+            gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
+            include_access=False, summary_only=True,
+        )
+        paid_access = bool(stream_card.get("found") and stream_card.get("paid_access"))
+        if paid_access:
+            stream_gc_id = re.sub(r"\D+", "", _clean(stream_card.get("gc_user_id"), 100))
+            stream_url = _clean(stream_card.get("profile_url"), 2000)
+            if stream_gc_id:
+                gc_id = stream_gc_id
+                found["getcourse"] = stream_url or f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
+    except Exception as exc:
+        _log("warning", "Streams badge lookup skipped: %s", exc)
+    return [
+        {"kind": kind, "label": PROFILE_LINK_LABELS[kind], "url": found[kind],
+         **({"paid_access": paid_access} if kind == "getcourse" else {})}
+        for kind in PROFILE_LINK_ORDER
+        if found.get(kind)
+    ]
+
+
+def _module_service(module_id: str, service: str):
+    module = sys.modules.get(f"_nexus_mod_{module_id}")
+    if module is None or not hasattr(module, service):
+        raise HTTPException(503, f"Модуль {module_id} недоступен")
+    return getattr(module, service)
+
+
+async def _widget_getcourse_card_data(
+    data: dict[str, Any], mode: str, device: dict[str, Any], *, include_access: bool = True,
+) -> dict[str, Any]:
+    context = _widget_context(data, mode, device)
+    await _apply_identity_rules(context)
+    gc_id = ""
+    if context.get("platform") == "getcourse" and context.get("entity_type") in {"user", "contact"}:
+        gc_id = re.sub(r"\D+", "", _clean(context.get("entity_id"), 100))
+    if not gc_id:
+        gc_id = re.sub(r"\D+", "", _identity_field_value(context, "getcourse_user_id", "gc_user_id", "user_id"))
+    if not gc_id and _identity_index is not None and context.get("phone"):
+        resolver = getattr(_identity_index, "platform_id_for_context", None)
+        if callable(resolver):
+            gc_id = re.sub(r"\D+", "", await asyncio.to_thread(resolver, "getcourse", context))
+    service = _module_service("student-transfer", "service_widget_student")
+    return await service(
+        gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
+        include_access=include_access,
+    )
+
+
+async def service_transfer_recipients(
+    *, email: str = "", gc_user_id: str = "", name: str = "", phone: str = "",
+) -> dict[str, Any]:
     if _identity_index is None:
-        return {"ok": False, "status": "unavailable", "telegram": "", "vk": "", "conflicts": []}
+        return {
+            "ok": False, "status": "unavailable", "telegram": "", "vk": "",
+            SALEBOT_PROVIDER: "", "conflicts": [],
+        }
     context = {
         "service": "getcourse",
         "entity_type": "user",
         "entity_id": _clean(gc_user_id, 200),
         "getcourse_user_id": _clean(gc_user_id, 200),
         "email": _clean(email, 320),
+        "phone": _normalize_phone(phone),
         "name": _clean(name, 200),
-        "fields": {"email": _clean(email, 320), "gc_user_id": _clean(gc_user_id, 200)},
+        "fields": {
+            "email": _clean(email, 320), "gc_user_id": _clean(gc_user_id, 200),
+            "phone": _normalize_phone(phone),
+        },
     }
-    telegram, vk = await asyncio.gather(*(
+    telegram, vk, salebot = await asyncio.gather(*(
         asyncio.to_thread(_identity_index.provider_id_for_exact_context, service, context)
-        for service in ("telegram", "vk")
+        for service in ("telegram", "vk", SALEBOT_PROVIDER)
     ))
     if not telegram:
         telegram = await asyncio.to_thread(_identity_index.platform_id_for_context, "telegram", context)
-    if not vk:
-        vk = await asyncio.to_thread(_identity_index.platform_id_for_context, "vk", context)
+    if not salebot:
+        # SaleBot has no standalone Customer DB table, therefore it can only
+        # be recovered from the exact GetCourse order fields (usually
+        # utm_term) and their linked Telegram record.
+        salebot = await asyncio.to_thread(
+            _identity_index.provider_id_for_exact_context, SALEBOT_PROVIDER, context,
+        )
+    telegram_username = await asyncio.to_thread(
+        _identity_index.telegram_username_for_platform_id, telegram
+    ) if telegram else ""
     return {
-        "ok": bool(telegram or vk),
-        "status": "resolved" if telegram or vk else "not_found",
+        "ok": bool(telegram or vk or salebot),
+        "status": "resolved" if telegram or vk or salebot else "not_found",
         "telegram": telegram,
+        "telegram_username": telegram_username,
         "vk": vk,
+        SALEBOT_PROVIDER: salebot,
         "conflicts": [],
     }
 
@@ -2273,6 +5383,21 @@ async def service_transfer_delivery_target(
             for provider in ("vk", SALEBOT_PROVIDER)
         ))
         targets = [(provider, value) for provider, value in (("vk", vk), (SALEBOT_PROVIDER, salebot)) if value == candidate]
+        if not targets and _vk_reference(term):
+            try:
+                resolved_vk = await _vk_peer_id(term)
+            except Exception:
+                resolved_vk = ""
+            if resolved_vk:
+                resolved_context = {
+                    **context,
+                    "fields": {**context["fields"], "vk_platform_id": resolved_vk},
+                }
+                verified_vk = await asyncio.to_thread(
+                    _identity_index.provider_id_for_exact_context, "vk", resolved_context
+                )
+                if verified_vk == resolved_vk:
+                    targets = [("vk", resolved_vk)]
     if len(targets) != 1:
         reason = "utm_term относится к нескольким каналам" if len(targets) > 1 else "ID из utm_term не найден в базе"
         return {"ok": False, "status": "conflict" if len(targets) > 1 else "not_found", "provider": "", "recipient_id": "", "reason": reason}
@@ -2294,25 +5419,508 @@ async def service_transfer_delivery_target(
     }
 
 
+async def service_resolve_onboarding_telegram_target(*, utm_term: str) -> dict[str, Any]:
+    """Resolve the exact Telegram chat used by GetCourse onboarding."""
+
+    if _identity_index is None:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "platform_id": "",
+            "source": "",
+            "matches": [],
+            "error": "identity index unavailable",
+        }
+    return await asyncio.to_thread(_identity_index.telegram_target_for_utm_term, _clean(utm_term, 1000))
+
+
+async def service_resolve_onboarding_target(
+    *, utm_term: str, email: str = "", gc_user_id: str = "", phone: str = "",
+) -> dict[str, Any]:
+    """Resolve one exact onboarding channel, preferring direct Telegram over VK."""
+
+    telegram = await service_resolve_onboarding_telegram_target(utm_term=utm_term)
+    if telegram.get("ok"):
+        return {
+            "ok": True,
+            "status": "ready",
+            "provider": "telegram",
+            "recipient_id": _clean(telegram.get("platform_id"), 200),
+            "source": _clean(telegram.get("source"), 100) or "telegram",
+        }
+    fallback = await service_transfer_delivery_target(
+        email=email, gc_user_id=gc_user_id, phone=phone, utm_term=utm_term,
+    )
+    if fallback.get("ok") and fallback.get("provider") == "vk":
+        return {
+            "ok": True,
+            "status": "ready",
+            "provider": "vk",
+            "recipient_id": _clean(fallback.get("recipient_id"), 200),
+            "source": "vk",
+        }
+    return {
+        "ok": False,
+        "status": fallback.get("status") or telegram.get("status") or "not_found",
+        "provider": "",
+        "recipient_id": "",
+        "source": "",
+        "error": fallback.get("reason") or fallback.get("error") or telegram.get("error") or "Получатель не найден",
+    }
+
+
+async def service_resolve_onboarding_targets(
+    *, utm_term: str, email: str = "", gc_user_id: str = "", phone: str = "", name: str = "",
+) -> dict[str, Any]:
+    """Return every verified direct channel so one unavailable provider cannot block another."""
+
+    candidates: list[dict[str, str]] = []
+    errors: list[str] = []
+
+    def add(provider: str, recipient_id: Any, source: str) -> None:
+        clean_id = _clean(recipient_id, 200)
+        if clean_id and not any(
+            item["provider"] == provider and item["recipient_id"] == clean_id for item in candidates
+        ):
+            candidates.append({"provider": provider, "recipient_id": clean_id, "source": source})
+
+    try:
+        exact_telegram = await service_resolve_onboarding_telegram_target(utm_term=utm_term)
+        if exact_telegram.get("ok"):
+            add("telegram", exact_telegram.get("platform_id"), exact_telegram.get("source") or "utm_term")
+        elif exact_telegram.get("error"):
+            errors.append(_clean(exact_telegram.get("error"), 500))
+    except Exception as exc:
+        errors.append(_clean(exc, 500))
+
+    try:
+        identities = await service_transfer_recipients(
+            email=email, gc_user_id=gc_user_id, name=name, phone=phone,
+        )
+        if identities.get("ok"):
+            add("telegram", identities.get("telegram"), "identity")
+            vk_id = _clean(identities.get("vk"), 200)
+            if vk_id:
+                allowed = await _vk_request(
+                    "messages.isMessagesFromGroupAllowed",
+                    {"user_id": vk_id, "group_id": _vk_group_id()},
+                )
+                is_allowed = (
+                    bool(int((allowed or {}).get("is_allowed") or 0))
+                    if isinstance(allowed, dict)
+                    else False
+                )
+                if is_allowed:
+                    add("vk", vk_id, "identity")
+    except Exception as exc:
+        errors.append(_clean(exc, 500))
+
+    try:
+        exact = await service_transfer_delivery_target(
+            email=email, gc_user_id=gc_user_id, phone=phone, utm_term=utm_term,
+        )
+        if exact.get("ok") and exact.get("provider") == "vk":
+            add("vk", exact.get("recipient_id"), "utm_term")
+    except Exception as exc:
+        errors.append(_clean(exc, 500))
+
+    return {
+        "ok": bool(candidates),
+        "status": "ready" if candidates else "not_found",
+        "candidates": candidates,
+        "errors": [item for item in errors if item][:8],
+        "error": "; ".join(item for item in errors if item)[:1000],
+    }
+
+
+async def service_resolve_vk_test_target(*, reference: str) -> dict[str, Any]:
+    """Resolve an explicit VK profile and verify that the community may message it."""
+
+    try:
+        peer_id = await _vk_peer_id(reference)
+        if not peer_id:
+            return {"ok": False, "status": "not_found", "recipient_id": "", "error": "VK-пользователь не найден"}
+        allowed = await _vk_request(
+            "messages.isMessagesFromGroupAllowed",
+            {"user_id": peer_id, "group_id": _vk_group_id()},
+        )
+        ready = bool(int((allowed or {}).get("is_allowed") or 0)) if isinstance(allowed, dict) else False
+        return {
+            "ok": ready,
+            "status": "ready" if ready else "unavailable",
+            "recipient_id": peer_id,
+            "error": "" if ready else "Пользователь не разрешил сообщения сообщества",
+        }
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "recipient_id": "", "error": _clean(exc, 500)}
+
+
 async def service_send_transfer_message(
     *, provider: str, recipient_id: str, content: str, operation_id: str,
+    keyboard: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     provider = _clean(provider, 40).lower()
     recipient_id = _clean(recipient_id, 200)
     content = _clean(content, 4000)
-    if provider not in {"vk", SALEBOT_PROVIDER} or not recipient_id or not content or not _clean(operation_id, 100):
+    clean_operation_id = _clean(operation_id, 100)
+    if provider not in {"vk", SALEBOT_PROVIDER} or not recipient_id or not content or not clean_operation_id:
         return {"ok": False, "status": "invalid", "error": "Некорректные параметры доставки"}
     try:
         if provider == SALEBOT_PROVIDER:
             details = await _salebot_send(recipient_id, content)
             return {"ok": True, "status": "sent", "provider": provider, "recipient_id": recipient_id, "details": details}
-        result = await _vk_request("messages.send", {
+        random_id = int.from_bytes(
+            hashlib.sha256(f"{provider}:{recipient_id}:{clean_operation_id}".encode()).digest()[:4],
+            "big",
+        ) & 0x7FFFFFFF
+        payload: dict[str, Any] = {
             "group_id": _vk_group_id(), "peer_id": recipient_id,
-            "random_id": secrets.randbelow(2_000_000_000) + 1, "message": content,
-        })
+            "random_id": random_id or 1, "message": content,
+        }
+        if keyboard:
+            payload["keyboard"] = keyboard if isinstance(keyboard, str) else json.dumps(
+                keyboard, ensure_ascii=False, separators=(",", ":")
+            )
+        result = await _vk_request("messages.send", payload)
         return {"ok": True, "status": "sent", "provider": provider, "recipient_id": recipient_id, "message_id": result}
     except Exception as exc:
         return {"ok": False, "status": "failed", "provider": provider, "recipient_id": recipient_id, "error": _clean(exc, 1000)}
+
+
+async def _streams_admin(operator_name: str) -> dict[str, Any]:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT id,wazzup_user_id,name,role FROM admins WHERE enabled=1 AND lower(name)=lower(?) LIMIT 1",
+            (_clean(operator_name, 200),),
+        )).fetchone()
+    finally:
+        await db.close()
+    return dict(row) if row else {
+        "id": 0,
+        "wazzup_user_id": f"streams-{hashlib.sha256(_clean(operator_name, 200).encode()).hexdigest()[:16]}",
+        "name": _clean(operator_name, 200) or "Streams",
+        "role": "employee",
+    }
+
+
+async def _streams_vk_profile_name(vk_id: str) -> str:
+    clean_id = _clean(vk_id, 200)
+    if not clean_id:
+        return ""
+    try:
+        profiles = await _vk_request("users.get", {"user_ids": clean_id})
+        profile = profiles[0] if isinstance(profiles, list) and profiles and isinstance(profiles[0], dict) else {}
+        name = " ".join(filter(None, (
+            _clean(profile.get("first_name"), 120),
+            _clean(profile.get("last_name"), 120),
+        ))).strip()
+        if name:
+            return name
+    except Exception:
+        _log("warning", "VK Streams profile name lookup failed user_id=%s", clean_id)
+    link = await _external_link(peer_id=clean_id, provider="vk")
+    return _clean(link.get("name"), 200) if link else ""
+
+
+async def _streams_salebot_profile_name(salebot_id: str, channels: list[dict[str, Any]]) -> str:
+    clean_id = _clean(salebot_id, 200)
+    if not clean_id:
+        return ""
+    for channel in channels:
+        if _clean(channel.get("provider"), 40).lower() != SALEBOT_PROVIDER:
+            continue
+        for message in channel.get("messages") if isinstance(channel.get("messages"), list) else []:
+            if not isinstance(message, dict) or _clean(message.get("direction"), 40).lower() != "incoming":
+                continue
+            if name := _clean(message.get("author_name"), 200):
+                return name
+    link = await _external_link(peer_id=clean_id, provider=SALEBOT_PROVIDER)
+    return _clean(link.get("name"), 200) if link else ""
+
+
+async def service_streams_conversations(
+    *, email: str = "", gc_user_id: str = "", name: str = "", phone: str = "", operator_name: str = "",
+) -> dict[str, Any]:
+    """Return the same channel/template data used by the full messenger widget."""
+
+    normalized_phone = _normalize_phone(phone)
+    identities, channels, admin = await asyncio.gather(
+        service_transfer_recipients(
+            email=email, gc_user_id=gc_user_id, name=name, phone=normalized_phone,
+        ),
+        _all_channels(),
+        _streams_admin(operator_name),
+    )
+
+    async def channel_view(channel: dict[str, Any]) -> dict[str, Any]:
+        provider = _clean(channel.get("provider"), 40).lower() or (
+            "vk" if _clean(channel.get("channel_id"), 200).startswith("vk:")
+            else TELEGRAM_PROVIDER if _clean(channel.get("channel_id"), 200).startswith("telegram-personal:")
+            else "wazzup"
+        )
+        transport = _clean(channel.get("transport"), 40).lower()
+        exact_id = ""
+        lookup_phone = normalized_phone
+        if provider == "vk":
+            exact_id = _clean(identities.get("vk"), 200)
+            lookup_phone = ""
+        elif provider == TELEGRAM_PROVIDER:
+            exact_id = _clean(identities.get("telegram"), 200)
+            lookup_phone = ""
+        elif provider == SALEBOT_PROVIDER:
+            exact_id = _clean(identities.get(SALEBOT_PROVIDER), 200)
+            lookup_phone = ""
+        if not exact_id and not lookup_phone:
+            return {
+                "channel_id": _clean(channel.get("channel_id"), 200),
+                "transport": transport, "provider": provider,
+                "label": _clean(channel.get("label") or channel.get("name") or transport, 200),
+                "chat_id": "", "has_chat": False, "can_send": False,
+                "send_reason": "Клиент не связан с этим каналом", "messages": [], "history_error": "",
+            }
+        history_error = ""
+        if provider == SALEBOT_PROVIDER:
+            try:
+                all_messages = await _salebot_history(exact_id)
+                messages = all_messages[-100:]
+                has_chat = bool(all_messages)
+            except Exception as exc:
+                messages = []
+                has_chat = False
+                history_error = _clean(getattr(exc, "detail", exc), 500)
+            chat_id = exact_id
+            can_send = bool(exact_id)
+            reason = "" if can_send else "Клиент не связан с SaleBot"
+        else:
+            chat_id, has_chat, messages = await _conversation_rows(
+                _clean(channel.get("channel_id"), 200), transport, lookup_phone, 100,
+                exact_chat_id=exact_id,
+            )
+            can_send, reason = _channel_send_state(channel, has_chat)
+        if provider in {"vk", TELEGRAM_PROVIDER}:
+            can_send = bool(exact_id)
+            reason = "" if can_send else "Клиент не связан с этим каналом"
+        return {
+            "channel_id": _clean(channel.get("channel_id"), 200),
+            "transport": transport,
+            "provider": provider,
+            "label": _clean(channel.get("label") or channel.get("name") or transport, 200),
+            "chat_id": exact_id or chat_id,
+            "has_chat": has_chat,
+            "can_send": can_send,
+            "send_reason": reason,
+            "messages": messages,
+            "history_error": history_error,
+        }
+
+    items = list(await asyncio.gather(*(channel_view(channel) for channel in channels)))
+    templates = await _template_rows(int(admin.get("id") or 0), can_edit_shared=False)
+    vk_id = _clean(identities.get("vk"), 200)
+    salebot_id = _clean(identities.get(SALEBOT_PROVIDER), 200)
+    vk_profile_name, salebot_profile_name = await asyncio.gather(
+        _streams_vk_profile_name(vk_id),
+        _streams_salebot_profile_name(salebot_id, items),
+    )
+    profile_links: list[dict[str, str]] = []
+    if vk_id:
+        profile_links.append({
+            "kind": "vk", "label": f"VK: {vk_profile_name}" if vk_profile_name else "VK",
+            "url": f"https://vk.com/id{quote(vk_id, safe='')}",
+        })
+    if telegram_username := _clean(identities.get("telegram_username"), 200).lstrip("@"):
+        profile_links.append({"kind": TELEGRAM_PROVIDER, "label": "Telegram", "url": f"https://t.me/{quote(telegram_username, safe='')}"})
+    if salebot_id:
+        profile_links.append({
+            "kind": SALEBOT_PROVIDER,
+            "label": f"SaleBot: {salebot_profile_name}" if salebot_profile_name else "SaleBot",
+            "url": f"{SALEBOT_PROFILE_BASE}/{quote(salebot_id, safe='')}",
+        })
+    return {
+        "ok": True,
+        "channels": items,
+        "templates": [item for item in templates if item.get("enabled", True)],
+        "profile_links": profile_links,
+        "send_all_default": False,
+        "updated_at": _iso(),
+    }
+
+
+def _streams_context(*, email: str, gc_user_id: str, name: str, phone: str) -> dict[str, Any]:
+    normalized_phone = _normalize_phone(phone)
+    return {
+        "service": "getcourse", "platform": "getcourse", "entity_type": "user",
+        "entity_id": _clean(gc_user_id, 200), "getcourse_user_id": _clean(gc_user_id, 200),
+        "email": _clean(email, 320), "phone": normalized_phone, "name": _clean(name, 200),
+        "fields": {"email": _clean(email, 320), "phone": normalized_phone, "gc_user_id": _clean(gc_user_id, 200)},
+    }
+
+
+async def service_streams_template_preview(
+    *, template_id: int = 0, body: str = "", email: str = "", gc_user_id: str = "",
+    name: str = "", phone: str = "", operator_name: str = "",
+) -> dict[str, Any]:
+    admin = await _streams_admin(operator_name)
+    current_body = _clean(body, 20_000)
+    if template_id:
+        rows = await _template_rows(int(admin.get("id") or 0), can_edit_shared=False)
+        template = next((row for row in rows if int(row.get("id") or 0) == int(template_id)), None)
+        if not template:
+            raise ValueError("Шаблон не найден")
+        current_body = _clean(template.get("body"), 20_000)
+    if not current_body:
+        raise ValueError("Текст не указан")
+    context = _streams_context(email=email, gc_user_id=gc_user_id, name=name, phone=phone)
+    if _identity_index is not None:
+        resolved = await asyncio.to_thread(_identity_index.resolve, context)
+        variables = resolved.get("variables") if isinstance(resolved.get("variables"), dict) else {}
+    else:
+        variables = build_context_variables([], context, {})
+    return {"ok": True, **render_message_template(current_body, variables)}
+
+
+async def service_streams_template_favorite(
+    *, template_id: int, favorite: bool, operator_name: str,
+) -> dict[str, Any]:
+    admin = await _streams_admin(operator_name)
+    admin_id = int(admin.get("id") or 0)
+    if not admin_id:
+        raise ValueError("Пользователь Streams не связан с сотрудником виджета")
+    return {"ok": True, "id": int(template_id), "favorite": await _set_template_favorite(admin_id, int(template_id), favorite)}
+
+
+async def service_streams_send(
+    *, channel_id: str, transport: str, provider: str, chat_id: str, phone: str,
+    text: str, operator_name: str, email: str = "", gc_user_id: str = "", name: str = "",
+    attachment_url: str = "", attachment_type: str = "", idempotency_key: str = "",
+    record_communication: bool = True,
+) -> dict[str, Any]:
+    """Send one text message using a channel already exposed to Streams."""
+
+    channel_id = _clean(channel_id, 200)
+    transport = _clean(transport, 40).lower()
+    provider = _clean(provider, 40).lower()
+    chat_id = _clean(chat_id, 250)
+    message_text = _clean(text, 4000)
+    attachment_url = _clean(attachment_url, 4000)
+    attachment_type = _clean(attachment_type, 100)
+    normalized_phone = _normalize_phone(phone)
+    if not channel_id or transport not in CHAT_TRANSPORTS or (not message_text and not attachment_url):
+        raise ValueError("Выберите канал и введите сообщение")
+    if attachment_url and not attachment_url.startswith("https://"):
+        raise ValueError("Вложение должно иметь HTTPS-ссылку")
+    channel = await _requested_channel(channel_id, transport, provider)
+    admin = await _streams_admin(operator_name)
+    now = _iso()
+    message: dict[str, Any]
+    if provider == SALEBOT_PROVIDER:
+        if not chat_id:
+            identities = await service_transfer_recipients(
+                email=email, gc_user_id=gc_user_id, name=name, phone=normalized_phone,
+            )
+            chat_id = _clean(identities.get(SALEBOT_PROVIDER), 200)
+        if not chat_id:
+            raise ValueError("Диалог SaleBot не найден")
+        await _salebot_send(chat_id, message_text, attachment_url, attachment_type)
+        response = {
+            "ok": True,
+            "channel": channel,
+            "message": {
+                "external_id": f"salebot:local:{secrets.token_hex(8)}",
+                "direction": "outgoing",
+                "status": "sent",
+                "text": message_text,
+                "content_uri": attachment_url,
+                "content_type": attachment_type,
+                "author_name": admin["name"],
+                "sent_at": now,
+            },
+        }
+        if record_communication and _db_path is not None:
+            await _record_communication(
+                dedupe_key=f"streams:{idempotency_key or secrets.token_hex(16)}",
+                external_id=response["message"]["external_id"], provider=provider,
+                channel_id=channel_id, chat_type=transport, chat_id=chat_id,
+                direction="outgoing", status="sent", text=message_text, sent_at=now,
+                client_name=name, phone_hash=_phone_hash(normalized_phone),
+                admin_id=int(admin["id"]), manager_name=admin["name"],
+                transport_author=admin["name"],
+            )
+        return response
+    if attachment_url:
+        raise ValueError("Вложения сейчас поддерживает канал SaleBot")
+    if provider == "vk":
+        if not chat_id:
+            raise ValueError("Диалог VK не найден")
+        result = await _vk_request("messages.send", {
+            "group_id": _vk_group_id(), "peer_id": chat_id,
+            "random_id": (
+                int(hashlib.sha256(idempotency_key.encode()).hexdigest()[:8], 16) % 2_000_000_000 + 1
+                if idempotency_key else secrets.randbelow(2_000_000_000) + 1
+            ), "message": message_text,
+        })
+        link = await _external_link(peer_id=chat_id) or {
+            "phone": normalized_phone, "getcourse_user_id": _clean(gc_user_id, 200), "name": _clean(name, 200),
+        }
+        message_id = _clean(result, 200) if not isinstance(result, dict) else _clean(result.get("message_id"), 200)
+        await _store_vk_messages(chat_id, [{
+            "id": message_id or f"local-{secrets.token_hex(12)}", "from_id": f"-{_vk_group_id()}",
+            "peer_id": chat_id, "date": int(_now_dt().timestamp()), "text": message_text, "attachments": [],
+        }], link, outgoing_author_name=admin["name"])
+        message = {
+            "external_id": f"vk:{_vk_group_id()}:{chat_id}:{message_id}", "direction": "outgoing",
+            "status": "delivered", "text": message_text, "author_name": admin["name"], "sent_at": now,
+        }
+    elif provider == TELEGRAM_PROVIDER:
+        if not chat_id:
+            raise ValueError("Диалог Telegram не найден")
+        message = await _telegram_send_text(chat_id, message_text, author_name=admin["name"])
+    else:
+        if not normalized_phone:
+            raise ValueError("Для этого канала нужен телефон")
+        known_chat_id, has_chat, _ = await _conversation_rows(channel_id, transport, normalized_phone, 1)
+        target_chat = chat_id or known_chat_id
+        identity = await resolve_client_identity(phone=normalized_phone, email=email, getcourse_user_id=gc_user_id)
+        payload: dict[str, Any] = {
+            "channelId": channel_id, "chatType": transport, "text": message_text,
+            "crmUserId": admin["wazzup_user_id"],
+            "crmMessageId": f"nexus-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:32] if idempotency_key else secrets.token_hex(16)}",
+        }
+        if has_chat and target_chat:
+            payload["chatId"] = target_chat
+        else:
+            payload.update(_first_message_recipient(channel, transport, normalized_phone, identity))
+        response = await _wazzup_request("POST", "/message", payload)
+        external_id = _clean((response or {}).get("messageId") or (response or {}).get("id"), 250) or f"local-{payload['crmMessageId']}"
+        response_chat_id = _clean((response or {}).get("chatId"), 250) or target_chat
+        db = await _connect()
+        try:
+            await db.execute(
+                """INSERT OR IGNORE INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
+                   ) VALUES(?,?,?,?,?,'outgoing','accepted',?,'',?,?,?,?)""",
+                (external_id, channel_id, transport, response_chat_id, _phone_hash(normalized_phone),
+                 message_text, admin["name"], now, "", now),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        message = {
+            "external_id": external_id, "chat_id": response_chat_id, "direction": "outgoing",
+            "status": "sent", "text": message_text, "author_name": admin["name"], "sent_at": now,
+        }
+    if record_communication and _db_path is not None:
+        await _record_communication(
+            dedupe_key=f"streams:{idempotency_key or secrets.token_hex(16)}",
+            external_id=_clean(message.get("external_id"), 250), provider=provider,
+            channel_id=channel_id, chat_type=transport, chat_id=chat_id,
+            direction="outgoing", status=_clean(message.get("status"), 40) or "sent",
+            text=message_text, sent_at=message.get("sent_at") or now,
+            client_name=name, phone_hash=_phone_hash(normalized_phone),
+            admin_id=int(admin["id"]), manager_name=admin["name"],
+            transport_author=_clean(message.get("author_name"), 200),
+        )
+    return {"ok": True, "status": "sent", "message": message}
 
 
 def _account_identity_value(accounts: list[dict[str, Any]], provider: str) -> str:
@@ -2366,12 +5974,29 @@ async def _provider_card_link(
 ) -> dict[str, str]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
+    exact_provider = "telegram" if provider == TELEGRAM_PROVIDER else provider
+    exact_reference = await asyncio.to_thread(
+        _identity_index.provider_id_for_exact_context, exact_provider, context,
+    ) if _identity_index is not None else ""
     existing = await _entity_external_link(
         context["platform"], context["entity_type"], context["entity_id"], provider,
     )
     page_kind, page_id = _page_context(data.get("source_url"))
     gc_id = page_id if page_kind == "user" else _identity_field_value(context, "getcourse_user_id")
+    exact_amo_identity = context.get("platform") == "amocrm" and provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER}
+    if existing and exact_amo_identity and (
+        not exact_reference
+        or _clean(existing.get("external_user_id"), 300) != _clean(exact_reference, 300)
+    ):
+        if mode != "test":
+            await _forget_entity_external_link(context, provider)
+        existing = {}
     if existing and _card_link_matches_context(existing, context, gc_id):
+        if mode != "test":
+            owner_id = await _responsible_admin_id(data, mode, device)
+            await _remember_notification_context(
+                context, provider, _clean(existing.get("external_user_id"), 250), owner_id,
+            )
         return existing
 
     identity = {
@@ -2382,37 +6007,33 @@ async def _provider_card_link(
     }
 
     if provider == SALEBOT_PROVIDER:
-        reference = await asyncio.to_thread(
-            _identity_index.provider_id_for_exact_context, "salebot", context,
-        ) if _identity_index is not None else ""
-        reference = reference or _identity_field_value(context, "salebot_id", "salebot_client_id", "sb_id")
-        if not reference:
-            reference = next((value for kind, value in parse_utm_term(_identity_field_value(context, "utm_term")) if kind == "salebot"), "")
+        reference = exact_reference
         if not reference:
             return {}
         if mode != "test":
             await _remember_external_link(identity, context["platform"], provider=provider, external_user_id=reference)
+            owner_id = await _responsible_admin_id(data, mode, device)
+            await _remember_entity_external_link(context, provider, reference, owner_id)
+            await _remember_notification_context(context, provider, reference, owner_id)
+            await _assign_client_threads(owner_id, direct_links=[(provider, reference)])
         return {
             **identity, "provider": provider, "external_user_id": reference,
             "source": context["platform"], "updated_at": _iso(),
         }
 
     if provider == "vk":
-        reference = await asyncio.to_thread(
-            _identity_index.provider_id_for_exact_context, "vk", context,
-        ) if _identity_index is not None else ""
-        reference = reference or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id")
-        if not reference and _identity_index is not None:
+        reference = exact_reference or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id")
+        if not reference and _identity_index is not None and context.get("platform") != "amocrm":
             lookup = {
                 **context,
                 "getcourse_user_id": gc_id,
                 "fields": {**(context.get("fields") or {}), "getcourse_user_id": gc_id},
             }
             reference = await asyncio.to_thread(_identity_index.platform_id_for_context, "vk", lookup)
-        if not reference:
+        if not reference and context.get("platform") != "amocrm":
             resolved = await _resolve_widget_context(data, mode, device)
             reference = _account_identity_value(resolved.get("accounts", []), "vk")
-        if not reference and _identity_index is not None:
+        if not reference and _identity_index is not None and context.get("platform") != "amocrm":
             for _, candidate in parse_utm_term(_identity_field_value(context, "utm_term")):
                 reference = await asyncio.to_thread(_identity_index.platform_id_for_service, "vk", candidate)
                 if reference:
@@ -2425,19 +6046,17 @@ async def _provider_card_link(
         if not peer_id:
             return {}
     else:
-        identity["telegram_id"] = (
-            _identity_field_value(context, "telegram_id", "tg_id")
-        )
-        if not identity["telegram_id"] and _identity_index is not None:
-            identity["telegram_id"] = await asyncio.to_thread(
-                _identity_index.provider_id_for_exact_context, "telegram", context,
-            )
-        identity["telegram_id"] = identity["telegram_id"] or _identity_field_value(context, "platform_id")
+        identity["telegram_id"] = exact_reference or _identity_field_value(context, "telegram_id", "tg_id")
+        if context.get("platform") != "amocrm":
+            identity["telegram_id"] = identity["telegram_id"] or _identity_field_value(context, "platform_id")
         identity["telegram_username"] = (
             _identity_field_value(context, "telegram_username", "tg_username")
             or _clean(identity.get("telegram_username"), 200)
         )
-        if not identity["telegram_id"] and not identity["telegram_username"]:
+        if (
+            not identity["telegram_id"] and not identity["telegram_username"]
+            and context.get("platform") != "amocrm"
+        ):
             resolved = await _resolve_widget_context(data, mode, device)
             identity["telegram_id"] = _account_identity_value(resolved.get("accounts", []), provider)
         cache_key = _card_link_cache_key(
@@ -2468,6 +6087,7 @@ async def _provider_card_link(
         )
         owner_id = await _responsible_admin_id(data, mode, device)
         await _remember_entity_external_link(context, provider, peer_id, owner_id)
+        await _remember_notification_context(context, provider, peer_id, owner_id)
         await _assign_client_threads(owner_id, phone=identity.get("phone", ""), direct_links=[(provider, peer_id)])
         link = await _external_link(peer_id=peer_id, provider=provider)
         _remember_card_link(cache_key, link)
@@ -2480,6 +6100,7 @@ async def _provider_card_link(
 
 def _template_view(row: Any, current_admin_id: int | None = None, can_edit_shared: bool = False) -> dict[str, Any]:
     owner_id = row["owner_admin_id"]
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
     return {
         "id": int(row["id"]),
         "folder": _clean(row["folder"], 120),
@@ -2488,7 +6109,10 @@ def _template_view(row: Any, current_admin_id: int | None = None, can_edit_share
         "scope": "personal" if owner_id is not None else "shared",
         "editable": (owner_id is None and can_edit_shared) or (owner_id is not None and int(owner_id) == int(current_admin_id or 0)),
         "enabled": bool(row["enabled"]),
+        "favorite": bool(row["is_favorite"]) if "is_favorite" in keys else False,
+        "favorite_order": int(row["favorite_order"]) if "favorite_order" in keys and row["favorite_order"] is not None else None,
         "sort_order": int(row["sort_order"]),
+        "user_order": int(row["user_sort_order"]) if "user_sort_order" in keys and row["user_sort_order"] is not None else None,
         "updated_at": row["updated_at"],
     }
 
@@ -2506,10 +6130,24 @@ async def _template_rows(
         params.append(admin_id)
     if not include_disabled:
         where.append("enabled=1")
-    sql = "SELECT * FROM message_templates"
+    if admin_id is None:
+        sql = "SELECT message_templates.*,0 AS is_favorite,NULL AS favorite_order,NULL AS user_sort_order FROM message_templates"
+    else:
+        sql = """SELECT message_templates.*,
+                 EXISTS(SELECT 1 FROM template_favorites favorite
+                        WHERE favorite.admin_id=? AND favorite.template_id=message_templates.id) AS is_favorite,
+                 (SELECT favorite.sort_order FROM template_favorites favorite
+                  WHERE favorite.admin_id=? AND favorite.template_id=message_templates.id) AS favorite_order
+                 ,(SELECT ordering.sort_order FROM template_user_order ordering
+                   WHERE ordering.admin_id=? AND ordering.template_id=message_templates.id) AS user_sort_order
+                 FROM message_templates"""
+        params = [admin_id, admin_id, admin_id, *params]
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY owner_admin_id IS NOT NULL,folder,sort_order,title,id"
+    if admin_id is None:
+        sql += " ORDER BY owner_admin_id IS NOT NULL,folder,sort_order,title,id"
+    else:
+        sql += " ORDER BY user_sort_order IS NULL,user_sort_order,owner_admin_id IS NOT NULL,folder,sort_order,title,id"
     db = await _connect()
     try:
         rows = await (await db.execute(sql, params)).fetchall()
@@ -2518,10 +6156,42 @@ async def _template_rows(
         await db.close()
 
 
+async def _set_template_favorite(admin_id: int, template_id: int, favorite: bool) -> bool:
+    db = await _connect()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT id FROM message_templates WHERE id=? AND (owner_admin_id IS NULL OR owner_admin_id=?)",
+                (template_id, admin_id),
+            )
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Шаблон не найден")
+        if favorite:
+            await db.execute(
+                """INSERT OR IGNORE INTO template_favorites(admin_id,template_id,sort_order,created_at)
+                   VALUES(?,?,COALESCE((SELECT MAX(sort_order)+1 FROM template_favorites WHERE admin_id=?),0),?)""",
+                (admin_id, template_id, admin_id, _iso()),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM template_favorites WHERE admin_id=? AND template_id=?",
+                (admin_id, template_id),
+            )
+        await db.commit()
+        return favorite
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
 async def _save_template(data: dict[str, Any], owner_admin_id: int | None, template_id: int | None = None) -> dict[str, Any]:
-    folder = _clean(data.get("folder"), 120)
+    folder = "" if owner_admin_id is not None else _clean(data.get("folder"), 120)
     title = _clean(data.get("title"), 120)
-    body = _clean(data.get("body"), 20_000)
+    body = await _auto_markup_message(_clean(data.get("body"), 20_000))
     if not title or not body:
         raise HTTPException(400, "Укажите название и текст")
     now = _iso()
@@ -2544,6 +6214,40 @@ async def _save_template(data: dict[str, Any], owner_admin_id: int | None, templ
         await db.commit()
         row = await (await db.execute("SELECT * FROM message_templates WHERE id=?", (template_id,))).fetchone()
         return _template_view(row, owner_admin_id, owner_admin_id is None)
+    finally:
+        await db.close()
+
+
+async def _set_template_order(admin_id: int, template_ids: Any) -> list[int]:
+    if not isinstance(template_ids, list) or len(template_ids) > 2000:
+        raise HTTPException(400, "Некорректный порядок шаблонов")
+    try:
+        ordered = [int(value) for value in template_ids]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Некорректный порядок шаблонов") from exc
+    if not ordered or len(ordered) != len(set(ordered)) or any(value <= 0 for value in ordered):
+        raise HTTPException(400, "Передайте уникальные шаблоны")
+    placeholders = ",".join("?" for _ in ordered)
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            f"SELECT id FROM message_templates WHERE id IN ({placeholders}) AND enabled=1 AND (owner_admin_id IS NULL OR owner_admin_id=?)",
+            (*ordered, admin_id),
+        )).fetchall()
+        if {int(row["id"]) for row in rows} != set(ordered):
+            raise HTTPException(404, "Один из шаблонов недоступен")
+        now = _iso()
+        await db.execute("BEGIN IMMEDIATE")
+        await db.executemany(
+            """INSERT INTO template_user_order(admin_id,template_id,sort_order,updated_at) VALUES(?,?,?,?)
+               ON CONFLICT(admin_id,template_id) DO UPDATE SET sort_order=excluded.sort_order,updated_at=excluded.updated_at""",
+            ((admin_id, template_id, index, now) for index, template_id in enumerate(ordered)),
+        )
+        await db.commit()
+        return ordered
+    except Exception:
+        await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -2681,7 +6385,11 @@ async def _inbox_items(
     initialized_at = await _inbox_initialized_at(device_id)
     channel_map = {row["channel_id"]: row for row in channels}
     selected = {_clean(value, 200) for value in (selected_channel_ids or []) if _clean(value, 200)}
-    channel_ids = [channel_id for channel_id in channel_map if not selected or channel_id in selected]
+    known_selected = selected.intersection(channel_map)
+    # A browser may keep channel ids from an older Wazzup configuration.
+    # When every saved id is stale, fall back to all current channels instead
+    # of returning an apparently empty inbox forever.
+    channel_ids = [channel_id for channel_id in channel_map if not known_selected or channel_id in known_selected]
     if not channel_ids:
         return {"items": [], "unread": 0, "unanswered": 0}
     placeholders = ",".join("?" for _ in channel_ids)
@@ -2697,11 +6405,6 @@ async def _inbox_items(
         where.append("(c.contact_name LIKE ? OR c.chat_id LIKE ? OR l.name LIKE ? OR l.phone LIKE ? OR l.getcourse_user_id LIKE ?)")
         params.extend((like, like, like, f"%{phone_query or query}%", like))
     where_sql = " AND ".join(where)
-    unread_owner = " AND c.responsible_admin_id=?" if _clean(device.get("admin_role"), 20) == "employee" else ""
-    unread_params: list[Any] = [device_id, *channel_ids]
-    if unread_owner:
-        unread_params.append(int(device["admin_id"]))
-    unread_params.append(initialized_at)
     db = await _connect()
     try:
         rows = await (
@@ -2727,20 +6430,29 @@ async def _inbox_items(
                 (*params, INBOX_LIMIT),
             )
         ).fetchall()
-        unread_rows = await (
-            await db.execute(
-                f"""SELECT m.channel_id,m.chat_type,m.chat_id,COUNT(*) AS unread
-                    FROM wazzup_messages m
-                    JOIN wazzup_chats c ON c.channel_id=m.channel_id AND c.chat_type=m.chat_type AND c.chat_id=m.chat_id
-                    LEFT JOIN inbox_reads r ON r.device_id=? AND r.channel_id=m.channel_id
-                         AND r.chat_type=m.chat_type AND r.chat_id=m.chat_id
-                    WHERE m.direction='incoming' AND m.channel_id IN ({placeholders})
-                      {unread_owner}
-                      AND m.sent_at>COALESCE(r.last_read_at,?)
-                    GROUP BY m.channel_id,m.chat_type,m.chat_id""",
-                unread_params,
-            )
-        ).fetchall()
+        visible_keys = [(row["channel_id"], row["chat_type"], row["chat_id"]) for row in rows]
+        if visible_keys:
+            visible_values = ",".join("(?,?,?)" for _ in visible_keys)
+            unread_params: list[Any] = []
+            for key in visible_keys:
+                unread_params.extend(key)
+            unread_params.extend((device_id, initialized_at))
+            unread_rows = await (
+                await db.execute(
+                    f"""WITH visible(channel_id,chat_type,chat_id) AS (VALUES {visible_values})
+                        SELECT m.channel_id,m.chat_type,m.chat_id,COUNT(*) AS unread
+                        FROM visible v
+                        JOIN wazzup_messages m ON m.channel_id=v.channel_id
+                             AND m.chat_type=v.chat_type AND m.chat_id=v.chat_id
+                        LEFT JOIN inbox_reads r ON r.device_id=? AND r.channel_id=m.channel_id
+                             AND r.chat_type=m.chat_type AND r.chat_id=m.chat_id
+                        WHERE m.direction='incoming' AND m.sent_at>COALESCE(r.last_read_at,?)
+                        GROUP BY m.channel_id,m.chat_type,m.chat_id""",
+                    unread_params,
+                )
+            ).fetchall()
+        else:
+            unread_rows = []
     finally:
         await db.close()
     unread_map = {
@@ -2820,13 +6532,28 @@ async def health() -> dict[str, Any]:
     try:
         admins = int((await (await db.execute("SELECT COUNT(*) FROM admins WHERE enabled=1")).fetchone())[0])
         devices = int((await (await db.execute("SELECT COUNT(*) FROM devices WHERE revoked_at='' AND expires_at>?", (_iso(),))).fetchone())[0])
-        contacts = int((await (await db.execute("SELECT COUNT(*) FROM contacts")).fetchone())[0])
-        chats = int((await (await db.execute("SELECT COUNT(*) FROM wazzup_chats")).fetchone())[0])
-        messages = int((await (await db.execute("SELECT COUNT(*) FROM wazzup_messages")).fetchone())[0])
+        contacts = int((await (await db.execute("SELECT COALESCE(MAX(id),0) FROM contacts")).fetchone())[0])
+        chats = int((await (await db.execute("SELECT COALESCE(MAX(id),0) FROM wazzup_chats")).fetchone())[0])
+        messages = int((await (await db.execute("SELECT COALESCE(MAX(id),0) FROM wazzup_messages")).fetchone())[0])
     finally:
         await db.close()
     identity = _identity_index.status() if _identity_index is not None else {"status": "unavailable"}
-    return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "identity": identity}
+    return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "counts_approximate": True, "identity": identity}
+
+
+@router.get("/guide", response_class=HTMLResponse)
+@router.get("/help", response_class=HTMLResponse)
+async def user_guide() -> HTMLResponse:
+    path = _must_db().parent.parent / "panel" / "docs.html"
+    return HTMLResponse(
+        path.read_text(encoding="utf-8"),
+        headers={
+            "Cache-Control": "no-cache, must-revalidate",
+            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'self'",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 @router.get("/settings")
@@ -3081,10 +6808,13 @@ async def sync_vk(request: Request) -> dict[str, Any]:
 
 @router.post("/vk/callback/{key}")
 async def vk_callback(key: str, request: Request) -> PlainTextResponse:
-    expected_key = await _setting("vk_callback_key")
+    expected_key = _vk_callback_config["key"]
     if not expected_key or not secrets.compare_digest(_clean(key, 200), expected_key):
         return PlainTextResponse("not found", status_code=404)
-    body = await request.body()
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        return PlainTextResponse("error", status_code=400)
     if len(body) > MAX_WEBHOOK_BYTES:
         return PlainTextResponse("error", status_code=413)
     try:
@@ -3094,24 +6824,17 @@ async def vk_callback(key: str, request: Request) -> PlainTextResponse:
     if _clean(payload.get("group_id"), 80) != _vk_group_id():
         return PlainTextResponse("error", status_code=403)
     secret = _clean(payload.get("secret"), 1000)
-    expected_secret = await _setting("vk_callback_secret")
+    expected_secret = _vk_callback_config["secret"]
     if expected_secret and not secrets.compare_digest(secret, expected_secret):
         return PlainTextResponse("error", status_code=403)
     if payload.get("type") == "confirmation":
-        return PlainTextResponse(await _setting("vk_confirmation_code"))
+        return PlainTextResponse(_vk_callback_config["confirmation"])
     if payload.get("type") in {"message_new", "message_reply", "message_edit"}:
-        obj = payload.get("object") if isinstance(payload.get("object"), dict) else {}
-        message = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-        peer_id = _clean(message.get("peer_id"), 200) if isinstance(message, dict) else ""
-        link = await _external_link(peer_id=peer_id)
-        if not link and peer_id:
-            identity = resolve_vk_identity(peer_id)
-            await _remember_external_link(
-                identity or {"name": f"VK {peer_id}"}, "callback", external_user_id=peer_id,
-            )
-            link = await _external_link(peer_id=peer_id)
-        if peer_id and link and isinstance(message, dict):
-            await _store_vk_messages(peer_id, [message], link)
+        try:
+            await _enqueue_vk_callback(body, payload)
+        except Exception as exc:
+            _log("error", "VK callback queue write failed: %s", exc)
+            return PlainTextResponse("error", status_code=503)
     return PlainTextResponse("ok")
 
 
@@ -3170,6 +6893,162 @@ async def inbound_webhook(secret: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "json object required"}, status_code=400)
     result = await _ingest_webhook(payload)
     return JSONResponse({"ok": True, **result})
+
+
+async def _notification_system_status() -> dict[str, Any]:
+    callback_secret = await _setting("notification_telegram_callback_secret")
+    callback_url = f"{PUBLIC_API_BASE}/notifications/telegram/{callback_secret}"
+    salebot_url = f"{PUBLIC_API_BASE}/notifications/salebot/{await _setting('notification_salebot_secret')}"
+    result: dict[str, Any] = {
+        "telegram": {
+            "configured": bool(_notification_bot_token()), "bot": f"@{NOTIFY_TELEGRAM_USERNAME}",
+            "callback": False, "callback_url": callback_url, "conflict": False,
+            "mode": "polling", "polling": bool(_notification_bot_poll_at and not _notification_bot_poll_error),
+            "poll_at": _notification_bot_poll_at, "poll_error": _notification_bot_poll_error,
+        },
+        "salebot": {"url": salebot_url},
+    }
+    if not _notification_bot_token():
+        return result
+    try:
+        me, webhook = await asyncio.gather(
+            _notification_tg_call("getMe"), _notification_tg_call("getWebhookInfo"),
+        )
+        username = _clean(me.get("username"), 200)
+        current_url = _clean(webhook.get("url"), 4000)
+        result["telegram"].update({
+            "valid": username.casefold() == NOTIFY_TELEGRAM_USERNAME.casefold(),
+            "username": f"@{username}" if username else "",
+            "callback": current_url == callback_url,
+            "conflict": bool(current_url and current_url != callback_url),
+            "pending_updates": int(webhook.get("pending_update_count") or 0),
+            "last_error": _clean(webhook.get("last_error_message"), 300),
+        })
+    except NotificationDeliveryError as exc:
+        result["telegram"].update({"valid": False, "error": str(exc)})
+    return result
+
+
+@router.get("/notification-system/status")
+async def notification_system_status(request: Request) -> dict[str, Any]:
+    await _require_admin(request)
+    return {"ok": True, **await _notification_system_status()}
+
+
+@router.post("/notification-system/telegram/register")
+async def notification_telegram_register(request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-notify-telegram-register", limit=10, window_seconds=3600, subject=user["username"])
+    me = await _notification_tg_call("getMe")
+    username = _clean(me.get("username"), 200)
+    if username.casefold() != NOTIFY_TELEGRAM_USERNAME.casefold():
+        raise HTTPException(409, f"Ожидался @{NOTIFY_TELEGRAM_USERNAME}, токен принадлежит @{username or 'unknown'}")
+    callback_url = f"{PUBLIC_API_BASE}/notifications/telegram/{await _setting('notification_telegram_callback_secret')}"
+    webhook = await _notification_tg_call("getWebhookInfo")
+    current_url = _clean(webhook.get("url"), 4000)
+    if current_url and current_url != callback_url:
+        raise HTTPException(409, "У бота уже настроен другой webhook. Nexus не стал его перезаписывать.")
+    if current_url == callback_url:
+        await _notification_tg_call("deleteWebhook", {"drop_pending_updates": False})
+    return {"ok": True, **await _notification_system_status()}
+
+
+@router.post("/notifications/telegram/{secret}")
+async def notification_telegram_callback(secret: str, request: Request) -> JSONResponse:
+    expected = await _setting("notification_telegram_callback_secret")
+    if not expected or not secrets.compare_digest(_clean(secret, 1000), expected):
+        return JSONResponse({"ok": False}, status_code=404)
+    body = await request.body()
+    if len(body) > 256 * 1024:
+        return JSONResponse({"ok": False, "error": "payload too large"}, status_code=413)
+    try:
+        payload = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+    await _handle_notification_telegram_update(payload)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/notifications/salebot/{secret}")
+async def notification_salebot_callback(secret: str, request: Request) -> JSONResponse:
+    expected = await _setting("notification_salebot_secret")
+    if not expected or not secrets.compare_digest(_clean(secret, 1000), expected):
+        return JSONResponse({"ok": False}, status_code=404)
+    body = await request.body()
+    if len(body) > MAX_BODY_BYTES:
+        return JSONResponse({"ok": False, "error": "payload too large"}, status_code=413)
+    try:
+        payload = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "json object required"}, status_code=400)
+    outside_raw = payload.get("message_from_outside")
+    if outside_raw is not None:
+        try:
+            if int(outside_raw) not in {0, 1}:
+                return JSONResponse({"ok": True, "inserted": False, "ignored": "service_event"})
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": True, "inserted": False, "ignored": "service_event"})
+    if _messenger_button_event(payload):
+        return JSONResponse({"ok": True, "inserted": False, "ignored": "button_event"})
+    client_id = _clean(payload.get("client_id"), 200)
+    text_value = _clean(payload.get("text"), 20_000)
+    attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
+    if not client_id or (not text_value and not attachments):
+        return JSONResponse({"ok": False, "error": "client_id and text or attachments required"}, status_code=400)
+    event_key = _clean(
+        payload.get("message_id") or payload.get("id") or request.headers.get("idempotency-key"),
+        250,
+    ) or secrets.token_urlsafe(18)
+    external_id = f"salebot-hook:{client_id}:{event_key}"
+    sent_at = _message_time(payload.get("sent_at") or payload.get("created_at"))
+    first_attachment = attachments[0] if attachments and isinstance(attachments[0], dict) else {}
+    content_uri = _clean(first_attachment.get("url"), 4000)
+    content_type = _clean(first_attachment.get("type") or first_attachment.get("content_type"), 100)
+    link = await _external_link(peer_id=client_id, provider=SALEBOT_PROVIDER)
+    client_name = _clean(payload.get("client_name") or link.get("name"), 200) or f"SaleBot {client_id}"
+    now = _iso()
+    db = await _connect()
+    try:
+        context = await (await db.execute(
+            "SELECT admin_id FROM conversation_contexts WHERE provider=? AND external_user_id=?",
+            (SALEBOT_PROVIDER, client_id),
+        )).fetchone()
+        owner_id = int(context["admin_id"]) if context and context["admin_id"] else None
+        cursor = await db.execute(
+            """INSERT OR IGNORE INTO wazzup_messages(
+               external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,
+               content_uri,author_name,sent_at,raw_json,created_at
+               ) VALUES(?,'salebot:project','salebot',?,'','incoming','delivered',?,?,?,?,?,?)""",
+            (
+                external_id, client_id, text_value, content_uri, client_name, sent_at,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:50_000], now,
+            ),
+        )
+        inserted = cursor.rowcount > 0
+        await db.execute(
+            """INSERT INTO wazzup_chats(
+               channel_id,chat_type,chat_id,phone_hash,contact_name,last_message_at,
+               last_message_preview,responsible_admin_id,created_at,updated_at
+               ) VALUES('salebot:project','salebot',?,'',?,?,?,?,?,?)
+               ON CONFLICT(channel_id,chat_type,chat_id) DO UPDATE SET
+               contact_name=excluded.contact_name,last_message_at=excluded.last_message_at,
+               last_message_preview=excluded.last_message_preview,
+               responsible_admin_id=COALESCE(excluded.responsible_admin_id,wazzup_chats.responsible_admin_id),
+               updated_at=excluded.updated_at""",
+            (client_id, client_name, sent_at, (text_value or "Вложение")[:500], owner_id, now, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    if inserted:
+        await _enqueue_notification_message(
+            external_id=external_id, channel_id="salebot:project", chat_type="salebot",
+            chat_id=client_id, provider=SALEBOT_PROVIDER, client_name=client_name,
+            text=text_value, content_type=content_type, sent_at=sent_at,
+        )
+    return JSONResponse({"ok": True, "inserted": inserted, "external_id": external_id})
 
 
 @router.get("/snippet")
@@ -3381,6 +7260,119 @@ async def staff_catalog(request: Request) -> dict[str, Any]:
     return {"ok": True, "getcourse": getcourse, "amocrm": await _amocrm_staff_catalog()}
 
 
+@router.get("/notification-routing")
+async def notification_routing(request: Request) -> dict[str, Any]:
+    await _require_admin(request)
+    db = await _connect()
+    try:
+        admins = await (await db.execute(
+            "SELECT id,name,enabled FROM admins WHERE enabled=1 ORDER BY name,id"
+        )).fetchall()
+        policies = await (await db.execute(
+            "SELECT source_admin_id FROM notification_route_policies WHERE configured=1"
+        )).fetchall()
+        routes = await (await db.execute(
+            "SELECT source_admin_id,recipient_admin_id FROM notification_routes ORDER BY source_admin_id,recipient_admin_id"
+        )).fetchall()
+        amo_sources = await (await db.execute(
+            """SELECT DISTINCT a.id,a.name,a.enabled FROM admins a
+               JOIN manager_bindings b ON b.admin_id=a.id AND b.platform='amocrm'
+               WHERE a.enabled=1 ORDER BY a.name,a.id"""
+        )).fetchall()
+        chat_preferences = await (await db.execute(
+            "SELECT admin_id,course_chats FROM notification_preferences WHERE course_chats=1"
+        )).fetchall()
+    finally:
+        await db.close()
+    configured = {int(row["source_admin_id"]) for row in policies}
+    mapped: dict[int, list[int]] = {}
+    for row in routes:
+        mapped.setdefault(int(row["source_admin_id"]), []).append(int(row["recipient_admin_id"]))
+    return {
+        "ok": True,
+        "admins": [dict(row) | {"enabled": bool(row["enabled"])} for row in admins],
+        "amo_sources": [dict(row) | {"enabled": bool(row["enabled"])} for row in amo_sources],
+        "course_chat_admin_ids": [int(row["admin_id"]) for row in chat_preferences if row["course_chats"]],
+        "routes": [{
+            "source_admin_id": int(row["id"]),
+            "configured": int(row["id"]) in configured,
+            "recipient_admin_ids": mapped.get(int(row["id"]), [int(row["id"])] if int(row["id"]) not in configured else []),
+        } for row in admins],
+    }
+
+
+@router.put("/notification-routing/course-chats/{admin_id}")
+async def save_course_chat_notifications(admin_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-course-chat-routing", limit=240, window_seconds=3600, subject=user["username"])
+    data = await _read_json(request)
+    if not isinstance(data.get("enabled"), bool):
+        raise HTTPException(400, "Укажите, включены ли уведомления учебных чатов")
+    db = await _connect()
+    try:
+        admin = await (await db.execute(
+            "SELECT id,name FROM admins WHERE id=? AND enabled=1", (admin_id,),
+        )).fetchone()
+        if not admin:
+            raise HTTPException(404, "Сотрудник не найден")
+        now = _iso()
+        await db.execute(
+            """INSERT INTO notification_preferences(admin_id,fallback_unassigned,course_chats,updated_at)
+               VALUES(?,0,?,?) ON CONFLICT(admin_id) DO UPDATE SET
+               course_chats=excluded.course_chats,updated_at=excluded.updated_at""",
+            (admin_id, 1 if data["enabled"] else 0, now),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "admin_id": admin_id, "enabled": data["enabled"]}
+
+
+@router.put("/notification-routing/{source_admin_id}")
+async def save_notification_routing(source_admin_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-notification-routing", limit=240, window_seconds=3600, subject=user["username"])
+    data = await _read_json(request)
+    reset = bool(data.get("reset"))
+    values = data.get("recipient_admin_ids", [])
+    if not isinstance(values, list) or len(values) > 200:
+        raise HTTPException(400, "Некорректные получатели")
+    try:
+        recipients = sorted({int(value) for value in values})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Некорректные получатели") from exc
+    now = _iso()
+    db = await _connect()
+    try:
+        valid = await (await db.execute(
+            "SELECT id FROM admins WHERE enabled=1 AND (id=? OR id IN (SELECT value FROM json_each(?)))",
+            (source_admin_id, json.dumps(recipients)),
+        )).fetchall()
+        valid_ids = {int(row["id"]) for row in valid}
+        if source_admin_id not in valid_ids or (set(recipients) - valid_ids):
+            raise HTTPException(404, "Сотрудник не найден")
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute("DELETE FROM notification_routes WHERE source_admin_id=?", (source_admin_id,))
+        await db.execute("DELETE FROM notification_route_policies WHERE source_admin_id=?", (source_admin_id,))
+        if not reset:
+            await db.execute(
+                "INSERT INTO notification_route_policies(source_admin_id,configured,updated_at) VALUES(?,1,?)",
+                (source_admin_id, now),
+            )
+            await db.executemany(
+                "INSERT INTO notification_routes(source_admin_id,recipient_admin_id,created_at,updated_at) VALUES(?,?,?,?)",
+                ((source_admin_id, recipient_id, now, now) for recipient_id in recipients),
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    return {"ok": True, "source_admin_id": source_admin_id, "configured": not reset,
+            "recipient_admin_ids": recipients if not reset else [source_admin_id]}
+
+
 @router.put("/admins/{admin_id}/bindings")
 async def save_admin_bindings(admin_id: int, request: Request) -> dict[str, Any]:
     await _require_admin(request)
@@ -3420,6 +7412,79 @@ async def save_admin_bindings(admin_id: int, request: Request) -> dict[str, Any]
         {"platform": platform, "platform_user_id": platform_user_id, "platform_user_email": email}
         for platform, platform_user_id, email in normalized
     ]}
+
+
+async def _template_owner_admin(admin_id: int) -> dict[str, Any]:
+    """Return the exact employee whose private templates are being managed."""
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT id,name,enabled FROM admins WHERE id=?", (admin_id,)
+        )).fetchone()
+    finally:
+        await db.close()
+    if not row:
+        raise HTTPException(404, "Сотрудник не найден")
+    return dict(row)
+
+
+@router.get("/admins/{admin_id}/templates")
+async def list_admin_templates(admin_id: int, request: Request) -> dict[str, Any]:
+    """Admin-only view of one employee's private templates and shared favourites."""
+    await _require_admin(request)
+    admin = await _template_owner_admin(admin_id)
+    return {
+        "ok": True,
+        "admin": admin,
+        "templates": await _template_rows(admin_id, include_disabled=True, can_edit_shared=False),
+        "variables": TEMPLATE_VARIABLES,
+    }
+
+
+@router.post("/admins/{admin_id}/templates")
+async def create_admin_template(admin_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-admin-template", limit=240, window_seconds=3600, subject=user["username"])
+    await _template_owner_admin(admin_id)
+    return {"ok": True, "template": await _save_template(await _read_json(request), admin_id)}
+
+
+@router.patch("/admins/{admin_id}/templates/{template_id}")
+async def update_admin_template(admin_id: int, template_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-admin-template", limit=240, window_seconds=3600, subject=user["username"])
+    await _template_owner_admin(admin_id)
+    return {"ok": True, "template": await _save_template(await _read_json(request), admin_id, template_id)}
+
+
+@router.delete("/admins/{admin_id}/templates/{template_id}")
+async def delete_admin_template(admin_id: int, template_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-admin-template", limit=240, window_seconds=3600, subject=user["username"])
+    await _template_owner_admin(admin_id)
+    await _delete_template(template_id, admin_id)
+    return {"ok": True}
+
+
+@router.put("/admins/{admin_id}/templates/{template_id}/favorite")
+async def set_admin_template_favorite(admin_id: int, template_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-admin-template", limit=240, window_seconds=3600, subject=user["username"])
+    data = await _read_json(request)
+    if not isinstance(data.get("favorite"), bool):
+        raise HTTPException(400, "Некорректное избранное")
+    await _template_owner_admin(admin_id)
+    favorite = await _set_template_favorite(admin_id, template_id, data["favorite"])
+    return {"ok": True, "id": template_id, "favorite": favorite}
+
+
+@router.put("/admins/{admin_id}/template-order")
+async def set_admin_template_order(admin_id: int, request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-admin-template-order", limit=240, window_seconds=3600, subject=user["username"])
+    await _template_owner_admin(admin_id)
+    data = await _read_json(request)
+    return {"ok": True, "template_ids": await _set_template_order(admin_id, data.get("template_ids"))}
 
 
 @router.patch("/admins/{admin_id}")
@@ -3536,6 +7601,91 @@ async def list_events(request: Request, limit: int = Query(100, ge=1, le=300)) -
     return {"ok": True, "events": [dict(row) for row in rows]}
 
 
+@router.get("/communications")
+async def list_communications(
+    request: Request, limit: int = Query(100, ge=1, le=200), before_id: int = Query(0, ge=0),
+    days: int = Query(30, ge=1, le=730), provider: str = "", direction: str = "",
+    admin_id: int = Query(0, ge=0), query: str = "",
+) -> dict[str, Any]:
+    await _require_admin(request)
+    clauses = ["c.sent_at>=?"]
+    values: list[Any] = [_iso(_now_dt() - timedelta(days=days))]
+    if before_id:
+        clauses.append("c.id<?")
+        values.append(before_id)
+    if provider:
+        clauses.append("c.provider=?")
+        values.append(_clean(provider, 40))
+    if direction in {"incoming", "outgoing"}:
+        clauses.append("c.direction=?")
+        values.append(direction)
+    if admin_id:
+        clauses.append("c.admin_id=?")
+        values.append(admin_id)
+    if query := _clean(query, 200):
+        clauses.append("(c.client_name LIKE ? OR c.text LIKE ? OR c.amo_lead_id LIKE ?)")
+        pattern = f"%{query}%"
+        values.extend((pattern, pattern, pattern))
+    values.append(limit + 1)
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            f"""SELECT c.*,a.name AS admin_name FROM communication_messages c
+                  LEFT JOIN admins a ON a.id=c.admin_id WHERE {' AND '.join(clauses)}
+                  ORDER BY c.id DESC LIMIT ?""", values,
+        )).fetchall()
+    finally:
+        await db.close()
+    items = [dict(row) for row in rows[:limit]]
+    return {
+        "ok": True, "communications": items,
+        "next_before_id": int(items[-1]["id"]) if len(rows) > limit and items else 0,
+    }
+
+
+@router.get("/communication-metrics")
+async def communication_metrics(request: Request, days: int = Query(7, ge=1, le=90)) -> dict[str, Any]:
+    await _require_admin(request)
+    since = _iso(_now_dt() - timedelta(days=days))
+    db = await _connect()
+    try:
+        communications = await (await db.execute(
+            """SELECT provider,direction,status,COUNT(*) AS count FROM communication_messages
+               WHERE created_at>=? GROUP BY provider,direction,status ORDER BY provider,direction,status""",
+            (since,),
+        )).fetchall()
+        outbound = await (await db.execute(
+            """SELECT provider,status,COUNT(*) AS count,COALESCE(SUM(attempts-1),0) AS retries,
+                      ROUND(AVG(CASE WHEN status='sent' THEN latency_ms END)) AS avg_latency_ms
+               FROM outbound_jobs WHERE created_at>=? GROUP BY provider,status ORDER BY provider,status""",
+            (since,),
+        )).fetchall()
+        amo_tasks = await (await db.execute(
+            """SELECT status,COUNT(*) AS count,COALESCE(SUM(attempts-1),0) AS retries
+               FROM amo_task_jobs WHERE created_at>=? GROUP BY status ORDER BY status""", (since,),
+        )).fetchall()
+        queue = await (await db.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM outbound_jobs WHERE status IN ('pending','processing','retry')) AS outbound,
+                 (SELECT COUNT(*) FROM amo_task_jobs WHERE status IN ('pending','processing','retry')) AS amo_tasks,
+                 (SELECT COUNT(*) FROM notification_events WHERE status IN ('pending','processing','retry')) AS notifications""",
+        )).fetchone()
+        latencies = await (await db.execute(
+            "SELECT latency_ms FROM outbound_jobs WHERE created_at>=? AND status='sent' AND latency_ms IS NOT NULL ORDER BY latency_ms LIMIT 10000",
+            (since,),
+        )).fetchall()
+    finally:
+        await db.close()
+    samples = [int(row["latency_ms"]) for row in latencies]
+    p95 = samples[min(len(samples) - 1, max(0, int(len(samples) * .95)))] if samples else None
+    return {
+        "ok": True, "days": days, "generated_at": _iso(),
+        "communications": [dict(row) for row in communications],
+        "outbound": [dict(row) for row in outbound], "amo_tasks": [dict(row) for row in amo_tasks],
+        "queue": dict(queue) if queue else {}, "p95_latency_ms": p95,
+    }
+
+
 @router.get("/contacts")
 async def list_contacts(request: Request, limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
     await _require_admin(request)
@@ -3589,6 +7739,26 @@ async def delete_shared_template(template_id: int, request: Request) -> dict[str
     await _require_admin(request)
     await _delete_template(template_id, None)
     return {"ok": True}
+
+
+@router.get("/template-settings")
+async def get_template_settings(request: Request) -> dict[str, Any]:
+    await _require_admin(request)
+    domains, tail = await asyncio.gather(_setting("auto_markup_domains"), _setting("auto_markup_tail"))
+    return {"ok": True, "auto_markup_domains": domains, "auto_markup_tail": tail}
+
+
+@router.put("/template-settings")
+async def put_template_settings(request: Request) -> dict[str, Any]:
+    user = await _require_admin(request)
+    enforce_rate_limit(request, "messenger-widget-template-settings", limit=60, window_seconds=3600, subject=user["username"])
+    data = await _read_json(request)
+    domains = _clean(data.get("auto_markup_domains"), 2000)
+    tail = _auto_markup_tail(data.get("auto_markup_tail"))
+    if domains and not _auto_markup_domains(domains):
+        raise HTTPException(400, "Укажите домены через точку с запятой")
+    await asyncio.gather(_set_setting("auto_markup_domains", domains), _set_setting("auto_markup_tail", tail))
+    return {"ok": True, "auto_markup_domains": domains, "auto_markup_tail": tail}
 
 
 @router.get("/identity/status")
@@ -3717,6 +7887,35 @@ async def widget_activate(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "Не удалось активировать устройство"}, 500)
 
 
+@router.post("/widget/logout")
+async def widget_logout(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": True})
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        db = await _connect()
+        try:
+            await db.execute(
+                "UPDATE devices SET revoked_at=? WHERE id=? AND revoked_at=''",
+                (_iso(), int(device["id"])),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        await _audit("logout", "ok", admin_id=device["admin_id"], device_id=device["id"])
+        return _widget_response(request, {"ok": True})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception:
+        _log("exception", "Messenger widget logout failed")
+        return _widget_response(request, {"ok": False, "error": "Не удалось выйти из виджета"}, 500)
+
+
 @router.post("/widget/context")
 async def widget_context(request: Request) -> JSONResponse:
     mode = await _widget_request_mode(request)
@@ -3756,6 +7955,92 @@ async def widget_context(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "Не удалось определить клиента"}, 500)
 
 
+@router.post("/widget/profile-links")
+async def widget_profile_links(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        enforce_rate_limit(request, "messenger-widget-profile-links", limit=240, window_seconds=3600, subject=str(device["id"]))
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        links = await _widget_profile_links(data, mode, device)
+        return _widget_response(request, {"ok": True, "links": links})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception:
+        _log("exception", "Messenger profile link resolution failed")
+        return _widget_response(request, {"ok": False, "error": "Не удалось найти профили"}, 500)
+
+
+@router.post("/widget/getcourse-card")
+async def widget_getcourse_card(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        enforce_rate_limit(request, "messenger-widget-getcourse-card", limit=180, window_seconds=3600, subject=str(device["id"]))
+        return _widget_response(request, await _widget_getcourse_card_data(data, mode, device, include_access=True))
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception as exc:
+        _log("exception", "Messenger GetCourse card failed")
+        return _widget_response(request, {"ok": False, "error": _clean(exc, 300) or "Не удалось загрузить GetCourse"}, 502)
+
+
+@router.post("/widget/getcourse-access")
+async def widget_getcourse_access(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        card = await _widget_getcourse_card_data(data, mode, device, include_access=False)
+        enrollment_id = _clean(data.get("enrollment_id"), 100)
+        if not card.get("found") or enrollment_id != _clean((card.get("item") or {}).get("enrollment_id"), 100):
+            raise HTTPException(404, "Доступы ученика не найдены")
+        action = _clean(data.get("action"), 30).lower() or "read"
+        requester = f"messenger:{int(device['admin_id'])}"
+        if action == "read":
+            service = _module_service("student-transfer", "service_widget_access")
+            return _widget_response(request, {"ok": True, "access": await service(enrollment_id=enrollment_id, live=bool(data.get("live")))})
+        if action == "preview":
+            changes = data.get("changes")
+            if not isinstance(changes, list) or not 1 <= len(changes) <= 100:
+                raise HTTPException(400, "Выберите изменения доступов")
+            normalized = []
+            for row in changes:
+                if not isinstance(row, dict) or not _clean(row.get("group_id"), 100) or not isinstance(row.get("enabled"), bool):
+                    raise HTTPException(400, "Некорректное изменение доступа")
+                normalized.append({"group_id": _clean(row["group_id"], 100), "enabled": row["enabled"]})
+            service = _module_service("student-transfer", "service_widget_access_preview")
+            return _widget_response(request, await service(enrollment_id=enrollment_id, changes=normalized, requester_user_id=requester))
+        if action == "apply":
+            request_id = _clean(data.get("request_id"), 200)
+            if not request_id:
+                raise HTTPException(400, "Проверка изменений не найдена")
+            service = _module_service("student-transfer", "service_widget_access_apply")
+            return _widget_response(request, await service(enrollment_id=enrollment_id, request_id=request_id, requester_user_id=requester))
+        raise HTTPException(400, "Неизвестное действие")
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception as exc:
+        _log("exception", "Messenger GetCourse access failed")
+        return _widget_response(request, {"ok": False, "error": _clean(exc, 500) or "Не удалось изменить доступы"}, 409)
+
+
 @router.post("/widget/templates")
 async def widget_templates(request: Request) -> JSONResponse:
     mode = await _widget_request_mode(request)
@@ -3769,10 +8054,6 @@ async def widget_templates(request: Request) -> JSONResponse:
         _validate_device_context(device, data, mode)
         action = _clean(data.get("action"), 20).lower() or "list"
         admin_id = int(device["admin_id"])
-        shared = _clean(data.get("scope"), 20).lower() == "shared"
-        if shared and _clean(device.get("admin_role"), 20) != "admin":
-            raise HTTPException(403, "Общие шаблоны может менять администратор")
-        owner_id = None if shared else admin_id
         if action == "list":
             return _widget_response(request, {
                 "ok": True,
@@ -3780,6 +8061,19 @@ async def widget_templates(request: Request) -> JSONResponse:
                 "templates": await _template_rows(admin_id, can_edit_shared=_clean(device.get("admin_role"), 20) == "admin"),
                 "variables": TEMPLATE_VARIABLES,
             })
+        if action == "favorite":
+            template_id = int(data.get("id") or 0)
+            if not template_id or not isinstance(data.get("favorite"), bool):
+                raise HTTPException(400, "Некорректное избранное")
+            favorite = await _set_template_favorite(admin_id, template_id, data["favorite"])
+            return _widget_response(request, {"ok": True, "id": template_id, "favorite": favorite})
+        if action == "reorder":
+            ordered = await _set_template_order(admin_id, data.get("template_ids"))
+            return _widget_response(request, {"ok": True, "template_ids": ordered})
+        shared = _clean(data.get("scope"), 20).lower() == "shared"
+        if shared and _clean(device.get("admin_role"), 20) != "admin":
+            raise HTTPException(403, "Общие шаблоны может менять администратор")
+        owner_id = None if shared else admin_id
         if action == "create":
             template = await _save_template(data, owner_id)
             return _widget_response(request, {"ok": True, "template": template})
@@ -4098,13 +8392,13 @@ async def widget_channels(request: Request) -> JSONResponse:
 
         phone = _normalize_phone((thread or {}).get("phone") or data.get("phone"))
         gc_id = _clean((thread or {}).get("getcourse_user_id"), 200)
-        views: list[dict[str, Any]] = []
-        direct_links: list[tuple[str, str]] = []
-        for channel in channels:
+        async def resolve_channel(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
             provider = channel.get("provider", "wazzup")
             has_chat = False
             can_send = False
             reason = ""
+            link: dict[str, Any] = {}
+            direct_link: tuple[str, str] | None = None
             if provider == "wazzup":
                 has_chat = await _has_conversation(
                     channel["channel_id"], channel["transport"], phone,
@@ -4135,7 +8429,7 @@ async def widget_channels(request: Request) -> JSONResponse:
                     _, has_chat, _ = await _conversation_rows(
                         channel["channel_id"], channel["transport"], "", 1, exact_chat_id=peer_id,
                     )
-                    direct_links.append((provider, peer_id))
+                    direct_link = (provider, peer_id)
                 if provider == "vk":
                     context = _widget_context(data, mode, device) if deferred_card else {}
                     can_send = bool(peer_id or _identity_field_value(
@@ -4152,14 +8446,21 @@ async def widget_channels(request: Request) -> JSONResponse:
                 else:
                     can_send = bool(peer_id or phone)
                     reason = "" if peer_id else "Проверка Telegram…" if link.get("pending") else "" if phone else "Telegram клиента не найден"
-            views.append({
+            return ({
                 **channel,
                 "available": can_send,
                 "can_send": can_send,
                 "has_chat": has_chat,
                 "send_reason": reason,
                 **({"pending": True} if provider == TELEGRAM_PROVIDER and link.get("pending") else {}),
-            })
+            }, direct_link)
+
+        # Channel checks are independent.  Running them together prevents a
+        # slow Telegram/SaleBot identity lookup from delaying every Wazzup
+        # channel in amoCRM and GetCourse.
+        resolved_channels = await asyncio.gather(*(resolve_channel(channel) for channel in channels))
+        views = [view for view, _ in resolved_channels]
+        direct_links = [link for _, link in resolved_channels if link]
         if not thread:
             owner_id = await _responsible_admin_id(data, mode, device)
             await _assign_client_threads(owner_id, phone=phone, direct_links=direct_links)
@@ -4553,6 +8854,38 @@ async def _import_wazzup_history(
         return {"status": "imported", "imported": imported, "complete": complete}
 
 
+def _schedule_wazzup_history(
+    device: dict[str, Any],
+    channel: dict[str, str],
+    phone: str,
+    *,
+    name: str = "",
+    identity: dict[str, str] | None = None,
+    offset: int = 0,
+    known_chat_id: str = "",
+) -> None:
+    normalized_phone = _normalize_phone(phone)
+    key = (_clean(channel.get("channel_id"), 200), _phone_hash(normalized_phone), max(0, offset))
+    if not key[0] or not normalized_phone or key in _wazzup_history_inflight:
+        return
+    _wazzup_history_inflight.add(key)
+
+    async def run() -> None:
+        try:
+            await _record_history_sync(channel["channel_id"], normalized_phone, "syncing", 0, success=False)
+            await _import_wazzup_history(
+                device, channel, normalized_phone, name=name, identity=identity,
+                offset=offset, known_chat_id=known_chat_id,
+            )
+        except Exception:
+            await _record_history_sync(channel["channel_id"], normalized_phone, "error", 0, success=False)
+            _log("warning", "Wazzup history refresh failed channel=%s", channel["channel_id"])
+        finally:
+            _wazzup_history_inflight.discard(key)
+
+    asyncio.create_task(run())
+
+
 async def _conversation_rows(
     channel_id: str,
     transport: str,
@@ -4740,7 +9073,140 @@ def _send_failure_notice(transport: str, detail: str) -> str:
     return ""
 
 
-def _salebot_messages(payload: Any) -> list[dict[str, Any]]:
+def _salebot_attachment_items(row: dict[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    raw_attachments = row.get("attachments")
+    if isinstance(raw_attachments, dict):
+        raw_attachments = list(raw_attachments.values()) if raw_attachments else []
+    if not isinstance(raw_attachments, list):
+        raw_attachments = []
+    for attachment in raw_attachments:
+        if isinstance(attachment, str):
+            url, content_type, filename = attachment, "", ""
+        elif isinstance(attachment, dict):
+            url = attachment.get("attachment_url") or attachment.get("url") or attachment.get("link") or attachment.get("src") or attachment.get("file")
+            content_type = attachment.get("attachment_type") or attachment.get("type") or attachment.get("mime") or ""
+            filename = attachment.get("filename") or attachment.get("name") or ""
+        else:
+            continue
+        items.append({
+            "url": _clean(url, 4000),
+            "content_type": _clean(content_type, 200).lower(),
+            "filename": _clean(filename, 500),
+        })
+    if items:
+        return items
+    for key in ("attachment_url", "attachment", "file", "media", "image", "photo", "video", "audio", "voice", "document"):
+        value = row.get(key)
+        url = value if isinstance(value, str) else value.get("url") if isinstance(value, dict) else ""
+        if url or key in {"audio", "voice"} and value:
+            return [{
+                "url": _clean(url, 4000),
+                "content_type": _clean(row.get("attachment_type") or key, 200).lower(),
+                "filename": "",
+            }]
+    return []
+
+
+def _salebot_attachment_type(content_type: str, url: str) -> str:
+    clean_type = _clean(content_type, 200).lower()
+    if clean_type:
+        return "audio" if clean_type == "voice" else clean_type
+    path = urlsplit(url).path.lower()
+    if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
+        return "image"
+    if path.endswith((".mp3", ".m4a", ".ogg", ".opus", ".wav")):
+        return "audio"
+    if path.endswith((".mp4", ".webm", ".mov")):
+        return "video"
+    return "document"
+
+
+def _salebot_attachment_token(client_id: str, message_id: str, attachment_index: int) -> str:
+    expires = int(time.time()) + SALEBOT_ATTACHMENT_TTL_SECONDS
+    payload = json.dumps(
+        {"c": _clean(client_id, 200), "m": _clean(message_id, 200), "i": int(attachment_index), "e": expires},
+        separators=(",", ":"),
+    ).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    signature = hmac.new(_salebot_key().encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _salebot_attachment_claims(token: str) -> tuple[str, str, int]:
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(_salebot_key().encode(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not _salebot_key() or not hmac.compare_digest(signature, expected):
+            raise ValueError("signature")
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+        if int(payload.get("e") or 0) < int(time.time()):
+            raise ValueError("expired")
+        client_id = _clean(payload.get("c"), 200)
+        message_id = _clean(payload.get("m"), 200)
+        index = int(payload.get("i"))
+        if not client_id or not message_id or index < 0 or index > 20:
+            raise ValueError("claims")
+        return client_id, message_id, index
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, binascii.Error) as exc:
+        raise HTTPException(404, "Вложение недоступно") from exc
+
+
+def _salebot_remote_attachment_url(url: str) -> str:
+    try:
+        parsed = urlsplit(_clean(url, 4000))
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            return ""
+        if parsed.port not in (None, 443):
+            return ""
+        host = parsed.hostname.rstrip(".").lower()
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            if host == "localhost" or "." not in host or not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+                return ""
+        else:
+            if not address.is_global:
+                return ""
+        return urlunsplit(("https", parsed.netloc, parsed.path or "/", parsed.query, ""))
+    except (TypeError, ValueError):
+        return ""
+
+
+async def _require_public_attachment_host(url: str) -> str:
+    safe_url = _salebot_remote_attachment_url(url)
+    if not safe_url:
+        raise HTTPException(404, "Вложение недоступно")
+    host = urlsplit(safe_url).hostname or ""
+    if host == "api.telegram.org":
+        return safe_url
+    try:
+        addresses = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM),
+        )
+    except socket.gaierror as exc:
+        raise HTTPException(404, "Вложение недоступно") from exc
+    resolved = {item[4][0] for item in addresses if item and len(item) > 4 and item[4]}
+    if not resolved:
+        raise HTTPException(404, "Вложение недоступно")
+    try:
+        if any(not ipaddress.ip_address(address).is_global for address in resolved):
+            raise HTTPException(404, "Вложение недоступно")
+    except ValueError as exc:
+        raise HTTPException(404, "Вложение недоступно") from exc
+    return safe_url
+
+
+def _salebot_safe_attachment_url(client_id: str, message_id: str, index: int, url: str) -> str:
+    if not _salebot_remote_attachment_url(url):
+        return ""
+    token = _salebot_attachment_token(client_id, message_id, index)
+    return f"{PUBLIC_API_BASE}/streams/salebot-attachment/{token}"
+
+
+def _salebot_messages(payload: Any, client_id: str = "") -> list[dict[str, Any]]:
     rows = payload
     if isinstance(payload, dict):
         rows = payload.get("result") or payload.get("messages") or payload.get("history") or payload.get("data") or []
@@ -4750,41 +9216,45 @@ def _salebot_messages(payload: Any) -> list[dict[str, Any]]:
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
+        outside_raw = row.get("message_from_outside")
+        try:
+            outside = int(outside_raw)
+        except (TypeError, ValueError):
+            continue
+        # SaleBot uses the other values for CRM comments, callbacks, telephony
+        # and other service events.  The sales dialog needs only ordinary and
+        # API messages.
+        if outside not in {0, 1}:
+            continue
+        text = _clean(row.get("text") or row.get("message"), 20_000)
         replica = row.get("client_replica")
         if isinstance(replica, str):
             replica = replica.strip().lower() in {"1", "true", "yes"}
-        outside = row.get("message_from_outside")
-        if outside not in (None, ""):
-            try:
-                incoming = int(outside) > 0
-            except (TypeError, ValueError):
-                incoming = bool(replica)
-        else:
-            incoming = bool(replica)
-        attachments: list[dict[str, str]] = []
-        raw_attachments = row.get("attachments") if isinstance(row.get("attachments"), list) else []
-        for attachment in raw_attachments:
-            if isinstance(attachment, str):
-                url, content_type = attachment, ""
-            elif isinstance(attachment, dict):
-                url = attachment.get("attachment_url") or attachment.get("url") or attachment.get("link") or attachment.get("src") or attachment.get("file")
-                content_type = attachment.get("attachment_type") or attachment.get("type") or attachment.get("mime") or ""
-            else:
-                continue
-            if _clean(url, 4000).startswith("https://"):
-                attachments.append({"content_uri": _clean(url, 4000), "content_type": _clean(content_type, 200), "filename": ""})
-        if not attachments:
-            for key in ("attachment_url", "attachment", "file", "media", "image", "photo", "video"):
-                value = row.get(key)
-                url = value if isinstance(value, str) else value.get("url") if isinstance(value, dict) else ""
-                if _clean(url, 4000).startswith("https://"):
-                    attachments.append({"content_uri": _clean(url, 4000), "content_type": _clean(row.get("attachment_type"), 200), "filename": ""})
-                    break
+        # message_from_outside separates dialog traffic from CRM/service
+        # events. Both the client and the bot use value 0 in real histories;
+        # client_replica is the speaker flag used by the amoCRM widget.
+        incoming = bool(replica)
+        if incoming and row.get("answered") is False and text.casefold() in SALEBOT_CALLBACK_MARKERS:
+            continue
+        attachments: list[dict[str, Any]] = []
+        message_id = _clean(row.get("id") or row.get("message_id") or index, 200)
+        for attachment_index, attachment in enumerate(_salebot_attachment_items(row)):
+            clean_url = _salebot_safe_attachment_url(
+                client_id, message_id, attachment_index, attachment["url"],
+            ) if client_id else attachment["url"]
+            clean_type = _salebot_attachment_type(attachment["content_type"], attachment["url"])
+            if clean_url.startswith("https://") or clean_type in {"audio", "voice"}:
+                attachments.append({
+                    "content_uri": clean_url if clean_url.startswith("https://") else "",
+                    "content_type": clean_type,
+                    "filename": attachment["filename"],
+                    "unavailable": not clean_url.startswith("https://"),
+                })
         result.append({
-            "external_id": f"salebot:{_clean(row.get('id') or row.get('message_id') or index, 200)}",
+            "external_id": f"salebot:{message_id}",
             "direction": "incoming" if incoming else "outgoing",
             "status": "delivered" if row.get("delivered", True) else "sent",
-            "text": _clean(row.get("text") or row.get("message"), 20_000),
+            "text": text,
             "content_uri": attachments[0]["content_uri"] if attachments else "",
             "attachments": attachments,
             "author_name": _clean(row.get("name") or row.get("author_name"), 200),
@@ -4796,7 +9266,7 @@ def _salebot_messages(payload: Any) -> list[dict[str, Any]]:
 async def _salebot_history(client_id: str) -> list[dict[str, Any]]:
     cached = _salebot_history_cache.get(client_id)
     if cached and cached[0] > time.monotonic():
-        return list(cached[1])
+        return await _apply_manager_attribution(list(cached[1]), SALEBOT_PROVIDER, client_id)
     key = _salebot_key()
     if not key:
         raise HTTPException(503, "SaleBot не настроен")
@@ -4810,11 +9280,130 @@ async def _salebot_history(client_id: str) -> list[dict[str, Any]]:
         raise HTTPException(502, "SaleBot вернул некорректную историю") from exc
     if isinstance(payload, dict) and payload.get("error"):
         raise HTTPException(502, "SaleBot не отдал историю. Повторите позже.")
-    messages = _salebot_messages(payload)
+    messages = _salebot_messages(payload, client_id)
     _salebot_history_cache[client_id] = (time.monotonic() + SALEBOT_HISTORY_CACHE_SECONDS, messages)
     while len(_salebot_history_cache) > DIRECT_HISTORY_CACHE_LIMIT:
         _salebot_history_cache.pop(next(iter(_salebot_history_cache)))
-    return list(messages)
+    return await _apply_manager_attribution(list(messages), SALEBOT_PROVIDER, client_id)
+
+
+async def _apply_manager_attribution(
+    messages: list[dict[str, Any]], provider: str, chat_id: str,
+) -> list[dict[str, Any]]:
+    """Overlay the Nexus manager on provider histories that only expose a bot/project author."""
+
+    if not messages:
+        return messages
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            """SELECT external_id,text,manager_name,sent_at FROM communication_messages
+               WHERE provider=? AND chat_id=? AND direction='outgoing' AND manager_name<>''
+               ORDER BY id DESC LIMIT 500""",
+            (_clean(provider, 40), _clean(chat_id, 250)),
+        )).fetchall()
+    finally:
+        await db.close()
+    candidates = [dict(row) for row in rows]
+    used: set[int] = set()
+    for message in messages:
+        if message.get("direction") != "outgoing":
+            continue
+        message_time = _parse_iso(message.get("sent_at"))
+        best_index = -1
+        best_distance = 601.0
+        for index, row in enumerate(candidates):
+            if index in used or _clean(row.get("text"), 4000) != _clean(message.get("text"), 4000):
+                continue
+            candidate_time = _parse_iso(row.get("sent_at"))
+            distance = abs((message_time - candidate_time).total_seconds()) if message_time and candidate_time else 0
+            if distance <= 600 and distance < best_distance:
+                best_index, best_distance = index, distance
+        if best_index >= 0:
+            used.add(best_index)
+            message["author_name"] = candidates[best_index]["manager_name"]
+    return messages
+
+
+async def _salebot_raw_attachment(client_id: str, message_id: str, attachment_index: int) -> dict[str, str]:
+    key = _salebot_key()
+    if not key:
+        raise HTTPException(503, "SaleBot не настроен")
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+        response = await client.get(
+            f"{SALEBOT_API_BASE}/{key}/get_history",
+            params={"client_id": client_id, "limit": 2000},
+        )
+    if response.status_code >= 400:
+        raise HTTPException(502, "SaleBot не отдал вложение")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(502, "SaleBot вернул некорректное вложение") from exc
+    rows = (
+        payload.get("result") or payload.get("messages") or payload.get("history") or payload.get("data") or []
+    ) if isinstance(payload, dict) else []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or _clean(row.get("id") or row.get("message_id"), 200) != message_id:
+            continue
+        attachments = _salebot_attachment_items(row)
+        if attachment_index >= len(attachments):
+            break
+        attachment = attachments[attachment_index]
+        if not _salebot_remote_attachment_url(attachment["url"]):
+            break
+        return attachment
+    raise HTTPException(404, "Вложение недоступно")
+
+
+@router.get("/streams/salebot-attachment/{token}")
+async def streams_salebot_attachment(token: str, request: Request) -> Response:
+    # The short-lived HMAC token is the capability credential. Browser media
+    # requests from the standalone Streams app do not carry a Nexus admin cookie.
+    enforce_rate_limit(request, "messenger-salebot-attachment", limit=120, window_seconds=300)
+    client_id, message_id, attachment_index = _salebot_attachment_claims(token)
+    attachment = await _salebot_raw_attachment(client_id, message_id, attachment_index)
+    attachment_url = await _require_public_attachment_host(attachment["url"])
+
+    def unavailable_image() -> Response:
+        svg = '''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180" viewBox="0 0 720 180"><rect width="720" height="180" fill="#111316"/><rect x="1" y="1" width="718" height="178" fill="none" stroke="#383c43"/><path d="M55 119l42-47 35 38 22-23 49 52H55z" fill="#383c43"/><circle cx="166" cy="55" r="14" fill="#727780"/><text x="235" y="84" fill="#eceef1" font-family="Arial,sans-serif" font-size="20">Вложение больше недоступно</text><text x="235" y="116" fill="#a7abb3" font-family="Arial,sans-serif" font-size="15">Остальные файлы истории продолжают отображаться.</text></svg>'''.encode("utf-8")
+        return Response(
+            svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"},
+        )
+
+    try:
+        parsed = urlsplit(attachment_url)
+        client_kwargs = httpx_client_kwargs(timeout=httpx.Timeout(30, connect=15)) if parsed.hostname == "api.telegram.org" else {
+            "timeout": httpx.Timeout(30, connect=15), "trust_env": False,
+        }
+        async with httpx.AsyncClient(follow_redirects=False, **client_kwargs) as client:
+            response = await client.get(attachment_url)
+    except httpx.HTTPError:
+        return unavailable_image()
+    if response.status_code != 200:
+        return unavailable_image()
+    try:
+        declared_size = int(response.headers.get("content-length") or 0)
+    except ValueError:
+        declared_size = 0
+    if declared_size > SALEBOT_ATTACHMENT_MAX_BYTES:
+        raise HTTPException(413, "Вложение слишком большое")
+    content = response.content
+    if len(content) > SALEBOT_ATTACHMENT_MAX_BYTES:
+        raise HTTPException(413, "Вложение слишком большое")
+    declared_type = _clean(response.headers.get("content-type"), 200).split(";", 1)[0].lower()
+    media_type = declared_type if declared_type in SALEBOT_SAFE_MEDIA_TYPES else "application/octet-stream"
+    headers = {"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"}
+    if media_type == "application/octet-stream":
+        safe_name = re.sub(r"[^A-Za-zА-Яа-я0-9._ -]+", "_", _clean(attachment.get("filename"), 180)) or "attachment"
+        headers["Content-Disposition"] = f'attachment; filename="{quote(safe_name)}"'
+    return Response(
+        content,
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 async def _salebot_send(client_id: str, text: str, attachment_url: str = "", attachment_type: str = "") -> dict[str, Any]:
@@ -4997,27 +9586,24 @@ async def widget_conversation(request: Request) -> JSONResponse:
             history = await _history_sync_info(channel_id, phone)
             should_import = not messages and (offset > 0 or await _history_sync_due(channel_id, phone))
             if should_import:
-                try:
-                    history = await _import_wazzup_history(
-                        device,
-                        channel,
-                        phone,
-                        name=_clean((thread or {}).get("name") or data.get("name"), 200),
-                        identity=identity,
-                        offset=offset,
-                        known_chat_id=chat_id,
-                    )
-                except Exception:
-                    await _record_history_sync(channel_id, phone, "error", 0, success=False)
-                    history = {"status": "error", "imported": 0, "complete": False}
-                    _log("warning", "Wazzup history read failed channel=%s", channel_id)
-                chat_id, has_chat, messages = await _conversation_rows(
-                    channel_id, transport, phone, CONVERSATION_PAGE_SIZE, offset=offset,
+                _schedule_wazzup_history(
+                    device,
+                    channel,
+                    phone,
+                    name=_clean((thread or {}).get("name") or data.get("name"), 200),
+                    identity=identity,
+                    offset=offset,
+                    known_chat_id=chat_id,
                 )
+                history = {"status": "syncing", "imported": 0, "complete": False}
         if has_chat:
             await _mark_thread_read(int(device["id"]), channel_id, transport, chat_id)
             owner_id = await _responsible_admin_id(data, mode, device) if not thread else None
             await _assign_client_threads(owner_id, phone=phone)
+            if not thread and _notification_source(channel_id, transport, provider) == "max":
+                await _remember_notification_context(
+                    _widget_context(data, mode, device), "max", chat_id, owner_id,
+                )
         can_send, send_reason = _channel_send_state(channel, has_chat)
         has_more = len(messages) >= CONVERSATION_PAGE_SIZE or not bool(history.get("complete", True))
         return _widget_response(
@@ -5053,6 +9639,7 @@ async def widget_send(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
     device: dict[str, Any] | None = None
     phone = ""
+    outbound_job: dict[str, Any] = {}
     try:
         device = await _device(request)
         if not device:
@@ -5069,12 +9656,44 @@ async def widget_send(request: Request) -> JSONResponse:
         source_url = _clean(data.get("source_url"), 2000)
         attachment_url = _clean(data.get("attachment_url"), 4000)
         attachment_type = _clean(data.get("attachment_type"), 100)
+        request_key = _clean(data.get("request_id"), 300) or secrets.token_urlsafe(24)
         if not message_text and not attachment_url:
             raise HTTPException(400, "Введите сообщение")
+        resolved_context = await _resolve_widget_context(data, mode, device)
+        message_text = await _auto_markup_for_send(message_text, resolved_context.get("variables", {}))
+        if len(message_text) > 4000:
+            raise HTTPException(400, "После авторазметки сообщение длиннее 4000 символов")
         if re.search(r"\{\{\s*[a-zA-Z0-9_.:-]+\s*\}\}", message_text):
             raise HTTPException(400, "Подставьте все переменные шаблона")
+        variables = resolved_context.get("variables") if isinstance(resolved_context.get("variables"), dict) else {}
+        expected_client_name = _clean(
+            variables.get("contact.name") or variables.get("contact.first_name") or data.get("name"), 200,
+        )
+        mismatch = _salutation_name_mismatch(message_text, expected_client_name)
+        if mismatch:
+            raise HTTPException(
+                409,
+                f"В тексте обращение «{mismatch[0]}», а выбран клиент «{mismatch[1]}». Проверьте имя перед отправкой.",
+            )
         if not channel_id or transport not in CHAT_TRANSPORTS:
             raise HTTPException(400, "Канал не указан")
+
+        async def start_delivery_job(chat_id: str, client_phone: str, client_name: str) -> dict[str, Any] | None:
+            nonlocal outbound_job
+            context = await _widget_delivery_context(
+                data, mode, device, provider, chat_id, channel_id, transport,
+            )
+            outbound_job = await _start_outbound_job(
+                request_key=request_key, device=device, provider=provider,
+                channel_id=channel_id, chat_type=transport, chat_id=chat_id,
+                phone=client_phone, client_name=client_name,
+                email=_clean(data.get("email"), 320),
+                getcourse_user_id=_clean(data.get("getcourse_user_id"), 200),
+                text=message_text, attachment_url=attachment_url,
+                attachment_type=attachment_type, context=context,
+            )
+            return _outbound_duplicate_payload(outbound_job)
+
         active_channels = await _all_channels()
         thread_fields = (
             _clean(data.get("thread_channel_id"), 200),
@@ -5090,11 +9709,20 @@ async def widget_send(request: Request) -> JSONResponse:
             client_id = _clean(link.get("external_user_id"), 200)
             if not client_id:
                 raise HTTPException(404, "SaleBot ID не найден. Нужен salebot_id в карточке или utm_term.")
+            duplicate = await start_delivery_job(
+                client_id, _clean(link.get("phone") or data.get("phone"), 40),
+                _clean(link.get("name") or data.get("name"), 200),
+            )
+            if duplicate:
+                duplicate["channel"] = channel
+                return _widget_response(request, duplicate)
             await _salebot_send(client_id, message_text, attachment_url, attachment_type)
+            message = {"external_id": f"salebot:local:{secrets.token_hex(8)}", "direction": "outgoing", "status": "sent", "text": message_text, "content_uri": attachment_url, "author_name": device["admin_name"], "sent_at": _iso()}
+            await _finish_outbound_job(outbound_job, message)
             await _audit("send_message", "ok", admin_id=device["admin_id"], device_id=device["id"], entity_id=client_id)
             return _widget_response(request, {
                 "ok": True, "channel": channel,
-                "message": {"external_id": f"salebot:local:{secrets.token_hex(8)}", "direction": "outgoing", "status": "sent", "text": message_text, "content_uri": attachment_url, "author_name": device["admin_name"], "sent_at": _iso()},
+                "message": message,
             })
         if provider == "vk":
             channel = await _requested_channel(channel_id, transport, provider)
@@ -5109,20 +9737,30 @@ async def widget_send(request: Request) -> JSONResponse:
             link = stored_link or card_link
             if not peer_id or not link:
                 raise HTTPException(404, "Диалог VK не найден")
+            duplicate = await start_delivery_job(
+                peer_id, _clean(link.get("phone") or data.get("phone"), 40),
+                _clean(link.get("name") or data.get("name"), 200),
+            )
+            if duplicate:
+                duplicate["channel"] = channel
+                return _widget_response(request, duplicate)
             result = await _vk_request("messages.send", {
                 "group_id": _vk_group_id(), "peer_id": peer_id,
-                "random_id": secrets.randbelow(2_000_000_000) + 1, "message": message_text,
+                "random_id": int(hashlib.sha256(request_key.encode()).hexdigest()[:8], 16) % 2_000_000_000 + 1,
+                "message": message_text,
             })
             message_id = _clean(result, 200) if not isinstance(result, dict) else _clean(result.get("message_id") or result.get("conversation_message_id"), 200)
             now_stamp = int(_now_dt().timestamp())
             await _store_vk_messages(peer_id, [{
                 "id": message_id or f"local-{secrets.token_hex(12)}", "from_id": f"-{_vk_group_id()}",
                 "peer_id": peer_id, "date": now_stamp, "text": message_text, "attachments": [],
-            }], link)
+            }], link, outgoing_author_name=device["admin_name"])
+            message = {"external_id": f"vk:{_vk_group_id()}:{peer_id}:{message_id}", "direction": "outgoing", "status": "delivered", "text": message_text, "content_uri": "", "author_name": device["admin_name"], "sent_at": _iso()}
+            await _finish_outbound_job(outbound_job, message)
             await _audit("send_message", "ok", admin_id=device["admin_id"], device_id=device["id"], page_kind=page_kind, entity_id=entity_id, phone=link.get("phone", ""))
             return _widget_response(request, {
                 "ok": True,
-                "message": {"external_id": f"vk:{_vk_group_id()}:{peer_id}:{message_id}", "direction": "outgoing", "status": "delivered", "text": message_text, "content_uri": "", "author_name": "Сообщество", "sent_at": _iso()},
+                "message": message,
                 "channel": channel,
             })
         if provider == TELEGRAM_PROVIDER:
@@ -5140,7 +9778,18 @@ async def widget_send(request: Request) -> JSONResponse:
             link = stored_link or card_link
             if not peer_id or not link:
                 raise HTTPException(404, "Диалог Telegram не найден")
-            message = await _telegram_send_text(peer_id, message_text, **({} if stored_link else {"identity": link}))
+            duplicate = await start_delivery_job(
+                peer_id, _clean(link.get("phone") or data.get("phone"), 40),
+                _clean(link.get("name") or data.get("name"), 200),
+            )
+            if duplicate:
+                duplicate["channel"] = channel
+                return _widget_response(request, duplicate)
+            message = await _telegram_send_text(
+                peer_id, message_text, author_name=device["admin_name"],
+                **({} if stored_link else {"identity": link}),
+            )
+            await _finish_outbound_job(outbound_job, message)
             await _audit(
                 "send_message", "ok", admin_id=device["admin_id"], device_id=device["id"],
                 page_kind=page_kind, entity_id=entity_id, phone=link.get("phone", ""),
@@ -5168,7 +9817,13 @@ async def widget_send(request: Request) -> JSONResponse:
             if not phone:
                 raise HTTPException(409, "Для этого канала нужен телефон клиента")
             chat_id, has_chat, _ = await _conversation_rows(channel_id, transport, phone, 1)
-        crm_message_id = f"nexus-{secrets.token_hex(16)}"
+        duplicate = await start_delivery_job(
+            chat_id, phone, _clean((thread or {}).get("name") or data.get("name"), 200),
+        )
+        if duplicate:
+            duplicate["channel"] = channel
+            return _widget_response(request, duplicate)
+        crm_message_id = f"nexus-{hashlib.sha256(request_key.encode()).hexdigest()[:32]}"
         message_payload: dict[str, Any] = {
             "channelId": channel_id,
             "chatType": transport,
@@ -5223,11 +9878,21 @@ async def widget_send(request: Request) -> JSONResponse:
         finally:
             await db.close()
         if not thread:
-            await _assign_client_threads(await _responsible_admin_id(data, mode, device), phone=phone)
+            owner_id = await _responsible_admin_id(data, mode, device)
+            await _assign_client_threads(owner_id, phone=phone)
+            if chat_id and _notification_source(channel_id, transport, provider) == "max":
+                await _remember_notification_context(
+                    _widget_context(data, mode, device), "max", chat_id, owner_id,
+                )
         await _audit(
             "send_message", "not_delivered" if failure_notice else "ok",
             admin_id=device["admin_id"], device_id=device["id"], page_kind=page_kind,
             entity_id=entity_id, phone=phone, error=failure_notice,
+        )
+        response_message = {"external_id": external_id, "chat_id": chat_id, "direction": "outgoing", "status": delivery_status, "text": message_text, "content_uri": "", "author_name": device["admin_name"], "sent_at": now}
+        await _finish_outbound_job(
+            outbound_job, response_message,
+            status="failed" if failure_notice else "sent", error=failure_notice,
         )
         return _widget_response(
             request,
@@ -5235,15 +9900,31 @@ async def widget_send(request: Request) -> JSONResponse:
                 "ok": True,
                 "sent": not failure_notice,
                 "notice": failure_notice,
-                "message": {"external_id": external_id, "direction": "outgoing", "status": delivery_status, "text": message_text, "content_uri": "", "author_name": device["admin_name"], "sent_at": now},
+                "message": response_message,
                 "channel": channel,
             },
         )
     except HTTPException as exc:
+        if outbound_job and outbound_job.get("id"):
+            retrying = await _fail_or_retry_outbound_job(outbound_job, exc)
+            if retrying:
+                if device:
+                    await _audit("send_message", "retry", admin_id=device["admin_id"], device_id=device["id"], phone=phone, error=str(exc.detail))
+                return _widget_response(request, {
+                    "ok": True, "sent": False, "queued": True,
+                    "notice": "Канал временно не ответил. Сообщение в очереди — Nexus повторит отправку автоматически.",
+                }, 202)
         if device:
             await _audit("send_message", "error", admin_id=device["admin_id"], device_id=device["id"], phone=phone, error=str(exc.detail))
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
-    except Exception:
+    except Exception as exc:
+        if outbound_job and outbound_job.get("id"):
+            retrying = await _fail_or_retry_outbound_job(outbound_job, exc)
+            if retrying:
+                return _widget_response(request, {
+                    "ok": True, "sent": False, "queued": True,
+                    "notice": "Связь временно пропала. Сообщение в очереди — Nexus повторит отправку автоматически.",
+                }, 202)
         _log("exception", "GetCourse Wazzup send failed")
         if device:
             await _audit("send_message", "error", admin_id=device["admin_id"], device_id=device["id"], phone=phone, error="internal")
