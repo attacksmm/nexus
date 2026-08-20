@@ -8534,13 +8534,33 @@ async def widget_channels(request: Request) -> JSONResponse:
                 link = await _external_link(
                     peer_id=_clean((thread or {}).get("chat_id"), 200), provider=provider,
                 ) if same_provider else {}
-                if not link and thread and provider != TELEGRAM_PROVIDER:
-                    link = await _external_link_for_identity(provider, phone=phone, gc_id=gc_id)
+                context = _widget_context(data, mode, device)
                 if not link:
-                    link = await _provider_card_link(
-                        data, mode, device, provider,
-                        allow_phone_import=False,
+                    exact_link = await _entity_external_link(
+                        context["platform"], context["entity_type"], context["entity_id"], provider,
                     )
+                    if exact_link and _card_link_matches_context(
+                        exact_link, context, gc_id,
+                    ):
+                        link = exact_link
+                if not link and (thread or context["platform"] != "amocrm"):
+                    link = await _external_link_for_identity(provider, phone=phone, gc_id=gc_id)
+                # Initial widget paint must use only identities already proven
+                # for this card or an explicit provider field.  A live Customer
+                # DB/Telegram lookup can take tens of seconds and is handled by
+                # the independent profile search instead of blocking channels.
+                if not link:
+                    explicit_id = ""
+                    if provider == "vk":
+                        explicit_id = _identity_field_value(
+                            context, "vk_id", "vkontakte_id", "senler_id",
+                        )
+                    elif provider == SALEBOT_PROVIDER:
+                        explicit_id = _identity_field_value(
+                            context, "salebot_id", "salebot_client_id", "sb_id",
+                        )
+                    if explicit_id:
+                        link = {"external_user_id": explicit_id}
                 peer_id = _clean(link.get("external_user_id"), 200)
                 provider_profile_name = ""
                 if peer_id:
@@ -8552,9 +8572,8 @@ async def widget_channels(request: Request) -> JSONResponse:
                         provider, peer_id, _clean(link.get("name"), 200),
                     )
                 if provider == "vk":
-                    context = _widget_context(data, mode, device)
                     can_send = bool(peer_id or _identity_field_value(
-                        context, "vk_id", "vkontakte_id", "senler_id", "platform_id", "utm_term",
+                        context, "vk_id", "vkontakte_id", "senler_id", "platform_id",
                     ))
                     reason = "" if can_send else "VK клиента не найден"
                 elif provider == SALEBOT_PROVIDER:
@@ -8577,10 +8596,31 @@ async def widget_channels(request: Request) -> JSONResponse:
                 **({"pending": True} if provider == TELEGRAM_PROVIDER and link.get("pending") else {}),
             }, direct_link)
 
-        # Channel checks are independent.  Running them together prevents a
-        # slow Telegram/SaleBot identity lookup from delaying every Wazzup
-        # channel in amoCRM and GetCourse.
-        resolved_channels = await asyncio.gather(*(resolve_channel(channel) for channel in channels))
+        async def resolve_channel_safely(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
+            try:
+                return await resolve_channel(channel)
+            except (HTTPException, aiosqlite.Error) as exc:
+                _log(
+                    "warning", "Widget channel resolution deferred: provider=%s channel=%s error=%s",
+                    channel.get("provider", "wazzup"), _clean(channel.get("channel_id"), 200),
+                    type(exc).__name__,
+                )
+                return ({
+                    **channel, "available": False, "can_send": False, "has_chat": False,
+                    "send_reason": "Канал временно недоступен. Повторяем проверку…", "pending": True,
+                }, None)
+            except Exception as exc:
+                _log(
+                    "exception", "Widget channel resolution failed: provider=%s channel=%s error=%s",
+                    channel.get("provider", "wazzup"), _clean(channel.get("channel_id"), 200),
+                    type(exc).__name__,
+                )
+                return ({
+                    **channel, "available": False, "can_send": False, "has_chat": False,
+                    "send_reason": "Канал временно недоступен. Повторяем проверку…", "pending": True,
+                }, None)
+
+        resolved_channels = await asyncio.gather(*(resolve_channel_safely(channel) for channel in channels))
         views = [view for view, _ in resolved_channels]
         direct_links = [link for _, link in resolved_channels if link]
         if not thread:
