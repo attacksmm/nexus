@@ -802,7 +802,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         )
         self.assertEqual(router._telegram_profile_url("", "123"), "")
 
-    def test_salebot_profile_also_resolves_exact_telegram_phone_profile(self):
+    def test_amocrm_telegram_profile_requires_live_personal_account_verification(self):
         class Index:
             def provider_id_for_exact_context(self, provider, _context):
                 return {"salebot": "99001", "telegram": "123456789"}.get(provider, "")
@@ -820,19 +820,41 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         async def no_entity_link(*_args):
             return {}
 
+        telegram_result = {"value": {}}
+
+        async def telegram_check(_data, _mode, _device, context):
+            self.assertEqual(context.get("platform"), "amocrm")
+            return dict(telegram_result["value"])
+
         self_assert = self
         previous = (
             router._identity_index,
             router._apply_identity_rules,
             router._resolve_widget_context,
             router._entity_external_link,
+            router._amocrm_telegram_profile_link,
         )
         router._identity_index = Index()
         router._apply_identity_rules = no_rules
         router._resolve_widget_context = resolved
         router._entity_external_link = no_entity_link
+        router._amocrm_telegram_profile_link = telegram_check
         try:
-            links = asyncio.run(router._widget_profile_links(
+            request_data = {
+                "entity_type": "lead",
+                "entity_id": "18222875",
+                "phone": "8 (999) 123-45-67",
+            }
+            device = {"admin_name": "Татьяна"}
+            missing_links = asyncio.run(router._widget_profile_links(
+                request_data, "amocrm", device,
+            ))
+            telegram_result["value"] = {"pending": "1"}
+            pending_links = asyncio.run(router._widget_profile_links(
+                request_data, "amocrm", device,
+            ))
+            telegram_result["value"] = {"external_user_id": "123456789"}
+            verified_links = asyncio.run(router._widget_profile_links(
                 {
                     "entity_type": "lead",
                     "entity_id": "18222875",
@@ -847,12 +869,21 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
                 router._apply_identity_rules,
                 router._resolve_widget_context,
                 router._entity_external_link,
+                router._amocrm_telegram_profile_link,
             ) = previous
-        self.assertEqual(links, [
+        self.assertEqual(missing_links, [
+            {
+                "kind": "salebot",
+                "label": "SaleBot",
+                "url": "https://salebot.pro/projects/397724/clients/99001",
+            },
+        ])
+        self.assertEqual(pending_links, [
             {
                 "kind": "telegram_personal",
-                "label": "TG Personal",
+                "label": "TG Personal · попробовать",
                 "url": "https://t.me/+79991234567?profile",
+                "verification": "unverified",
             },
             {
                 "kind": "salebot",
@@ -860,6 +891,65 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
                 "url": "https://salebot.pro/projects/397724/clients/99001",
             },
         ])
+        self.assertEqual(verified_links, [
+            {
+                "kind": "telegram_personal",
+                "label": "TG Personal",
+                "url": "https://t.me/+79991234567?profile",
+                "verification": "verified",
+            },
+            {
+                "kind": "salebot",
+                "label": "SaleBot",
+                "url": "https://salebot.pro/projects/397724/clients/99001",
+            },
+        ])
+        amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertIn("row.verification==='unverified'", amo)
+        self.assertIn("Telegram не успел подтвердить профиль — попробовать открыть по номеру", amo)
+
+    def test_amocrm_telegram_profile_verification_runs_in_background_and_caches_miss(self):
+        async def scenario():
+            context = {
+                "platform": "amocrm", "entity_type": "lead", "entity_id": "18232123",
+                "phone": "+79991234567", "email": "",
+            }
+            device = {"id": 17}
+            cache_key = router._card_link_cache_key(
+                context, device, router.TELEGRAM_PROVIDER, "",
+            )
+            gate = asyncio.Event()
+
+            async def slow_check(_data, _mode, _device, provider, **kwargs):
+                self.assertEqual(provider, router.TELEGRAM_PROVIDER)
+                self.assertEqual(kwargs.get("resolution_timeout"), 30)
+                await gate.wait()
+                router._remember_card_link(cache_key, {})
+                return {}
+
+            previous = router._provider_card_link
+            router._provider_card_link = slow_check
+            router._card_link_cache.clear()
+            router._telegram_profile_inflight.clear()
+            try:
+                pending = await router._amocrm_telegram_profile_link(
+                    {}, "amocrm", device, context,
+                )
+                self.assertEqual(pending, {"pending": "1"})
+                self.assertIn(cache_key, router._telegram_profile_inflight)
+                gate.set()
+                await router._telegram_profile_inflight[cache_key]
+                self.assertEqual(
+                    await router._amocrm_telegram_profile_link({}, "amocrm", device, context),
+                    {},
+                )
+                self.assertNotIn(cache_key, router._telegram_profile_inflight)
+            finally:
+                router._provider_card_link = previous
+                router._card_link_cache.clear()
+                router._telegram_profile_inflight.clear()
+
+        asyncio.run(scenario())
 
     def test_amocrm_profile_ignores_unverified_salebot_import_url_and_stale_link(self):
         class Index:
@@ -1075,8 +1165,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.7.29")
-        self.assertIn("static/amocrm.html?v=51414", script)
+        self.assertEqual(manifest["widget"]["version"], "1.7.31")
+        self.assertIn("static/amocrm.html?v=51416", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)

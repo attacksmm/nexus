@@ -209,6 +209,7 @@ _salebot_history_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _telegram_history_inflight: set[tuple[str, int]] = set()
 _wazzup_history_inflight: set[tuple[str, str, int]] = set()
 _card_link_cache: dict[tuple[str, ...], tuple[float, dict[str, str]]] = {}
+_telegram_profile_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _telegram_state_cache: tuple[float, dict[str, Any]] = (0.0, {})
 _telegram_auth_pending: dict[str, dict[str, Any]] = {}
 _telegram_lock = asyncio.Lock()
@@ -255,6 +256,37 @@ def _remember_card_link(key: tuple[str, ...], link: dict[str, str]) -> None:
     _card_link_cache[key] = (now + 60, dict(link))
     while len(_card_link_cache) > DIRECT_HISTORY_CACHE_LIMIT:
         _card_link_cache.pop(next(iter(_card_link_cache)))
+
+
+async def _amocrm_telegram_profile_link(
+    data: dict[str, Any], mode: str, device: dict[str, Any], context: dict[str, Any],
+) -> dict[str, str]:
+    """Start a bounded background check without delaying the profile header."""
+
+    cache_key = _card_link_cache_key(context, device, TELEGRAM_PROVIDER, "")
+    cached = _card_link_cache.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return dict(cached[1])
+    task = _telegram_profile_inflight.get(cache_key)
+    if task and not task.done():
+        return {"pending": "1"}
+
+    async def verify() -> None:
+        try:
+            result = await _provider_card_link(
+                data, mode, device, TELEGRAM_PROVIDER,
+                allow_phone_import=False, resolution_timeout=30,
+            )
+            if result.get("pending"):
+                _remember_card_link(cache_key, {"pending": "1"})
+        except Exception as exc:
+            _log("warning", "Telegram profile verification deferred: %s", type(exc).__name__)
+            _remember_card_link(cache_key, {"pending": "1"})
+        finally:
+            _telegram_profile_inflight.pop(cache_key, None)
+
+    _telegram_profile_inflight[cache_key] = asyncio.create_task(verify())
+    return {"pending": "1"}
 
 
 async def setup(ctx) -> None:
@@ -5195,6 +5227,8 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     found = _profile_links_from_values([context, resolved.get("variables", {})])
     accounts = [row for row in resolved.get("accounts", []) if isinstance(row, dict)]
     exact_ids: dict[str, str] = {}
+    telegram_identity_hint = ""
+    telegram_profile_verification = ""
     if context.get("platform") == "amocrm" and _identity_index is not None:
         # Historical amoCRM imports contain generated ``Диалог SaleBot`` URLs
         # whose client id was copied blindly from utm_term.  Those URLs are
@@ -5206,9 +5240,11 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
             asyncio.to_thread(_identity_index.provider_id_for_exact_context, provider, context)
             for provider in ("vk", "telegram", SALEBOT_PROVIDER)
         ))
+        telegram_identity_hint = _clean(telegram_exact, 300) or _identity_field_value(
+            context, "telegram_id", "tg_id",
+        )
         exact_ids = {
             "vk": _clean(vk_exact, 300) or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id"),
-            TELEGRAM_PROVIDER: _clean(telegram_exact, 300) or _identity_field_value(context, "telegram_id", "tg_id"),
             SALEBOT_PROVIDER: _clean(salebot_exact, 300),
         }
         # A graph/phone match is useful for discovery, but it must never turn
@@ -5265,15 +5301,38 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         if exact_salebot_id:
             account_ids[SALEBOT_PROVIDER] = exact_salebot_id
 
-    # SaleBot stores the messenger platform id, while the public Telegram link
-    # may live only in the linked Customer DB record. Resolve that exact edge
-    # before falling back to the phone from the current card.
-    if TELEGRAM_PROVIDER not in account_ids and SALEBOT_PROVIDER in account_ids and _identity_index is not None:
-        exact_telegram_id = await asyncio.to_thread(
-            _identity_index.provider_id_for_exact_context, "telegram", context,
-        )
-        if exact_telegram_id:
-            account_ids[TELEGRAM_PROVIDER] = exact_telegram_id
+    if context.get("platform") == "amocrm":
+        # A Telegram id bridged through SaleBot proves that the bot has seen
+        # the person, but it does not prove that our connected personal
+        # Telegram account can resolve or message that person.  Use the same
+        # live, non-importing check as the TG Personal channel.  A definitive
+        # miss hides the profile button; a timeout keeps only an explicitly
+        # unverified "try to open" action.
+        if context.get("phone"):
+            telegram_link = await _amocrm_telegram_profile_link(data, mode, device, context)
+        else:
+            telegram_link = {"pending": "1"} if found.get(TELEGRAM_PROVIDER) else {}
+        telegram_id = _clean(telegram_link.get("external_user_id"), 300)
+        if telegram_id:
+            account_ids[TELEGRAM_PROVIDER] = telegram_id
+            telegram_profile_verification = "verified"
+        elif telegram_link.get("pending"):
+            telegram_username_hint = ""
+            if telegram_identity_hint and _identity_index is not None:
+                telegram_username_hint = await asyncio.to_thread(
+                    _identity_index.telegram_username_for_platform_id, telegram_identity_hint,
+                )
+            try_url = found.get(TELEGRAM_PROVIDER) or _telegram_profile_url(
+                telegram_username_hint, context.get("phone"),
+            )
+            if try_url:
+                found[TELEGRAM_PROVIDER] = try_url
+                telegram_profile_verification = "unverified"
+            else:
+                found.pop(TELEGRAM_PROVIDER, None)
+        else:
+            account_ids.pop(TELEGRAM_PROVIDER, None)
+            found.pop(TELEGRAM_PROVIDER, None)
 
     vk_value = account_ids.get("vk")
     if context.get("platform") != "amocrm":
@@ -5338,8 +5397,12 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         _log("warning", "Streams badge lookup skipped: %s", exc)
     return [
         {"kind": kind,
-         "label": f"{PROFILE_LINK_LABELS[kind]}: {profile_names[kind]}" if profile_names.get(kind) else PROFILE_LINK_LABELS[kind],
+         "label": (
+             f"{PROFILE_LINK_LABELS[kind]}: {profile_names[kind]}"
+             if profile_names.get(kind) else PROFILE_LINK_LABELS[kind]
+         ) + (" · попробовать" if kind == TELEGRAM_PROVIDER and telegram_profile_verification == "unverified" else ""),
          "url": found[kind],
+         **({"verification": telegram_profile_verification} if kind == TELEGRAM_PROVIDER and telegram_profile_verification else {}),
          **({"paid_access": paid_access} if kind == "getcourse" else {})}
         for kind in PROFILE_LINK_ORDER
         if found.get(kind)
@@ -6044,6 +6107,7 @@ async def _provider_card_link(
     provider: str,
     *,
     allow_phone_import: bool = False,
+    resolution_timeout: float = 6,
 ) -> dict[str, str]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
@@ -6159,10 +6223,13 @@ async def _provider_card_link(
             return _telegram_user_view(entity)["id"] if entity else ""
 
         try:
-            peer_id = await asyncio.wait_for(_telegram_run(resolve_telegram), timeout=6)
+            peer_id = await asyncio.wait_for(
+                _telegram_run(resolve_telegram), timeout=max(1.0, float(resolution_timeout)),
+            )
         except TimeoutError:
             return {"pending": "1"}
         if not peer_id:
+            _remember_card_link(cache_key, {})
             return {}
 
     if mode != "test":
