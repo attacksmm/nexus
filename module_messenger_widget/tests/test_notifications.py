@@ -193,6 +193,142 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Второе", tasks[0][1])
         self.assertEqual(tasks[0][2], "pending")
 
+    async def test_amo_task_delivery_merges_open_tasks_and_resets_deadline(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.executemany(
+                """INSERT INTO amo_task_jobs(
+                   message_key,amo_lead_id,responsible_user_id,messenger,client_name,message_text,
+                   status,attempts,next_attempt_at,amo_task_id,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,'sent',1,'',?,?,?)""",
+                [
+                    ("old-1", "18250000", "7461291", "VK", "Клиент", "Первое", "101", now, now),
+                    ("old-2", "18250000", "7461291", "VK", "Клиент", "Второе", "102", now, now),
+                ],
+            )
+            await db.commit()
+        current = {
+            "id": 3, "amo_lead_id": "18250000", "responsible_user_id": "7461291",
+            "messenger": "VK", "client_name": "Клиент", "message_text": "Третье",
+        }
+        calls = []
+        original_env = router._read_env_values
+        original_request = router._amo_task_api_request
+
+        async def fake_request(_client, method, _url, _token, *, payload=None, params=None):
+            calls.append((method, payload, params))
+            if method == "GET":
+                return {"_embedded": {"tasks": [
+                    {"id": 101, "entity_id": 18250000, "entity_type": "leads", "responsible_user_id": 7461291,
+                     "created_at": 10, "is_completed": False, "text": "Новое сообщение · VK\nКлиент: Первое"},
+                    {"id": 102, "entity_id": 18250000, "entity_type": "leads", "responsible_user_id": 7461291,
+                     "created_at": 20, "is_completed": False, "text": "Новое сообщение · VK\nКлиент: Второе"},
+                ]}}
+            return {"_embedded": {"tasks": [{"id": 102}]}}
+
+        router._read_env_values = lambda: {"AMO_BASE_URL": "https://example.amocrm.ru", "AMO_ACCESS_TOKEN": "token"}
+        router._amo_task_api_request = fake_request
+        before = int(router.time.time())
+        try:
+            task_id, replaced = await router._send_amo_task(current)
+        finally:
+            router._read_env_values = original_env
+            router._amo_task_api_request = original_request
+        self.assertEqual(task_id, "102")
+        self.assertEqual(replaced, ["101", "102"])
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH"])
+        patch_payload = calls[1][1]
+        self.assertEqual(patch_payload[0]["id"], 102)
+        self.assertFalse(patch_payload[0]["is_completed"])
+        self.assertGreaterEqual(patch_payload[0]["complete_till"], before + 24 * 60 * 60)
+        text = patch_payload[0]["text"]
+        self.assertLess(text.index("Первое"), text.index("Второе"))
+        self.assertLess(text.index("Второе"), text.index("Третье"))
+        self.assertEqual(
+            patch_payload[1],
+            {"id": 101, "is_completed": True, "result": {"text": "Объединено Nexus в задачу #102"}},
+        )
+
+    async def test_amo_task_retry_does_not_append_same_batch_twice(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO amo_task_jobs(
+                   message_key,amo_lead_id,responsible_user_id,messenger,client_name,message_text,
+                   status,attempts,next_attempt_at,amo_task_id,created_at,updated_at
+                   ) VALUES('old','18250001','7461291','VK','Клиент','Первое','sent',1,'','201',?,?)""",
+                (now, now),
+            )
+            await db.commit()
+        current = {
+            "id": 2, "amo_lead_id": "18250001", "responsible_user_id": "7461291",
+            "messenger": "VK", "client_name": "Клиент", "message_text": "Одинаковый пакет",
+        }
+        expected = router._compose_amo_task_text(
+            ["VK", "VK"], ["Клиент: Первое", "Клиент: Одинаковый пакет"],
+        )
+        patch_payloads = []
+        original_env = router._read_env_values
+        original_request = router._amo_task_api_request
+
+        async def fake_request(_client, method, _url, _token, *, payload=None, params=None):
+            if method == "GET":
+                return {"_embedded": {"tasks": [{
+                    "id": 201, "entity_id": 18250001, "entity_type": "leads", "responsible_user_id": 7461291,
+                    "created_at": 10, "is_completed": False, "text": expected,
+                }]}}
+            patch_payloads.append(payload)
+            return {"_embedded": {"tasks": [{"id": 201}]}}
+
+        router._read_env_values = lambda: {"AMO_BASE_URL": "https://example.amocrm.ru", "AMO_ACCESS_TOKEN": "token"}
+        router._amo_task_api_request = fake_request
+        try:
+            await router._send_amo_task(current)
+        finally:
+            router._read_env_values = original_env
+            router._amo_task_api_request = original_request
+        merged = patch_payloads[0][0]["text"]
+        self.assertEqual(merged, expected)
+        self.assertEqual(merged.count("Одинаковый пакет"), 1)
+
+    async def test_successful_merge_relinks_previous_local_jobs_to_canonical_task(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.executemany(
+                """INSERT INTO amo_task_jobs(
+                   message_key,amo_lead_id,responsible_user_id,messenger,client_name,message_text,
+                   status,attempts,next_attempt_at,amo_task_id,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,'sent',1,'',?,?,?)""",
+                [
+                    ("old-a", "18250002", "7461291", "VK", "Клиент", "Первое", "301", now, now),
+                    ("old-b", "18250002", "7461291", "VK", "Клиент", "Второе", "302", now, now),
+                ],
+            )
+            cursor = await db.execute(
+                """INSERT INTO amo_task_jobs(
+                   message_key,amo_lead_id,responsible_user_id,messenger,client_name,message_text,
+                   status,attempts,next_attempt_at,created_at,updated_at
+                   ) VALUES('current','18250002','7461291','VK','Клиент','Третье','processing',1,'',?,?)""",
+                (now, now),
+            )
+            current_id = int(cursor.lastrowid)
+            await db.commit()
+        original_send = router._send_amo_task
+
+        async def fake_send(_job):
+            return "302", ["301", "302"]
+
+        router._send_amo_task = fake_send
+        try:
+            await router._process_amo_task_job({"id": current_id, "attempts": 1})
+        finally:
+            router._send_amo_task = original_send
+        async with aiosqlite.connect(router._must_db()) as db:
+            rows = await (await db.execute(
+                "SELECT amo_task_id,status FROM amo_task_jobs ORDER BY id"
+            )).fetchall()
+        self.assertEqual(rows, [("302", "sent"), ("302", "sent"), ("302", "sent")])
+
     async def test_pairing_command_never_creates_client_notification_or_task(self):
         inserted = await router._enqueue_notification_message(
             external_id="vk-pairing-command", channel_id="vk:225", chat_type="vk",

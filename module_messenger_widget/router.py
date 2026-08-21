@@ -198,6 +198,8 @@ OUTBOUND_MAX_ATTEMPTS = 8
 OUTBOUND_RETRY_SECONDS = (15, 45, 120, 300, 900, 1800, 3600, 10800)
 AMO_TASK_MAX_ATTEMPTS = 8
 AMO_TASK_RETRY_SECONDS = (30, 120, 300, 900, 1800, 3600, 10800, 21600)
+AMO_NEXUS_TASK_PREFIX = "Новое сообщение ·"
+AMO_TASK_TEXT_LIMIT = 2000
 COMMUNICATION_RETENTION_DAYS = 730
 
 _db_path: Path | None = None
@@ -2602,29 +2604,79 @@ def _retry_after_seconds_header(value: str) -> int:
         return 0
 
 
-async def _send_amo_task(job: dict[str, Any]) -> str:
-    values = _read_env_values()
-    base_url = _clean(os.environ.get("AMO_BASE_URL") or values.get("AMO_BASE_URL"), 1000).rstrip("/")
-    token = _clean(os.environ.get("AMO_ACCESS_TOKEN") or values.get("AMO_ACCESS_TOKEN"), 5000)
-    if not base_url or not token:
-        raise AmoTaskDeliveryError("AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы")
-    preview = _clean(job.get("message_text"), 1300) or "Вложение без текста"
-    messenger = _clean(job.get("messenger"), 80)
+def _amo_task_job_body(job: dict[str, Any]) -> str:
+    preview = _clean(job.get("message_text"), 5000) or "Вложение без текста"
     client_name = _clean(job.get("client_name"), 200) or "Клиент"
-    task: dict[str, Any] = {
-        "entity_id": int(job["amo_lead_id"]), "entity_type": "leads", "task_type_id": 1,
-        "text": _clean(f"Новое сообщение · {messenger}\n{client_name}: {preview}", 2000),
-        "complete_till": int(time.time()) + 24 * 60 * 60,
-    }
-    responsible = _clean(job.get("responsible_user_id"), 64)
-    if responsible.isdigit():
-        task["responsible_user_id"] = int(responsible)
+    return _clean(f"{client_name}: {preview}", 5400)
+
+
+def _amo_task_text_messengers(value: Any) -> list[str]:
+    first_line = _clean(value, AMO_TASK_TEXT_LIMIT).splitlines()[0] if _clean(value, AMO_TASK_TEXT_LIMIT) else ""
+    if not first_line.startswith(AMO_NEXUS_TASK_PREFIX):
+        return []
+    return [item.strip() for item in first_line[len(AMO_NEXUS_TASK_PREFIX):].split(",") if item.strip()]
+
+
+def _amo_task_legacy_body(value: Any) -> str:
+    text = _clean(value, AMO_TASK_TEXT_LIMIT)
+    lines = text.splitlines()
+    if lines and lines[0].startswith(AMO_NEXUS_TASK_PREFIX):
+        return _clean("\n".join(lines[1:]), AMO_TASK_TEXT_LIMIT)
+    return text
+
+
+def _compose_amo_task_text(messengers: list[str], bodies: list[str]) -> str:
+    unique_messengers: list[str] = []
+    for messenger in messengers:
+        clean_messenger = _clean(messenger, 80)
+        if clean_messenger and clean_messenger not in unique_messengers:
+            unique_messengers.append(clean_messenger)
+    header = AMO_NEXUS_TASK_PREFIX + (", ".join(unique_messengers) or "Мессенджер")
+    body = "\n\n".join(_clean(item, 5400) for item in bodies if _clean(item, 5400))
+    text = header + ("\n" + body if body else "")
+    if len(text) <= AMO_TASK_TEXT_LIMIT:
+        return text
+    marker = "… предыдущие сообщения сокращены …\n"
+    body_limit = max(0, AMO_TASK_TEXT_LIMIT - len(header) - len(marker) - 1)
+    return _clean(f"{header}\n{marker}{body[-body_limit:]}", AMO_TASK_TEXT_LIMIT)
+
+
+def _is_open_nexus_amo_task(task: Any, lead_id: str) -> bool:
+    if not isinstance(task, dict) or bool(task.get("is_completed")):
+        return False
+    if _clean(task.get("entity_type"), 32) not in {"", "leads"}:
+        return False
+    if _clean(task.get("entity_id"), 64) not in {"", lead_id}:
+        return False
+    return _clean(task.get("text"), AMO_TASK_TEXT_LIMIT).startswith(AMO_NEXUS_TASK_PREFIX)
+
+
+async def _linked_amo_task_jobs(task_ids: list[str]) -> list[dict[str, Any]]:
+    clean_ids = list(dict.fromkeys(_clean(task_id, 64) for task_id in task_ids if _clean(task_id, 64)))
+    if not clean_ids:
+        return []
+    placeholders = ",".join("?" for _ in clean_ids)
+    db = await _connect()
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                base_url + "/api/v4/tasks", json=[task],
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            )
+        rows = await (await db.execute(
+            f"""SELECT * FROM amo_task_jobs WHERE amo_task_id IN ({placeholders})
+                ORDER BY created_at,id""",
+            clean_ids,
+        )).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
+async def _amo_task_api_request(
+    client: httpx.AsyncClient, method: str, url: str, token: str,
+    *, payload: Any = None, params: dict[str, Any] | None = None,
+) -> Any:
+    headers = {"Authorization": f"Bearer {token}"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        response = await client.request(method, url, json=payload, params=params, headers=headers)
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         raise AmoTaskDeliveryError(f"amoCRM недоступен: {type(exc).__name__}") from exc
     if response.status_code == 429 or response.status_code >= 500:
@@ -2636,10 +2688,116 @@ async def _send_amo_task(job: dict[str, Any]) -> str:
         raise AmoTaskDeliveryError(
             f"amoCRM HTTP {response.status_code}: {_clean(response.text, 400)}", permanent=True,
         )
+    if not response.content:
+        return {}
     try:
-        return _clean((((response.json().get("_embedded") or {}).get("tasks") or [{}])[0].get("id")), 64)
-    except (ValueError, TypeError, AttributeError):
-        return ""
+        return response.json()
+    except (ValueError, TypeError) as exc:
+        raise AmoTaskDeliveryError("amoCRM вернула некорректный ответ") from exc
+
+
+async def _send_amo_task(job: dict[str, Any]) -> tuple[str, list[str]]:
+    values = _read_env_values()
+    base_url = _clean(os.environ.get("AMO_BASE_URL") or values.get("AMO_BASE_URL"), 1000).rstrip("/")
+    token = _clean(os.environ.get("AMO_ACCESS_TOKEN") or values.get("AMO_ACCESS_TOKEN"), 5000)
+    if not base_url or not token:
+        raise AmoTaskDeliveryError("AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы")
+    lead_id = _clean(job.get("amo_lead_id"), 64)
+    if not lead_id.isdigit():
+        raise AmoTaskDeliveryError("Некорректный ID сделки amoCRM", permanent=True)
+    responsible = _clean(job.get("responsible_user_id"), 64)
+    due_at = int(time.time()) + 24 * 60 * 60
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        body = await _amo_task_api_request(
+            client, "GET", base_url + "/api/v4/tasks", token,
+            params={
+                "filter[entity_type]": "leads", "filter[entity_id]": int(lead_id),
+                "filter[is_completed]": 0, "limit": 250,
+            },
+        )
+        open_tasks = [
+            task for task in (((body or {}).get("_embedded") or {}).get("tasks") or [])
+            if _is_open_nexus_amo_task(task, lead_id)
+        ]
+        open_tasks.sort(key=lambda task: (int(task.get("created_at") or 0), int(task.get("id") or 0)))
+        task_ids = [_clean(task.get("id"), 64) for task in open_tasks if _clean(task.get("id"), 64)]
+        try:
+            linked_jobs = await _linked_amo_task_jobs(task_ids)
+        except (sqlite3.Error, OSError) as exc:
+            raise AmoTaskDeliveryError(f"Не удалось собрать историю задач: {type(exc).__name__}") from exc
+
+        linked_task_ids = {_clean(item.get("amo_task_id"), 64) for item in linked_jobs}
+        messengers: list[str] = []
+        bodies: list[str] = []
+        for linked_job in linked_jobs:
+            messengers.extend(
+                item.strip() for item in _clean(linked_job.get("messenger"), 400).split(",") if item.strip()
+            )
+            bodies.append(_amo_task_job_body(linked_job))
+
+        current_body = _amo_task_job_body(job)
+        current_already_in_legacy = False
+        for task in open_tasks:
+            messengers.extend(_amo_task_text_messengers(task.get("text")))
+            if _clean(task.get("id"), 64) in linked_task_ids:
+                continue
+            legacy_body = _amo_task_legacy_body(task.get("text"))
+            if legacy_body:
+                bodies.append(legacy_body)
+                if legacy_body == current_body or legacy_body.endswith("\n\n" + current_body):
+                    current_already_in_legacy = True
+        messengers.extend(
+            item.strip() for item in _clean(job.get("messenger"), 400).split(",") if item.strip()
+        )
+        if not current_already_in_legacy:
+            bodies.append(current_body)
+        task_text = _compose_amo_task_text(messengers, bodies)
+
+        if open_tasks:
+            same_manager = [
+                task for task in open_tasks
+                if responsible.isdigit() and _clean(task.get("responsible_user_id"), 64) == responsible
+            ]
+            canonical = (same_manager or open_tasks)[-1]
+            canonical_id = _clean(canonical.get("id"), 64)
+            updates: list[dict[str, Any]] = [{
+                "id": int(canonical_id), "text": task_text, "complete_till": due_at,
+                "is_completed": False,
+            }]
+            if responsible.isdigit():
+                updates[0]["responsible_user_id"] = int(responsible)
+            for task in open_tasks:
+                duplicate_id = _clean(task.get("id"), 64)
+                if duplicate_id and duplicate_id != canonical_id:
+                    updates.append({
+                        "id": int(duplicate_id), "is_completed": True,
+                        "result": {"text": f"Объединено Nexus в задачу #{canonical_id}"},
+                    })
+            await _amo_task_api_request(
+                client, "PATCH", base_url + "/api/v4/tasks", token, payload=updates,
+            )
+            if len(task_ids) > 1:
+                _log(
+                    "info", "amoCRM Nexus tasks merged lead=%s canonical=%s duplicates=%s",
+                    lead_id, canonical_id, len(task_ids) - 1,
+                )
+            return canonical_id, task_ids
+
+        task: dict[str, Any] = {
+            "entity_id": int(lead_id), "entity_type": "leads", "task_type_id": 1,
+            "text": task_text, "complete_till": due_at,
+        }
+        if responsible.isdigit():
+            task["responsible_user_id"] = int(responsible)
+        created = await _amo_task_api_request(
+            client, "POST", base_url + "/api/v4/tasks", token, payload=[task],
+        )
+        task_id = _clean(
+            ((((created or {}).get("_embedded") or {}).get("tasks") or [{}])[0].get("id")), 64,
+        )
+        if not task_id:
+            raise AmoTaskDeliveryError("amoCRM не вернула ID созданной задачи")
+        return task_id, []
 
 
 async def _claim_amo_task_job() -> dict[str, Any] | None:
@@ -2673,18 +2831,34 @@ async def _claim_amo_task_job() -> dict[str, Any] | None:
 
 async def _process_amo_task_job(job: dict[str, Any]) -> None:
     try:
-        task_id = await _send_amo_task(job)
+        task_id, replaced_task_ids = await _send_amo_task(job)
         status, next_at, error = "sent", "", ""
     except AmoTaskDeliveryError as exc:
         dead = exc.permanent or int(job["attempts"]) >= AMO_TASK_MAX_ATTEMPTS
         delay = exc.retry_after or AMO_TASK_RETRY_SECONDS[min(int(job["attempts"]) - 1, len(AMO_TASK_RETRY_SECONDS) - 1)]
-        status, next_at, error, task_id = (
+        status, next_at, error, task_id, replaced_task_ids = (
             "failed" if dead else "retry",
             "" if dead else _iso(_now_dt() + timedelta(seconds=delay)),
-            str(exc), "",
+            str(exc), "", [],
+        )
+    except Exception as exc:
+        dead = int(job["attempts"]) >= AMO_TASK_MAX_ATTEMPTS
+        delay = AMO_TASK_RETRY_SECONDS[min(int(job["attempts"]) - 1, len(AMO_TASK_RETRY_SECONDS) - 1)]
+        status, next_at, error, task_id, replaced_task_ids = (
+            "failed" if dead else "retry",
+            "" if dead else _iso(_now_dt() + timedelta(seconds=delay)),
+            f"{type(exc).__name__}: {exc}", "", [],
         )
     db = await _connect()
     try:
+        if task_id and replaced_task_ids:
+            clean_ids = list(dict.fromkeys(_clean(item, 64) for item in replaced_task_ids if _clean(item, 64)))
+            placeholders = ",".join("?" for _ in clean_ids)
+            if placeholders:
+                await db.execute(
+                    f"UPDATE amo_task_jobs SET amo_task_id=?,updated_at=? WHERE amo_task_id IN ({placeholders})",
+                    [task_id, _iso(), *clean_ids],
+                )
         await db.execute(
             "UPDATE amo_task_jobs SET status=?,next_attempt_at=?,amo_task_id=?,error=?,updated_at=? WHERE id=?",
             (status, next_at, task_id, _clean(error, 1000), _iso(), job["id"]),
