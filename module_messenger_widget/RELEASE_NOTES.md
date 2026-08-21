@@ -1,6 +1,14 @@
-# Messenger Widget 5.15.1
+# Messenger Widget 5.15.2
 
 Release candidate for the week-long production observation period.
+
+## 5.15.2 — instant repeat opens
+
+- The last usable card snapshot is painted immediately when the same employee reopens a deal.
+- Profiles, channels, and the latest conversation refresh independently in the background.
+- A visible animated status explains that saved data is shown while Nexus updates it.
+- Cache is isolated per employee, expires after 30 minutes, and is bounded to eight recent cards.
+- Failed refreshes no longer erase a usable cached conversation.
 
 - Every initial outbound message is durably queued before the widget confirms acceptance. Provider calls run only in background workers, survive Nexus restarts, and preserve request idempotency.
 - `pending`, `processing`, and `retry` deliveries are visible in the employee Operations journal with an animated state, manager, client, message text, and the final human-readable result.
