@@ -231,6 +231,19 @@ def access_catalog():
     return {"ok": True, "items": ACCESS_GROUPS}
 
 
+def test_period_catalog():
+    items = {
+        "puppy": {"group_id": 4090123, "name": "Тест-драйв. Щенок"},
+        "dog": {"group_id": 3543056, "name": "Тест-драйв. Собака"},
+        "used": {"group_id": 4149757, "name": "Использовал тестовый период"},
+    }
+    items.update({
+        f"module_{index}": {"group_id": 4257564 + index, "name": f"{index} Модуль.Тестовый период"}
+        for index in range(1, 9)
+    })
+    return {"ok": True, "items": items, "missing": []}
+
+
 def latest_access_verification(**kwargs):
     return {"ok": True, "pending": False}
 
@@ -298,11 +311,12 @@ sys.modules["_nexus_mod_course-chat-creator"] = types.SimpleNamespace(
 )
 sys.modules["_nexus_mod_chat-moderators"] = types.SimpleNamespace(
     service_access_catalog=access_catalog,
+    service_test_period_catalog=test_period_catalog,
     service_latest_access_verification=latest_access_verification,
     service_access_verifications=access_verifications,
 )
 
-module._db_path = Path("/tmp/student-transfer-browser-v3.db")
+module._db_path = Path("/tmp/student-transfer-browser-v4.db")
 module._module_dir = Path(__file__).resolve().parents[1]
 module._snapshot = snapshot
 module._access_identity = access_identity

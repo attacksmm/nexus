@@ -3,6 +3,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import aiosqlite
 from starlette.requests import Request
@@ -598,6 +599,24 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         # The message is kept in history, but an unknown SaleBot id without
         # an amoCRM deal must not leak into the admin's fallback notifications.
         self.assertEqual(event_count, 0)
+
+    async def test_salebot_minimal_callback_queues_notification_without_batch_delay(self):
+        secret = await router._setting("notification_salebot_secret")
+        captured = {}
+
+        async def enqueue(**kwargs):
+            captured.update(kwargs)
+            return True
+
+        body = {"client_id": "99002", "text": "Когда начало?", "message_id": "sb-immediate"}
+        with patch.object(router, "_enqueue_notification_message", new=enqueue):
+            response = await router.notification_salebot_callback(
+                secret, request_for("/notifications/salebot/x", body),
+            )
+        self.assertTrue(json.loads(response.body)["inserted"])
+        self.assertEqual(captured["chat_id"], "99002")
+        self.assertEqual(captured["text"], "Когда начало?")
+        self.assertEqual(captured["delay_seconds"], 0)
 
     async def test_salebot_button_and_service_events_are_acknowledged_but_ignored(self):
         secret = await router._setting("notification_salebot_secret")

@@ -2,7 +2,7 @@ define(['jquery'], function ($) {
   'use strict';
   const Widget = function () {
     const self = this;
-    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=51421';
+    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=51430';
     const AMO_REQUEST_TIMEOUT = 6000;
     const CONTEXT_TIMEOUT = 20000;
 
@@ -175,7 +175,7 @@ define(['jquery'], function ($) {
         const palette = loadingTheme === 'dark'
           ? {background:'#111c25', color:'#c5d0d7'}
           : loadingTheme === 'gray'
-            ? {background:'#cbd1d5', color:'#334650'}
+            ? {background:'#92999d', color:'#202b31'}
             : {background:'#f5f7f8', color:'#5f707b'};
         shell.css('background', palette.background); loading.css(palette); frame.css('background', palette.background);
       }

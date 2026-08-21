@@ -1,7 +1,7 @@
 {
   "id": "messenger-widget",
   "name": "Виджет мессенжеров",
-  "version": "5.14.21",
+  "version": "5.14.30",
   "description": "Общие диалоги, надёжные уведомления менеджерам и браузерный канал.",
   "replaces": "getcourse-wazzup",
   "env_required": [],

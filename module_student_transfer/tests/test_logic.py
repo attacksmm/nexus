@@ -1659,6 +1659,220 @@ def test_fullscreen_panel_can_change_curator():
     assert "item.status!=='waiting'" in panel
 
 
+def test_test_period_reserves_gc_email_and_phone_identity(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+    asyncio.run(module._init_db())
+
+    async def eligible(_identity, *, live):
+        assert live is True
+        return {"can_issue": True}
+
+    async def catalog():
+        items = {
+            "puppy": {"group_id": 4090123, "name": "Тест-драйв. Щенок"},
+            "dog": {"group_id": 3543056, "name": "Тест-драйв. Собака"},
+            "used": {"group_id": 4149757, "name": "Использовал тестовый период"},
+        }
+        items.update({f"module_{index}": {"group_id": 4257564 + index, "name": f"{index} Модуль.Тестовый период"} for index in range(1, 9)})
+        return items
+
+    async def no_worker(_period_id=""):
+        return None
+
+    monkeypatch.setattr(module, "_test_period_status_for_identity", eligible)
+    monkeypatch.setattr(module, "_test_period_catalog", catalog)
+    monkeypatch.setattr(module, "_process_test_periods", no_worker)
+
+    async def scenario():
+        now = module._now()
+        async with aiosqlite.connect(module._must_db()) as db:
+            for enrollment_id, gc_user_id, email in (
+                ("student-1", "511", "first@example.com"),
+                ("student-2", "512", "second@example.com"),
+            ):
+                await db.execute(
+                    """INSERT INTO enrollments(
+                        id,gc_user_id,name,email,course_key,course,status,source_json,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (enrollment_id, gc_user_id, "Иван", email, "puppy", "Щенок", "assigned", json.dumps({"phone": "+7 999 123-45-67"}), now, now),
+                )
+            await db.commit()
+        first = await module._create_test_period(
+            "student-1", days=7, courses=["puppy", "dog"], operator={"id": 7, "display_name": "Оператор"},
+        )
+        with pytest.raises(HTTPException) as repeated:
+            await module._create_test_period(
+                "student-2", days=7, courses=["puppy"], operator={"id": 7, "display_name": "Оператор"},
+            )
+        async with aiosqlite.connect(module._must_db()) as db:
+            aliases = await (await db.execute(
+                "SELECT identity_type,identity_value FROM test_period_identities ORDER BY identity_type"
+            )).fetchall()
+        return first, repeated.value, aliases
+
+    first, repeated, aliases = asyncio.run(scenario())
+    assert first["status"] == "queued_grant"
+    assert first["courses"] == ["dog", "puppy"]
+    assert repeated.status_code == 409
+    assert ("phone", "79991234567") in aliases
+    assert {kind for kind, _value in aliases} == {"email", "gc_user_id", "phone"}
+
+
+def test_expired_test_period_is_revoked_after_restart_and_completed_only_after_verification(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+    asyncio.run(module._init_db())
+    now = module._now()
+    expired = "2026-01-01T00:00:00Z"
+
+    async def prepare(_period, *, revoke):
+        assert revoke is True
+        return "revoke-request"
+
+    async def verified(_request_id):
+        return "verified"
+
+    monkeypatch.setattr(module, "_prepare_test_period_access", prepare)
+
+    async def scenario():
+        async with aiosqlite.connect(module._must_db()) as db:
+            await db.execute(
+                """INSERT INTO test_periods(
+                    id,enrollment_id,gc_user_id,email,courses_json,group_ids_json,status,starts_at,
+                    expires_at,next_attempt_at,operator_id,operator_name,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("trial-1", "student-1", "511", "student@example.com", '["puppy"]', "[]", "active", expired, expired, expired, 7, "Оператор", now, now),
+            )
+            await db.commit()
+        await module._init_db()
+        await module._process_test_periods("trial-1")
+        revoking = await module._test_period_row(period_id="trial-1")
+        monkeypatch.setattr(module, "_test_period_request_state", verified)
+        await module._advance_test_period(revoking)
+        completed = await module._test_period_row(period_id="trial-1")
+        return revoking, completed
+
+    revoking, completed = asyncio.run(scenario())
+    assert revoking["status"] == "revoking"
+    assert revoking["revoke_request_id"] == "revoke-request"
+    assert completed["status"] == "completed"
+    assert completed["completed_at"]
+
+
+def test_widget_can_revoke_active_test_period_durably(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+    asyncio.run(module._init_db())
+    now = module._now()
+
+    async def identity(_enrollment_id):
+        return {"gc_user_id": "511", "email": "student@example.com", "phone": "+79991234567"}
+
+    monkeypatch.setattr(module, "_access_identity", identity)
+
+    async def scenario():
+        async with aiosqlite.connect(module._must_db()) as db:
+            await db.execute(
+                """INSERT INTO test_periods(
+                    id,enrollment_id,gc_user_id,email,courses_json,group_ids_json,status,starts_at,
+                    expires_at,next_attempt_at,operator_id,operator_name,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "trial-revoke", "student-1", "511", "student@example.com", '["puppy"]',
+                    "[]", "active", now, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z",
+                    7, "Оператор", now, now,
+                ),
+            )
+            await db.commit()
+        result = await module.service_widget_test_period(
+            enrollment_id="student-1", action="revoke", requester_user_id="messenger:7",
+        )
+        stored = await module._test_period_row(period_id="trial-revoke")
+        return result, stored
+
+    result, stored = asyncio.run(scenario())
+    assert result["status"] == "queued_revoke"
+    assert result["operation_pending"] is True
+    assert stored["status"] == "queued_revoke"
+    assert stored["expires_at"] <= module._now()
+    assert stored["next_attempt_at"] <= module._now()
+
+
+def test_widget_can_repeat_a_completed_test_period(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+    asyncio.run(module._init_db())
+    now = module._now()
+
+    async def identity(_enrollment_id):
+        return {
+            "gc_user_id": "511", "email": "student@example.com",
+            "phone": "+79991234567", "name": "Анна",
+        }
+
+    monkeypatch.setattr(module, "_access_identity", identity)
+
+    async def scenario():
+        async with aiosqlite.connect(module._must_db()) as db:
+            await db.execute(
+                """INSERT INTO test_periods(
+                    id,enrollment_id,gc_user_id,email,phone_key,courses_json,group_ids_json,status,
+                    starts_at,expires_at,next_attempt_at,operator_id,operator_name,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "trial-old", "student-1", "511", "student@example.com", "79991234567",
+                    '["puppy"]', "[]", "completed", now, now, "", 7, "Оператор", now, now,
+                ),
+            )
+            await db.executemany(
+                "INSERT INTO test_period_identities(identity_type,identity_value,test_period_id,created_at) VALUES(?,?,?,?)",
+                [
+                    ("gc_user_id", "511", "trial-old", now),
+                    ("email", "student@example.com", "trial-old", now),
+                    ("phone", "79991234567", "trial-old", now),
+                ],
+            )
+            await db.commit()
+        old_status = await module.service_widget_test_period(
+            enrollment_id="student-1", action="status", requester_user_id="messenger:7",
+        )
+        repeated = await module.service_widget_test_period(
+            enrollment_id="student-1", action="repeat", days=3, courses=["puppy"],
+            requester_user_id="messenger:7",
+        )
+        async with aiosqlite.connect(module._must_db()) as db:
+            aliases = await (await db.execute(
+                "SELECT DISTINCT test_period_id FROM test_period_identities"
+            )).fetchall()
+            row = await (await db.execute(
+                "SELECT allow_repeat,status FROM test_periods WHERE id=?", (repeated["id"],),
+            )).fetchone()
+        return old_status, repeated, aliases, tuple(row)
+
+    old_status, repeated, aliases, stored = asyncio.run(scenario())
+    assert old_status["can_repeat"] is True
+    assert repeated["status"] == "queued_grant"
+    assert stored == (1, "queued_grant")
+    assert aliases == [(repeated["id"],)]
+
+
+def test_confirmed_trial_starts_its_full_promised_duration():
+    starts, expires = module._test_period_active_window({
+        "starts_at": "2026-08-20T10:00:00Z",
+        "expires_at": "2026-08-23T10:00:00Z",
+    })
+    start_dt = module.datetime.fromisoformat(starts.replace("Z", "+00:00"))
+    end_dt = module.datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    assert end_dt - start_dt == module.timedelta(days=3)
+
+
+def test_fullscreen_panel_has_test_period_controls_and_help():
+    panel = (Path(__file__).parents[1] / "panel" / "app" / "index.html").read_text(encoding="utf-8")
+    assert 'id="testPeriodBtn"' in panel
+    assert 'data-trial-course="puppy"' in panel
+    assert 'data-trial-course="dog"' in panel
+    assert "/test-period?live=1" in panel
+    assert 'id="help-test-period"' in panel
+    assert "перезапуск сервера его не сбрасывает" in panel
+
+
 def test_widget_paid_summary_matches_unique_exact_phone_without_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_db_path", tmp_path / "student-transfer.db")
     asyncio.run(module._init_db())
@@ -2071,3 +2285,267 @@ def test_sheet_row_payload_keeps_purchase_date():
         {"enrollment_id": "x", "email": "x@example.com", "date": "2026-08-02T17:59:53Z"},
     )
     assert result["date"] == "2026-08-02T17:59:53Z"
+
+
+def test_browser_access_snapshot_is_persistent_and_reused(tmp_path):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    async def scenario():
+        await module._init_db()
+        await module._save_browser_access_snapshot(
+            {"gc_user_id": "513", "email": "student@example.com"},
+            {
+                "ok": True,
+                "gc_user_id": "513",
+                "groups": [{"group_id": "4090123", "name": "Тест-драйв. Щенок"}],
+                "updated_at": module._now(),
+            },
+        )
+        return await module._load_browser_access_snapshot("513", "student@example.com")
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["ok"] is True
+    assert snapshot["source"] == "browser-cache"
+    assert snapshot["refresh_due"] is False
+    assert snapshot["groups"] == [{"group_id": "4090123", "name": "Тест-драйв. Щенок"}]
+
+
+def test_public_testdrive_preflight_only_reads_claims(tmp_path):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    async def scenario():
+        await module._init_db()
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/streams/testdrive/check",
+            "headers": [(b"origin", b"https://club.sobakovod.pro")],
+            "client": ("127.0.0.1", 1234),
+        })
+        first = await module.testdrive_check(
+            module.TestDriveCheckIn(email="Student@Example.com", phone="+7 999 111-22-33"), request
+        )
+        now = module._now()
+        async with aiosqlite.connect(module._must_db()) as db:
+            await db.execute(
+                """INSERT INTO test_periods(
+                    id,enrollment_id,gc_user_id,email,status,starts_at,expires_at,next_attempt_at,
+                    operator_id,operator_name,created_at,updated_at
+                ) VALUES('trial','testdrive:1','1','student@example.com','completed',?,?,?,0,'test',?,?)""",
+                (now, now, "", now, now),
+            )
+            await db.execute(
+                "INSERT INTO test_period_identities(identity_type,identity_value,test_period_id,created_at) VALUES('email','student@example.com','trial',?)",
+                (now,),
+            )
+            await db.commit()
+        second = await module.testdrive_check(
+            module.TestDriveCheckIn(email="student@example.com"), request
+        )
+        return json.loads(first.body), json.loads(second.body), dict(first.headers)
+
+    first, second, headers = asyncio.run(scenario())
+    assert first["eligible"] is True
+    assert second == {"ok": True, "eligible": False, "reason": "Тестовый период уже использован"}
+    assert headers["access-control-allow-origin"] == "https://club.sobakovod.pro"
+
+
+def test_bulk_testdrive_callbacks_are_acknowledged_into_durable_deduplicated_queue(tmp_path):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    async def scenario():
+        await module._init_db()
+        token = await module._meta_get("testdrive_callback_token")
+        results = []
+        for user_id in range(700, 716):
+            results.append(await module._queue_testdrive_confirm(
+                module.TestDriveConfirmIn(token=token, gc_user_id=str(user_id))
+            ))
+        await module._queue_testdrive_confirm(
+            module.TestDriveConfirmIn(token=token, gc_user_id="700")
+        )
+        async with aiosqlite.connect(module._must_db()) as db:
+            count = (await (await db.execute(
+                "SELECT COUNT(*) FROM registry_meta WHERE key LIKE 'testdrive_confirm:%'"
+            )).fetchone())[0]
+        return results, count
+
+    results, count = asyncio.run(scenario())
+    assert len(results) == 16
+    assert all(item["accepted"] and item["queued"] for item in results)
+    assert count == 16
+
+
+def test_testdrive_confirmation_verifies_real_groups_and_is_idempotent(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+    catalog = {
+        **{f"module_{index}": {"group_id": str(4257564 + index)} for index in range(1, 9)},
+        "puppy": {"group_id": "4090123"},
+        "dog": {"group_id": "3543056"},
+        "used": {"group_id": "4149757"},
+    }
+
+    class Browser:
+        async def service_getcourse_browser_access_snapshot(self, **_kwargs):
+            return {
+                "ok": True,
+                "gc_user_id": "777",
+                "email": "trial@example.com",
+                "phone": "+7 999 000-11-22",
+                "name": "Тестовый Ученик",
+                "groups": [
+                    {"group_id": "4090123", "name": "Тест-драйв. Щенок"},
+                    *[
+                        {"group_id": str(4257564 + index), "name": f"{index} Модуль.Тестовый период"}
+                        for index in range(1, 9)
+                    ],
+                ],
+                "updated_at": module._now(),
+            }
+
+    monkeypatch.setattr(module, "_module", lambda *_args: Browser())
+
+    async def fake_catalog():
+        return catalog
+
+    monkeypatch.setattr(module, "_test_period_catalog", fake_catalog)
+
+    async def scenario():
+        await module._init_db()
+        token = await module._meta_get("testdrive_callback_token")
+        browser_alias = await module._testdrive_browser_alias("browser_marker_123456789")
+        await module._remember_testdrive_pending(
+            "trial@example.com", "+7 999 000-11-22", browser_alias
+        )
+        data = module.TestDriveConfirmIn(token=token, gc_user_id="777")
+        accepted = await module._queue_testdrive_confirm(data)
+        async with aiosqlite.connect(module._must_db()) as db:
+            queued = await (await db.execute(
+                "SELECT value FROM registry_meta WHERE key='testdrive_confirm:777'"
+            )).fetchone()
+        first = await module._confirm_testdrive_job(json.loads(queued[0]))
+        second = await module._confirm_testdrive_job(json.loads(queued[0]))
+        async with aiosqlite.connect(module._must_db()) as db:
+            row = await (await db.execute(
+                "SELECT status,enrollment_id,email,phone_key,courses_json FROM test_periods WHERE id=?",
+                (first["period"]["id"],),
+            )).fetchone()
+            aliases = await (await db.execute(
+                "SELECT identity_type FROM test_period_identities WHERE test_period_id=? ORDER BY identity_type",
+                (first["period"]["id"],),
+            )).fetchall()
+            await db.execute(
+                "UPDATE test_periods SET status='completed',completed_at=? WHERE id=?",
+                (module._now(), first["period"]["id"]),
+            )
+            await db.commit()
+        repeated_after_use = await module._confirm_testdrive_job(json.loads(queued[0]))
+        cleanup = await module._test_period_row(period_id=first["period"]["id"])
+        return accepted, first, second, repeated_after_use, cleanup, tuple(row), [item[0] for item in aliases]
+
+    accepted, first, second, repeated_after_use, cleanup, row, aliases = asyncio.run(scenario())
+    assert accepted["queued"] is True
+    assert first["duplicate"] is False
+    assert second["duplicate"] is True
+    assert repeated_after_use["cleanup_queued"] is True
+    assert cleanup["status"] == "queued_revoke"
+    assert row[:3] == ("active", "testdrive:777", "trial@example.com")
+    assert json.loads(row[4]) == ["puppy"]
+    assert aliases == ["browser", "email", "gc_user_id", "phone"]
+
+
+def test_widget_resolves_exact_getcourse_prospect_without_marking_paid(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    class Resolver:
+        def service_resolve_access_user(self, **kwargs):
+            assert kwargs["email"] == "prospect@example.com"
+            return {
+                "ok": True, "found": True, "gc_user_id": "778",
+                "email": "prospect@example.com", "phone": "+7 999 000-22-33",
+                "full_name": "Будущий Ученик", "groups": [],
+            }
+
+    monkeypatch.setattr(module, "_module", lambda *_args: Resolver())
+
+    async def scenario():
+        await module._init_db()
+        return await module.service_widget_student(
+            email="prospect@example.com", include_access=False, summary_only=True,
+        )
+
+    result = asyncio.run(scenario())
+    assert result["found"] is True
+    assert result["paid_access"] is False
+    assert result["item"]["prospect"] is True
+    assert result["item"]["enrollment_id"] == "gc:778"
+    assert result["profile_url"].endswith("/user/control/user/update/id/778")
+
+
+def test_widget_accepts_exact_identity_graph_gc_id_without_access_snapshot(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    class Resolver:
+        def service_resolve_access_user(self, **_kwargs):
+            return {"ok": True, "found": False}
+
+    monkeypatch.setattr(module, "_module", lambda *_args: Resolver())
+
+    async def scenario():
+        await module._init_db()
+        card = await module.service_widget_student(
+            gc_user_id="780", email="identity@example.com", phone="+7 999 000-44-55",
+            name="Точный Контакт", include_access=False, summary_only=True,
+        )
+        identity = await module._access_identity("gc:780")
+        return card, identity
+
+    card, identity = asyncio.run(scenario())
+    assert card["found"] is True
+    assert card["paid_access"] is False
+    assert card["item"]["name"] == "Точный Контакт"
+    assert identity["gc_user_id"] == "780"
+    assert identity["email"] == "identity@example.com"
+    assert identity["prospect"] is True
+
+
+def test_verified_manual_tariff_promotes_user_to_latest_stream_and_lessons(tmp_path, monkeypatch):
+    module._db_path = tmp_path / "student-transfer.db"
+
+    class Fields:
+        async def service_registry_ensure_student(self, **kwargs):
+            assert kwargs["course_key"] == "puppy"
+            assert kwargs["stream"] == "60"
+            return {"row": 12, "lesson_columns": [{"key": "A", "label": "ДЗ 1"}]}
+
+    monkeypatch.setattr(module, "_module", lambda *_args: Fields())
+
+    async def scenario():
+        await module._init_db()
+        now = module._now()
+        async with aiosqlite.connect(module._must_db()) as db:
+            await db.execute(
+                """INSERT INTO flow_registry(
+                    course_key,stream,course,date_start,teacher,teacher_code,status,updated_at
+                ) VALUES('puppy','60','Щенок','2026-08-01','Ирина','Куратор 1','ready',?)""",
+                (now,),
+            )
+            await db.commit()
+        await module._promote_manual_student({
+            "request_id": "access-1", "gc_user_id": "779", "email": "manual@example.com",
+            "phone": "+7 999 000-33-44", "name": "Ручной Ученик",
+            "packages": {"puppy": "premium"},
+        })
+        async with aiosqlite.connect(module._must_db()) as db:
+            enrollment = await (await db.execute(
+                "SELECT id,stream,tariff,status,source_json FROM enrollments WHERE gc_user_id='779'"
+            )).fetchone()
+            lessons = await (await db.execute(
+                "SELECT lesson_key,label FROM lesson_progress WHERE enrollment_id=?", (enrollment[0],)
+            )).fetchall()
+        return tuple(enrollment), [tuple(row) for row in lessons]
+
+    enrollment, lessons = asyncio.run(scenario())
+    assert enrollment[:4] == ("manual:779:puppy", "60", "Премиум", "assigned")
+    assert json.loads(enrollment[4])["source"] == "messenger-access"
+    assert lessons == [("A", "ДЗ 1")]

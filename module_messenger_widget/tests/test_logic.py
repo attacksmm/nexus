@@ -913,7 +913,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         ])
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertIn("['pending','unverified'].includes(row.verification)", amo)
-        self.assertIn("Проверяем TG Personal…", amo)
+        self.assertIn("Уточняем остальные профили…", amo)
         self.assertIn("if(result.sent.length)loadProfileLinks(bootGeneration,true)", amo)
 
     def test_amocrm_telegram_profile_reuses_an_exact_verified_card_link(self):
@@ -1172,7 +1172,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertNotIn("<aside>", amo)
         self.assertNotIn("placeholder=\"Имя, телефон или ID\"", amo)
         self.assertIn('id="profileLinks"', amo)
-        self.assertIn("request('/profile-links')", amo)
+        self.assertIn("request('/profile-links'", amo)
         self.assertIn("function appendRichText", amo)
         self.assertIn("function appendAttachment", amo)
         self.assertIn("media=document.createElement('audio')", amo)
@@ -1231,8 +1231,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.7.35")
-        self.assertIn("static/amocrm.html?v=51421", script)
+        self.assertEqual(manifest["widget"]["version"], "1.7.38")
+        self.assertIn("static/amocrm.html?v=51430", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
@@ -1394,13 +1394,31 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         panel = (module_dir / "panel" / "index.html").read_text(encoding="utf-8")
         for source in (amo, widget):
             self.assertIn("Проверить и применить", source)
-            self.assertIn("Проверяем и ставим в очередь", source)
+            self.assertIn("Передаём команду", source)
             self.assertIn("Проверяем актуальные доступы GetCourse", source)
             self.assertIn("Загружаем ДЗ и созвоны", source)
+            self.assertIn("Тестовый период", source)
+            self.assertIn("getcourse-test-period", source)
+            self.assertIn("Проверяем возможность тестового периода", source)
+            self.assertIn("Команда принята. Тестовый период будет выдан в фоне", source)
+            self.assertIn("Доступы GetCourse применены и подтверждены", source)
+            self.assertIn("operation_pending", source)
+            self.assertIn("Забрать тестовый период", source)
+            self.assertIn("Выдать повторно", source)
+            self.assertIn("Задача принята. Окно можно закрыть", source)
+            self.assertIn("gcShowsProgress", source)
+            self.assertIn("стандарт", source.lower())
             self.assertNotIn("Следующая автоматическая попытка", source)
             self.assertNotIn("Проверьте изменения", source)
             self.assertNotIn("Данные ДЗ пока не найдены", source)
-        self.assertIn("Запрос принят", amo)
+        self.assertIn("showGcOperationNotice", amo)
+        self.assertIn("action:'revoke'", amo)
+        self.assertIn("Операции", amo)
+        self.assertIn("operationSettings", amo)
+        self.assertIn("gcCardVisible=false", amo)
+        self.assertIn("Операции", widget)
+        self.assertIn('action:"revoke"', widget)
+        self.assertIn("showDrawerOperations", widget)
         self.assertIn("Изменения выполняются в GetCourse", widget)
         self.assertNotIn("if(!confirm((details", amo)
         self.assertNotIn("window.confirm((text", widget)
@@ -1408,6 +1426,192 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("replace(/^(\\d+)[.,]0$/", widget)
         self.assertIn('{"client_id":"123456","text":"Здравствуйте"}', panel)
         self.assertNotIn('"message_id":"sb-987"', panel)
+
+    def test_amocrm_rich_text_escapes_bare_ampersands_before_html_parsing(self):
+        amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertIn("replace(/&(?!(?:amp|lt|gt|quot|apos|#\\d+|#x[0-9a-f]+);)/gi,'&amp;')", amo)
+
+    def test_notification_graph_recovers_exact_amocrm_deal(self):
+        class Index:
+            def resolve(self, context):
+                self_assert.assertEqual((context["service"], context["entity_id"]), ("vk", "668744625"))
+                return {
+                    "status": "resolved",
+                    "accounts": [
+                        {"service": "amo", "platform_id": "18222853", "updated_at": "2026-08-21"},
+                        {"service": "vk", "platform_id": "668744625", "updated_at": "2026-08-21"},
+                    ],
+                }
+
+        self_assert = self
+        previous = router._identity_index, router._amo_deal_delivery_details, router._amo_origin
+        router._identity_index = Index()
+        router._amo_deal_delivery_details = lambda lead_id: {
+            "entity_url": "https://sobakovodpro.amocrm.ru/leads/detail/" + lead_id,
+        }
+        router._amo_origin = lambda: "https://sobakovodpro.amocrm.ru"
+        try:
+            result = asyncio.run(router._identity_amo_notification_context("vk", "668744625"))
+        finally:
+            router._identity_index, router._amo_deal_delivery_details, router._amo_origin = previous
+        self.assertEqual(result, {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18222853",
+            "entity_url": "https://sobakovodpro.amocrm.ru/leads/detail/18222853",
+        })
+
+    def test_getcourse_card_uses_email_recovered_from_identity_graph(self):
+        class Index:
+            def resolve(self, _context):
+                return {
+                    "variables": {
+                        "contact.email": {"value": "client@example.test"},
+                    },
+                }
+
+        async def no_rules(_context):
+            return None
+
+        received = {}
+
+        async def student(**kwargs):
+            received.update(kwargs)
+            return {"ok": True, "found": True, "item": {"email": kwargs["email"]}}
+
+        previous = router._identity_index, router._apply_identity_rules, router._module_service
+        router._identity_index = Index()
+        router._apply_identity_rules = no_rules
+        router._module_service = lambda _module_id, _service: student
+        try:
+            result = asyncio.run(router._widget_getcourse_card_data(
+                {"entity_type": "lead", "entity_id": "18278741"},
+                "amocrm", {"admin_name": "Татьяна"}, include_access=False, summary_only=True,
+            ))
+        finally:
+            router._identity_index, router._apply_identity_rules, router._module_service = previous
+        self.assertEqual(received["email"], "client@example.test")
+        self.assertEqual(result["item"]["email"], "client@example.test")
+
+    def test_parallel_widget_identity_reads_are_single_flight(self):
+        class Index:
+            def __init__(self):
+                self.resolve_calls = 0
+                self.exact_calls = 0
+
+            def resolve(self, _context):
+                self.resolve_calls += 1
+                __import__("time").sleep(0.02)
+                return {"accounts": [], "variables": {}}
+
+            def provider_id_for_exact_context(self, _provider, _context):
+                self.exact_calls += 1
+                __import__("time").sleep(0.02)
+                return "123"
+
+        index = Index()
+        previous = router._identity_index
+        router._identity_index = index
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18278741",
+            "phone": "+79990000000", "email": "client@example.test", "fields": {},
+        }
+
+        async def run_parallel():
+            resolved = await asyncio.gather(*(
+                router._resolve_identity_context(dict(context)) for _ in range(12)
+            ))
+            exact = await asyncio.gather(*(
+                router._exact_provider_identity("vk", dict(context)) for _ in range(12)
+            ))
+            return resolved, exact
+
+        try:
+            resolved, exact = asyncio.run(run_parallel())
+        finally:
+            router._identity_index = previous
+        self.assertEqual(len(resolved), 12)
+        self.assertEqual(exact, ["123"] * 12)
+        self.assertEqual(index.resolve_calls, 1)
+        self.assertEqual(index.exact_calls, 1)
+
+    def test_slow_profile_lookup_returns_pending_then_cached_result(self):
+        calls = 0
+
+        async def slow_links(_data, _mode, _device):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.08)
+            return [{"kind": "getcourse", "label": "client@example.test", "url": "https://example.test/user/1"}]
+
+        async def scenario():
+            data = {"entity_type": "lead", "entity_id": "18278741"}
+            device = {"id": 77, "admin_name": "Татьяна"}
+            first = await router._cached_widget_profile_links(
+                data, "amocrm", device, foreground_seconds=0.005,
+            )
+            await asyncio.sleep(0.09)
+            second = await router._cached_widget_profile_links(
+                data, "amocrm", device, foreground_seconds=0.005,
+            )
+            return first, second
+
+        router._profile_links_cache.clear()
+        router._profile_links_inflight.clear()
+        with patch.object(router, "_widget_profile_links", new=slow_links):
+            first, second = asyncio.run(scenario())
+        self.assertEqual(first, ([], True))
+        self.assertEqual(second[1], False)
+        self.assertEqual(second[0][0]["kind"], "getcourse")
+        self.assertEqual(calls, 1)
+
+    def test_known_profile_is_returned_while_full_enrichment_runs(self):
+        calls = 0
+
+        async def quick_links(_data, _mode, _device):
+            return [{"kind": "vk", "label": "VK", "url": "https://vk.com/id123"}]
+
+        async def slow_links(_data, _mode, _device):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.08)
+            return [
+                {"kind": "vk", "label": "VK: Анна", "url": "https://vk.com/id123"},
+                {"kind": "getcourse", "label": "GetCourse", "url": "https://example.test/user/1"},
+            ]
+
+        async def scenario():
+            data = {"entity_type": "lead", "entity_id": "18278742"}
+            device = {"id": 78, "admin_name": "Татьяна"}
+            first = await router._cached_widget_profile_links(data, "amocrm", device)
+            await asyncio.sleep(0.09)
+            second = await router._cached_widget_profile_links(data, "amocrm", device)
+            return first, second
+
+        router._profile_links_cache.clear()
+        router._profile_links_inflight.clear()
+        with (
+            patch.object(router, "_quick_widget_profile_links", new=quick_links),
+            patch.object(router, "_widget_profile_links", new=slow_links),
+        ):
+            first, second = asyncio.run(scenario())
+        self.assertEqual(first[0][0]["kind"], "vk")
+        self.assertTrue(first[1])
+        self.assertEqual([row["kind"] for row in second[0]], ["vk", "getcourse"])
+        self.assertFalse(second[1])
+        self.assertEqual(calls, 1)
+
+    def test_operation_errors_are_short_and_understandable(self):
+        self.assertEqual(
+            router._friendly_operation_error("HTTP 429 Too Many Requests", "vk"),
+            "Канал ограничил частоту отправки. Nexus повторит автоматически.",
+        )
+        self.assertEqual(
+            router._friendly_operation_error("Connect timeout after 15 seconds", "telegram_personal"),
+            "Канал временно не ответил. Nexus попробует ещё раз.",
+        )
+        self.assertNotIn(
+            "stacktrace",
+            router._friendly_operation_error("unexpected stacktrace from provider", "salebot").casefold(),
+        )
 
 
 if __name__ == "__main__":

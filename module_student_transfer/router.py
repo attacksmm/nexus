@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -20,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,6 +35,7 @@ SESSION_COOKIE = "student_transfer_session"
 SESSION_TTL_DAYS = 30
 PASSWORD_MIN_LENGTH = 8
 ACCESS_VERIFY_DELAY_SECONDS = 20
+TEST_PERIOD_MAX_DAYS = 90
 CURATOR_OFFERS = {
     "Куратор 1": 8593080,
     "Куратор 2": 8593081,
@@ -62,6 +64,7 @@ _logger = None
 _worker_task: asyncio.Task | None = None
 _access_sync_task: asyncio.Task | None = None
 _access_queue_task: asyncio.Task | None = None
+_access_browser_cache_task: asyncio.Task | None = None
 _transfer_lock = asyncio.Lock()
 _operation_queue_lock = asyncio.Lock()
 _chat_delivery_lock = asyncio.Lock()
@@ -163,6 +166,23 @@ class AccessApplyIn(StrictInput):
     request_id: str = Field(min_length=8, max_length=40)
 
 
+class TestPeriodIn(StrictInput):
+    days: int = Field(ge=1, le=TEST_PERIOD_MAX_DAYS)
+    courses: list[str] = Field(min_length=1, max_length=2)
+
+
+class TestDriveCheckIn(StrictInput):
+    email: str = Field(default="", max_length=320)
+    phone: str = Field(default="", max_length=100)
+    browser_id: str = Field(default="", max_length=128)
+
+
+class TestDriveConfirmIn(StrictInput):
+    token: str = Field(min_length=20, max_length=256)
+    gc_user_id: str = Field(min_length=1, max_length=100)
+    browser_id: str = Field(default="", max_length=128)
+
+
 class LessonUpdateIn(StrictInput):
     value: bool
     expected_value: bool
@@ -193,7 +213,7 @@ class MessengerTemplateFavoriteIn(StrictInput):
 
 
 def setup(ctx):
-    global _db_path, _module_dir, _logger, _worker_task, _access_sync_task, _access_queue_task
+    global _db_path, _module_dir, _logger, _worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task
     _db_path = ctx.db_path
     _module_dir = ctx.module_dir
     _logger = getattr(ctx, "logger", None)
@@ -205,17 +225,23 @@ def setup(ctx):
             _worker_task = lifecycle.create_task(_worker_loop(), name="student-transfer-worker")
             _access_sync_task = lifecycle.create_task(_access_sync_loop(), name="student-transfer-access-sync")
             _access_queue_task = lifecycle.create_task(_access_queue_loop(), name="student-transfer-access-queue")
+            _access_browser_cache_task = lifecycle.create_task(
+                _access_browser_cache_loop(), name="student-transfer-access-browser-cache"
+            )
         else:
             _worker_task = loop.create_task(_worker_loop(), name="student-transfer-worker")
             _access_sync_task = loop.create_task(_access_sync_loop(), name="student-transfer-access-sync")
             _access_queue_task = loop.create_task(_access_queue_loop(), name="student-transfer-access-queue")
+            _access_browser_cache_task = loop.create_task(
+                _access_browser_cache_loop(), name="student-transfer-access-browser-cache"
+            )
     else:
         loop.run_until_complete(_init_db())
 
 
 async def shutdown():
-    global _worker_task, _access_sync_task, _access_queue_task, _snapshot_refresh_task, _registry_sync_task
-    tasks = [task for task in (_worker_task, _access_sync_task, _access_queue_task, _snapshot_refresh_task, _registry_sync_task) if task and not task.done()]
+    global _worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task
+    tasks = [task for task in (_worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task) if task and not task.done()]
     for task in tasks:
         task.cancel()
     if tasks:
@@ -223,6 +249,7 @@ async def shutdown():
     _worker_task = None
     _access_sync_task = None
     _access_queue_task = None
+    _access_browser_cache_task = None
     _snapshot_refresh_task = None
     _registry_sync_task = None
 
@@ -565,6 +592,64 @@ async def _init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS test_periods (
+                id TEXT PRIMARY KEY,
+                enrollment_id TEXT NOT NULL,
+                gc_user_id TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                phone_key TEXT NOT NULL DEFAULT '',
+                student_name TEXT NOT NULL DEFAULT '',
+                courses_json TEXT NOT NULL DEFAULT '[]',
+                group_ids_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                starts_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                grant_request_id TEXT NOT NULL DEFAULT '',
+                revoke_request_id TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                operator_id INTEGER NOT NULL,
+                operator_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL DEFAULT '',
+                allow_repeat INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_periods_due
+                ON test_periods(status,next_attempt_at,expires_at);
+            CREATE INDEX IF NOT EXISTS idx_test_periods_enrollment
+                ON test_periods(enrollment_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS test_period_identities (
+                identity_type TEXT NOT NULL,
+                identity_value TEXT NOT NULL,
+                test_period_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(identity_type,identity_value),
+                FOREIGN KEY(test_period_id) REFERENCES test_periods(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS access_browser_snapshots (
+                gc_user_id TEXT PRIMARY KEY,
+                email TEXT NOT NULL DEFAULT '',
+                snapshot_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT '',
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                next_attempt_at TEXT NOT NULL DEFAULT '',
+                failures INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_access_browser_snapshots_due
+                ON access_browser_snapshots(next_attempt_at,last_attempt_at);
+            CREATE TABLE IF NOT EXISTS testdrive_pending (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL DEFAULT '',
+                phone_key TEXT NOT NULL DEFAULT '',
+                browser_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_testdrive_pending_identity
+                ON testdrive_pending(email,phone_key,expires_at);
             """
         )
         transfer_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(transfers)")).fetchall()}
@@ -578,6 +663,9 @@ async def _init_db() -> None:
         operator_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(operators)")).fetchall()}
         if "password_hash" not in operator_columns:
             await db.execute("ALTER TABLE operators ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+        test_period_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(test_periods)")).fetchall()}
+        if "allow_repeat" not in test_period_columns:
+            await db.execute("ALTER TABLE test_periods ADD COLUMN allow_repeat INTEGER NOT NULL DEFAULT 0")
         now = _now()
         for login in DEFAULT_OPERATORS:
             await db.execute(
@@ -593,9 +681,23 @@ async def _init_db() -> None:
             ON CONFLICT(key) DO UPDATE SET value=excluded.value
             """
         )
+        await db.execute(
+            "INSERT OR IGNORE INTO registry_meta(key,value) VALUES('testdrive_callback_token',?)",
+            (secrets.token_urlsafe(36),),
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO registry_meta(key,value) VALUES('testdrive_hash_key',?)",
+            (secrets.token_hex(32),),
+        )
         await db.execute("DELETE FROM sessions WHERE expires_at<=?", (now,))
+        await db.execute("DELETE FROM testdrive_pending WHERE expires_at<=?", (now,))
         await db.execute("UPDATE transfers SET status='queued',updated_at=? WHERE status='running'", (now,))
         await db.execute("UPDATE flow_jobs SET status='queued',updated_at=? WHERE status='running'", (now,))
+        await db.execute(
+            "UPDATE test_periods SET status='queued_grant',next_attempt_at=?,updated_at=? "
+            "WHERE status='preparing'",
+            (now, now),
+        )
         await db.commit()
 
 
@@ -1355,6 +1457,8 @@ async def _widget_student_base(enrollment_id: str) -> dict[str, Any]:
 async def service_widget_lessons(*, enrollment_id: str) -> dict[str, Any]:
     """Load only lesson and call progress for the mini card."""
     key = _clean(enrollment_id, 100)
+    if key.startswith("gc:"):
+        return {"ok": True, "enrollment_id": key, "lessons": []}
     async with _connect() as db:
         exists = await (
             await db.execute(
@@ -1381,8 +1485,8 @@ async def service_widget_lessons(*, enrollment_id: str) -> dict[str, Any]:
 
 
 async def service_widget_student(
-    *, gc_user_id: str = "", email: str = "", phone: str = "", include_access: bool = True,
-    summary_only: bool = False,
+    *, gc_user_id: str = "", email: str = "", phone: str = "", name: str = "",
+    include_access: bool = True, summary_only: bool = False,
 ) -> dict[str, Any]:
     """Compact Streams card for other Nexus modules; matching stays exact."""
     gc_id = _clean(gc_user_id, 100)
@@ -1420,7 +1524,52 @@ async def service_widget_student(
                     exact.append(candidate)
             row = exact[0] if len(exact) == 1 else None
     if not row:
-        return {"ok": True, "found": False, "paid_access": False}
+        try:
+            resolver = _module("chat-moderators", "service_resolve_access_user")
+            prospect = await asyncio.to_thread(
+                resolver.service_resolve_access_user,
+                gc_user_id=gc_id, email=email, phone=phone,
+            )
+        except Exception as exc:
+            if _logger:
+                _logger.warning("GetCourse prospect lookup skipped: %s", exc)
+            prospect = {"found": False}
+        if not prospect.get("found") and gc_id.isdigit():
+            # The messenger identity graph already resolved this exact
+            # GetCourse ID from the current card's phone/email.  Access
+            # snapshots are intentionally sparse, so their absence must not
+            # hide a real GetCourse profile from the operator.
+            prospect = {
+                "found": True, "gc_user_id": gc_id,
+                "email": email, "phone": phone, "full_name": name,
+            }
+        if not prospect.get("found"):
+            return {"ok": True, "found": False, "paid_access": False}
+        matched_gc_id = _clean(prospect.get("gc_user_id"), 100)
+        if not matched_gc_id:
+            return {"ok": True, "found": False, "paid_access": False}
+        item = {
+            "enrollment_id": f"gc:{matched_gc_id}",
+            "gc_user_id": matched_gc_id,
+            "name": _clean(prospect.get("full_name"), 300),
+            "email": _clean(prospect.get("email") or email, 320),
+            "phone": _clean(prospect.get("phone") or phone, 100),
+            "course_key": "",
+            "course": "Доступ ещё не куплен",
+            "course_display": "Доступ ещё не куплен",
+            "stream": "",
+            "stream_display": "",
+            "tariff": "",
+            "lessons": [],
+            "prospect": True,
+        }
+        await _remember_widget_prospect(item)
+        return {
+            "ok": True, "found": True, "paid_access": False,
+            "gc_user_id": matched_gc_id,
+            "profile_url": f"https://club.sobakovod.pro/user/control/user/update/id/{quote(matched_gc_id)}",
+            "item": item,
+        }
     matched_gc_id = _clean(row["gc_user_id"], 100)
     profile_url = (
         f"https://club.sobakovod.pro/user/control/user/update/id/{quote(matched_gc_id)}"
@@ -1442,6 +1591,29 @@ async def service_widget_student(
     if include_access:
         result["access"] = await _student_access_view(item["enrollment_id"], live=False)
     return result
+
+
+async def _remember_widget_prospect(item: dict[str, Any]) -> None:
+    gc_user_id = _clean(item.get("gc_user_id"), 100)
+    if not gc_user_id.isdigit():
+        return
+    value = json.dumps({
+        "gc_user_id": gc_user_id,
+        "email": _clean(item.get("email"), 320),
+        "phone": _clean(item.get("phone"), 100),
+        "name": _clean(item.get("name"), 300),
+        "updated_at": _now(),
+    }, ensure_ascii=False, separators=(",", ":"))
+    await _meta_set(f"widget_prospect:{gc_user_id}", value)
+
+
+async def _widget_prospect_identity(gc_user_id: str) -> dict[str, Any]:
+    raw = await _meta_get(f"widget_prospect:{_clean(gc_user_id, 100)}")
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        value = {}
+    return value if isinstance(value, dict) else {}
 
 
 async def _student_access_view(enrollment_id: str, *, live: bool = False) -> dict[str, Any]:
@@ -1556,6 +1728,13 @@ async def _apply_access_change(
             requester_user_id=requester,
             delay_seconds=2,
         )
+        promotion_queued = False
+        if identity.get("prospect"):
+            promotion_queued = await _queue_manual_promotion(
+                request_id=request_id,
+                identity=identity,
+                target_groups=scheduled.get("target_groups") or prepared.get("target_groups") or [],
+            )
         current = await _get_access_view(identity, live=False, allow_stale=True)
         target_groups = scheduled.get("target_groups") or []
         return {
@@ -1568,6 +1747,7 @@ async def _apply_access_change(
             "verification_delayed": True,
             "next_check_at": scheduled.get("next_check_at") or "",
             "ready_by": scheduled.get("ready_by") or "",
+            "promotion_queued": promotion_queued,
             "access": _access_target_view(
                 current,
                 target_groups,
@@ -1576,6 +1756,152 @@ async def _apply_access_change(
                 stage="queued",
             ),
         }
+
+
+def _manual_package_selections(groups: list[dict[str, Any]]) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    for group in groups:
+        course_key = _clean(group.get("course_key"), 50)
+        package_key = _clean(group.get("package_key"), 50)
+        if course_key in {"puppy", "dog"} and group.get("group_kind") == "package" and package_key:
+            selected[course_key] = package_key
+    return selected
+
+
+async def _queue_manual_promotion(
+    *, request_id: str, identity: dict[str, Any], target_groups: list[dict[str, Any]],
+) -> bool:
+    packages = _manual_package_selections(target_groups)
+    if not packages:
+        return False
+    await _meta_set(
+        f"manual_promotion:{_clean(request_id, 64)}",
+        json.dumps({
+            "request_id": _clean(request_id, 64),
+            "gc_user_id": _clean(identity.get("gc_user_id"), 100),
+            "email": _clean(identity.get("email"), 320),
+            "phone": _clean(identity.get("phone"), 100),
+            "name": _clean(identity.get("name"), 300),
+            "packages": packages,
+            "attempts": 0,
+            "next_at": _now(),
+        }, ensure_ascii=False),
+    )
+    return True
+
+
+def _manual_tariff_label(package_key: str) -> str:
+    return {
+        "standard": "Стандарт", "premium": "Премиум", "vip": "ВИП",
+        "mentorship": "Наставничество", "module_standard": "Помодульно",
+    }.get(_clean(package_key, 50), _clean(package_key, 100))
+
+
+async def _latest_ready_flow(course_key: str) -> dict[str, Any]:
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT * FROM flow_registry WHERE course_key=? AND status='ready' "
+                "ORDER BY date_start DESC,CAST(stream AS INTEGER) DESC LIMIT 1",
+                (_clean(course_key, 50),),
+            )
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+async def _promote_manual_student(job: dict[str, Any]) -> None:
+    gc_user_id = _clean(job.get("gc_user_id"), 100)
+    if not gc_user_id.isdigit():
+        raise RuntimeError("Для добавления в Streams не найден GetCourse ID")
+    packages = job.get("packages") if isinstance(job.get("packages"), dict) else {}
+    now = _now()
+    for course_key, package_key in packages.items():
+        if course_key not in {"puppy", "dog"}:
+            continue
+        flow = await _latest_ready_flow(course_key)
+        stream = _clean(flow.get("stream"), 50)
+        course = _clean(flow.get("course"), 100) or ("Щенок" if course_key == "puppy" else "Собака")
+        enrollment_id = f"manual:{gc_user_id}:{course_key}"
+        source = {
+            "source": "messenger-access",
+            "phone": _clean(job.get("phone"), 100),
+            "manual_access_request_id": _clean(job.get("request_id"), 64),
+            "course_assignments": ([{
+                "course_key": course_key, "course": course, "stream": stream,
+                "sheet_title": _clean(flow.get("sheet_title"), 300),
+            }] if stream else []),
+        }
+        async with _connect() as db:
+            await db.execute(
+                """INSERT INTO enrollments(
+                    id,source_record_id,order_id,deal_number,gc_user_id,name,email,tg_account,date,
+                    course_key,course,stream,tariff,teacher,teacher_code,status,source_json,created_at,updated_at
+                ) VALUES(?,0,'','',?,?,?,'',?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,email=excluded.email,stream=excluded.stream,tariff=excluded.tariff,
+                    teacher=excluded.teacher,teacher_code=excluded.teacher_code,status=excluded.status,
+                    source_json=excluded.source_json,updated_at=excluded.updated_at""",
+                (
+                    enrollment_id, gc_user_id, _clean(job.get("name"), 300),
+                    _clean(job.get("email"), 320), now, course_key, course, stream,
+                    _manual_tariff_label(package_key), _clean(flow.get("teacher"), 200),
+                    _clean(flow.get("teacher_code"), 100), "assigned" if stream else "pending",
+                    json.dumps(source, ensure_ascii=False), now, now,
+                ),
+            )
+            await db.commit()
+        if stream:
+            student = await _widget_student_base(enrollment_id)
+            fields = _module("getcourse-chat-fields", "service_registry_ensure_student")
+            result = await fields.service_registry_ensure_student(
+                course_key=course_key, stream=stream, student=student,
+            )
+            await _bind_sheet_row(
+                enrollment_id, int(result.get("row") or 0), result.get("lesson_columns") or [],
+            )
+    _clear_snapshot_cache()
+
+
+async def _process_manual_promotions() -> None:
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT key,value FROM registry_meta WHERE key LIKE 'manual_promotion:%' "
+                "AND COALESCE(json_extract(value,'$.next_at'),'')<=? "
+                "ORDER BY json_extract(value,'$.next_at'),key LIMIT 1",
+                (_now(),),
+            )
+        ).fetchone()
+    if not row:
+        return
+    key, raw = str(row[0]), str(row[1] or "{}")
+    try:
+        job = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        job = {}
+    if _clean(job.get("next_at"), 40) > _now():
+        return
+    request_id = _clean(job.get("request_id"), 64)
+    state = await _test_period_request_state(request_id)
+    if state == "pending":
+        return
+    if state != "verified":
+        attempts = int(job.get("attempts") or 0) + 1
+        job.update(attempts=attempts, next_at=_test_period_retry_at(attempts), error="Выдача тарифа ещё не подтверждена")
+        await _meta_set(key, json.dumps(job, ensure_ascii=False))
+        return
+    try:
+        await _promote_manual_student(job)
+    except Exception as exc:
+        attempts = int(job.get("attempts") or 0) + 1
+        job.update(attempts=attempts, next_at=_test_period_retry_at(attempts), error=_clean(exc, 1000))
+        await _meta_set(key, json.dumps(job, ensure_ascii=False))
+        if _logger:
+            _logger.warning("Manual Streams promotion %s deferred: %s", request_id, exc)
+        return
+    async with _connect() as db:
+        await db.execute("DELETE FROM registry_meta WHERE key=?", (key,))
+        await db.commit()
 
 
 async def service_widget_access(*, enrollment_id: str, live: bool = False) -> dict[str, Any]:
@@ -1600,6 +1926,16 @@ async def service_widget_access_apply(
         request_id=request_id,
         requester_user_id=requester_user_id,
     )
+
+
+async def service_widget_access_operation(*, request_id: str) -> dict[str, Any]:
+    """Return the durable verification state for a widget access command."""
+    state = await _test_period_request_state(request_id)
+    return {
+        "request_id": _clean(request_id, 64),
+        "status": state,
+        "operation_pending": state in {"pending", "missing"},
+    }
 
 
 async def _bind_sheet_row(enrollment_id: str, row: int, lesson_columns: list[dict[str, Any]]) -> None:
@@ -2122,13 +2458,43 @@ async def _chat_delivery_view(item: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _access_identity(enrollment_id: str) -> dict[str, Any]:
+    key = _clean(enrollment_id, 100)
+    if key.startswith("gc:"):
+        gc_user_id = _clean(key.split(":", 1)[1], 100)
+        if not gc_user_id.isdigit():
+            raise HTTPException(400, "Некорректный GetCourse ID")
+        resolver = _module("chat-moderators", "service_resolve_access_user")
+        prospect = await asyncio.to_thread(
+            resolver.service_resolve_access_user, gc_user_id=gc_user_id,
+        )
+        if not prospect.get("found"):
+            remembered = await _widget_prospect_identity(gc_user_id)
+            if remembered:
+                prospect = {
+                    "found": True, "gc_user_id": gc_user_id,
+                    "email": remembered.get("email"), "phone": remembered.get("phone"),
+                    "full_name": remembered.get("name"),
+                }
+        if not prospect.get("found"):
+            raise HTTPException(404, "Пользователь GetCourse не найден")
+        return {
+            "id": key,
+            "gc_user_id": gc_user_id,
+            "email": _clean(prospect.get("email"), 320),
+            "phone": _clean(prospect.get("phone"), 100),
+            "name": _clean(prospect.get("full_name"), 300),
+            "course_key": "",
+            "tariff": "",
+            "payment_state": "prospect",
+            "prospect": True,
+        }
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         row = await (
             await db.execute(
                 "SELECT id,name,email,gc_user_id,course_key,tariff,source_json FROM enrollments "
                 "WHERE id=? AND status<>'removed' LIMIT 1",
-                (_clean(enrollment_id, 100),),
+                (key,),
             )
         ).fetchone()
     if not row:
@@ -2139,6 +2505,7 @@ async def _access_identity(enrollment_id: str) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         source = {}
     item["payment_state"] = _clean(source.get("payment_state"), 40) if isinstance(source, dict) else ""
+    item["phone"] = _clean(source.get("phone") or source.get("user_phone"), 100) if isinstance(source, dict) else ""
     if not _clean(item.get("gc_user_id"), 100) and not _clean(item.get("email"), 300):
         raise HTTPException(400, "GetCourse ID и email не найдены")
     return item
@@ -2199,6 +2566,75 @@ def _access_view(
     }
 
 
+async def _load_browser_access_snapshot(
+    gc_user_id: str, email: str = "", *, allow_stale: bool = True
+) -> dict[str, Any] | None:
+    user_id = _clean(gc_user_id, 100)
+    if not user_id.isdigit():
+        return None
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                "SELECT snapshot_json,updated_at FROM access_browser_snapshots WHERE gc_user_id=?",
+                (user_id,),
+            )
+        ).fetchone()
+    if not row or not _clean(row["snapshot_json"], 100_000):
+        return None
+    try:
+        snapshot = json.loads(row["snapshot_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(snapshot, dict) or not snapshot.get("ok"):
+        return None
+    age = _iso_age_seconds(row["updated_at"])
+    if age > 72 * 3600 and not allow_stale:
+        return None
+    snapshot["source"] = "browser-cache"
+    snapshot["updated_at"] = _clean(row["updated_at"], 40)
+    snapshot["stale"] = age > 6 * 3600
+    snapshot["refresh_due"] = age > 6 * 3600
+    if email and not snapshot.get("email"):
+        snapshot["email"] = _clean(email, 320)
+    return snapshot
+
+
+async def _save_browser_access_snapshot(identity: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    user_id = _clean(snapshot.get("gc_user_id") or identity.get("gc_user_id"), 100)
+    if not user_id.isdigit() or not snapshot.get("ok"):
+        return
+    now = _clean(snapshot.get("updated_at"), 40) or _now()
+    clean_snapshot = {
+        "ok": True,
+        "gc_user_id": user_id,
+        "email": _clean(snapshot.get("email") or identity.get("email"), 320),
+        "groups": [
+            {
+                "group_id": _clean(item.get("group_id"), 30),
+                "name": _clean(item.get("name"), 500),
+            }
+            for item in snapshot.get("groups") or []
+            if _clean(item.get("group_id"), 30).isdigit()
+        ],
+        "source": "browser-cache",
+        "updated_at": now,
+    }
+    async with _connect() as db:
+        await db.execute(
+            """
+            INSERT INTO access_browser_snapshots(
+                gc_user_id,email,snapshot_json,updated_at,last_attempt_at,next_attempt_at,failures,last_error
+            ) VALUES(?,?,?,?,?,'',0,'')
+            ON CONFLICT(gc_user_id) DO UPDATE SET
+                email=excluded.email,snapshot_json=excluded.snapshot_json,updated_at=excluded.updated_at,
+                last_attempt_at=excluded.last_attempt_at,next_attempt_at='',failures=0,last_error=''
+            """,
+            (user_id, clean_snapshot["email"], json.dumps(clean_snapshot, ensure_ascii=False), now, _now()),
+        )
+        await db.commit()
+
+
 async def _get_access_view(
     identity: dict[str, Any], *, live: bool, force: bool = False, allow_stale: bool = False
 ) -> dict[str, Any]:
@@ -2212,8 +2648,15 @@ async def _get_access_view(
             snapshot = await browser.service_getcourse_browser_access_snapshot(
                 gc_user_id=_clean(identity.get("gc_user_id"), 100),
             )
+            if snapshot.get("ok"):
+                await _save_browser_access_snapshot(identity, snapshot)
         except Exception as exc:
             snapshot = {"ok": False, "error": _clean(exc, 1000), "groups": []}
+    if not snapshot.get("ok"):
+        snapshot = await _load_browser_access_snapshot(
+            _clean(identity.get("gc_user_id"), 100),
+            _clean(identity.get("email"), 320),
+        ) or snapshot
     fields = _module("getcourse-chat-fields", "service_getcourse_access_snapshot")
     if not snapshot.get("ok"):
         snapshot = await fields.service_getcourse_access_snapshot(
@@ -2222,7 +2665,12 @@ async def _get_access_view(
             live=live,
             force=force,
         )
-    if not live and not allow_stale and (not snapshot.get("ok") or snapshot.get("refresh_due")):
+    if (
+        not live
+        and not allow_stale
+        and snapshot.get("source") != "browser-cache"
+        and (not snapshot.get("ok") or snapshot.get("refresh_due"))
+    ):
         snapshot = await fields.service_getcourse_access_snapshot(
             gc_user_id=_clean(identity.get("gc_user_id"), 100),
             email=_clean(identity.get("email"), 300),
@@ -2654,20 +3102,502 @@ async def _access_sync_loop() -> None:
         await asyncio.sleep(delay)
 
 
+def _future_iso(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(1, seconds))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _next_browser_access_identity() -> dict[str, str] | None:
+    now = _now()
+    stale_before = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                """
+                SELECT e.gc_user_id,MAX(e.email) AS email,COALESCE(s.last_attempt_at,'') AS last_attempt_at
+                FROM enrollments e
+                LEFT JOIN access_browser_snapshots s ON s.gc_user_id=e.gc_user_id
+                WHERE e.status<>'removed' AND e.gc_user_id<>''
+                  AND e.gc_user_id NOT GLOB '*[^0-9]*'
+                  AND (s.next_attempt_at IS NULL OR s.next_attempt_at='' OR s.next_attempt_at<=?)
+                  AND (s.updated_at IS NULL OR s.updated_at='' OR s.updated_at<=?)
+                GROUP BY e.gc_user_id
+                ORDER BY COALESCE(s.last_attempt_at,'') ASC,e.gc_user_id ASC
+                LIMIT 1
+                """,
+                (now, stale_before),
+            )
+        ).fetchone()
+    return {"gc_user_id": row["gc_user_id"], "email": row["email"] or ""} if row else None
+
+
+async def _save_browser_access_failure(identity: dict[str, Any], error: str) -> int:
+    user_id = _clean(identity.get("gc_user_id"), 100)
+    if not user_id.isdigit():
+        return 0
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT failures FROM access_browser_snapshots WHERE gc_user_id=?", (user_id,)
+            )
+        ).fetchone()
+        failures = int(row[0] or 0) + 1 if row else 1
+        delay = (60, 300, 900, 1800, 3600, 7200)[min(failures - 1, 5)]
+        await db.execute(
+            """
+            INSERT INTO access_browser_snapshots(
+                gc_user_id,email,snapshot_json,updated_at,last_attempt_at,next_attempt_at,failures,last_error
+            ) VALUES(?,?,'{}','',?,?,?,?)
+            ON CONFLICT(gc_user_id) DO UPDATE SET
+                email=excluded.email,last_attempt_at=excluded.last_attempt_at,
+                next_attempt_at=excluded.next_attempt_at,failures=excluded.failures,last_error=excluded.last_error
+            """,
+            (
+                user_id,
+                _clean(identity.get("email"), 320),
+                _now(),
+                _future_iso(delay),
+                failures,
+                _clean(error, 1000),
+            ),
+        )
+        await db.commit()
+    return failures
+
+
+def _browser_access_global_pause(error: str) -> int:
+    normalized = _norm(error)
+    if any(marker in normalized for marker in ("сессия", "авторизац", "войти", "login", "captcha", "капч", "403")):
+        return 6 * 3600
+    if "429" in normalized or "too many" in normalized:
+        return 30 * 60
+    return 0
+
+
+async def _access_browser_cache_loop() -> None:
+    """Warm Streams and messenger access cards through one throttled GC browser."""
+
+    await asyncio.sleep(45)
+    while True:
+        delay = 5.0
+        try:
+            pause_until = await _meta_get("access_browser_pause_until")
+            if pause_until and pause_until > _now():
+                delay = min(300.0, max(30.0, _iso_age_seconds(_now()) + 60.0))
+            else:
+                identity = await _next_browser_access_identity()
+                if not identity:
+                    delay = 60.0
+                else:
+                    browser = _module("getcourse-onboarding", "service_getcourse_browser_access_snapshot")
+                    snapshot = await browser.service_getcourse_browser_access_snapshot(
+                        gc_user_id=identity["gc_user_id"]
+                    )
+                    if snapshot.get("ok"):
+                        await _save_browser_access_snapshot(identity, snapshot)
+                        delay = 1.0 + secrets.randbelow(801) / 1000
+                    else:
+                        error = _clean(snapshot.get("error"), 1000) or "GetCourse browser snapshot failed"
+                        await _save_browser_access_failure(identity, error)
+                        pause = _browser_access_global_pause(error)
+                        if pause:
+                            await _meta_set("access_browser_pause_until", _future_iso(pause))
+                            if _logger:
+                                _logger.warning("GetCourse browser access cache paused: %s", error)
+                        delay = 30.0 if pause else 2.0 + secrets.randbelow(1001) / 1000
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            pause = _browser_access_global_pause(str(exc))
+            if pause:
+                await _meta_set("access_browser_pause_until", _future_iso(pause))
+            if _logger:
+                _logger.warning("GetCourse browser access cache iteration failed: %s", exc)
+            delay = 60.0
+        await asyncio.sleep(delay)
+
+
 async def _access_queue_loop() -> None:
     """Keep employee access changes responsive even while the bulk GC sync is busy."""
     await asyncio.sleep(5)
     while True:
+        testdrive_worked = False
         try:
             await _apply_pending_access()
             await _verify_pending_access()
             await _process_pending_access_refresh()
+            await _process_test_periods()
+            await _process_manual_promotions()
+            testdrive_worked = await _process_testdrive_confirms()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if _logger:
                 _logger.warning("GetCourse access queue iteration failed: %s", exc)
-        await asyncio.sleep(10)
+        await asyncio.sleep(1.0 + secrets.randbelow(801) / 1000 if testdrive_worked else 10)
+
+
+def _test_period_retry_at(attempts: int) -> str:
+    delay = (15, 30, 60, 120, 300, 900, 1800, 3600)[min(max(0, attempts), 7)]
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _test_period_aliases(identity: dict[str, Any]) -> list[tuple[str, str]]:
+    aliases: list[tuple[str, str]] = []
+    gc_user_id = _clean(identity.get("gc_user_id"), 100)
+    email = _clean(identity.get("email"), 320).casefold()
+    phone = _phone_search_key(identity.get("phone"))
+    if gc_user_id:
+        aliases.append(("gc_user_id", gc_user_id))
+    if email:
+        aliases.append(("email", email))
+    if len(phone) >= 10:
+        aliases.append(("phone", phone))
+    return aliases
+
+
+async def _testdrive_browser_alias(value: Any) -> tuple[str, str] | None:
+    browser_id = _clean(value, 128)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", browser_id):
+        return None
+    key = await _meta_get("testdrive_hash_key")
+    if not key:
+        return None
+    digest = hmac.new(key.encode("utf-8"), browser_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return "browser", digest
+
+
+async def _testdrive_aliases(email: Any = "", phone: Any = "", browser_id: Any = "") -> list[tuple[str, str]]:
+    aliases = _test_period_aliases({"email": email, "phone": phone})
+    browser = await _testdrive_browser_alias(browser_id)
+    if browser:
+        aliases.append(browser)
+    return aliases
+
+
+async def _remember_testdrive_pending(email: Any, phone: Any, browser_alias: tuple[str, str] | None) -> None:
+    if not browser_alias:
+        return
+    email_value = _clean(email, 320).casefold()
+    phone_key = _phone_search_key(phone)
+    if not email_value and len(phone_key) < 10:
+        return
+    now = _now()
+    async with _connect() as db:
+        await db.execute("DELETE FROM testdrive_pending WHERE expires_at<=?", (now,))
+        await db.execute(
+            """INSERT INTO testdrive_pending(email,phone_key,browser_hash,created_at,expires_at)
+               VALUES(?,?,?,?,?)""",
+            (email_value, phone_key, browser_alias[1], now, _future_iso(2 * 3600)),
+        )
+        await db.commit()
+
+
+async def _pending_testdrive_browser_alias(identity: dict[str, Any]) -> tuple[str, str] | None:
+    email = _clean(identity.get("email"), 320).casefold()
+    phone_key = _phone_search_key(identity.get("phone"))
+    if not email and len(phone_key) < 10:
+        return None
+    clauses: list[str] = []
+    params: list[str] = []
+    if email:
+        clauses.append("email=?")
+        params.append(email)
+    if len(phone_key) >= 10:
+        clauses.append("phone_key=?")
+        params.append(phone_key)
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                f"SELECT browser_hash FROM testdrive_pending WHERE expires_at>? AND ({' OR '.join(clauses)}) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (_now(), *params),
+            )
+        ).fetchone()
+    return ("browser", _clean(row[0], 64)) if row and _clean(row[0], 64) else None
+
+
+async def _test_period_for_aliases(aliases: list[tuple[str, str]]) -> dict[str, Any] | None:
+    if not aliases:
+        return None
+    clauses = " OR ".join("(i.identity_type=? AND i.identity_value=?)" for _ in aliases)
+    params = [value for pair in aliases for value in pair]
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                f"SELECT p.* FROM test_period_identities i JOIN test_periods p ON p.id=i.test_period_id "
+                f"WHERE {clauses} ORDER BY p.created_at DESC LIMIT 1",
+                params,
+            )
+        ).fetchone()
+    return dict(row) if row else None
+
+
+async def _test_period_catalog() -> dict[str, dict[str, Any]]:
+    service = _module("chat-moderators", "service_test_period_catalog")
+    result = await asyncio.to_thread(service.service_test_period_catalog)
+    if not result.get("ok"):
+        raise RuntimeError("Не найдены группы тестового периода: " + ", ".join(result.get("missing") or []))
+    return result.get("items") or {}
+
+
+def _test_period_group_ids(catalog: dict[str, dict[str, Any]], courses: list[str]) -> list[str]:
+    keys = [f"module_{index}" for index in range(1, 9)] + list(courses)
+    return [str(catalog[key]["group_id"]) for key in keys]
+
+
+def _test_period_row_view(row: dict[str, Any] | aiosqlite.Row | None) -> dict[str, Any]:
+    if not row:
+        return {
+            "exists": False, "status": "available", "can_issue": True,
+            "can_repeat": False, "operation_pending": False, "reason": "",
+        }
+    item = dict(row)
+    try:
+        courses = json.loads(item.get("courses_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        courses = []
+    status = _clean(item.get("status"), 40)
+    pending = status in {"queued_grant", "granting", "queued_revoke", "revoking"}
+    reasons = {
+        "queued_grant": "Команда принята. Тестовый период будет выдан в фоне.",
+        "granting": "Тестовый период выдаётся в GetCourse…",
+        "active": "Тестовый период выдан. Nexus автоматически закроет его в срок.",
+        "queued_revoke": "Срок закончился. Доступы закрываются в фоне…",
+        "revoking": "Доступы тестового периода закрываются в GetCourse…",
+        "completed": "Тестовый период завершён, доступы закрыты.",
+        "blocked_used": "Ученик уже использовал тестовый период.",
+    }
+    return {
+        "exists": True,
+        "id": _clean(item.get("id"), 64),
+        "status": status,
+        "courses": courses,
+        "starts_at": _clean(item.get("starts_at"), 40),
+        "expires_at": _clean(item.get("expires_at"), 40),
+        "completed_at": _clean(item.get("completed_at"), 40),
+        "last_error": _clean(item.get("last_error"), 1000),
+        "attempts": int(item.get("attempts") or 0),
+        "can_issue": False,
+        "can_repeat": status in {"completed", "blocked_used"},
+        "operation_pending": pending,
+        "reason": reasons.get(status, "Тестовый период уже выдавался"),
+    }
+
+
+def _test_period_active_window(period: dict[str, Any]) -> tuple[str, str]:
+    """Start the promised duration only after GetCourse confirms the grant."""
+
+    try:
+        planned_start = datetime.fromisoformat(_clean(period.get("starts_at"), 40).replace("Z", "+00:00"))
+        planned_end = datetime.fromisoformat(_clean(period.get("expires_at"), 40).replace("Z", "+00:00"))
+        duration = max(timedelta(minutes=1), planned_end - planned_start)
+    except (TypeError, ValueError):
+        duration = timedelta(days=1)
+    starts = datetime.now(timezone.utc).replace(microsecond=0)
+    return (
+        starts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        (starts + duration).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+async def _test_period_row(period_id: str = "", enrollment_id: str = "") -> dict[str, Any] | None:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        if period_id:
+            row = await (await db.execute("SELECT * FROM test_periods WHERE id=?", (_clean(period_id, 64),))).fetchone()
+        else:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM test_periods WHERE enrollment_id=? ORDER BY created_at DESC LIMIT 1",
+                    (_clean(enrollment_id, 100),),
+                )
+            ).fetchone()
+    return dict(row) if row else None
+
+
+async def _test_period_request_state(request_id: str) -> str:
+    service = _module("chat-moderators", "service_access_verifications")
+    result = await asyncio.to_thread(
+        service.service_access_verifications, limit=1, request_id=_clean(request_id, 64)
+    )
+    item = next(iter(result.get("items") or []), None)
+    if not item:
+        return "missing"
+    status = _clean(item.get("status"), 30)
+    apply_result = item.get("apply_result") if isinstance(item.get("apply_result"), dict) else {}
+    verification = apply_result.get("verification") if isinstance(apply_result.get("verification"), dict) else {}
+    if status in {"failed", "cancelled"}:
+        return "failed"
+    if status == "applied" and verification.get("verified") and not apply_result.get("verification_pending"):
+        return "verified"
+    return "pending"
+
+
+async def _update_test_period(period_id: str, **values: Any) -> None:
+    if not values:
+        return
+    values["updated_at"] = _now()
+    columns = ",".join(f"{key}=?" for key in values)
+    async with _connect() as db:
+        await db.execute(
+            f"UPDATE test_periods SET {columns} WHERE id=?",
+            (*values.values(), _clean(period_id, 64)),
+        )
+        await db.commit()
+
+
+async def _prepare_test_period_access(period: dict[str, Any], *, revoke: bool) -> str:
+    identity = {
+        "gc_user_id": period.get("gc_user_id"),
+        "email": period.get("email"),
+        "phone": period.get("phone_key"),
+    }
+    current = await _get_access_view(identity, live=True, force=True, allow_stale=True)
+    if not current.get("ok") or current.get("stale"):
+        raise RuntimeError(current.get("error") or current.get("warning") or "GetCourse ещё не вернул актуальные доступы")
+    catalog = await _test_period_catalog()
+    current_ids = {str(item.get("group_id") or "") for item in current.get("current_groups") or []}
+    all_trial_ids = {
+        str(item["group_id"])
+        for key, item in catalog.items()
+        if key != "used"
+    }
+    used_id = str(catalog["used"]["group_id"])
+    allow_repeat = bool(int(period.get("allow_repeat") or 0))
+    if not revoke and used_id in current_ids and not allow_repeat:
+        return "used"
+    if revoke:
+        changes = [{"group_id": group_id, "enabled": False} for group_id in sorted(all_trial_ids)]
+        changes.append({"group_id": used_id, "enabled": True})
+        already_done = not (current_ids & all_trial_ids) and used_id in current_ids
+    else:
+        courses = json.loads(period.get("courses_json") or "[]")
+        grant_ids = set(_test_period_group_ids(catalog, courses))
+        changes = [{"group_id": group_id, "enabled": True} for group_id in sorted(grant_ids)]
+        if allow_repeat and used_id in current_ids:
+            changes.insert(0, {"group_id": used_id, "enabled": False})
+        already_done = grant_ids.issubset(current_ids) and (not allow_repeat or used_id not in current_ids)
+    if already_done:
+        return "already_done"
+    preparer = _module("chat-moderators", "service_prepare_test_period_change")
+    prepared = await asyncio.to_thread(
+        preparer.service_prepare_test_period_change,
+        gc_user_id=_clean(period.get("gc_user_id"), 100),
+        email=_clean(period.get("email"), 320),
+        current_groups=current.get("current_groups") or [],
+        changes=changes,
+        requester_user_id=str(period.get("operator_id") or "test-period"),
+    )
+    scheduler = _module("chat-moderators", "service_schedule_access_apply")
+    await asyncio.to_thread(
+        scheduler.service_schedule_access_apply,
+        request_id=prepared["request_id"],
+        requester_user_id=str(period.get("operator_id") or "test-period"),
+        delay_seconds=2,
+    )
+    return _clean(prepared.get("request_id"), 64)
+
+
+async def _advance_test_period(period: dict[str, Any]) -> None:
+    period_id = _clean(period.get("id"), 64)
+    status = _clean(period.get("status"), 40)
+    expired = _clean(period.get("expires_at"), 40) <= _now()
+    try:
+        if expired and status not in {"queued_revoke", "revoking", "completed", "blocked_used"}:
+            grant_request_id = _clean(period.get("grant_request_id"), 64)
+            if grant_request_id:
+                try:
+                    cancel = _module("chat-moderators", "service_cancel_access_change")
+                    await asyncio.to_thread(cancel.service_cancel_access_change, request_id=grant_request_id)
+                except Exception:
+                    pass
+            status = "queued_revoke"
+            await _update_test_period(period_id, status=status, next_attempt_at=_now(), last_error="")
+            period["status"] = status
+        if status == "queued_grant":
+            request_id = await _prepare_test_period_access(period, revoke=False)
+            if request_id == "used":
+                await _update_test_period(
+                    period_id, status="queued_revoke", next_attempt_at=_now(),
+                    last_error="Тестовый период уже использован; проверяем снятие тестовых групп",
+                )
+                return
+            if request_id == "already_done":
+                starts_at, expires_at = _test_period_active_window(period)
+                await _update_test_period(
+                    period_id, status="active", starts_at=starts_at, expires_at=expires_at,
+                    next_attempt_at=expires_at, attempts=0, last_error="",
+                )
+            else:
+                await _update_test_period(period_id, status="granting", grant_request_id=request_id, next_attempt_at=_test_period_retry_at(0), last_error="")
+            return
+        if status == "granting":
+            request_state = await _test_period_request_state(period.get("grant_request_id") or "")
+            if request_state == "verified":
+                starts_at, expires_at = _test_period_active_window(period)
+                await _update_test_period(
+                    period_id, status="active", starts_at=starts_at, expires_at=expires_at,
+                    next_attempt_at=expires_at, attempts=0, last_error="",
+                )
+            elif request_state == "failed" or request_state == "missing":
+                attempts = int(period.get("attempts") or 0) + 1
+                await _update_test_period(period_id, status="queued_grant", grant_request_id="", attempts=attempts, next_attempt_at=_test_period_retry_at(attempts), last_error="Изменение не подтвердилось; Nexus повторит")
+            else:
+                await _update_test_period(period_id, next_attempt_at=_test_period_retry_at(0))
+            return
+        if status == "active":
+            await _update_test_period(period_id, next_attempt_at=period["expires_at"])
+            return
+        if status == "queued_revoke":
+            request_id = await _prepare_test_period_access(period, revoke=True)
+            if request_id == "already_done":
+                await _update_test_period(period_id, status="completed", completed_at=_now(), next_attempt_at="", attempts=0, last_error="")
+            else:
+                await _update_test_period(period_id, status="revoking", revoke_request_id=request_id, next_attempt_at=_test_period_retry_at(0), last_error="")
+            return
+        if status == "revoking":
+            request_state = await _test_period_request_state(period.get("revoke_request_id") or "")
+            if request_state == "verified":
+                await _update_test_period(period_id, status="completed", completed_at=_now(), next_attempt_at="", attempts=0, last_error="")
+            elif request_state == "failed" or request_state == "missing":
+                attempts = int(period.get("attempts") or 0) + 1
+                await _update_test_period(period_id, status="queued_revoke", revoke_request_id="", attempts=attempts, next_attempt_at=_test_period_retry_at(attempts), last_error="Снятие не подтвердилось; Nexus повторит")
+            else:
+                await _update_test_period(period_id, next_attempt_at=_test_period_retry_at(0))
+    except Exception as exc:
+        attempts = int(period.get("attempts") or 0) + 1
+        retry_status = "queued_revoke" if status in {"queued_revoke", "revoking"} or expired else "queued_grant"
+        await _update_test_period(
+            period_id,
+            status=retry_status,
+            attempts=attempts,
+            next_attempt_at=_test_period_retry_at(attempts),
+            last_error=_clean(exc, 1000),
+            **({"revoke_request_id": ""} if retry_status == "queued_revoke" else {"grant_request_id": ""}),
+        )
+        if _logger:
+            _logger.warning("Test period %s deferred: %s", period_id, exc)
+
+
+async def _process_test_periods(period_id: str = "") -> None:
+    now = _now()
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        if period_id:
+            rows = await (await db.execute("SELECT * FROM test_periods WHERE id=? LIMIT 1", (period_id,))).fetchall()
+        else:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM test_periods WHERE status NOT IN ('completed','blocked_used') "
+                    "AND (next_attempt_at='' OR next_attempt_at<=? OR expires_at<=?) "
+                    "ORDER BY CASE WHEN expires_at<=? THEN 0 ELSE 1 END,next_attempt_at,created_at LIMIT 1",
+                    (now, now, now),
+                )
+            ).fetchall()
+    for row in rows:
+        await _advance_test_period(dict(row))
 
 
 def _find_source(snapshot: dict[str, Any], ref: TransferRef | CuratorChangeRef) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -3550,10 +4480,10 @@ async def students(
     start = max(0, min(100000, int(offset)))
     page_size = max(1, min(250, int(limit)))
     page = found[start : start + page_size]
+    enrichers = [_enrich_successful_managers(page), _enrich_student_notes(page)]
     if not identities_enriched:
-        await _enrich_order_identities(page)
-    await _enrich_successful_managers(page)
-    await _enrich_student_notes(page)
+        enrichers.append(_enrich_order_identities(page))
+    await asyncio.gather(*enrichers)
     return {
         "items": page,
         "total": len(found),
@@ -3711,6 +4641,412 @@ async def student_access(enrollment_id: str, request: Request, live: str = "0"):
     await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-access-read", limit=40, window_seconds=120)
     return await _student_access_view(enrollment_id, live=live == "1")
+
+
+TESTDRIVE_PAGE_ORIGIN = "https://club.sobakovod.pro"
+TESTDRIVE_CHECK_URL = "https://junior.sobakovod.pro/streams/testdrive/check"
+TESTDRIVE_CONFIRM_URL = "https://junior.sobakovod.pro/streams/testdrive/confirm"
+
+
+def _testdrive_cors_headers() -> dict[str, str]:
+    return {
+        "Access-Control-Allow-Origin": TESTDRIVE_PAGE_ORIGIN,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+        "Vary": "Origin",
+    }
+
+
+def _require_testdrive_origin(request: Request) -> None:
+    if _clean(request.headers.get("origin"), 300) != TESTDRIVE_PAGE_ORIGIN:
+        raise HTTPException(403, "Источник запроса не разрешён")
+
+
+@router.options("/testdrive/check")
+async def testdrive_check_options(request: Request):
+    _require_testdrive_origin(request)
+    return Response(status_code=204, headers=_testdrive_cors_headers())
+
+
+@router.post("/testdrive/check")
+async def testdrive_check(data: TestDriveCheckIn, request: Request):
+    """Public preflight; its short-lived browser link never reserves an identity."""
+
+    _require_testdrive_origin(request)
+    enforce_rate_limit(request, "student-transfer-testdrive-check", limit=30, window_seconds=300)
+    aliases = await _testdrive_aliases(data.email, data.phone, data.browser_id)
+    if not aliases:
+        raise HTTPException(400, "Укажите корректную почту или телефон")
+    existing = await _test_period_for_aliases(aliases)
+    if not existing:
+        await _remember_testdrive_pending(
+            data.email,
+            data.phone,
+            next((alias for alias in aliases if alias[0] == "browser"), None),
+        )
+    payload = {
+        "ok": True,
+        "eligible": not bool(existing),
+        "reason": "Тестовый период уже использован" if existing else "",
+    }
+    return JSONResponse(payload, headers=_testdrive_cors_headers())
+
+
+@router.get("/testdrive/client.js")
+async def testdrive_client_script():
+    script = r'''(()=>{"use strict";
+const endpoint="https://junior.sobakovod.pro/streams/testdrive/check",key="sobakovod-testdrive-browser-v1";
+const browserId=()=>{try{let value=localStorage.getItem(key);if(!/^[A-Za-z0-9_-]{16,128}$/.test(value||"")){value=(crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(24)),v=>v.toString(16).padStart(2,"0")).join(""));localStorage.setItem(key,value)}return value}catch{return""}};
+const message=(form,text)=>{let node=form.querySelector(".form-result-block");if(!node){node=document.createElement("div");form.prepend(node)}node.textContent=text;node.style.display="block";node.style.color="#b42318";node.style.margin="12px 0"};
+const loading=form=>{let node=form.querySelector(".nexus-testdrive-loading");if(!node){node=document.createElement("div");node.className="nexus-testdrive-loading";node.innerHTML='<span aria-hidden="true"></span>Проверяем возможность тестового периода…';form.prepend(node)}node.style.cssText="display:flex;align-items:center;gap:8px;margin:12px 0;color:#475467";const spinner=node.firstElementChild;spinner.style.cssText="display:inline-block;width:16px;height:16px;flex:0 0 16px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:nexusTrialSpin .7s linear infinite";if(!document.getElementById("nexus-testdrive-style")){const style=document.createElement("style");style.id="nexus-testdrive-style";style.textContent="@keyframes nexusTrialSpin{to{transform:rotate(360deg)}}";document.head.append(style)}return()=>node.remove()};
+for(const form of document.querySelectorAll('form[action*="/pl/lite/block-public/process"]'))form.addEventListener("submit",async event=>{if(form.dataset.nexusTrialApproved==="1"){delete form.dataset.nexusTrialApproved;return}event.preventDefault();event.stopImmediatePropagation();const submitter=event.submitter||form.querySelector('[type="submit"]'),email=form.querySelector('[name="formParams[email]"]')?.value||"",phone=form.querySelector('[name="formParams[phone]"]')?.value||"",stopLoading=loading(form);if(submitter){submitter.disabled=true;submitter.setAttribute("aria-busy","true")}try{const response=await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,phone,browser_id:browserId()})}),data=await response.json();if(!response.ok)throw new Error(data.detail||"Проверка временно недоступна");if(!data.eligible){message(form,data.reason||"Тестовый период уже использован");return}form.dataset.nexusTrialApproved="1";stopLoading();if(submitter){submitter.disabled=false;submitter.removeAttribute("aria-busy")}form.requestSubmit(submitter||undefined)}catch(error){message(form,error.message||"Проверка временно недоступна")}finally{stopLoading();if(submitter&&form.dataset.nexusTrialApproved!=="1"){submitter.disabled=false;submitter.removeAttribute("aria-busy")}}},true);
+})();'''
+    return Response(
+        script,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+async def _confirm_testdrive_job(job: dict[str, Any]) -> dict[str, Any]:
+    user_id = _clean(job.get("gc_user_id"), 100)
+    browser = _module("getcourse-onboarding", "service_getcourse_browser_access_snapshot")
+    snapshot = await browser.service_getcourse_browser_access_snapshot(gc_user_id=user_id)
+    if not snapshot.get("ok"):
+        raise HTTPException(409, snapshot.get("error") or "GetCourse не подтвердил тестовые группы")
+    identity = {
+        "gc_user_id": user_id,
+        "email": _clean(snapshot.get("email"), 320),
+        "phone": _clean(snapshot.get("phone"), 100),
+        "name": _clean(snapshot.get("name"), 300),
+    }
+    await _save_browser_access_snapshot(identity, snapshot)
+    aliases = _test_period_aliases(identity)
+    browser_alias = await _testdrive_browser_alias(job.get("browser_id"))
+    if browser_alias:
+        aliases.append(browser_alias)
+    pending_browser_alias = await _pending_testdrive_browser_alias(identity)
+    if pending_browser_alias and pending_browser_alias not in aliases:
+        aliases.append(pending_browser_alias)
+    catalog = await _test_period_catalog()
+    current_ids = {str(item.get("group_id") or "") for item in snapshot.get("groups") or []}
+    courses = [course for course in ("puppy", "dog") if str(catalog[course]["group_id"]) in current_ids]
+    existing = await _test_period_for_aliases(aliases)
+    if existing:
+        existing_status = _clean(existing.get("status"), 40)
+        if courses and existing_status in {"completed", "blocked_used", "queued_revoke", "revoking"}:
+            now = _now()
+            await _update_test_period(
+                existing["id"], status="queued_revoke", expires_at=now, next_attempt_at=now,
+                courses_json=json.dumps(courses, ensure_ascii=False),
+                group_ids_json=json.dumps(_test_period_group_ids(catalog, courses)),
+                last_error="Повторная выдача обнаружена GetCourse; Nexus снимает доступ",
+            )
+        async with _connect() as db:
+            await db.executemany(
+                "INSERT OR IGNORE INTO test_period_identities(identity_type,identity_value,test_period_id,created_at) VALUES(?,?,?,?)",
+                [(kind, value, existing["id"], _now()) for kind, value in aliases],
+            )
+            await db.commit()
+        return {"ok": True, "duplicate": True, "cleanup_queued": bool(courses and existing_status in {"completed", "blocked_used", "queued_revoke", "revoking"}), "period": _test_period_row_view(await _test_period_row(period_id=existing["id"]))}
+    if not courses:
+        raise HTTPException(409, "У пользователя нет активных групп тест-драйва")
+    period_id = uuid.uuid4().hex
+    try:
+        starts = datetime.fromisoformat(_clean(job.get("received_at"), 40).replace("Z", "+00:00")).astimezone(timezone.utc).replace(microsecond=0)
+    except ValueError:
+        starts = datetime.now(timezone.utc).replace(microsecond=0)
+    starts_at = starts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (starts + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    group_ids = _test_period_group_ids(catalog, courses)
+    async with _connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        for identity_type, identity_value in aliases:
+            claimed = await (
+                await db.execute(
+                    "SELECT test_period_id FROM test_period_identities WHERE identity_type=? AND identity_value=?",
+                    (identity_type, identity_value),
+                )
+            ).fetchone()
+            if claimed:
+                await db.rollback()
+                existing = await _test_period_row(period_id=claimed[0])
+                return {"ok": True, "duplicate": True, "period": _test_period_row_view(existing)}
+        await db.execute(
+            """INSERT INTO test_periods(
+                id,enrollment_id,gc_user_id,email,phone_key,student_name,courses_json,group_ids_json,
+                status,starts_at,expires_at,next_attempt_at,operator_id,operator_name,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                period_id, f"testdrive:{user_id}", user_id, identity["email"],
+                _phone_search_key(identity["phone"]), identity["name"],
+                json.dumps(courses, ensure_ascii=False), json.dumps(group_ids), "active",
+                starts_at, expires_at, expires_at, 0, "GetCourse testdrive", starts_at, starts_at,
+            ),
+        )
+        await db.executemany(
+            "INSERT INTO test_period_identities(identity_type,identity_value,test_period_id,created_at) VALUES(?,?,?,?)",
+            [(kind, value, period_id, starts_at) for kind, value in aliases],
+        )
+        await db.commit()
+    return {"ok": True, "duplicate": False, "period": _test_period_row_view(await _test_period_row(period_id=period_id))}
+
+
+async def _queue_testdrive_confirm(data: TestDriveConfirmIn) -> dict[str, Any]:
+    expected = await _meta_get("testdrive_callback_token")
+    if not expected or not hmac.compare_digest(expected, data.token):
+        raise HTTPException(401, "Неверный ключ подтверждения")
+    user_id = _clean(data.gc_user_id, 100)
+    if not user_id.isdigit():
+        raise HTTPException(400, "GetCourse ID должен быть числом")
+    key = f"testdrive_confirm:{user_id}"
+    now = _now()
+    async with _connect() as db:
+        row = await (await db.execute("SELECT value FROM registry_meta WHERE key=?", (key,))).fetchone()
+        try:
+            previous = json.loads(str(row[0] or "{}")) if row else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            previous = {}
+        payload = {
+            "gc_user_id": user_id,
+            "browser_id": _clean(data.browser_id, 128) or _clean(previous.get("browser_id"), 128),
+            "received_at": _clean(previous.get("received_at"), 40) or now,
+            "next_at": now,
+            "attempts": int(previous.get("attempts") or 0),
+            "last_error": "",
+        }
+        await db.execute(
+            "INSERT INTO registry_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, json.dumps(payload, ensure_ascii=False)),
+        )
+        await db.commit()
+    return {"ok": True, "accepted": True, "queued": True, "gc_user_id": user_id}
+
+
+async def _process_testdrive_confirms() -> bool:
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT key,value FROM registry_meta WHERE key LIKE 'testdrive_confirm:%' "
+                "AND COALESCE(json_extract(value,'$.next_at'),'')<=? "
+                "ORDER BY json_extract(value,'$.next_at'),key LIMIT 1",
+                (_now(),),
+            )
+        ).fetchone()
+    if not row:
+        return False
+    key, raw = str(row[0]), str(row[1] or "{}")
+    try:
+        job = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        job = {}
+    if _clean(job.get("next_at"), 40) > _now():
+        return False
+    try:
+        await _confirm_testdrive_job(job)
+    except Exception as exc:
+        attempts = int(job.get("attempts") or 0) + 1
+        job.update(
+            attempts=attempts, next_at=_test_period_retry_at(attempts),
+            last_error=_clean(getattr(exc, "detail", None) or exc, 1000),
+        )
+        await _meta_set(key, json.dumps(job, ensure_ascii=False))
+        if _logger:
+            _logger.warning("GetCourse test-drive confirmation %s deferred: %s", job.get("gc_user_id"), exc)
+        return True
+    async with _connect() as db:
+        await db.execute("DELETE FROM registry_meta WHERE key=?", (key,))
+        await db.commit()
+    return True
+
+
+@router.post("/testdrive/confirm")
+async def testdrive_confirm(data: TestDriveConfirmIn, request: Request):
+    enforce_rate_limit(request, "student-transfer-testdrive-confirm", limit=300, window_seconds=3600)
+    return await _queue_testdrive_confirm(data)
+
+
+@router.get("/testdrive/config")
+async def testdrive_config(request: Request):
+    await _require_operator(request)
+    return {
+        "check_url": TESTDRIVE_CHECK_URL,
+        "confirm_url": TESTDRIVE_CONFIRM_URL,
+        "client_script": '<script src="https://junior.sobakovod.pro/streams/testdrive/client.js" defer></script>',
+        "callback_token": await _meta_get("testdrive_callback_token"),
+    }
+
+
+@router.post("/testdrive/config/rotate")
+async def rotate_testdrive_config(request: Request):
+    await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-testdrive-rotate", limit=3, window_seconds=3600)
+    token = secrets.token_urlsafe(36)
+    await _meta_set("testdrive_callback_token", token)
+    return {"ok": True, "callback_token": token}
+
+
+async def _test_period_for_identity(identity: dict[str, Any]) -> dict[str, Any] | None:
+    return await _test_period_for_aliases(_test_period_aliases(identity))
+
+
+async def _test_period_status_for_identity(identity: dict[str, Any], *, live: bool) -> dict[str, Any]:
+    existing = await _test_period_for_identity(identity)
+    result = _test_period_row_view(existing)
+    if live and not existing:
+        access = await _get_access_view(identity, live=True, force=True, allow_stale=True)
+        if not access.get("ok") or access.get("stale"):
+            raise RuntimeError(access.get("error") or access.get("warning") or "Не удалось проверить доступы GetCourse")
+        catalog = await _test_period_catalog()
+        current_ids = {str(item.get("group_id") or "") for item in access.get("current_groups") or []}
+        used_id = str(catalog["used"]["group_id"])
+        trial_ids = {str(item["group_id"]) for key, item in catalog.items() if key != "used"}
+        if used_id in current_ids:
+            result.update(status="used", can_issue=False, reason="Ученик уже использовал тестовый период")
+        elif current_ids & trial_ids:
+            result.update(status="active_external", can_issue=False, reason="Тестовый период уже активен в GetCourse")
+    return result
+
+
+async def _test_period_status(enrollment_id: str, *, live: bool) -> dict[str, Any]:
+    return await _test_period_status_for_identity(await _access_identity(enrollment_id), live=live)
+
+
+async def _create_test_period(
+    enrollment_id: str, *, days: int, courses: list[str], operator: dict[str, Any]
+) -> dict[str, Any]:
+    return await _create_test_period_for_identity(
+        await _access_identity(enrollment_id), enrollment_id=enrollment_id,
+        days=days, courses=courses, operator=operator,
+    )
+
+
+async def _create_test_period_for_identity(
+    identity: dict[str, Any], *, enrollment_id: str, days: int,
+    courses: list[str], operator: dict[str, Any], allow_repeat: bool = False,
+) -> dict[str, Any]:
+    normalized_courses = sorted({_clean(item, 20) for item in courses})
+    if not normalized_courses or any(item not in {"puppy", "dog"} for item in normalized_courses):
+        raise HTTPException(400, "Выберите Щенок, Собака или оба курса")
+    aliases = _test_period_aliases(identity)
+    if not aliases:
+        raise HTTPException(409, "У ученика нет GetCourse ID, email или телефона")
+    period_id = uuid.uuid4().hex
+    starts = datetime.now(timezone.utc).replace(microsecond=0)
+    starts_at = starts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (starts + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    operator_name = _clean(operator.get("display_name") or operator.get("login"), 200)
+    async with _connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        claimed_period_ids: set[str] = set()
+        for identity_type, identity_value in aliases:
+            claimed = await (
+                await db.execute(
+                    "SELECT test_period_id FROM test_period_identities WHERE identity_type=? AND identity_value=?",
+                    (identity_type, identity_value),
+                )
+            ).fetchone()
+            if claimed:
+                claimed_period_ids.add(_clean(claimed[0], 64))
+        if claimed_period_ids and not allow_repeat:
+            await db.rollback()
+            raise HTTPException(409, "Тестовый период уже выдавался этому ученику")
+        if allow_repeat and claimed_period_ids:
+            placeholders = ",".join("?" for _ in claimed_period_ids)
+            rows = await (await db.execute(
+                f"SELECT id,status FROM test_periods WHERE id IN ({placeholders})",
+                sorted(claimed_period_ids),
+            )).fetchall()
+            unfinished = [row for row in rows if _clean(row[1], 40) not in {"completed", "blocked_used"}]
+            if unfinished:
+                await db.rollback()
+                raise HTTPException(409, "Предыдущий тестовый период ещё выполняется или активен")
+        await db.execute(
+            """INSERT INTO test_periods(
+                id,enrollment_id,gc_user_id,email,phone_key,student_name,courses_json,group_ids_json,
+                status,starts_at,expires_at,next_attempt_at,operator_id,operator_name,created_at,updated_at,allow_repeat
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                period_id, _clean(enrollment_id, 100), _clean(identity.get("gc_user_id"), 100),
+                _clean(identity.get("email"), 320), _phone_search_key(identity.get("phone")),
+                _clean(identity.get("name"), 300), json.dumps(normalized_courses, ensure_ascii=False),
+                "[]", "queued_grant", starts_at, expires_at, starts_at,
+                int(operator.get("id") or 0), operator_name, starts_at, starts_at, int(allow_repeat),
+            ),
+        )
+        await db.executemany(
+            """INSERT INTO test_period_identities(identity_type,identity_value,test_period_id,created_at)
+               VALUES(?,?,?,?) ON CONFLICT(identity_type,identity_value) DO UPDATE SET
+               test_period_id=excluded.test_period_id,created_at=excluded.created_at""",
+            [(identity_type, identity_value, period_id, starts_at) for identity_type, identity_value in aliases],
+        )
+        await db.commit()
+    return _test_period_row_view(await _test_period_row(period_id=period_id))
+
+
+async def service_widget_test_period(
+    *, enrollment_id: str, action: str = "status", days: int = 1,
+    courses: list[str] | None = None, requester_user_id: str = "",
+) -> dict[str, Any]:
+    identity = await _access_identity(enrollment_id)
+    normalized_action = _clean(action, 20).lower()
+    if normalized_action == "status":
+        # Widget polling must stay cheap and must never block the employee on
+        # a live browser session. The durable worker performs the authoritative
+        # GetCourse/"already used" check before it grants anything.
+        return await _test_period_status_for_identity(identity, live=False)
+    if normalized_action == "revoke":
+        row = await _test_period_row(enrollment_id=enrollment_id)
+        if not row:
+            raise HTTPException(404, "Активный тестовый период не найден")
+        status = _clean(row.get("status"), 40)
+        if status in {"completed", "blocked_used"}:
+            return _test_period_row_view(row)
+        grant_request_id = _clean(row.get("grant_request_id"), 64)
+        if grant_request_id:
+            try:
+                cancel = _module("chat-moderators", "service_cancel_access_change")
+                await asyncio.to_thread(cancel.service_cancel_access_change, request_id=grant_request_id)
+            except Exception:
+                # Revocation remains durable even when cancellation races the grant.
+                pass
+        now = _now()
+        await _update_test_period(
+            row["id"], status="queued_revoke", expires_at=now,
+            next_attempt_at=now, last_error="Досрочное закрытие запрошено из виджета",
+        )
+        return _test_period_row_view(await _test_period_row(period_id=row["id"]))
+    if normalized_action not in {"create", "repeat"}:
+        raise HTTPException(400, "Неизвестное действие тестового периода")
+    if not 1 <= int(days) <= TEST_PERIOD_MAX_DAYS:
+        raise HTTPException(400, "Количество дней должно быть от 1 до 90")
+    requester = _clean(requester_user_id, 200) or "messenger"
+    return await _create_test_period_for_identity(
+        identity, enrollment_id=enrollment_id, days=int(days), courses=courses or [],
+        operator={"id": 0, "display_name": requester}, allow_repeat=normalized_action == "repeat",
+    )
+
+
+@router.get("/students/{enrollment_id}/test-period")
+async def student_test_period(enrollment_id: str, request: Request, live: str = "0"):
+    await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-test-period-read", limit=20, window_seconds=120)
+    try:
+        return await _test_period_status(enrollment_id, live=live == "1")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, _clean(exc, 1000)) from exc
+
+
+@router.post("/students/{enrollment_id}/test-period")
+async def create_student_test_period(enrollment_id: str, data: TestPeriodIn, request: Request):
+    operator = await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-test-period-create", limit=6, window_seconds=300)
+    return await _create_test_period(
+        enrollment_id, days=data.days, courses=data.courses, operator=operator
+    )
 
 
 @router.post("/students/{enrollment_id}/access/preview")

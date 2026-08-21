@@ -169,6 +169,57 @@ class IdentityGraphTests(unittest.TestCase):
             self.assertEqual(index.resolve(context)["status"], "conflict")
             self.assertEqual(index.platform_id_for_context("vk", context), "685881742")
 
+    def test_amocrm_phone_resolves_getcourse_user_from_linked_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                for table in ("cdb_getcourse_orders", "cdb_amo_deals"):
+                    db.execute(
+                        f"CREATE TABLE {table}(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)"
+                    )
+                db.execute(
+                    "INSERT INTO cdb_getcourse_orders VALUES(1,'882537162',?,?,?)",
+                    (json.dumps({"gc_user_id": "513517610", "phone": "+79213219438"}), "", "3"),
+                )
+                db.execute(
+                    "INSERT INTO cdb_amo_deals VALUES(1,'18278741',?,?,?)",
+                    (json.dumps({"phone": "+79213219438"}), "", "4"),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            self.assertEqual(index.build_if_changed(force=True)["status"], "rebuilt")
+            context = {
+                "platform": "amocrm", "entity_type": "lead", "entity_id": "18278741",
+                "phone": "+79213219438", "fields": {"phone": "+79213219438"},
+            }
+            self.assertEqual(index.platform_id_for_context("getcourse", context), "513517610")
+
+    def test_amocrm_getcourse_order_conflict_does_not_guess_user(self):
+        with tempfile.TemporaryDirectory() as temp:
+            customer_db = Path(temp) / "customer.db"
+            index_db = Path(temp) / "identity-index.db"
+            with sqlite3.connect(customer_db) as db:
+                for table in ("cdb_getcourse_orders", "cdb_amo_deals"):
+                    db.execute(
+                        f"CREATE TABLE {table}(id INTEGER PRIMARY KEY,platform_id TEXT,custom_fields TEXT,created_at TEXT,updated_at TEXT)"
+                    )
+                for row_id, order_id, user_id in ((1, "9001", "5001"), (2, "9002", "5002")):
+                    db.execute(
+                        "INSERT INTO cdb_getcourse_orders VALUES(?,?,?,?,?)",
+                        (row_id, order_id, json.dumps({"gc_user_id": user_id, "phone": "+79990001122"}), "", "3"),
+                    )
+                db.execute(
+                    "INSERT INTO cdb_amo_deals VALUES(1,'42',?,?,?)",
+                    (json.dumps({"phone": "+79990001122"}), "", "4"),
+                )
+                db.commit()
+            index = graph.IdentityIndex(customer_db, index_db)
+            self.assertEqual(index.build_if_changed(force=True)["status"], "rebuilt")
+            self.assertEqual(index.platform_id_for_context("getcourse", {
+                "platform": "amocrm", "entity_id": "42", "phone": "+79990001122",
+            }), "")
+
     def test_exact_card_provider_lookup_uses_bare_utm_without_merged_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             customer_db = Path(temp) / "customer.db"

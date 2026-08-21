@@ -442,7 +442,45 @@ class IdentityIndex:
                     f"SELECT DISTINCT platform_id FROM record_refs WHERE entity_id IN ({entity_placeholders}) AND service=? LIMIT 2",
                     (*entity_ids, target_service),
                 ).fetchall()
-                return clean(rows[0][0], 300) if len(rows) == 1 else ""
+                if len(rows) == 1:
+                    return clean(rows[0][0], 300)
+                if rows or target_service != "getcourse":
+                    return ""
+
+                # Customer DB can receive an order before (or without) the
+                # separate GetCourse user export.  The order still contains
+                # the authoritative gc_user_id.  Recover it only from order
+                # rows already attached to the exact matched identity, and
+                # only when all those rows agree on one user.  This keeps a
+                # duplicated phone/email from linking an amoCRM card to an
+                # arbitrary GetCourse profile.
+                order_ref_ids = [
+                    int(row[0])
+                    for row in index.execute(
+                        f"SELECT DISTINCT record_id FROM record_refs "
+                        f"WHERE entity_id IN ({entity_placeholders}) "
+                        "AND table_name='cdb_getcourse_orders' LIMIT 200",
+                        tuple(entity_ids),
+                    )
+                ]
+                if not order_ref_ids:
+                    return ""
+                with self._open_source() as source:
+                    if "cdb_getcourse_orders" not in self._tables(source):
+                        return ""
+                    order_placeholders = ",".join("?" for _ in order_ref_ids)
+                    user_ids = {
+                        numeric_id(value)
+                        for row in source.execute(
+                            f"SELECT custom_fields FROM cdb_getcourse_orders "
+                            f"WHERE id IN ({order_placeholders})",
+                            tuple(order_ref_ids),
+                        )
+                        for key, value in identity_scalars(parse_object(row[0]))
+                        if key.rsplit(".", 1)[-1] in {"gc_user_id", "getcourse_user_id", "user_id"}
+                    }
+                    user_ids.discard("")
+                    return next(iter(user_ids)) if len(user_ids) == 1 else ""
         except sqlite3.Error:
             return ""
 

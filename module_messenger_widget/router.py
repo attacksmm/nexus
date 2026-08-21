@@ -183,6 +183,9 @@ NOTIFY_TELEGRAM_USERNAME = "attackpng_notify_bot"
 # A short debounce produced several amoCRM tasks while a client was still
 # typing.  Keep one rolling five-minute batch per dialog instead.
 NOTIFY_BATCH_SECONDS = 5 * 60
+WIDGET_OPERATION_ACTIONS = (
+    "widget_getcourse_access", "widget_trial_issue", "widget_trial_revoke",
+)
 NOTIFY_PAIRING_TTL_MINUTES = 10
 NOTIFY_MAX_ATTEMPTS = 8
 NOTIFY_EVENT_RETENTION_DAYS = 30
@@ -219,6 +222,15 @@ _vk_queue_lock = asyncio.Lock()
 _vk_callback_config: dict[str, str] = {"key": "", "secret": "", "confirmation": ""}
 _identity_index: Any = None
 _identity_index_status: dict[str, Any] = {"status": "pending", "records": 0}
+_identity_lookup_loop: asyncio.AbstractEventLoop | None = None
+_identity_lookup_gate: asyncio.Semaphore | None = None
+_identity_resolve_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+_identity_resolve_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
+_identity_exact_cache: dict[tuple[str, ...], tuple[float, str]] = {}
+_identity_exact_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
+_identity_cache_owner: Any = None
+_profile_links_cache: dict[tuple[str, ...], tuple[float, list[dict[str, Any]], bool]] = {}
+_profile_links_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _staff_catalog_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
 _notification_wakeup = asyncio.Event()
 _outbound_wakeup = asyncio.Event()
@@ -383,6 +395,7 @@ async def setup(ctx) -> None:
                 outbound_delivery_loop(worker_id), name=f"messenger-widget-outbound-{worker_id}",
             )
         lifecycle.create_task(amo_task_delivery_loop(), name="messenger-widget-amo-tasks")
+        lifecycle.create_task(widget_operation_loop(), name="messenger-widget-operations")
 
 
 async def on_telegram_proxy_changed() -> dict[str, Any]:
@@ -596,6 +609,11 @@ async def _connect():
     db = await aiosqlite.connect(_must_db(), timeout=30)
     await db.execute("PRAGMA busy_timeout=30000")
     await db.execute("PRAGMA foreign_keys=ON")
+    # A widget request opens several short-lived read connections.  Keep each
+    # connection's private page cache deliberately small so a burst of cards
+    # cannot evict the Bizon browser or the OS file cache into swap.
+    await db.execute("PRAGMA cache_size=-512")
+    await db.execute("PRAGMA temp_store=FILE")
     db.row_factory = aiosqlite.Row
     return db
 
@@ -1261,6 +1279,248 @@ async def _audit(
         await db.commit()
     finally:
         await db.close()
+
+
+def _operation_payload(value: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _queue_widget_operation(
+    *, action: str, device: dict[str, Any], context: dict[str, Any],
+    enrollment_id: str, details: dict[str, Any],
+) -> int:
+    if action not in WIDGET_OPERATION_ACTIONS:
+        raise ValueError("unsupported widget operation")
+    payload = {
+        **details,
+        "enrollment_id": _clean(enrollment_id, 100),
+        "client_name": _clean(context.get("name"), 200),
+        "email": _clean(context.get("email"), 320),
+        "platform": _clean(context.get("platform"), 40),
+        "entity_type": _clean(context.get("entity_type"), 40),
+        "entity_id": _clean(context.get("entity_id"), 100),
+        "entity_url": _clean(context.get("entity_url"), 1000),
+        "manager_name": _clean(device.get("admin_name"), 200),
+        "attempts": 0,
+        "note_status": "pending" if (
+            context.get("platform") == "amocrm"
+            and context.get("entity_type") == "lead"
+            and _clean(context.get("entity_id"), 64).isdigit()
+        ) else "skipped",
+    }
+    now = _iso()
+    db = await _connect()
+    try:
+        cursor = await db.execute(
+            """INSERT INTO events(
+               admin_id,device_id,action,status,page_kind,entity_id,phone_mask,error,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                int(device["admin_id"]), int(device["id"]), action, "pending",
+                _clean(context.get("platform"), 20), _clean(enrollment_id, 100),
+                _mask_phone(context.get("phone")),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:8000], now,
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid or 0)
+    finally:
+        await db.close()
+
+
+def _schedule_widget_operation(**kwargs: Any) -> None:
+    async def persist() -> None:
+        for attempt in range(120):
+            try:
+                await _queue_widget_operation(**kwargs)
+                return
+            except asyncio.CancelledError:
+                raise
+            except (sqlite3.Error, OSError) as exc:
+                if attempt == 119:
+                    _log("error", "Widget operation journal write failed: %s", exc)
+                    return
+                await asyncio.sleep(min(5, 0.1 * (attempt + 1)))
+            except Exception as exc:
+                _log("error", "Widget operation journal rejected: %s", exc)
+                return
+
+    if _module_lifecycle is not None:
+        _module_lifecycle.create_task(persist(), name="messenger-widget-operation-journal")
+    else:
+        asyncio.create_task(persist())
+
+
+async def _update_widget_operation(event_id: int, status: str, details: dict[str, Any]) -> None:
+    db = await _connect()
+    try:
+        await db.execute(
+            "UPDATE events SET status=?,error=? WHERE id=?",
+            (
+                _clean(status, 40),
+                json.dumps(details, ensure_ascii=False, separators=(",", ":"))[:8000],
+                int(event_id),
+            ),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+def _operation_title(action: str) -> str:
+    return {
+        "widget_getcourse_access": "Доступы GetCourse",
+        "widget_trial_issue": "Тестовый период",
+        "widget_trial_revoke": "Досрочное закрытие тестового периода",
+    }.get(action, "Операция Nexus")
+
+
+def _friendly_operation_error(value: Any, provider: Any = "") -> str:
+    """Translate transport diagnostics into a short instruction for sales staff."""
+
+    raw = _clean(value, 2000)
+    if not raw:
+        return "Сообщение не доставлено."
+    text = raw.casefold()
+    if any(marker in text for marker in ("429", "too many", "rate limit", "flood", "слишком много")):
+        return "Канал ограничил частоту отправки. Nexus повторит автоматически."
+    if any(marker in text for marker in ("401", "unauthorized", "token", "auth", "авторизац")):
+        return "Канал нужно переподключить в настройках Nexus."
+    if any(marker in text for marker in ("403", "forbidden", "blocked", "bot was blocked", "заблок", "запрет")):
+        return "Клиент запретил сообщения в этом канале."
+    if any(marker in text for marker in ("404", "not found", "recipient", "peer", "chat not", "пользователь не найден", "получатель")):
+        return "Профиль клиента в канале не найден."
+    if any(marker in text for marker in (
+        "timeout", "timed out", "time out", "502", "503", "504", "connection", "network",
+        "temporar", "unavailable", "не ответ", "недоступ", "соединен",
+    )):
+        return "Канал временно не ответил. Nexus попробует ещё раз."
+    if any(marker in text for marker in ("400", "bad request", "invalid", "некоррект", "отклонил")):
+        return "Канал отклонил сообщение. Проверьте адресата и текст."
+    label = _clean(provider, 40).replace("telegram_personal", "TG Personal").replace("salebot", "SaleBot")
+    return f"{label or 'Канал'} не доставил сообщение. Nexus сохранил ошибку для проверки."
+
+
+def _operation_note_text(action: str, status: str, details: dict[str, Any]) -> str:
+    courses = details.get("courses") if isinstance(details.get("courses"), list) else []
+    course_names = {"puppy": "Щенок", "dog": "Собака"}
+    lines = [
+        f"Nexus · {_operation_title(action)}",
+        f"Результат: {_clean(details.get('result'), 1000) or ('выполнено' if status == 'success' else 'ошибка')}",
+    ]
+    if courses:
+        lines.append("Курсы: " + ", ".join(course_names.get(str(item), str(item)) for item in courses))
+    if details.get("days"):
+        lines.append(f"Срок: {int(details['days'])} дн.")
+    if details.get("expires_at"):
+        lines.append(f"Доступ закроется: {_clean(details['expires_at'], 60)}")
+    if details.get("manager_name"):
+        lines.append(f"Выполнил: {_clean(details['manager_name'], 200)}")
+    lines.append(f"Время: {_clean(details.get('completed_at') or _iso(), 60)}")
+    return "\n".join(lines)
+
+
+async def _send_amo_operation_note(lead_id: str, text: str) -> None:
+    values = _read_env_values()
+    base_url = _clean(os.environ.get("AMO_BASE_URL") or values.get("AMO_BASE_URL"), 1000).rstrip("/")
+    token = _clean(os.environ.get("AMO_ACCESS_TOKEN") or values.get("AMO_ACCESS_TOKEN"), 5000)
+    if not base_url or not token:
+        raise AmoTaskDeliveryError("AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы")
+    if not _clean(lead_id, 64).isdigit():
+        raise AmoTaskDeliveryError("Некорректный ID сделки amoCRM", permanent=True)
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        await _amo_task_api_request(
+            client, "POST", f"{base_url}/api/v4/leads/{lead_id}/notes", token,
+            payload=[{"note_type": "common", "params": {"text": _clean(text, 10000)}}],
+        )
+
+
+async def _check_widget_operation(row: dict[str, Any]) -> None:
+    details = _operation_payload(row.get("error"))
+    action = _clean(row.get("action"), 80)
+    status = _clean(row.get("status"), 40)
+    if status == "pending":
+        attempts = int(details.get("attempts") or 0) + 1
+        details["attempts"] = attempts
+        try:
+            if action == "widget_getcourse_access":
+                service = _module_service("student-transfer", "service_widget_access_operation")
+                operation = await service(request_id=_clean(details.get("request_id"), 64))
+                state = _clean(operation.get("status"), 30)
+                if state == "verified":
+                    status, details["result"] = "success", "Доступы применены и подтверждены GetCourse."
+                elif state == "failed" or (state == "missing" and attempts >= 120):
+                    status, details["result"] = "failed", "GetCourse не подтвердил изменение доступов."
+            else:
+                service = _module_service("student-transfer", "service_widget_test_period")
+                trial = await service(
+                    enrollment_id=_clean(details.get("enrollment_id"), 100), action="status",
+                    requester_user_id="messenger-operation-worker",
+                )
+                trial_status = _clean(trial.get("status"), 40)
+                details["expires_at"] = _clean(trial.get("expires_at"), 60) or details.get("expires_at", "")
+                if action == "widget_trial_issue" and trial_status == "active":
+                    status, details["result"] = "success", "Тестовый период выдан."
+                elif action == "widget_trial_revoke" and trial_status in {"completed", "blocked_used"}:
+                    status, details["result"] = "success", "Тестовый доступ закрыт."
+                elif trial_status == "blocked_used":
+                    status, details["result"] = "failed", "Тестовый период уже использовался."
+                elif action == "widget_trial_issue" and trial_status == "completed":
+                    status, details["result"] = "success", "Тестовый период выдан и уже завершён."
+            if status != "pending":
+                details["completed_at"] = _iso()
+        except Exception as exc:
+            details["last_error"] = _clean(exc, 500)
+        await _update_widget_operation(int(row["id"]), status, details)
+
+    if status in {"success", "failed"} and details.get("note_status") == "pending":
+        next_at = _parse_iso(details.get("note_next_at"))
+        if next_at and next_at > _now_dt():
+            return
+        try:
+            await _send_amo_operation_note(
+                _clean(details.get("entity_id"), 64),
+                _operation_note_text(action, status, details),
+            )
+            details["note_status"] = "sent"
+            details.pop("note_error", None)
+            details.pop("note_next_at", None)
+        except Exception as exc:
+            note_attempts = int(details.get("note_attempts") or 0) + 1
+            details["note_attempts"] = note_attempts
+            details["note_error"] = _clean(exc, 500)
+            details["note_next_at"] = _iso(_now_dt() + timedelta(seconds=min(3600, 15 * 2 ** min(note_attempts, 8))))
+        await _update_widget_operation(int(row["id"]), status, details)
+
+
+async def widget_operation_loop() -> None:
+    await asyncio.sleep(2)
+    while True:
+        try:
+            cutoff = _iso(_now_dt() - timedelta(days=AUDIT_RETENTION_DAYS))
+            placeholders = ",".join("?" for _ in WIDGET_OPERATION_ACTIONS)
+            db = await _connect()
+            try:
+                rows = await (await db.execute(
+                    f"""SELECT * FROM events
+                        WHERE action IN ({placeholders}) AND created_at>=?
+                          AND (status='pending' OR error LIKE '%\"note_status\":\"pending\"%')
+                        ORDER BY id LIMIT 12""",
+                    (*WIDGET_OPERATION_ACTIONS, cutoff),
+                )).fetchall()
+            finally:
+                await db.close()
+            for row in rows:
+                await _check_widget_operation(dict(row))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("error", "Messenger operation worker failed: %s", exc)
+        await asyncio.sleep(5)
 
 
 async def _require_admin(request: Request) -> dict[str, Any]:
@@ -1945,6 +2205,7 @@ async def _enqueue_notification_message(
     phone_hash: str = "", provider: str = "", client_name: str = "",
     text: str = "", content_type: str = "", sent_at: str = "",
     course_context: dict[str, Any] | None = None,
+    delay_seconds: int | None = None,
 ) -> bool:
     source = _notification_source(channel_id, chat_type, provider)
     external_id = _clean(external_id, 250)
@@ -1960,7 +2221,8 @@ async def _enqueue_notification_message(
     if live_since and sent_at < live_since:
         return False
     now = _iso()
-    available_at = _iso(_now_dt() + timedelta(seconds=NOTIFY_BATCH_SECONDS))
+    delay = NOTIFY_BATCH_SECONDS if delay_seconds is None else max(0, min(int(delay_seconds), NOTIFY_BATCH_SECONDS))
+    available_at = _iso(_now_dt() + timedelta(seconds=delay))
     thread_key = f"{source}:{_clean(channel_id, 200)}:{chat_id}"
     course_context = course_context if isinstance(course_context, dict) and course_context.get("found") else {}
     direct_target = await _course_chat_target(course_context) if course_context else None
@@ -1975,6 +2237,10 @@ async def _enqueue_notification_message(
             },
             source, chat_id, direct_target,
         )
+    else:
+        # Backfill legacy conversations before choosing the current amoCRM
+        # owner and before rendering the manager notification.
+        await _notification_context(source, chat_id)
     current_amo_owner = None if direct_target else await _current_amo_notification_owner(source, chat_id)
     db = await _connect()
     inserted = False
@@ -2063,7 +2329,23 @@ async def _notification_context(source: str, chat_id: str) -> dict[str, str]:
         )).fetchone()
     finally:
         await db.close()
-    return dict(row) if row else {}
+    context = dict(row) if row else {}
+    if (
+        _clean(context.get("platform"), 40) != "course_chat"
+        and not (
+            _clean(context.get("platform"), 40) == "amocrm"
+            and _clean(context.get("entity_type"), 40) == "lead"
+            and _clean(context.get("entity_id"), 64)
+        )
+    ):
+        recovered = await _identity_amo_notification_context(source, chat_id)
+        if recovered:
+            await _remember_notification_context(
+                recovered, source, chat_id,
+                int(context.get("admin_id") or 0) or None,
+            )
+            context.update(recovered)
+    return context
 
 
 async def _notification_admin_name(admin_id: Any) -> str:
@@ -2538,6 +2820,51 @@ def _amo_deal_delivery_details(lead_id: str) -> dict[str, str]:
         "responsible_user_id": _clean(amo.get("responsible_user_id") or payload.get("responsible_user_id"), 64),
         "client_name": _clean(contact.get("name") or payload.get("deal_name"), 200),
         "entity_url": _clean(payload.get("deal_url"), 1000),
+    }
+
+
+async def _identity_amo_notification_context(source: str, chat_id: str) -> dict[str, str]:
+    """Recover an exact amoCRM deal from the durable cross-channel graph.
+
+    Old messenger conversations were created before conversation_contexts was
+    populated. The identity graph still has their exact VK/Telegram/SaleBot to
+    amo deal edge, so use it as a safe fallback instead of omitting the deal.
+    A conflicted graph deliberately returns no accounts and therefore no link.
+    """
+    if _identity_index is None:
+        return {}
+    clean_source = _clean(source, 40).lower()
+    clean_chat_id = _clean(chat_id, 250)
+    if clean_source not in NOTIFY_SOURCES or not clean_chat_id:
+        return {}
+    try:
+        resolved = await _resolve_identity_context({
+            "service": clean_source,
+            "platform": clean_source,
+            "entity_type": "contact",
+            "entity_id": clean_chat_id,
+            "platform_id": clean_chat_id,
+            "fields": {"platform_id": clean_chat_id},
+        })
+    except Exception as exc:
+        _log("warning", "amoCRM notification context recovery skipped: %s", exc)
+        return {}
+    accounts = resolved.get("accounts") if isinstance(resolved, dict) else []
+    lead_id = next((
+        re.sub(r"\D+", "", _clean(row.get("platform_id"), 100))
+        for row in accounts or []
+        if isinstance(row, dict) and _clean(row.get("service"), 40).lower() in {"amo", "amocrm"}
+        and re.sub(r"\D+", "", _clean(row.get("platform_id"), 100))
+    ), "")
+    if not lead_id:
+        return {}
+    details = await asyncio.to_thread(_amo_deal_delivery_details, lead_id)
+    entity_url = _clean(details.get("entity_url"), 2000)
+    if not entity_url and _amo_origin():
+        entity_url = f"{_amo_origin()}/leads/detail/{lead_id}"
+    return {
+        "platform": "amocrm", "entity_type": "lead",
+        "entity_id": lead_id, "entity_url": entity_url,
     }
 
 
@@ -5323,6 +5650,7 @@ def _widget_context(data: dict[str, Any], mode: str, device: dict[str, Any]) -> 
         "phone": _normalize_phone(data.get("phone")),
         "email": _clean(data.get("email"), 320),
         "manager_name": _clean(device.get("admin_name"), 200),
+        "entity_url": _clean(data.get("source_url"), 1000),
         "fields": fields,
     }
 
@@ -5445,12 +5773,126 @@ async def _apply_identity_rules(context: dict[str, Any]) -> None:
         fields.setdefault(target, value)
 
 
-async def _resolve_widget_context(data: dict[str, Any], mode: str, device: dict[str, Any]) -> dict[str, Any]:
-    context = _widget_context(data, mode, device)
-    await _apply_identity_rules(context)
+def _identity_context_key(context: dict[str, Any]) -> tuple[str, ...]:
+    fields = context.get("fields") if isinstance(context.get("fields"), dict) else {}
+    def identity_value(*names: str) -> str:
+        return next((
+            _clean(context.get(name) or fields.get(name), 1000)
+            for name in names
+            if _clean(context.get(name) or fields.get(name), 1000)
+        ), "")
+    return (
+        _clean(context.get("platform"), 40),
+        _clean(context.get("entity_type"), 40),
+        _clean(context.get("entity_id"), 200),
+        _normalize_phone(context.get("phone")),
+        _clean(context.get("email"), 320).casefold(),
+        identity_value("getcourse_user_id", "gc_user_id"),
+        identity_value("vk_platform_id", "vk_id", "vkontakte_id", "senler_id"),
+        identity_value("telegram_id", "tg_id"),
+        identity_value("salebot_id", "salebot_client_id", "sb_id"),
+        identity_value("utm_term"),
+    )
+
+
+def _ensure_identity_cache_owner() -> None:
+    global _identity_cache_owner
+    if _identity_cache_owner is _identity_index:
+        return
+    _identity_cache_owner = _identity_index
+    _identity_resolve_cache.clear()
+    _identity_resolve_inflight.clear()
+    _identity_exact_cache.clear()
+    _identity_exact_inflight.clear()
+
+
+async def _run_identity_lookup(function: Any, *args: Any) -> Any:
+    """Bound random reads of the large identity databases.
+
+    The default asyncio executor may otherwise start dozens of simultaneous
+    SQLite readers when several amoCRM cards retry together.  On the small
+    production host that turns ordinary indexed reads into swap/I/O thrash.
+    """
+    global _identity_lookup_loop, _identity_lookup_gate
+    loop = asyncio.get_running_loop()
+    if _identity_lookup_loop is not loop or _identity_lookup_gate is None:
+        _identity_lookup_loop = loop
+        _identity_lookup_gate = asyncio.Semaphore(2)
+    async with _identity_lookup_gate:
+        return await asyncio.to_thread(function, *args)
+
+
+async def _resolve_identity_context(context: dict[str, Any]) -> dict[str, Any]:
     if _identity_index is None:
         return {"status": "unavailable", "accounts": [], "variables": build_context_variables([], context), "conflicts": []}
-    return await asyncio.to_thread(_identity_index.resolve, context)
+    _ensure_identity_cache_owner()
+    key = _identity_context_key(context)
+    now = time.monotonic()
+    cached = _identity_resolve_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    task = _identity_resolve_inflight.get(key)
+    if task is None:
+        task = asyncio.create_task(_run_identity_lookup(_identity_index.resolve, context))
+        _identity_resolve_inflight[key] = task
+    try:
+        result = await asyncio.shield(task)
+        _identity_resolve_cache[key] = (time.monotonic() + 30, result)
+        if len(_identity_resolve_cache) > 256:
+            oldest = min(_identity_resolve_cache, key=lambda item: _identity_resolve_cache[item][0])
+            _identity_resolve_cache.pop(oldest, None)
+        return result
+    finally:
+        if task.done() and _identity_resolve_inflight.get(key) is task:
+            _identity_resolve_inflight.pop(key, None)
+
+
+async def _exact_provider_identity(provider: str, context: dict[str, Any]) -> str:
+    if _identity_index is None:
+        return ""
+    _ensure_identity_cache_owner()
+    key = (provider, *_identity_context_key(context))
+    now = time.monotonic()
+    cached = _identity_exact_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+    task = _identity_exact_inflight.get(key)
+    if task is None:
+        task = asyncio.create_task(_run_identity_lookup(
+            _identity_index.provider_id_for_exact_context, provider, context,
+        ))
+        _identity_exact_inflight[key] = task
+    try:
+        value = _clean(await asyncio.shield(task), 300)
+        _identity_exact_cache[key] = (time.monotonic() + 30, value)
+        if len(_identity_exact_cache) > 512:
+            oldest = min(_identity_exact_cache, key=lambda item: _identity_exact_cache[item][0])
+            _identity_exact_cache.pop(oldest, None)
+        return value
+    finally:
+        if task.done() and _identity_exact_inflight.get(key) is task:
+            _identity_exact_inflight.pop(key, None)
+
+
+async def _resolve_widget_context(
+    data: dict[str, Any], mode: str, device: dict[str, Any], *, context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if context is None:
+        context = _widget_context(data, mode, device)
+        await _apply_identity_rules(context)
+    return await _resolve_identity_context(context)
+
+
+def _resolved_variable(resolved: dict[str, Any], *keys: str) -> str:
+    variables = resolved.get("variables") if isinstance(resolved, dict) else {}
+    if not isinstance(variables, dict):
+        return ""
+    for key in keys:
+        item = variables.get(key)
+        value = item.get("value") if isinstance(item, dict) else item
+        if _clean(value, 1000):
+            return _clean(value, 1000)
+    return ""
 
 
 PROFILE_LINK_LABELS = {
@@ -5588,6 +6030,15 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
     resolved = await _resolve_widget_context(data, mode, device)
+    context["email"] = context.get("email") or _resolved_variable(
+        resolved, "contact.email", "getcourse.order.email", "getcourse.user.email",
+    )
+    context["phone"] = context.get("phone") or _resolved_variable(
+        resolved, "contact.phone", "getcourse.order.phone", "getcourse.user.phone",
+    )
+    context["name"] = context.get("name") or _resolved_variable(
+        resolved, "contact.name", "getcourse.order.name", "getcourse.user.name",
+    )
     found = _profile_links_from_values([context, resolved.get("variables", {})])
     accounts = [row for row in resolved.get("accounts", []) if isinstance(row, dict)]
     exact_ids: dict[str, str] = {}
@@ -5603,7 +6054,7 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         found.pop(SALEBOT_PROVIDER, None)
         found.pop(TELEGRAM_PROVIDER, None)
         vk_exact, salebot_exact = await asyncio.gather(*(
-            asyncio.to_thread(_identity_index.provider_id_for_exact_context, provider, context)
+            _exact_provider_identity(provider, context)
             for provider in ("vk", SALEBOT_PROVIDER)
         ))
         exact_ids = {
@@ -5620,10 +6071,10 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         gc_id = re.sub(r"\D+", "", _clean(context.get("entity_id"), 100))
     if not gc_id:
         gc_id = re.sub(r"\D+", "", _identity_field_value(context, "getcourse_user_id", "gc_user_id", "user_id"))
-    if not gc_id and _identity_index is not None and context.get("phone"):
+    if not gc_id and _identity_index is not None and (context.get("phone") or context.get("email")):
         resolver = getattr(_identity_index, "platform_id_for_context", None)
         if callable(resolver):
-            gc_id = re.sub(r"\D+", "", await asyncio.to_thread(resolver, "getcourse", context))
+            gc_id = re.sub(r"\D+", "", await _run_identity_lookup(resolver, "getcourse", context))
     if gc_id:
         found["getcourse"] = f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
 
@@ -5680,9 +6131,7 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     # a verified SaleBot id in Customer DB even before an entity link has been
     # persisted by the channel request.
     if SALEBOT_PROVIDER not in account_ids and _identity_index is not None:
-        exact_salebot_id = await asyncio.to_thread(
-            _identity_index.provider_id_for_exact_context, SALEBOT_PROVIDER, context,
-        )
+        exact_salebot_id = await _exact_provider_identity(SALEBOT_PROVIDER, context)
         if exact_salebot_id:
             account_ids[SALEBOT_PROVIDER] = exact_salebot_id
 
@@ -5723,7 +6172,9 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         telegram_id = telegram_id or _identity_field_value(context, "telegram_id", "tg_id")
         telegram_username = _identity_field_value(context, "telegram_username", "tg_username").lstrip("@")
     if not telegram_username and telegram_id and _identity_index is not None:
-        telegram_username = await asyncio.to_thread(_identity_index.telegram_username_for_platform_id, telegram_id)
+        telegram_username = await _run_identity_lookup(
+            _identity_index.telegram_username_for_platform_id, telegram_id,
+        )
     telegram_profile_url = _telegram_profile_url(
         telegram_username,
         context.get("phone") if telegram_id else "",
@@ -5761,10 +6212,11 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         service = _module_service("student-transfer", "service_widget_student")
         stream_card = await service(
             gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
+            name=context.get("name") or "",
             include_access=False, summary_only=True,
         )
         paid_access = bool(stream_card.get("found") and stream_card.get("paid_access"))
-        if paid_access:
+        if stream_card.get("found"):
             stream_gc_id = re.sub(r"\D+", "", _clean(stream_card.get("gc_user_id"), 100))
             stream_url = _clean(stream_card.get("profile_url"), 2000)
             if stream_gc_id:
@@ -5791,6 +6243,175 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     return links
 
 
+async def _quick_widget_profile_links(
+    data: dict[str, Any], mode: str, device: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return profile buttons proved by card fields or local delivery history.
+
+    This path intentionally avoids live provider and GetCourse requests.  It
+    gives the widget useful buttons while the complete enrichment continues
+    in the background.
+    """
+
+    context = _widget_context(data, mode, device)
+    try:
+        await asyncio.wait_for(_apply_identity_rules(context), timeout=0.2)
+    except (TimeoutError, RuntimeError, aiosqlite.Error):
+        pass
+    found = _profile_links_from_values([context])
+    if context.get("platform") == "amocrm":
+        # A copied SaleBot/TG URL in an amoCRM field is not proof that this
+        # exact lead owns the profile.  Keep the same strict rule as the full
+        # resolver.
+        found.pop(SALEBOT_PROVIDER, None)
+        found.pop(TELEGRAM_PROVIDER, None)
+
+    gc_id = re.sub(
+        r"\D+", "",
+        _identity_field_value(context, "getcourse_user_id", "gc_user_id", "user_id"),
+    )
+    if context.get("platform") == "getcourse" and context.get("entity_type") in {"user", "contact"}:
+        gc_id = gc_id or re.sub(r"\D+", "", _clean(context.get("entity_id"), 100))
+    if gc_id:
+        found["getcourse"] = f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
+
+    lookups = [
+        _exact_provider_identity("vk", context),
+        _exact_provider_identity(SALEBOT_PROVIDER, context),
+        *(
+            _entity_external_link(context["platform"], context["entity_type"], context["entity_id"], provider)
+            for provider in ("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER)
+        ),
+        _successful_card_delivery_link(context, TELEGRAM_PROVIDER),
+    ]
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*lookups, return_exceptions=True), timeout=0.45,
+        )
+    except TimeoutError:
+        results = []
+
+    vk_exact = _clean(results[0], 300) if len(results) > 0 and not isinstance(results[0], Exception) else ""
+    salebot_exact = _clean(results[1], 300) if len(results) > 1 and not isinstance(results[1], Exception) else ""
+    entity_links = [
+        results[index] if len(results) > index and isinstance(results[index], dict) else {}
+        for index in range(2, 5)
+    ]
+    telegram_delivery = results[5] if len(results) > 5 and isinstance(results[5], dict) else {}
+    names: dict[str, str] = {}
+
+    vk_value = vk_exact or (
+        _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id")
+        if context.get("platform") != "amocrm" else ""
+    )
+    vk_id = re.sub(r"\D+", "", vk_value)
+    if vk_id:
+        found.setdefault("vk", f"https://vk.com/id{vk_id}")
+
+    for provider, link in zip(("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER), entity_links):
+        external_id = _clean(link.get("external_user_id"), 300)
+        accepted = context.get("platform") != "amocrm"
+        if context.get("platform") == "amocrm":
+            accepted = (
+                (provider == "vk" and bool(vk_exact) and external_id == vk_exact)
+                or (provider == SALEBOT_PROVIDER and bool(salebot_exact) and external_id == salebot_exact)
+                or (provider == TELEGRAM_PROVIDER and _card_link_matches_context(link, context, gc_id))
+            )
+        if accepted and external_id:
+            names[provider] = _clean(link.get("name"), 200)
+            if provider == "vk":
+                found.setdefault("vk", f"https://vk.com/id{re.sub(r'\D+', '', external_id)}")
+            elif provider == SALEBOT_PROVIDER:
+                found.setdefault(provider, f"{SALEBOT_PROFILE_BASE}/{quote(external_id, safe='')}")
+
+    if salebot_exact:
+        found.setdefault(SALEBOT_PROVIDER, f"{SALEBOT_PROFILE_BASE}/{quote(salebot_exact, safe='')}")
+
+    telegram_id = _clean(telegram_delivery.get("external_user_id"), 300)
+    if telegram_id:
+        names[TELEGRAM_PROVIDER] = _clean(telegram_delivery.get("name"), 200)
+        telegram_url = _telegram_profile_url(
+            telegram_delivery.get("username"), context.get("phone"),
+        )
+        if telegram_url:
+            found[TELEGRAM_PROVIDER] = telegram_url
+
+    return [
+        {
+            "kind": kind,
+            "label": f"{PROFILE_LINK_LABELS[kind]}: {names[kind]}" if names.get(kind) else PROFILE_LINK_LABELS[kind],
+            "url": found[kind],
+            **({"verification": "verified"} if kind == TELEGRAM_PROVIDER else {}),
+        }
+        for kind in PROFILE_LINK_ORDER
+        if found.get(kind)
+    ]
+
+
+async def _cached_widget_profile_links(
+    data: dict[str, Any], mode: str, device: dict[str, Any], *, foreground_seconds: float = 1.2,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return profile buttons quickly while one card lookup continues in background."""
+    context = _widget_context(data, mode, device)
+    key = (*_identity_context_key(context), str(int(device.get("id") or 0)))
+    now = time.monotonic()
+    cached = _profile_links_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1], cached[2]
+
+    try:
+        quick_links = await asyncio.wait_for(
+            _quick_widget_profile_links(data, mode, device), timeout=0.7,
+        )
+    except (TimeoutError, RuntimeError, aiosqlite.Error):
+        quick_links = cached[1] if cached else []
+
+    task = _profile_links_inflight.get(key)
+    if task is None:
+        async def resolve() -> tuple[list[dict[str, Any]], bool]:
+            pending = False
+            ttl = 20
+            try:
+                links = await asyncio.wait_for(
+                    _widget_profile_links(data, mode, device), timeout=20,
+                )
+            except (TimeoutError, RuntimeError, aiosqlite.Error) as exc:
+                _log("warning", "Profile enrichment deferred: %s", exc)
+                links, pending, ttl = quick_links, True, 5
+            except Exception as exc:
+                _log("warning", "Profile enrichment failed and will retry: %s", exc)
+                links, pending, ttl = quick_links, True, 5
+            _profile_links_cache[key] = (time.monotonic() + ttl, links, pending)
+            if len(_profile_links_cache) > 256:
+                oldest = min(_profile_links_cache, key=lambda item: _profile_links_cache[item][0])
+                _profile_links_cache.pop(oldest, None)
+            return links, pending
+
+        coroutine = resolve()
+        task = (
+            _module_lifecycle.create_task(coroutine, name="messenger-widget-profile-links")
+            if _module_lifecycle is not None
+            else asyncio.create_task(coroutine)
+        )
+        _profile_links_inflight[key] = task
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            if _profile_links_inflight.get(key) is done:
+                _profile_links_inflight.pop(key, None)
+
+        task.add_done_callback(finished)
+
+    try:
+        if quick_links:
+            return quick_links, True
+        links, pending = await asyncio.wait_for(
+            asyncio.shield(task), timeout=max(0.05, float(foreground_seconds)),
+        )
+        return links, pending
+    except TimeoutError:
+        return quick_links, True
+
+
 def _module_service(module_id: str, service: str):
     module = sys.modules.get(f"_nexus_mod_{module_id}")
     if module is None or not hasattr(module, service):
@@ -5804,18 +6425,32 @@ async def _widget_getcourse_card_data(
 ) -> dict[str, Any]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
+    if _identity_index is None:
+        resolved = {"variables": {}}
+    else:
+        resolved = await _resolve_identity_context(context)
+    context["email"] = context.get("email") or _resolved_variable(
+        resolved, "contact.email", "getcourse.order.email", "getcourse.user.email",
+    )
+    context["phone"] = context.get("phone") or _resolved_variable(
+        resolved, "contact.phone", "getcourse.order.phone", "getcourse.user.phone",
+    )
+    context["name"] = context.get("name") or _resolved_variable(
+        resolved, "contact.name", "getcourse.order.name", "getcourse.user.name",
+    )
     gc_id = ""
     if context.get("platform") == "getcourse" and context.get("entity_type") in {"user", "contact"}:
         gc_id = re.sub(r"\D+", "", _clean(context.get("entity_id"), 100))
     if not gc_id:
         gc_id = re.sub(r"\D+", "", _identity_field_value(context, "getcourse_user_id", "gc_user_id", "user_id"))
-    if not gc_id and _identity_index is not None and context.get("phone"):
+    if not gc_id and _identity_index is not None and (context.get("phone") or context.get("email")):
         resolver = getattr(_identity_index, "platform_id_for_context", None)
         if callable(resolver):
-            gc_id = re.sub(r"\D+", "", await asyncio.to_thread(resolver, "getcourse", context))
+            gc_id = re.sub(r"\D+", "", await _run_identity_lookup(resolver, "getcourse", context))
     service = _module_service("student-transfer", "service_widget_student")
     return await service(
         gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
+        name=context.get("name") or "",
         include_access=include_access, summary_only=summary_only,
     )
 
@@ -5842,20 +6477,18 @@ async def service_transfer_recipients(
         },
     }
     telegram, vk, salebot = await asyncio.gather(*(
-        asyncio.to_thread(_identity_index.provider_id_for_exact_context, service, context)
+        _exact_provider_identity(service, context)
         for service in ("telegram", "vk", SALEBOT_PROVIDER)
     ))
     if not telegram:
-        telegram = await asyncio.to_thread(_identity_index.platform_id_for_context, "telegram", context)
+        telegram = await _run_identity_lookup(_identity_index.platform_id_for_context, "telegram", context)
     if not salebot:
         # SaleBot has no standalone Customer DB table, therefore it can only
         # be recovered from the exact GetCourse order fields (usually
         # utm_term) and their linked Telegram record.
-        salebot = await asyncio.to_thread(
-            _identity_index.provider_id_for_exact_context, SALEBOT_PROVIDER, context,
-        )
-    telegram_username = await asyncio.to_thread(
-        _identity_index.telegram_username_for_platform_id, telegram
+        salebot = await _exact_provider_identity(SALEBOT_PROVIDER, context)
+    telegram_username = await _run_identity_lookup(
+        _identity_index.telegram_username_for_platform_id, telegram,
     ) if telegram else ""
     return {
         "ok": bool(telegram or vk or salebot),
@@ -5890,14 +6523,14 @@ async def service_transfer_delivery_target(
     kind, candidate = parsed[0]
     targets: list[tuple[str, str]] = []
     if kind == "vk_platform":
-        verified = await asyncio.to_thread(_identity_index.provider_id_for_exact_context, "vk", context)
+        verified = await _exact_provider_identity("vk", context)
         targets = [("vk", candidate)] if verified == candidate else []
     elif kind == "salebot":
-        verified = await asyncio.to_thread(_identity_index.provider_id_for_exact_context, SALEBOT_PROVIDER, context)
+        verified = await _exact_provider_identity(SALEBOT_PROVIDER, context)
         targets = [(SALEBOT_PROVIDER, candidate)] if verified == candidate else []
     elif kind == "candidate":
         vk, salebot = await asyncio.gather(*(
-            asyncio.to_thread(_identity_index.provider_id_for_exact_context, provider, context)
+            _exact_provider_identity(provider, context)
             for provider in ("vk", SALEBOT_PROVIDER)
         ))
         targets = [(provider, value) for provider, value in (("vk", vk), (SALEBOT_PROVIDER, salebot)) if value == candidate]
@@ -5911,9 +6544,7 @@ async def service_transfer_delivery_target(
                     **context,
                     "fields": {**context["fields"], "vk_platform_id": resolved_vk},
                 }
-                verified_vk = await asyncio.to_thread(
-                    _identity_index.provider_id_for_exact_context, "vk", resolved_context
-                )
+                verified_vk = await _exact_provider_identity("vk", resolved_context)
                 if verified_vk == resolved_vk:
                     targets = [("vk", resolved_vk)]
     if len(targets) != 1:
@@ -5949,7 +6580,9 @@ async def service_resolve_onboarding_telegram_target(*, utm_term: str) -> dict[s
             "matches": [],
             "error": "identity index unavailable",
         }
-    return await asyncio.to_thread(_identity_index.telegram_target_for_utm_term, _clean(utm_term, 1000))
+    return await _run_identity_lookup(
+        _identity_index.telegram_target_for_utm_term, _clean(utm_term, 1000),
+    )
 
 
 async def service_resolve_onboarding_target(
@@ -6290,7 +6923,7 @@ async def service_streams_template_preview(
         raise ValueError("Текст не указан")
     context = _streams_context(email=email, gc_user_id=gc_user_id, name=name, phone=phone)
     if _identity_index is not None:
-        resolved = await asyncio.to_thread(_identity_index.resolve, context)
+        resolved = await _resolve_identity_context(context)
         variables = resolved.get("variables") if isinstance(resolved.get("variables"), dict) else {}
     else:
         variables = build_context_variables([], context, {})
@@ -6494,9 +7127,7 @@ async def _provider_card_link(
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
     exact_provider = "telegram" if provider == TELEGRAM_PROVIDER else provider
-    exact_reference = await asyncio.to_thread(
-        _identity_index.provider_id_for_exact_context, exact_provider, context,
-    ) if _identity_index is not None else ""
+    exact_reference = await _exact_provider_identity(exact_provider, context)
     existing = await _entity_external_link(
         context["platform"], context["entity_type"], context["entity_id"], provider,
     )
@@ -6557,13 +7188,13 @@ async def _provider_card_link(
                 "getcourse_user_id": gc_id,
                 "fields": {**(context.get("fields") or {}), "getcourse_user_id": gc_id},
             }
-            reference = await asyncio.to_thread(_identity_index.platform_id_for_context, "vk", lookup)
+            reference = await _run_identity_lookup(_identity_index.platform_id_for_context, "vk", lookup)
         if not reference and context.get("platform") != "amocrm":
             resolved = await _resolve_widget_context(data, mode, device)
             reference = _account_identity_value(resolved.get("accounts", []), "vk")
         if not reference and _identity_index is not None and context.get("platform") != "amocrm":
             for _, candidate in parse_utm_term(_identity_field_value(context, "utm_term")):
-                reference = await asyncio.to_thread(_identity_index.platform_id_for_service, "vk", candidate)
+                reference = await _run_identity_lookup(_identity_index.platform_id_for_service, "vk", candidate)
                 if reference:
                     break
         cache_key = _card_link_cache_key(context, device, provider, reference)
@@ -7579,7 +8210,7 @@ async def notification_salebot_callback(secret: str, request: Request) -> JSONRe
         await _enqueue_notification_message(
             external_id=external_id, channel_id="salebot:project", chat_type="salebot",
             chat_id=client_id, provider=SALEBOT_PROVIDER, client_name=client_name,
-            text=text_value, content_type=content_type, sent_at=sent_at,
+            text=text_value, content_type=content_type, sent_at=sent_at, delay_seconds=0,
         )
     return JSONResponse({"ok": True, "inserted": inserted, "external_id": external_id})
 
@@ -8514,8 +9145,18 @@ async def widget_profile_links(request: Request) -> JSONResponse:
         enforce_rate_limit(request, "messenger-widget-profile-links", limit=240, window_seconds=3600, subject=str(device["id"]))
         data = await _read_json(request)
         _validate_device_context(device, data, mode)
-        links = await _widget_profile_links(data, mode, device)
-        return _widget_response(request, {"ok": True, "links": links})
+        links, pending = await _cached_widget_profile_links(data, mode, device)
+        response_links = list(links)
+        if pending and not any(
+            row.get("kind") == TELEGRAM_PROVIDER and row.get("verification") == "pending"
+            for row in response_links
+        ):
+            # Keeps already-open iframe versions polling too; current clients
+            # additionally use the explicit top-level ``pending`` flag.
+            response_links.append({
+                "kind": TELEGRAM_PROVIDER, "label": "", "url": "", "verification": "pending",
+            })
+        return _widget_response(request, {"ok": True, "links": response_links, "pending": pending})
     except HTTPException as exc:
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception:
@@ -8545,7 +9186,11 @@ async def widget_getcourse_card(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception as exc:
         _log("exception", "Messenger GetCourse card failed")
-        return _widget_response(request, {"ok": False, "error": _clean(exc, 300) or "Не удалось загрузить GetCourse"}, 502)
+        return _widget_response(
+            request,
+            {"ok": False, "error": "GetCourse временно обновляет данные. Повторите через несколько секунд."},
+            503,
+        )
 
 
 @router.post("/widget/getcourse-lessons")
@@ -8572,7 +9217,11 @@ async def widget_getcourse_lessons(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception as exc:
         _log("exception", "Messenger GetCourse lessons failed")
-        return _widget_response(request, {"ok": False, "error": _clean(exc, 300) or "Не удалось загрузить ДЗ и созвоны"}, 502)
+        return _widget_response(
+            request,
+            {"ok": False, "error": "Данные обучения временно обновляются. Повторите через несколько секунд."},
+            503,
+        )
 
 
 @router.post("/widget/getcourse-access")
@@ -8586,11 +9235,8 @@ async def widget_getcourse_access(request: Request) -> JSONResponse:
             return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
         data = await _read_json(request)
         _validate_device_context(device, data, mode)
-        card = await _widget_getcourse_card_data(
-            data, mode, device, include_access=False, summary_only=True,
-        )
         enrollment_id = _clean(data.get("enrollment_id"), 100)
-        if not card.get("found") or enrollment_id != _clean((card.get("item") or {}).get("enrollment_id"), 100):
+        if not enrollment_id:
             raise HTTPException(404, "Доступы ученика не найдены")
         action = _clean(data.get("action"), 30).lower() or "read"
         requester = f"messenger:{int(device['admin_id'])}"
@@ -8613,13 +9259,173 @@ async def widget_getcourse_access(request: Request) -> JSONResponse:
             if not request_id:
                 raise HTTPException(400, "Проверка изменений не найдена")
             service = _module_service("student-transfer", "service_widget_access_apply")
-            return _widget_response(request, await service(enrollment_id=enrollment_id, request_id=request_id, requester_user_id=requester))
+            result = await service(
+                enrollment_id=enrollment_id, request_id=request_id,
+                requester_user_id=requester,
+            )
+            _schedule_widget_operation(
+                action="widget_getcourse_access", device=device,
+                context=_widget_context(data, mode, device), enrollment_id=enrollment_id,
+                details={"request_id": request_id, "changes": data.get("changes") or []},
+            )
+            return _widget_response(request, {**result, "operation_queued": True})
         raise HTTPException(400, "Неизвестное действие")
     except HTTPException as exc:
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception as exc:
         _log("exception", "Messenger GetCourse access failed")
-        return _widget_response(request, {"ok": False, "error": _clean(exc, 500) or "Не удалось изменить доступы"}, 409)
+        return _widget_response(
+            request,
+            {"ok": False, "error": "Не удалось принять команду. Nexus занят обновлением данных — повторите ещё раз."},
+            503,
+        )
+
+
+@router.post("/widget/getcourse-test-period")
+async def widget_getcourse_test_period(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        enforce_rate_limit(
+            request, "messenger-widget-getcourse-test-period", limit=30,
+            window_seconds=3600, subject=str(device["id"]),
+        )
+        enrollment_id = _clean(data.get("enrollment_id"), 100)
+        if not enrollment_id:
+            raise HTTPException(404, "Пользователь GetCourse не найден")
+        action = _clean(data.get("action"), 20).lower() or "status"
+        days = int(data.get("days") or 1)
+        courses = data.get("courses") if isinstance(data.get("courses"), list) else []
+        if action in {"create", "repeat"} and (not 1 <= days <= 90 or not 1 <= len(courses) <= 2):
+            raise HTTPException(400, "Укажите 1–90 дней и хотя бы один курс")
+        if action not in {"status", "create", "repeat", "revoke"}:
+            raise HTTPException(400, "Неизвестное действие")
+        service = _module_service("student-transfer", "service_widget_test_period")
+        result = await service(
+            enrollment_id=enrollment_id, action=action, days=days, courses=courses,
+            requester_user_id=f"messenger:{int(device['admin_id'])}",
+        )
+        response = {"ok": True, "test_period": result}
+        if action in {"create", "repeat", "revoke"}:
+            _schedule_widget_operation(
+                action="widget_trial_issue" if action in {"create", "repeat"} else "widget_trial_revoke",
+                device=device, context=_widget_context(data, mode, device),
+                enrollment_id=enrollment_id,
+                details={
+                    "period_id": _clean(result.get("id"), 64),
+                    "days": days if action == "create" else 0,
+                    "courses": courses if action == "create" else result.get("courses") or [],
+                    "expires_at": _clean(result.get("expires_at"), 60),
+                },
+            )
+            response["operation_queued"] = True
+        return _widget_response(request, response)
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception as exc:
+        _log("exception", "Messenger GetCourse test period failed")
+        return _widget_response(
+            request,
+            {"ok": False, "error": "Не удалось принять команду. Nexus занят обновлением данных — повторите ещё раз."},
+            503,
+        )
+
+
+@router.post("/widget/operations")
+async def widget_operations(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(
+                request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401,
+            )
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        enforce_rate_limit(
+            request, "messenger-widget-operations", limit=180,
+            window_seconds=3600, subject=str(device["id"]),
+        )
+        admin_only = _clean(device.get("admin_role"), 20) != "admin"
+        db = await _connect()
+        try:
+            event_params: list[Any] = [*WIDGET_OPERATION_ACTIONS]
+            event_admin = ""
+            if admin_only:
+                event_admin = " AND e.admin_id=?"
+                event_params.append(int(device["admin_id"]))
+            event_params.append(100)
+            placeholders = ",".join("?" for _ in WIDGET_OPERATION_ACTIONS)
+            events = await (await db.execute(
+                f"""SELECT e.*,a.name AS admin_name FROM events e
+                    LEFT JOIN admins a ON a.id=e.admin_id
+                    WHERE e.action IN ({placeholders}){event_admin}
+                    ORDER BY e.id DESC LIMIT ?""",
+                event_params,
+            )).fetchall()
+            message_params: list[Any] = []
+            message_admin = ""
+            if admin_only:
+                message_admin = " AND c.admin_id=?"
+                message_params.append(int(device["admin_id"]))
+            message_params.append(100)
+            messages = await (await db.execute(
+                f"""SELECT c.*,a.name AS admin_name FROM communication_messages c
+                    LEFT JOIN admins a ON a.id=c.admin_id
+                    WHERE c.direction='outgoing'{message_admin}
+                    ORDER BY c.id DESC LIMIT ?""",
+                message_params,
+            )).fetchall()
+        finally:
+            await db.close()
+        items: list[dict[str, Any]] = []
+        for row in events:
+            details = _operation_payload(row["error"])
+            event_error = details.get("last_error") or details.get("error") or (
+                details.get("result") if row["status"] == "failed" else ""
+            )
+            items.append({
+                "id": f"operation:{row['id']}", "kind": "operation",
+                "action": row["action"], "title": _operation_title(row["action"]),
+                "status": row["status"], "created_at": row["created_at"],
+                "admin_name": row["admin_name"] or details.get("manager_name") or "—",
+                "client_name": details.get("client_name") or details.get("email") or "—",
+                "result": details.get("result") or (
+                    "Выполняется в GetCourse" if row["status"] == "pending" else ""
+                ),
+                "expires_at": details.get("expires_at") or "",
+                "note_status": details.get("note_status") or "",
+                "entity_url": details.get("entity_url") or "",
+                "error": _friendly_operation_error(event_error) if row["status"] == "failed" else "",
+            })
+        for row in messages:
+            items.append({
+                "id": f"message:{row['id']}", "kind": "message",
+                "action": "message", "title": "Сообщение · " + _clean(row["provider"], 40),
+                "status": row["status"], "created_at": row["sent_at"],
+                "admin_name": row["admin_name"] or row["manager_name"] or "—",
+                "client_name": row["client_name"] or "—", "result": _clean(row["text"], 500),
+                "expires_at": "", "note_status": "", "entity_url": row["entity_url"] or "",
+                "error": _friendly_operation_error(row["error"], row["provider"])
+                if row["status"] in {"failed", "dead"} else "",
+            })
+        items.sort(key=lambda item: (_clean(item.get("created_at"), 60), item["id"]), reverse=True)
+        return _widget_response(request, {"ok": True, "items": items[:100]})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except Exception:
+        _log("exception", "Messenger operations journal failed")
+        return _widget_response(
+            request, {"ok": False, "error": "Не удалось загрузить операции. Повторите через несколько секунд."}, 503,
+        )
 
 
 @router.post("/widget/templates")
