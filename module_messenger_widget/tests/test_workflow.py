@@ -183,6 +183,25 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
         self.assertFalse(router._wazzup_history_inflight)
 
+    async def test_health_reuses_identity_snapshot_for_ten_concurrent_widgets(self):
+        class SlowIdentity:
+            def status(self):
+                raise AssertionError("health must not scan the identity index")
+
+        previous_index = router._identity_index
+        previous_status = router._identity_index_status
+        router._identity_index = SlowIdentity()
+        router._identity_index_status = {
+            "status": "ready", "records": 418369, "entities": 250597, "conflicts": 16,
+        }
+        try:
+            results = await asyncio.gather(*(router.health() for _ in range(10)))
+        finally:
+            router._identity_index = previous_index
+            router._identity_index_status = previous_status
+        self.assertTrue(all(row["ok"] for row in results))
+        self.assertTrue(all(row["identity"]["records"] == 418369 for row in results))
+
     async def test_salebot_history_runs_only_after_explicit_channel_open(self):
         channel = {
             "channel_id": "salebot:project", "transport": "salebot", "channel_transport": "salebot",

@@ -1872,7 +1872,11 @@ async def identity_index_loop() -> None:
     while True:
         try:
             if _identity_index is not None:
-                current = _identity_index.status()
+                # The identity index contains hundreds of thousands of rows.
+                # COUNT queries must never run on the event loop or once per
+                # health request: ten simultaneously opened widgets would
+                # otherwise serialize those scans and stall unrelated work.
+                current = await asyncio.to_thread(_identity_index.status)
                 if first_run and current.get("status") == "ready":
                     _identity_index_status = current
                 else:
@@ -7920,7 +7924,7 @@ async def health() -> dict[str, Any]:
         messages = int((await (await db.execute("SELECT COALESCE(MAX(id),0) FROM wazzup_messages")).fetchone())[0])
     finally:
         await db.close()
-    identity = _identity_index.status() if _identity_index is not None else {"status": "unavailable"}
+    identity = dict(_identity_index_status) if _identity_index is not None else {"status": "unavailable"}
     return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "counts_approximate": True, "identity": identity}
 
 
@@ -7949,7 +7953,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "allowed_origin": _allowed_origin(),
         "amocrm_origin": _amo_origin(),
         "customer_db": {"path": str(_customer_db_path()), "ready": _customer_db_path().is_file()},
-        "identity": _identity_index.status() if _identity_index is not None else {"status": "unavailable"},
+        "identity": dict(_identity_index_status) if _identity_index is not None else {"status": "unavailable"},
         "activation_persistent": True,
         "device_ttl_days": DEVICE_TTL_DAYS,
         "vk_configured": bool(_vk_token() and _vk_group_id()),
@@ -9173,15 +9177,17 @@ async def put_template_settings(request: Request) -> dict[str, Any]:
 @router.get("/identity/status")
 async def identity_status(request: Request) -> dict[str, Any]:
     await _require_admin(request)
-    return {"ok": True, "index": _identity_index.status() if _identity_index is not None else {"status": "unavailable"}}
+    return {"ok": True, "index": dict(_identity_index_status) if _identity_index is not None else {"status": "unavailable"}}
 
 
 @router.post("/identity/rebuild")
 async def identity_rebuild(request: Request) -> dict[str, Any]:
+    global _identity_index_status
     await _require_admin(request)
     if _identity_index is None:
         raise HTTPException(503, "Индекс недоступен")
     result = await asyncio.to_thread(_identity_index.build_if_changed, force=True)
+    _identity_index_status = dict(result)
     return {"ok": result.get("status") not in {"error", "missing"}, "index": result}
 
 
