@@ -208,6 +208,9 @@ COMMUNICATION_RETENTION_DAYS = 730
 _db_path: Path | None = None
 _logger = None
 _channel_cache: tuple[float, list[dict[str, str]]] = (0.0, [])
+_all_channels_cache: tuple[float, list[dict[str, str]]] = (0.0, [])
+_all_channels_inflight: asyncio.Task[Any] | None = None
+_all_channels_cache_owner: str = ""
 _vk_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _telegram_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _salebot_history_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -5330,20 +5333,86 @@ def _salebot_channel() -> dict[str, str] | None:
 
 
 async def _all_channels(*, refresh: bool = False) -> list[dict[str, str]]:
-    channels_result, vk, telegram = await asyncio.gather(
-        _cached_active_channels(refresh=refresh),
-        _vk_channel(),
-        _telegram_channel(refresh=refresh),
-        return_exceptions=True,
-    )
+    """Return one shared channel catalogue for all simultaneously opened cards.
+
+    Channel discovery includes Wazzup and Telegram account state.  Without a
+    single-flight guard ten amoCRM cards opened at once could start ten equal
+    provider requests.  The catalogue is account-wide, so it is safe to share
+    for a short interval between all widget devices.
+    """
+
+    global _all_channels_cache, _all_channels_inflight, _all_channels_cache_owner
+    owner = str(_db_path or "")
+    if owner != _all_channels_cache_owner:
+        _all_channels_cache_owner = owner
+        _all_channels_cache = (0.0, [])
+        _all_channels_inflight = None
+    now = time.monotonic()
+    expires_at, cached = _all_channels_cache
+    if not refresh and cached and expires_at > now:
+        return [dict(row) for row in cached]
+
+    task = _all_channels_inflight
+    if task is None or task.done():
+        async def load() -> list[dict[str, str]]:
+            global _all_channels_cache
+            channels_result, vk, telegram = await asyncio.gather(
+                _cached_active_channels(refresh=refresh),
+                _vk_channel(),
+                _telegram_channel(refresh=refresh),
+                return_exceptions=True,
+            )
+            try:
+                if isinstance(channels_result, BaseException):
+                    raise channels_result
+                channels = channels_result
+            except HTTPException:
+                channels = []
+            direct = [row for row in (vk, telegram, _salebot_channel()) if isinstance(row, dict)]
+            rows = channels + direct
+            _all_channels_cache = (time.monotonic() + CHANNEL_CACHE_SECONDS, [dict(row) for row in rows])
+            return rows
+
+        task = asyncio.create_task(load())
+        _all_channels_inflight = task
     try:
-        if isinstance(channels_result, BaseException):
-            raise channels_result
-        channels = channels_result
-    except HTTPException:
-        channels = []
-    direct = [row for row in (vk, telegram, _salebot_channel()) if isinstance(row, dict)]
-    return channels + direct
+        return [dict(row) for row in await asyncio.wait_for(asyncio.shield(task), timeout=0.7)]
+    except TimeoutError:
+        # Keep the account-wide refresh running, but never hold the whole card
+        # open for a provider catalogue request.  Stored Wazzup chats and
+        # configured direct channels are enough for the first usable paint.
+        rows = [dict(row) for row in _channel_cache[1]]
+        if not rows:
+            try:
+                rows = await asyncio.wait_for(_stored_wazzup_channels(), timeout=0.25)
+            except (TimeoutError, RuntimeError, aiosqlite.Error):
+                rows = []
+        if _vk_group_id() and _vk_token():
+            rows.append({
+                "channel_id": _vk_channel_id(), "transport": "vk", "channel_transport": "vk",
+                "provider": "vk", "name": f"Сообщество {_vk_group_id()}",
+                "plain_id": _vk_group_id(), "label": f"VK · Сообщество {_vk_group_id()}",
+            })
+        state = _telegram_state_cache[1] if _telegram_state_cache[1] else {}
+        account = state.get("account") if isinstance(state.get("account"), dict) else {}
+        account_id = _clean(account.get("id"), 200)
+        if state.get("authorized") and account_id:
+            name = _clean(account.get("username") or account.get("name"), 200) or account_id
+            rows.append({
+                "channel_id": f"telegram-personal:{account_id}", "transport": "telegram",
+                "channel_transport": "personal", "provider": TELEGRAM_PROVIDER,
+                "name": name, "plain_id": account_id, "label": f"Telegram Personal · {name}",
+            })
+        salebot = _salebot_channel()
+        if salebot:
+            rows.append(salebot)
+        unique: dict[tuple[str, str, str], dict[str, str]] = {}
+        for row in rows:
+            unique[(row["channel_id"], row["transport"], row.get("provider", "wazzup"))] = row
+        return list(unique.values())
+    finally:
+        if task.done() and _all_channels_inflight is task:
+            _all_channels_inflight = None
 
 
 def _phone_hash(value: Any) -> str:
@@ -6410,6 +6479,25 @@ async def _cached_widget_profile_links(
         return links, pending
     except TimeoutError:
         return quick_links, True
+
+
+def _widget_profile_kind_state(
+    data: dict[str, Any], mode: str, device: dict[str, Any], kind: str,
+) -> str:
+    """Expose background profile discovery state without starting new work."""
+
+    context = _widget_context(data, mode, device)
+    key = (*_identity_context_key(context), str(int(device.get("id") or 0)))
+    task = _profile_links_inflight.get(key)
+    if task is not None and not task.done():
+        return "pending"
+    cached = _profile_links_cache.get(key)
+    if not cached or cached[0] <= time.monotonic():
+        return "pending"
+    links, pending = cached[1], cached[2]
+    if any(_clean(row.get("kind"), 40) == kind and _clean(row.get("url"), 2000) for row in links):
+        return "verified"
+    return "pending" if pending else "missing"
 
 
 def _module_service(module_id: str, service: str):
@@ -9780,6 +9868,12 @@ async def widget_channels(request: Request) -> JSONResponse:
         phone = _normalize_phone((thread or {}).get("phone") or data.get("phone"))
         gc_id = _clean((thread or {}).get("getcourse_user_id"), 200)
         card_context = _widget_context(data, mode, device)
+        try:
+            conversation_presence = await asyncio.wait_for(
+                _conversation_presence(channels, phone), timeout=0.35,
+            )
+        except (TimeoutError, RuntimeError, aiosqlite.Error):
+            conversation_presence = set()
         async def resolve_channel(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
             provider = channel.get("provider", "wazzup")
             has_chat = False
@@ -9790,9 +9884,7 @@ async def widget_channels(request: Request) -> JSONResponse:
             direct_label = ""
             verification_pending = False
             if provider == "wazzup":
-                has_chat = await _has_conversation(
-                    channel["channel_id"], channel["transport"], phone,
-                ) if phone else False
+                has_chat = (channel["channel_id"], channel["transport"]) in conversation_presence
                 can_send, reason = _channel_send_state(channel, has_chat)
                 if not phone and not has_chat:
                     can_send, reason = False, "Телефон не найден"
@@ -9812,11 +9904,18 @@ async def widget_channels(request: Request) -> JSONResponse:
                     and provider in {"vk", SALEBOT_PROVIDER}
                 )
                 if not link and exact_amo_provider:
-                    # Keep the direct channel in lockstep with the profile
-                    # header.  Historical amoCRM fields may contain generated
-                    # SaleBot/VK URLs or a copied utm_term, so only the exact
-                    # Customer DB resolver may enable these channels.
-                    link = await _provider_card_link(data, mode, device, provider)
+                    # Exact Customer DB/provider discovery is already running
+                    # in the shared profile-enrichment task.  Never repeat it
+                    # synchronously here: the stored entity link is sufficient
+                    # proof, otherwise the channel stays pending until that
+                    # one background lookup finishes.
+                    link = await _entity_external_link(
+                        context["platform"], context["entity_type"], context["entity_id"], provider,
+                    )
+                    verification_pending = (
+                        not link
+                        and _widget_profile_kind_state(data, mode, device, provider) == "pending"
+                    )
                 if not link and not exact_amo_provider:
                     exact_link = await _entity_external_link(
                         context["platform"], context["entity_type"], context["entity_id"], provider,
@@ -9852,13 +9951,18 @@ async def widget_channels(request: Request) -> JSONResponse:
                 peer_id = _clean(link.get("external_user_id"), 200)
                 provider_profile_name = ""
                 if peer_id:
-                    _, has_chat, _ = await _conversation_rows(
-                        channel["channel_id"], channel["transport"], "", 1, exact_chat_id=peer_id,
+                    has_chat = await _has_exact_conversation(
+                        channel["channel_id"], channel["transport"], peer_id,
                     )
                     direct_link = (provider, peer_id)
-                    provider_profile_name = await _provider_profile_name(
-                        provider, peer_id, _clean(link.get("name"), 200),
-                    )
+                    provider_profile_name = _clean(link.get("name"), 200)
+                    if not provider_profile_name:
+                        try:
+                            provider_profile_name = await asyncio.wait_for(
+                                _provider_profile_name(provider, peer_id), timeout=0.2,
+                            )
+                        except TimeoutError:
+                            provider_profile_name = ""
                 if provider == "vk":
                     can_send = bool(peer_id or (
                         context["platform"] != "amocrm"
@@ -9909,14 +10013,29 @@ async def widget_channels(request: Request) -> JSONResponse:
                 "can_send": can_send,
                 "has_chat": has_chat,
                 "send_reason": reason,
-                **({"pending": True} if provider == TELEGRAM_PROVIDER and (
+                **({"pending": True} if (
                     link.get("pending") or verification_pending
                 ) else {}),
             }, direct_link)
 
         async def resolve_channel_safely(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
             try:
-                return await resolve_channel(channel)
+                return await asyncio.wait_for(resolve_channel(channel), timeout=0.45)
+            except TimeoutError:
+                provider = channel.get("provider", "wazzup")
+                can_send = False
+                reason = "Проверка канала продолжается в фоне"
+                if provider == "wazzup":
+                    can_send, reason = _channel_send_state(channel, False)
+                    if not phone:
+                        can_send, reason = False, "Телефон не найден"
+                elif provider == TELEGRAM_PROVIDER and card_context.get("platform") == "amocrm" and phone:
+                    can_send = True
+                    reason = "Нажмите — Nexus попробует найти пользователя Telegram"
+                return ({
+                    **channel, "available": can_send, "can_send": can_send, "has_chat": False,
+                    "send_reason": reason, "pending": True,
+                }, None)
             except (HTTPException, aiosqlite.Error) as exc:
                 _log(
                     "warning", "Widget channel resolution deferred: provider=%s channel=%s error=%s",
@@ -10435,6 +10554,51 @@ async def _has_conversation(channel_id: str, transport: str, phone: str) -> bool
             """SELECT 1 FROM wazzup_chats WHERE channel_id=? AND chat_type=?
                AND (phone_hash=? OR chat_id=?) LIMIT 1""",
             (channel_id, transport, phone_hash, digits),
+        )).fetchone()
+        return bool(row)
+    finally:
+        await db.close()
+
+
+async def _conversation_presence(
+    channels: list[dict[str, Any]], phone: str,
+) -> set[tuple[str, str]]:
+    """Read conversation availability for every Wazzup channel in one query."""
+
+    phone_hash = _phone_hash(phone)
+    digits = phone[1:] if phone else ""
+    pairs = {
+        (_clean(row.get("channel_id"), 200), _clean(row.get("transport"), 40))
+        for row in channels if row.get("provider", "wazzup") == "wazzup"
+    }
+    pairs.discard(("", ""))
+    if not pairs or (not phone_hash and not digits):
+        return set()
+    db = await _connect()
+    try:
+        rows = await (await db.execute(
+            """SELECT channel_id,chat_type FROM wazzup_chats
+               WHERE phone_hash=? OR chat_id=?""",
+            (phone_hash, digits),
+        )).fetchall()
+    finally:
+        await db.close()
+    return {
+        (_clean(row["channel_id"], 200), _clean(row["chat_type"], 40))
+        for row in rows
+        if (_clean(row["channel_id"], 200), _clean(row["chat_type"], 40)) in pairs
+    }
+
+
+async def _has_exact_conversation(channel_id: str, transport: str, chat_id: str) -> bool:
+    if not channel_id or not transport or not chat_id:
+        return False
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT 1 FROM wazzup_chats
+               WHERE channel_id=? AND chat_type=? AND chat_id=? LIMIT 1""",
+            (channel_id, transport, chat_id),
         )).fetchone()
         return bool(row)
     finally:

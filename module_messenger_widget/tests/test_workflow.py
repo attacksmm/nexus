@@ -597,6 +597,79 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(views[1]["send_reason"], "Пользователь Telegram не найден")
         self.assertFalse(json.loads(repeated.body)["channels"][1]["can_send"])
 
+    async def test_ten_simultaneous_cards_share_one_provider_catalogue_request(self):
+        calls = 0
+
+        async def slow_channels(*, refresh=False):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.08)
+            return [{
+                "channel_id": "max-1", "provider": "wazzup", "transport": "max",
+                "channel_transport": "max", "name": "Служба заботы", "plain_id": "",
+                "label": "MAX · Служба заботы",
+            }]
+
+        router._all_channels_cache = (0.0, [])
+        router._all_channels_inflight = None
+        router._all_channels_cache_owner = str(router._db_path)
+        started = time.monotonic()
+        with (
+            patch.object(router, "_cached_active_channels", new=slow_channels),
+            patch.object(router, "_vk_channel", new=AsyncMock(return_value=None)),
+            patch.object(router, "_telegram_channel", new=AsyncMock(return_value=None)),
+            patch.object(router, "_salebot_channel", return_value=None),
+        ):
+            results = await asyncio.gather(*(router._all_channels() for _ in range(10)))
+
+        self.assertEqual(calls, 1)
+        self.assertLess(time.monotonic() - started, 0.25)
+        self.assertTrue(all(rows[0]["channel_id"] == "max-1" for rows in results))
+
+    async def test_slow_card_identity_never_blocks_first_usable_channels(self):
+        code = await self._code()
+        activated = await router.widget_activate(request_for(
+            "/widget/activate", {"code": code, "platform_user_id": "6269974"},
+            origin="https://junior.sobakovod.pro", platform="amocrm",
+        ))
+        token = json.loads(activated.body)["device_token"]
+        channels = [
+            {
+                "channel_id": "max-1", "provider": "wazzup", "transport": "max",
+                "channel_transport": "max", "name": "Служба заботы", "plain_id": "",
+                "label": "MAX · Служба заботы",
+            },
+            {
+                "channel_id": "salebot:project", "provider": router.SALEBOT_PROVIDER,
+                "transport": "salebot", "channel_transport": "salebot",
+                "name": "Проект", "plain_id": "project", "label": "SaleBot · Проект",
+            },
+        ]
+
+        async def blocked_entity(*_args, **_kwargs):
+            await asyncio.sleep(5)
+            return {}
+
+        started = time.monotonic()
+        with (
+            patch.object(router, "_all_channels", new=AsyncMock(return_value=channels)),
+            patch.object(router, "_conversation_presence", new=AsyncMock(return_value=set())),
+            patch.object(router, "_entity_external_link", new=blocked_entity),
+            patch.object(router, "_provider_card_link", new=AsyncMock(side_effect=AssertionError("foreground provider lookup"))),
+        ):
+            response = await router.widget_channels(request_for(
+                "/widget/channels",
+                {"platform_user_id": "6269974", "entity_type": "lead", "entity_id": "18278741", "phone": "+79213219438"},
+                origin="https://junior.sobakovod.pro", token=token, platform="amocrm",
+            ))
+        elapsed = time.monotonic() - started
+        views = json.loads(response.body)["channels"]
+
+        self.assertLess(elapsed, 0.8)
+        self.assertTrue(views[0]["can_send"])
+        self.assertFalse(views[1]["can_send"])
+        self.assertTrue(views[1]["pending"])
+
     async def test_amocrm_salebot_channel_uses_the_same_exact_card_identity_as_profile(self):
         code = await self._code()
         amo_origin = "https://junior.sobakovod.pro"
@@ -615,10 +688,20 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         exact_link = AsyncMock(return_value={
             "external_user_id": "998417306", "name": "Амина Тесаева",
         })
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18101847",
+            "phone": "+79297762777", "name": "Амина Тесаева",
+        }
+        await router._remember_external_link(
+            context, "amocrm-card", provider=router.SALEBOT_PROVIDER,
+            external_user_id="998417306",
+        )
+        await router._remember_entity_external_link(
+            context, router.SALEBOT_PROVIDER, "998417306", self.admin_id,
+        )
         with (
             patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
             patch.object(router, "_provider_card_link", new=exact_link),
-            patch.object(router, "_conversation_rows", new=AsyncMock(return_value=("", False, []))),
         ):
             response = await router.widget_channels(request_for(
                 "/widget/channels",
@@ -636,7 +719,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             **channel, "label": "SaleBot: Амина Тесаева",
             "available": True, "can_send": True, "has_chat": False, "send_reason": "",
         }])
-        exact_link.assert_awaited_once()
+        exact_link.assert_not_awaited()
 
     async def test_amocrm_salebot_raw_card_field_does_not_bypass_exact_verification(self):
         code = await self._code()
