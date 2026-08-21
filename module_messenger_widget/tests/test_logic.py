@@ -915,7 +915,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertIn("['pending','unverified'].includes(row.verification)", amo)
         self.assertIn("Уточняем остальные профили…", amo)
-        self.assertIn("if(result.sent.length)loadProfileLinks(bootGeneration,true)", amo)
+        self.assertIn("if(result.sent.length){await refreshActive(true);loadProfileLinks(bootGeneration,true)}", amo)
+        self.assertIn("else if(result.queued.length)setTimeout(()=>refreshActive(true),2500)", amo)
 
     def test_amocrm_telegram_profile_reuses_an_exact_verified_card_link(self):
         class Index:
@@ -1232,8 +1233,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.7.41")
-        self.assertIn("static/amocrm.html?v=51433", script)
+        self.assertEqual(manifest["widget"]["version"], "1.8.0")
+        self.assertIn("static/amocrm.html?v=51500", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
