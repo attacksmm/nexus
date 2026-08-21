@@ -6095,6 +6095,35 @@ async def _provider_profile_name(provider: str, external_id: str, fallback: str 
     return _clean(fallback, 200)
 
 
+async def _remember_verified_card_identities(
+    context: dict[str, Any], device: dict[str, Any], identities: dict[str, str], mode: str,
+) -> None:
+    """Share exact profile proof with conversation/send channel discovery."""
+
+    if mode == "test" or _db_path is None:
+        return
+    identity = {
+        "phone": _normalize_phone(context.get("phone")),
+        "email": _clean(context.get("email"), 320),
+        "name": _clean(context.get("name"), 200),
+        "getcourse_user_id": _identity_field_value(
+            context, "getcourse_user_id", "gc_user_id", "user_id",
+        ),
+    }
+    admin_id = int(device.get("admin_id") or 0) or None
+    for provider, external_id in identities.items():
+        external_id = _clean(external_id, 300)
+        if not external_id:
+            continue
+        await _remember_external_link(
+            identity, "amocrm-card-verified",
+            provider=provider, external_user_id=external_id,
+        )
+        await _remember_entity_external_link(
+            context, provider, external_id, admin_id,
+        )
+
+
 async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[str, Any]) -> list[dict[str, Any]]:
     context = _widget_context(data, mode, device)
     await _apply_identity_rules(context)
@@ -6130,6 +6159,14 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
             "vk": _clean(vk_exact, 300) or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id"),
             SALEBOT_PROVIDER: _clean(salebot_exact, 300),
         }
+        # Profile buttons and send channels must consume the same verified
+        # card identity.  Exact Customer DB / VK / Telegram list resolution
+        # used to create the profile button only, while /widget/channels read
+        # entity_identity_links and therefore reported the same VK/SaleBot as
+        # unavailable until another code path happened to persist it.  Store
+        # the exact bridge here, inside the existing background enrichment,
+        # so every subsequent channel poll sees the proof immediately.
+        await _remember_verified_card_identities(context, device, exact_ids, mode)
         # A graph/phone match is useful for discovery, but it must never turn
         # into a profile button in an amoCRM deal unless the exact deal row
         # confirms the provider identifier.
@@ -6362,6 +6399,10 @@ async def _quick_widget_profile_links(
 
     vk_exact = _clean(results[0], 300) if len(results) > 0 and not isinstance(results[0], Exception) else ""
     salebot_exact = _clean(results[1], 300) if len(results) > 1 and not isinstance(results[1], Exception) else ""
+    if context.get("platform") == "amocrm":
+        await _remember_verified_card_identities(context, device, {
+            "vk": vk_exact, SALEBOT_PROVIDER: salebot_exact,
+        }, mode)
     entity_links = [
         results[index] if len(results) > index and isinstance(results[index], dict) else {}
         for index in range(2, 5)

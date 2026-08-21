@@ -721,6 +721,40 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }])
         exact_link.assert_not_awaited()
 
+    async def test_amocrm_verified_vk_profile_is_persisted_for_send_channel(self):
+        """A VK button proved by the identity graph must activate VK sending too."""
+
+        data = {
+            "platform_user_id": "6269974", "entity_type": "lead",
+            "entity_id": "17998515", "name": "Ирина Ермакова",
+            "fields": {"utm_term": "350644981"},
+        }
+
+        async def exact(provider, _context):
+            return "350644981" if provider == "vk" else ""
+
+        with (
+            patch.object(router, "_identity_index", object()),
+            patch.object(router, "_apply_identity_rules", new=AsyncMock()),
+            patch.object(router, "_resolve_widget_context", new=AsyncMock(return_value={
+                "variables": {}, "accounts": [],
+            })),
+            patch.object(router, "_exact_provider_identity", new=exact),
+            patch.object(router, "_provider_profile_name", new=AsyncMock(return_value="Ирина Ермакова")),
+        ):
+            links = await router._widget_profile_links(
+                data, "amocrm", {"id": 7, "admin_id": self.admin_id},
+            )
+
+        self.assertIn("https://vk.com/id350644981", {
+            row["url"] for row in links if row["kind"] == "vk"
+        })
+        stored = await router._entity_external_link(
+            "amocrm", "lead", "17998515", "vk",
+        )
+        self.assertEqual(stored["external_user_id"], "350644981")
+        self.assertEqual(stored["name"], "Ирина Ермакова")
+
     async def test_amocrm_salebot_raw_card_field_does_not_bypass_exact_verification(self):
         code = await self._code()
         amo_origin = "https://junior.sobakovod.pro"

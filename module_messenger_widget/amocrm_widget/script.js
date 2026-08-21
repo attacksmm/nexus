@@ -2,7 +2,7 @@ define(['jquery'], function ($) {
   'use strict';
   const Widget = function () {
     const self = this;
-    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=51431';
+    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=51432';
     const AMO_REQUEST_TIMEOUT = 6000;
     const CONTEXT_TIMEOUT = 20000;
 

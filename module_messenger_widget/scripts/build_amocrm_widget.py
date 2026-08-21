@@ -15,7 +15,7 @@ REQUIRED = (
 
 def main() -> None:
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("widget", {}).get("version") != "1.7.39":
+    if manifest.get("widget", {}).get("version") != "1.7.40":
         raise SystemExit("Unexpected amoCRM widget version")
     required_widget = {"name", "description", "short_description", "locale", "installation"}
     if not required_widget <= manifest.get("widget", {}).keys() or not isinstance(manifest.get("locations"), list):
