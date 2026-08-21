@@ -6381,7 +6381,25 @@ async def _quick_widget_profile_links(
     if gc_id:
         found["getcourse"] = f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
 
+    async def quick_result(awaitable: Any) -> Any:
+        try:
+            return await asyncio.wait_for(awaitable, timeout=0.42)
+        except (TimeoutError, RuntimeError, aiosqlite.Error):
+            return {}
+
+    resolver = (
+        getattr(_identity_index, "platform_id_for_context", None)
+        if _identity_index is not None else None
+    )
+    # Schedule this first: a known GetCourse user is the most useful profile
+    # action for the sales team and the indexed lookup must not sit behind
+    # slower messenger/provider checks.
+    getcourse_lookup: Any = (
+        _run_identity_lookup(resolver, "getcourse", context)
+        if callable(resolver) else asyncio.sleep(0, result="")
+    )
     lookups = [
+        getcourse_lookup,
         _exact_provider_identity("vk", context),
         _exact_provider_identity(SALEBOT_PROVIDER, context),
         *(
@@ -6390,24 +6408,23 @@ async def _quick_widget_profile_links(
         ),
         _successful_card_delivery_link(context, TELEGRAM_PROVIDER),
     ]
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*lookups, return_exceptions=True), timeout=0.45,
-        )
-    except TimeoutError:
-        results = []
+    results = await asyncio.gather(*(quick_result(item) for item in lookups))
 
-    vk_exact = _clean(results[0], 300) if len(results) > 0 and not isinstance(results[0], Exception) else ""
-    salebot_exact = _clean(results[1], 300) if len(results) > 1 and not isinstance(results[1], Exception) else ""
+    quick_gc_id = re.sub(r"\D+", "", _clean(results[0], 300))
+    vk_exact = _clean(results[1], 300)
+    salebot_exact = _clean(results[2], 300)
+    if quick_gc_id:
+        gc_id = gc_id or quick_gc_id
+        found.setdefault("getcourse", f"{_allowed_origin()}/user/control/user/update/id/{quick_gc_id}")
     if context.get("platform") == "amocrm":
         await _remember_verified_card_identities(context, device, {
             "vk": vk_exact, SALEBOT_PROVIDER: salebot_exact,
         }, mode)
     entity_links = [
         results[index] if len(results) > index and isinstance(results[index], dict) else {}
-        for index in range(2, 5)
+        for index in range(3, 6)
     ]
-    telegram_delivery = results[5] if len(results) > 5 and isinstance(results[5], dict) else {}
+    telegram_delivery = results[6] if len(results) > 6 and isinstance(results[6], dict) else {}
     names: dict[str, str] = {}
 
     vk_value = vk_exact or (

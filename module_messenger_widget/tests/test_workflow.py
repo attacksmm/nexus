@@ -755,6 +755,34 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["external_user_id"], "350644981")
         self.assertEqual(stored["name"], "Ирина Ермакова")
 
+    async def test_amocrm_quick_profiles_include_indexed_getcourse_user(self):
+        class Index:
+            def platform_id_for_context(self, provider, context):
+                self_assert.assertEqual(provider, "getcourse")
+                self_assert.assertEqual(context["entity_id"], "18229403")
+                return "513425973"
+
+        self_assert = self
+        data = {
+            "platform_user_id": "6269974", "entity_type": "lead",
+            "entity_id": "18229403", "name": "Виктория",
+        }
+        with (
+            patch.object(router, "_identity_index", Index()),
+            patch.object(router, "_apply_identity_rules", new=AsyncMock()),
+            patch.object(router, "_exact_provider_identity", new=AsyncMock(return_value="")),
+        ):
+            started = time.monotonic()
+            links = await router._quick_widget_profile_links(
+                data, "amocrm", {"id": 7, "admin_id": self.admin_id},
+            )
+
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertIn(
+            "https://club.sobakovod.pro/user/control/user/update/id/513425973",
+            {row["url"] for row in links if row["kind"] == "getcourse"},
+        )
+
     async def test_amocrm_salebot_raw_card_field_does_not_bypass_exact_verification(self):
         code = await self._code()
         amo_origin = "https://junior.sobakovod.pro"
