@@ -426,6 +426,99 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await router._notification_targets(slava_id, direct=True), [slava_id])
 
+    async def test_course_chat_requires_curator_mention_or_reply(self):
+        context = {
+            "curator_vk_id": "45930434",
+            "curator_vk_ref": "aflameryan",
+            "curator_telegram": "slava_curator",
+        }
+        self.assertTrue(router._course_chat_addressed(
+            context, "[id45930434|@aflameryan], подскажите, пожалуйста",
+        ))
+        self.assertTrue(router._course_chat_addressed(
+            context, "Спасибо", reply_sender_id="45930434",
+        ))
+        self.assertTrue(router._course_chat_addressed(
+            context, "Подскажите", reply_sender_ref="@slava_curator",
+        ))
+        self.assertFalse(router._course_chat_addressed(
+            context, "Как приучить собаку к туалету?",
+        ))
+
+    async def test_course_chat_uses_configured_multiple_recipients(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            cursor = await db.execute(
+                "INSERT INTO admins(wazzup_user_id,name,role,enabled,created_at,updated_at) VALUES(?,?,'employee',1,?,?)",
+                ("nikita-copy", "Никита", now, now),
+            )
+            nikita_id = int(cursor.lastrowid)
+            await db.execute(
+                "INSERT INTO notification_route_policies(source_admin_id,configured,updated_at) VALUES(?,1,?)",
+                (self.admin_id, now),
+            )
+            await db.executemany(
+                "INSERT INTO notification_routes(source_admin_id,recipient_admin_id,created_at,updated_at) VALUES(?,?,?,?)",
+                [
+                    (self.admin_id, self.admin_id, now, now),
+                    (self.admin_id, nikita_id, now, now),
+                ],
+            )
+            await db.commit()
+        self.assertEqual(
+            set(await router._notification_targets(self.admin_id, direct=True)),
+            {self.admin_id, nikita_id},
+        )
+
+    async def test_notification_names_responsible_manager(self):
+        row = {
+            "source": "vk", "chat_id": "515207214", "target_admin_id": self.admin_id,
+            "client_name": "Светлана Демина", "text": "Завтра удобно", "content_type": "text",
+        }
+        original_context = router._notification_context
+
+        async def amo_context(_source, _chat_id):
+            return {"platform": "amocrm", "entity_url": "https://example.amocrm.ru/leads/detail/1"}
+
+        router._notification_context = amo_context
+        try:
+            text_value, links = await router._notification_text([row])
+        finally:
+            router._notification_context = original_context
+        self.assertIn("Ответственный: Анна Менеджер", text_value)
+        self.assertIn(("Открыть сделку amoCRM", "https://example.amocrm.ru/leads/detail/1"), links)
+
+    async def test_course_notification_uses_real_chat_title_and_link(self):
+        row = {
+            "source": "vk", "chat_id": "2000000024", "target_admin_id": self.admin_id,
+            "client_name": "Участник · Старое название", "text": "@aflameryan подскажите",
+            "content_type": "text",
+        }
+        original_context = router._notification_context
+        original_course_context = router._course_chat_context
+
+        async def stored_context(_source, _chat_id):
+            return {"platform": "course_chat", "entity_id": "Старое название"}
+
+        async def live_context(_source, _chat_id, *args, **kwargs):
+            return {
+                "title": "55. 03.08.2026 - Современный Собаковод - закрытый чат",
+                "chat_url": "https://vk.com/gim225075265?sel=c24",
+                "curator_name": "Слава",
+            }
+
+        router._notification_context = stored_context
+        router._course_chat_context = live_context
+        try:
+            text_value, links = await router._notification_text([row])
+        finally:
+            router._notification_context = original_context
+            router._course_chat_context = original_course_context
+        self.assertIn("Учебный чат: 55. 03.08.2026 - Современный Собаковод - закрытый чат", text_value)
+        self.assertIn("Куратор: Слава", text_value)
+        self.assertNotIn("Профиль VK", text_value)
+        self.assertEqual(links, [("Открыть учебный чат", "https://vk.com/gim225075265?sel=c24")])
+
     async def test_unknown_profile_is_not_enqueued_for_fallback_admin(self):
         now = router._iso()
         async with aiosqlite.connect(router._must_db()) as db:

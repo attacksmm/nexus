@@ -1779,7 +1779,32 @@ def _person_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", _clean(value, 200).casefold().translate(translit))
 
 
-async def _course_chat_context(provider: str, chat_id: str, title: str = "") -> dict[str, Any]:
+def _course_chat_addressed(
+    context: dict[str, Any], text: str = "", *, reply_sender_id: str = "", reply_sender_ref: str = "",
+) -> bool:
+    """Return whether a course-chat message explicitly addresses its curator."""
+    value = _clean(text, 5000).casefold()
+    reply_id = re.sub(r"\D+", "", _clean(reply_sender_id, 200))
+    reply_ref = _clean(reply_sender_ref, 200).lstrip("@").casefold()
+    curator_id = re.sub(r"\D+", "", _clean(context.get("curator_vk_id"), 200))
+    vk_ref = _clean(context.get("curator_vk_ref"), 200).lstrip("@").casefold()
+    telegram_ref = _clean(context.get("curator_telegram"), 200).lstrip("@").casefold()
+    if curator_id and (
+        reply_id == curator_id
+        or re.search(rf"\[id{re.escape(curator_id)}\|", value)
+        or re.search(rf"https?://(?:m\.)?vk\.(?:com|ru)/(?:id)?{re.escape(curator_id)}(?:\b|/)", value)
+    ):
+        return True
+    references = {item for item in (vk_ref, telegram_ref) if item}
+    if reply_ref and reply_ref in references:
+        return True
+    return any(re.search(rf"(?<![\w.])@{re.escape(reference)}(?![\w.])", value) for reference in references)
+
+
+async def _course_chat_context(
+    provider: str, chat_id: str, title: str = "", *, text: str = "",
+    reply_sender_id: str = "", reply_sender_ref: str = "", require_addressed: bool = False,
+) -> dict[str, Any]:
     platform = "telegram" if provider == TELEGRAM_PROVIDER else "vk" if provider == "vk" else ""
     if not platform:
         return {}
@@ -1788,7 +1813,12 @@ async def _course_chat_context(provider: str, chat_id: str, title: str = "") -> 
         result = service(platform=platform, chat_id=_clean(chat_id, 250), title=_clean(title, 500))
         if inspect.isawaitable(result):
             result = await result
-        return result if isinstance(result, dict) and result.get("found") else {}
+        if not isinstance(result, dict) or not result.get("found"):
+            return {}
+        result["addressed"] = _course_chat_addressed(
+            result, text, reply_sender_id=reply_sender_id, reply_sender_ref=reply_sender_ref,
+        )
+        return {} if require_addressed and not result["addressed"] else result
     except Exception:
         return {}
 
@@ -1871,6 +1901,45 @@ async def _notification_owner(
     return None
 
 
+async def _current_amo_notification_owner(source: str, chat_id: str) -> int | None:
+    """Resolve the current amoCRM responsible manager from local deal data."""
+    db = await _connect()
+    try:
+        context = await (await db.execute(
+            """SELECT entity_id FROM conversation_contexts
+               WHERE provider=? AND external_user_id=? AND platform='amocrm'
+                 AND entity_type='lead' AND entity_id<>''""",
+            (_clean(source, 40), _clean(chat_id, 250)),
+        )).fetchone()
+    finally:
+        await db.close()
+    if not context:
+        return None
+    details = await asyncio.to_thread(_amo_deal_delivery_details, _clean(context["entity_id"], 64))
+    responsible_user_id = _clean(details.get("responsible_user_id"), 64)
+    if not responsible_user_id:
+        return None
+    db = await _connect()
+    try:
+        admin = await (await db.execute(
+            """SELECT a.id FROM manager_bindings b JOIN admins a ON a.id=b.admin_id
+               WHERE b.platform='amocrm' AND b.platform_user_id=? AND a.enabled=1
+               ORDER BY b.updated_at DESC LIMIT 1""",
+            (responsible_user_id,),
+        )).fetchone()
+        if not admin:
+            return None
+        admin_id = int(admin["id"])
+        await db.execute(
+            "UPDATE conversation_contexts SET admin_id=?,updated_at=? WHERE provider=? AND external_user_id=?",
+            (admin_id, _iso(), _clean(source, 40), _clean(chat_id, 250)),
+        )
+        await db.commit()
+        return admin_id
+    finally:
+        await db.close()
+
+
 async def _enqueue_notification_message(
     *, external_id: str, channel_id: str, chat_type: str, chat_id: str,
     phone_hash: str = "", provider: str = "", client_name: str = "",
@@ -1906,11 +1975,12 @@ async def _enqueue_notification_message(
             },
             source, chat_id, direct_target,
         )
+    current_amo_owner = None if direct_target else await _current_amo_notification_owner(source, chat_id)
     db = await _connect()
     inserted = False
     try:
         await db.execute("BEGIN IMMEDIATE")
-        owner_id = direct_target or await _notification_owner(
+        owner_id = direct_target or current_amo_owner or await _notification_owner(
             db, source=source, channel_id=_clean(channel_id, 200),
             chat_type=_clean(chat_type, 40).lower(), chat_id=chat_id,
             phone_hash=_clean(phone_hash, 100),
@@ -1996,15 +2066,44 @@ async def _notification_context(source: str, chat_id: str) -> dict[str, str]:
     return dict(row) if row else {}
 
 
+async def _notification_admin_name(admin_id: Any) -> str:
+    try:
+        clean_id = int(admin_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not clean_id:
+        return ""
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT name FROM admins WHERE id=? AND enabled=1", (clean_id,),
+        )).fetchone()
+    finally:
+        await db.close()
+    return _clean(row["name"], 200) if row else ""
+
+
 async def _notification_text(rows: list[dict[str, Any]]) -> tuple[str, list[tuple[str, str]]]:
     first = rows[0]
     name = _clean(first.get("client_name"), 200) or "Клиент"
     context = await _notification_context(first["source"], first["chat_id"])
     course_chat = _clean(context.get("platform"), 40) == "course_chat"
-    lines = [
-        f"💬 Новое сообщение · {_notification_label(first['source'])}",
-        f"{'Учебный чат' if course_chat else 'Клиент'}: {name}", "",
-    ]
+    course_context = await _course_chat_context(first["source"], first["chat_id"]) if course_chat else {}
+    responsible_name = await _notification_admin_name(first.get("target_admin_id"))
+    lines = [f"💬 Новое сообщение · {_notification_label(first['source'])}"]
+    if course_chat:
+        chat_title = _clean(course_context.get("title"), 300) or _clean(context.get("entity_id"), 200) or "Учебный чат"
+        sender_name = name.split(" · ", 1)[0].strip() if " · " in name else ""
+        lines.append(f"Учебный чат: {chat_title}")
+        if course_context.get("curator_name"):
+            lines.append(f"Куратор: {_clean(course_context.get('curator_name'), 200)}")
+        if sender_name and sender_name != chat_title:
+            lines.append(f"Отправитель: {sender_name}")
+    else:
+        lines.append(f"Клиент: {name}")
+        if responsible_name:
+            lines.append(f"Ответственный: {responsible_name}")
+    lines.append("")
     for row in rows[:12]:
         value = _clean(row.get("text"), 1200)
         if not value:
@@ -2027,7 +2126,7 @@ async def _notification_text(rows: list[dict[str, Any]]) -> tuple[str, list[tupl
     if len(rows) > 12:
         lines.append(f"…ещё сообщений: {len(rows) - 12}")
     links: list[tuple[str, str]] = []
-    entity_url = _clean(context.get("entity_url"), 2000)
+    entity_url = _clean(course_context.get("chat_url"), 2000) or _clean(context.get("entity_url"), 2000)
     if entity_url:
         links.append(("Открыть учебный чат" if course_chat else "Открыть сделку amoCRM", entity_url))
     if not course_chat and first["source"] == "vk" and str(first["chat_id"]).isdigit():
@@ -2176,10 +2275,22 @@ async def _webpush_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }.get(_clean(first.get("content_type"), 100).lower(), "Новое вложение")
     if len(rows) > 1:
         text_value = f"{text_value}\nЕщё сообщений: {len(rows) - 1}"
+    responsible_name = await _notification_admin_name(first.get("target_admin_id"))
+    if responsible_name and _clean(context.get("platform"), 40) != "course_chat":
+        text_value = f"Ответственный: {responsible_name}\n{text_value}"
+    course_context = (
+        await _course_chat_context(first["source"], first["chat_id"])
+        if _clean(context.get("platform"), 40) == "course_chat" else {}
+    )
+    title_name = (
+        _clean(course_context.get("title"), 120)
+        or _clean(first.get("client_name"), 120)
+        or "Клиент"
+    )
     return {
-        "title": f"{_notification_label(first['source'])} · {_clean(first.get('client_name'), 120) or 'Клиент'}",
+        "title": f"{_notification_label(first['source'])} · {title_name}",
         "body": text_value,
-        "url": _clean(context.get("entity_url"), 2000),
+        "url": _clean(course_context.get("chat_url"), 2000) or _clean(context.get("entity_url"), 2000),
         "tag": "nexus-" + hashlib.sha256(first["thread_key"].encode()).hexdigest()[:20],
     }
 
@@ -2188,11 +2299,6 @@ async def _notification_targets(target_admin_id: int | None, *, direct: bool = F
     db = await _connect()
     try:
         if target_admin_id:
-            if direct:
-                row = await (await db.execute(
-                    "SELECT id FROM admins WHERE id=? AND enabled=1", (target_admin_id,),
-                )).fetchone()
-                return [int(row["id"])] if row else []
             policy = await (await db.execute(
                 "SELECT configured FROM notification_route_policies WHERE source_admin_id=?",
                 (target_admin_id,),
@@ -3900,7 +4006,11 @@ async def _process_vk_callback_payload(payload: dict[str, Any]) -> None:
             return
     course_context: dict[str, Any] = {}
     if peer_id.isdigit() and int(peer_id) > 2_000_000_000:
-        course_context = await _course_chat_context("vk", peer_id)
+        reply_message = message.get("reply_message") if isinstance(message.get("reply_message"), dict) else {}
+        course_context = await _course_chat_context(
+            "vk", peer_id, text=_clean(message.get("text"), 5000),
+            reply_sender_id=_clean(reply_message.get("from_id"), 200), require_addressed=True,
+        )
         if not course_context:
             return
         sender_id = _clean(message.get("from_id"), 200) if isinstance(message, dict) else ""
@@ -4698,6 +4808,7 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
         limit = TELEGRAM_DIALOG_LIMIT if full else TELEGRAM_BACKGROUND_DIALOG_LIMIT
         async for dialog in client.iter_dialogs(limit=limit):
             entity = getattr(dialog, "entity", None)
+            latest = getattr(dialog, "message", None)
             course_context: dict[str, Any] = {}
             if _telegram_is_user(entity):
                 peer = _telegram_user_view(entity)
@@ -4705,6 +4816,8 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
                 course_context = await _course_chat_context(
                     TELEGRAM_PROVIDER, _clean(getattr(entity, "id", ""), 200),
                     _clean(getattr(dialog, "name", "") or getattr(entity, "title", ""), 500),
+                    text=_clean(getattr(latest, "message", "") if latest else "", 5000),
+                    require_addressed=True,
                 )
                 if not course_context:
                     continue
@@ -4732,7 +4845,6 @@ async def _sync_telegram_dialogs(*, full: bool = False) -> dict[str, int]:
                 )
                 link = await _external_link(peer_id=peer["id"], provider=TELEGRAM_PROVIDER)
             dialogs += 1
-            latest = getattr(dialog, "message", None)
             if latest:
                 messages += await _telegram_store_messages(
                     channel, entity, [latest], link, course_context=course_context,
@@ -4798,9 +4910,22 @@ async def telegram_realtime_loop() -> None:
                     if _telegram_is_user(entity):
                         peer = _telegram_user_view(entity)
                     else:
+                        reply_sender_id = ""
+                        reply_sender_ref = ""
+                        if getattr(event.message, "reply_to", None):
+                            try:
+                                replied = await event.get_reply_message()
+                                replied_sender = await replied.get_sender() if replied else None
+                                reply_sender_id = _clean(getattr(replied_sender, "id", ""), 200)
+                                reply_sender_ref = _clean(getattr(replied_sender, "username", ""), 200)
+                            except Exception:
+                                pass
                         course_context = await _course_chat_context(
                             TELEGRAM_PROVIDER, _clean(getattr(entity, "id", ""), 200),
                             _clean(getattr(entity, "title", ""), 500),
+                            text=_clean(getattr(event.message, "message", ""), 5000),
+                            reply_sender_id=reply_sender_id, reply_sender_ref=reply_sender_ref,
+                            require_addressed=True,
                         )
                         if not course_context:
                             return
@@ -7690,15 +7815,29 @@ async def notification_routing(request: Request) -> dict[str, Any]:
         chat_preferences = await (await db.execute(
             "SELECT admin_id,course_chats FROM notification_preferences WHERE course_chats=1"
         )).fetchall()
+        destination_rows = await (await db.execute(
+            """SELECT admin_id,provider FROM notification_destinations
+               WHERE enabled=1 UNION ALL
+               SELECT admin_id,'browser' FROM browser_notification_subscriptions WHERE enabled=1"""
+        )).fetchall()
     finally:
         await db.close()
     configured = {int(row["source_admin_id"]) for row in policies}
     mapped: dict[int, list[int]] = {}
     for row in routes:
         mapped.setdefault(int(row["source_admin_id"]), []).append(int(row["recipient_admin_id"]))
+    destination_map: dict[int, list[str]] = {}
+    for row in destination_rows:
+        values = destination_map.setdefault(int(row["admin_id"]), [])
+        provider = _clean(row["provider"], 40)
+        if provider and provider not in values:
+            values.append(provider)
     return {
         "ok": True,
-        "admins": [dict(row) | {"enabled": bool(row["enabled"])} for row in admins],
+        "admins": [dict(row) | {
+            "enabled": bool(row["enabled"]),
+            "notification_channels": destination_map.get(int(row["id"]), []),
+        } for row in admins],
         "amo_sources": [dict(row) | {"enabled": bool(row["enabled"])} for row in amo_sources],
         "course_chat_admin_ids": [int(row["admin_id"]) for row in chat_preferences if row["course_chats"]],
         "routes": [{
