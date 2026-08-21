@@ -1006,9 +1006,29 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "Наталья Абрамова",
         )
 
-    async def test_telegram_personal_initial_channels_do_not_run_live_phone_lookup(self):
+    async def test_successful_telegram_delivery_is_verified_profile_evidence(self):
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18240573",
+            "amo_lead_id": "18240573",
+        }
+        await router._record_communication(
+            dedupe_key="tg-success:18240573", external_id="tg:6055344033",
+            provider=router.TELEGRAM_PROVIDER,
+            channel_id="telegram-personal:5601500901", chat_type="telegram",
+            chat_id="6055344033", direction="outgoing", status="sent",
+            text="Здравствуйте", sent_at=router._iso(), client_name="Екатерина Поликарпова",
+            context=context,
+        )
+        link = await router._successful_card_delivery_link(context, router.TELEGRAM_PROVIDER)
+        self.assertEqual(link["external_user_id"], "6055344033")
+        self.assertEqual(link["name"], "Екатерина Поликарпова")
+
+    async def test_telegram_personal_initial_channel_is_available_for_explicit_attempt(self):
         code = await self._code()
-        token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
+        token = json.loads((await router.widget_activate(request_for(
+            "/widget/activate", {"code": code, "platform_user_id": "6269974"},
+            origin="https://junior.sobakovod.pro", platform="amocrm",
+        ))).body)["device_token"]
         channel = {
             "channel_id": "telegram-personal:5601500901", "provider": router.TELEGRAM_PROVIDER,
             "transport": "telegram", "channel_transport": "personal", "name": "operator",
@@ -1020,17 +1040,22 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             patch.object(router, "_provider_card_link", new=resolver),
         ):
             response = await router.widget_channels(request_for(
-                "/widget/channels", {"phone": "+79991234567", "entity_type": "lead", "entity_id": "17759125"}, token=token,
+                "/widget/channels", {"phone": "+79991234567", "entity_type": "lead", "entity_id": "17759125", "platform_user_id": "6269974"},
+                token=token, origin="https://junior.sobakovod.pro", platform="amocrm",
             ))
         view = json.loads(response.body)["channels"][0]
-        self.assertFalse(view["can_send"])
-        self.assertNotIn("pending", view)
-        self.assertEqual(view["send_reason"], "Пользователь Telegram не найден")
+        self.assertTrue(view["can_send"])
+        self.assertTrue(view["pending"])
+        self.assertEqual(view["label"], "TG Personal")
+        self.assertEqual(view["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
         resolver.assert_not_awaited()
 
-    async def test_telegram_personal_is_unavailable_when_phone_has_no_telegram_user(self):
+    async def test_telegram_personal_remains_available_after_a_confirmed_miss(self):
         code = await self._code()
-        token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
+        token = json.loads((await router.widget_activate(request_for(
+            "/widget/activate", {"code": code, "platform_user_id": "6269974"},
+            origin="https://junior.sobakovod.pro", platform="amocrm",
+        ))).body)["device_token"]
         channel = {
             "channel_id": "telegram-personal:5601500901", "provider": router.TELEGRAM_PROVIDER,
             "transport": "telegram", "channel_transport": "personal", "name": "operator",
@@ -1040,15 +1065,39 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])),
             patch.object(router, "_provider_card_link", new=resolver),
+            patch.object(router, "_card_link_state", return_value="missing"),
         ):
             response = await router.widget_channels(request_for(
-                "/widget/channels", {"phone": "+79091440995", "entity_type": "lead", "entity_id": "18232123"}, token=token,
+                "/widget/channels", {"phone": "+79091440995", "entity_type": "lead", "entity_id": "18232123", "platform_user_id": "6269974"},
+                token=token, origin="https://junior.sobakovod.pro", platform="amocrm",
+            ))
+        view = json.loads(response.body)["channels"][0]
+        self.assertTrue(view["can_send"])
+        self.assertNotIn("pending", view)
+        self.assertEqual(view["label"], "TG Personal · попробовать")
+        self.assertEqual(view["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
+        resolver.assert_not_awaited()
+
+    async def test_telegram_personal_is_unavailable_without_a_phone(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(request_for(
+            "/widget/activate", {"code": code, "platform_user_id": "6269974"},
+            origin="https://junior.sobakovod.pro", platform="amocrm",
+        ))).body)["device_token"]
+        channel = {
+            "channel_id": "telegram-personal:5601500901", "provider": router.TELEGRAM_PROVIDER,
+            "transport": "telegram", "channel_transport": "personal", "name": "operator",
+            "plain_id": "5601500901", "label": "Telegram Personal · operator",
+        }
+        with patch.object(router, "_all_channels", new=AsyncMock(return_value=[channel])):
+            response = await router.widget_channels(request_for(
+                "/widget/channels", {"entity_type": "lead", "entity_id": "18232123", "platform_user_id": "6269974"},
+                token=token, origin="https://junior.sobakovod.pro", platform="amocrm",
             ))
         view = json.loads(response.body)["channels"][0]
         self.assertFalse(view["can_send"])
         self.assertNotIn("pending", view)
-        self.assertEqual(view["send_reason"], "Пользователь Telegram не найден")
-        resolver.assert_not_awaited()
+        self.assertEqual(view["send_reason"], "Телефон клиента не найден")
 
     async def test_vk_card_link_uses_the_resolved_vk_account(self):
         data = {

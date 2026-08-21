@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import router
 
@@ -680,7 +681,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('"Сервер не ответил за " + Math.round(timeoutMs / 1000)', widget)
         self.assertIn('timeoutMs:60000', widget)
         self.assertNotIn('deferred_card = not thread and provider == TELEGRAM_PROVIDER', backend)
-        self.assertIn('can_send = bool(peer_id)', backend)
+        self.assertIn('can_send = bool(peer_id or attemptable)', backend)
         self.assertIn("if not state and not refresh:\n        db = await _connect()", backend)
         self.assertNotIn("if not state and not refresh and _telegram_lock.locked()", backend)
         self.assertIn("has_chat = await _has_conversation(", backend)
@@ -820,6 +821,9 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         async def no_entity_link(*_args):
             return {}
 
+        async def no_successful_delivery(*_args):
+            return {}
+
         telegram_result = {"value": {}}
 
         async def telegram_check(_data, _mode, _device, context):
@@ -833,12 +837,14 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             router._resolve_widget_context,
             router._entity_external_link,
             router._amocrm_telegram_profile_link,
+            router._successful_card_delivery_link,
         )
         router._identity_index = Index()
         router._apply_identity_rules = no_rules
         router._resolve_widget_context = resolved
         router._entity_external_link = no_entity_link
         router._amocrm_telegram_profile_link = telegram_check
+        router._successful_card_delivery_link = no_successful_delivery
         try:
             request_data = {
                 "entity_type": "lead",
@@ -870,6 +876,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
                 router._resolve_widget_context,
                 router._entity_external_link,
                 router._amocrm_telegram_profile_link,
+                router._successful_card_delivery_link,
             ) = previous
         self.assertEqual(missing_links, [
             {
@@ -880,15 +887,15 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         ])
         self.assertEqual(pending_links, [
             {
-                "kind": "telegram_personal",
-                "label": "TG Personal · попробовать",
-                "url": "https://t.me/+79991234567?profile",
-                "verification": "unverified",
-            },
-            {
                 "kind": "salebot",
                 "label": "SaleBot",
                 "url": "https://salebot.pro/projects/397724/clients/99001",
+            },
+            {
+                "kind": "telegram_personal",
+                "label": "",
+                "url": "",
+                "verification": "pending",
             },
         ])
         self.assertEqual(verified_links, [
@@ -905,8 +912,58 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             },
         ])
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
-        self.assertIn("row.verification==='unverified'", amo)
-        self.assertIn("Telegram не успел подтвердить профиль — попробовать открыть по номеру", amo)
+        self.assertIn("['pending','unverified'].includes(row.verification)", amo)
+        self.assertIn("Проверяем TG Personal…", amo)
+        self.assertIn("if(result.sent.length)loadProfileLinks(bootGeneration,true)", amo)
+
+    def test_amocrm_telegram_profile_reuses_an_exact_verified_card_link(self):
+        class Index:
+            def provider_id_for_exact_context(self, _provider, _context):
+                return ""
+
+            def telegram_username_for_platform_id(self, platform_id):
+                self_assert.assertEqual(platform_id, "6055344033")
+                return ""
+
+        async def no_rules(_context):
+            return None
+
+        async def resolved(_data, _mode, _device):
+            return {"accounts": [], "variables": {}}
+
+        async def exact_link(_platform, _entity_type, _entity_id, provider):
+            if provider == router.TELEGRAM_PROVIDER:
+                return {
+                    "external_user_id": "6055344033", "phone": "+79050497320",
+                    "name": "Екатерина Поликарпова",
+                }
+            return {}
+
+        self_assert = self
+        with (
+            patch.object(router, "_identity_index", Index()),
+            patch.object(router, "_apply_identity_rules", new=no_rules),
+            patch.object(router, "_resolve_widget_context", new=resolved),
+            patch.object(router, "_entity_external_link", new=exact_link),
+            patch.object(
+                router, "_successful_card_delivery_link",
+                new=AsyncMock(side_effect=AssertionError("exact link must avoid history lookup")),
+            ),
+            patch.object(
+                router, "_amocrm_telegram_profile_link",
+                new=AsyncMock(side_effect=AssertionError("exact link must avoid live lookup")),
+            ),
+        ):
+            links = asyncio.run(router._widget_profile_links(
+                {
+                    "entity_type": "lead", "entity_id": "18240573",
+                    "phone": "+79050497320",
+                },
+                "amocrm", {"admin_name": "Евгения"},
+            ))
+        telegram = next(row for row in links if row["kind"] == router.TELEGRAM_PROVIDER)
+        self.assertEqual(telegram["verification"], "verified")
+        self.assertEqual(telegram["label"], "TG Personal: Екатерина Поликарпова")
 
     def test_amocrm_telegram_profile_verification_runs_in_background_and_caches_miss(self):
         async def scenario():
@@ -974,16 +1031,21 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
                 return {"external_user_id": "765266654"}
             return {}
 
+        async def no_successful_delivery(*_args):
+            return {}
+
         previous = (
             router._identity_index,
             router._apply_identity_rules,
             router._resolve_widget_context,
             router._entity_external_link,
+            router._successful_card_delivery_link,
         )
         router._identity_index = Index()
         router._apply_identity_rules = no_rules
         router._resolve_widget_context = resolved
         router._entity_external_link = stale_entity_link
+        router._successful_card_delivery_link = no_successful_delivery
         try:
             links = asyncio.run(router._widget_profile_links(
                 {
@@ -1000,6 +1062,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
                 router._apply_identity_rules,
                 router._resolve_widget_context,
                 router._entity_external_link,
+                router._successful_card_delivery_link,
             ) = previous
         self.assertNotIn("salebot", {row["kind"] for row in links})
 
@@ -1165,8 +1228,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.7.32")
-        self.assertIn("static/amocrm.html?v=51417", script)
+        self.assertEqual(manifest["widget"]["version"], "1.7.34")
+        self.assertIn("static/amocrm.html?v=51419", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)

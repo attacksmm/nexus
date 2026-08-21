@@ -258,6 +258,71 @@ def _remember_card_link(key: tuple[str, ...], link: dict[str, str]) -> None:
         _card_link_cache.pop(next(iter(_card_link_cache)))
 
 
+def _card_link_state(key: tuple[str, ...]) -> str:
+    """Return the live card-check state without starting another lookup."""
+
+    task = _telegram_profile_inflight.get(key)
+    if task and not task.done():
+        return "pending"
+    cached = _card_link_cache.get(key)
+    if not cached or cached[0] <= time.monotonic():
+        return "unknown"
+    link = cached[1]
+    if link.get("pending"):
+        return "pending"
+    return "verified" if _clean(link.get("external_user_id"), 250) else "missing"
+
+
+async def _successful_card_delivery_link(
+    context: dict[str, Any], provider: str,
+) -> dict[str, str]:
+    """Return an exact direct identity only after a successful card delivery."""
+
+    if (
+        context.get("platform") != "amocrm"
+        or context.get("entity_type") != "lead"
+        or not _clean(context.get("entity_id"), 100)
+    ):
+        return {}
+    lead_id = _clean(context.get("entity_id"), 100)
+    chat_type = "telegram" if provider == TELEGRAM_PROVIDER else provider
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT chat_id,client_name FROM communication_messages
+               WHERE amo_lead_id=? AND provider=? AND direction='outgoing'
+                 AND status IN ('sent','delivered','read') AND chat_id<>''
+               ORDER BY sent_at DESC,id DESC LIMIT 1""",
+            (lead_id, provider),
+        )).fetchone()
+        if not row:
+            row = await (await db.execute(
+                """SELECT context.external_user_id AS chat_id,'' AS client_name
+                   FROM conversation_contexts context
+                   WHERE context.provider=? AND context.platform='amocrm'
+                     AND context.entity_type='lead' AND context.entity_id=?
+                     AND EXISTS(
+                       SELECT 1 FROM wazzup_messages message
+                       WHERE message.chat_type=? AND message.chat_id=context.external_user_id
+                         AND message.direction='outgoing'
+                         AND message.status IN ('sent','delivered','read')
+                     )
+                   ORDER BY context.updated_at DESC LIMIT 1""",
+                (provider, lead_id, chat_type),
+            )).fetchone()
+    finally:
+        await db.close()
+    if not row:
+        return {}
+    peer_id = _clean(row["chat_id"], 250)
+    stored = await _external_link(peer_id=peer_id, provider=provider)
+    return stored or {
+        "provider": provider,
+        "external_user_id": peer_id,
+        "name": _clean(row["client_name"], 200),
+    }
+
+
 async def _amocrm_telegram_profile_link(
     data: dict[str, Any], mode: str, device: dict[str, Any], context: dict[str, Any],
 ) -> dict[str, str]:
@@ -5227,8 +5292,9 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
     found = _profile_links_from_values([context, resolved.get("variables", {})])
     accounts = [row for row in resolved.get("accounts", []) if isinstance(row, dict)]
     exact_ids: dict[str, str] = {}
-    telegram_identity_hint = ""
     telegram_profile_verification = ""
+    telegram_profile_pending = False
+    telegram_delivery_link: dict[str, str] = {}
     if context.get("platform") == "amocrm" and _identity_index is not None:
         # Historical amoCRM imports contain generated ``Диалог SaleBot`` URLs
         # whose client id was copied blindly from utm_term.  Those URLs are
@@ -5236,13 +5302,11 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         # lead exists in SaleBot.  Only the exact Customer DB bridge below may
         # create a SaleBot profile button for an amoCRM card.
         found.pop(SALEBOT_PROVIDER, None)
-        vk_exact, telegram_exact, salebot_exact = await asyncio.gather(*(
+        found.pop(TELEGRAM_PROVIDER, None)
+        vk_exact, salebot_exact = await asyncio.gather(*(
             asyncio.to_thread(_identity_index.provider_id_for_exact_context, provider, context)
-            for provider in ("vk", "telegram", SALEBOT_PROVIDER)
+            for provider in ("vk", SALEBOT_PROVIDER)
         ))
-        telegram_identity_hint = _clean(telegram_exact, 300) or _identity_field_value(
-            context, "telegram_id", "tg_id",
-        )
         exact_ids = {
             "vk": _clean(vk_exact, 300) or _identity_field_value(context, "vk_id", "vkontakte_id", "senler_id"),
             SALEBOT_PROVIDER: _clean(salebot_exact, 300),
@@ -5285,11 +5349,33 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
                 bool(exact_ids.get(provider))
                 and _clean(link.get("external_user_id"), 300) == exact_ids.get(provider)
             )
+            or (
+                provider == TELEGRAM_PROVIDER
+                and _card_link_matches_context(link, context, gc_id)
+            )
         ):
             account_ids.setdefault(provider, _clean(link.get("external_user_id"), 300))
     for provider, external_id in exact_ids.items():
         if external_id:
             account_ids[provider] = external_id
+
+    if context.get("platform") == "amocrm":
+        telegram_delivery_link = next((
+            link for provider, link in zip(
+                ("vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER), entity_links,
+            )
+            if provider == TELEGRAM_PROVIDER
+            and link
+            and _card_link_matches_context(link, context, gc_id)
+        ), {})
+        if not telegram_delivery_link:
+            telegram_delivery_link = await _successful_card_delivery_link(
+                context, TELEGRAM_PROVIDER,
+            )
+        delivered_telegram_id = _clean(telegram_delivery_link.get("external_user_id"), 300)
+        if delivered_telegram_id:
+            account_ids[TELEGRAM_PROVIDER] = delivered_telegram_id
+            telegram_profile_verification = "verified"
 
     # Use the same exact card resolver as the SaleBot channel.  A card can have
     # a verified SaleBot id in Customer DB even before an entity link has been
@@ -5308,28 +5394,19 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         # live, non-importing check as the TG Personal channel.  A definitive
         # miss hides the profile button; a timeout keeps only an explicitly
         # unverified "try to open" action.
-        if context.get("phone"):
+        if account_ids.get(TELEGRAM_PROVIDER):
+            telegram_link = telegram_delivery_link
+        elif context.get("phone"):
             telegram_link = await _amocrm_telegram_profile_link(data, mode, device, context)
         else:
-            telegram_link = {"pending": "1"} if found.get(TELEGRAM_PROVIDER) else {}
+            telegram_link = {}
         telegram_id = _clean(telegram_link.get("external_user_id"), 300)
         if telegram_id:
             account_ids[TELEGRAM_PROVIDER] = telegram_id
             telegram_profile_verification = "verified"
         elif telegram_link.get("pending"):
-            telegram_username_hint = ""
-            if telegram_identity_hint and _identity_index is not None:
-                telegram_username_hint = await asyncio.to_thread(
-                    _identity_index.telegram_username_for_platform_id, telegram_identity_hint,
-                )
-            try_url = found.get(TELEGRAM_PROVIDER) or _telegram_profile_url(
-                telegram_username_hint, context.get("phone"),
-            )
-            if try_url:
-                found[TELEGRAM_PROVIDER] = try_url
-                telegram_profile_verification = "unverified"
-            else:
-                found.pop(TELEGRAM_PROVIDER, None)
+            found.pop(TELEGRAM_PROVIDER, None)
+            telegram_profile_pending = True
         else:
             account_ids.pop(TELEGRAM_PROVIDER, None)
             found.pop(TELEGRAM_PROVIDER, None)
@@ -5370,7 +5447,8 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
         _provider_profile_name("vk", vk_id, entity_by_provider.get("vk", {}).get("name", "")),
         _provider_profile_name(
             TELEGRAM_PROVIDER, telegram_id,
-            entity_by_provider.get(TELEGRAM_PROVIDER, {}).get("name", ""),
+            telegram_delivery_link.get("name", "")
+            or entity_by_provider.get(TELEGRAM_PROVIDER, {}).get("name", ""),
         ),
         _provider_profile_name(
             SALEBOT_PROVIDER, salebot_id,
@@ -5395,18 +5473,23 @@ async def _widget_profile_links(data: dict[str, Any], mode: str, device: dict[st
                 found["getcourse"] = stream_url or f"{_allowed_origin()}/user/control/user/update/id/{gc_id}"
     except Exception as exc:
         _log("warning", "Streams badge lookup skipped: %s", exc)
-    return [
+    links = [
         {"kind": kind,
          "label": (
              f"{PROFILE_LINK_LABELS[kind]}: {profile_names[kind]}"
              if profile_names.get(kind) else PROFILE_LINK_LABELS[kind]
-         ) + (" · попробовать" if kind == TELEGRAM_PROVIDER and telegram_profile_verification == "unverified" else ""),
+         ),
          "url": found[kind],
          **({"verification": telegram_profile_verification} if kind == TELEGRAM_PROVIDER and telegram_profile_verification else {}),
          **({"paid_access": paid_access} if kind == "getcourse" else {})}
         for kind in PROFILE_LINK_ORDER
         if found.get(kind)
     ]
+    if telegram_profile_pending:
+        links.append({
+            "kind": TELEGRAM_PROVIDER, "label": "", "url": "", "verification": "pending",
+        })
+    return links
 
 
 def _module_service(module_id: str, service: str):
@@ -8585,6 +8668,8 @@ async def widget_channels(request: Request) -> JSONResponse:
             reason = ""
             link: dict[str, Any] = {}
             direct_link: tuple[str, str] | None = None
+            direct_label = ""
+            verification_pending = False
             if provider == "wazzup":
                 has_chat = await _has_conversation(
                     channel["channel_id"], channel["transport"], phone,
@@ -8621,6 +8706,12 @@ async def widget_channels(request: Request) -> JSONResponse:
                         exact_link, context, gc_id,
                     ):
                         link = exact_link
+                if (
+                    not link
+                    and provider == TELEGRAM_PROVIDER
+                    and context["platform"] == "amocrm"
+                ):
+                    link = await _successful_card_delivery_link(context, provider)
                 if not link and (thread or context["platform"] != "amocrm"):
                     link = await _external_link_for_identity(provider, phone=phone, gc_id=gc_id)
                 # Initial widget paint must use only identities already proven
@@ -8672,16 +8763,36 @@ async def widget_channels(request: Request) -> JSONResponse:
                     can_send = bool(peer_id or explicit_id)
                     reason = "" if can_send else "SaleBot клиента не найден"
                 else:
-                    can_send = bool(peer_id)
-                    reason = "" if peer_id else "Проверяем пользователя Telegram…" if link.get("pending") else "Пользователь Telegram не найден"
+                    attemptable = context["platform"] == "amocrm" and bool(phone)
+                    state = _card_link_state(
+                        _card_link_cache_key(context, device, TELEGRAM_PROVIDER, "")
+                    ) if attemptable and not peer_id else "verified"
+                    verification_pending = bool(
+                        attemptable and not peer_id and state in {"unknown", "pending"}
+                    )
+                    can_send = bool(peer_id or attemptable)
+                    if peer_id:
+                        reason = ""
+                    elif attemptable:
+                        direct_label = (
+                            "TG Personal" if verification_pending
+                            else "TG Personal · попробовать"
+                        )
+                        reason = "Нажмите — Nexus попробует найти пользователя Telegram"
+                    else:
+                        reason = "Пользователь Telegram не найден" if phone else "Телефон клиента не найден"
             return ({
                 **channel,
-                **({"label": f"{('TG Personal' if provider == TELEGRAM_PROVIDER else 'SaleBot' if provider == SALEBOT_PROVIDER else 'VK')}: {provider_profile_name}"} if provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER} and provider_profile_name else {}),
+                **({"label": direct_label} if direct_label else
+                   {"label": f"{('TG Personal' if provider == TELEGRAM_PROVIDER else 'SaleBot' if provider == SALEBOT_PROVIDER else 'VK')}: {provider_profile_name}"}
+                   if provider in {"vk", TELEGRAM_PROVIDER, SALEBOT_PROVIDER} and provider_profile_name else {}),
                 "available": can_send,
                 "can_send": can_send,
                 "has_chat": has_chat,
                 "send_reason": reason,
-                **({"pending": True} if provider == TELEGRAM_PROVIDER and link.get("pending") else {}),
+                **({"pending": True} if provider == TELEGRAM_PROVIDER and (
+                    link.get("pending") or verification_pending
+                ) else {}),
             }, direct_link)
 
         async def resolve_channel_safely(channel: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str] | None]:
