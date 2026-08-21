@@ -718,6 +718,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(response.body)["channels"], [{
             **channel, "label": "SaleBot: Амина Тесаева",
             "available": True, "can_send": True, "has_chat": False, "send_reason": "",
+            "chat_id": "998417306",
         }])
         exact_link.assert_not_awaited()
 
@@ -853,6 +854,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(response.body)["channels"], [{
             **channel, "label": "TG Personal: Елена",
             "available": True, "can_send": True, "has_chat": True, "send_reason": "",
+            "chat_id": "700",
         }])
 
     async def test_webhook_stores_incoming_message_without_sending(self):
@@ -953,9 +955,12 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 },
                 token=token,
             ))
+            job = await router._claim_outbound_job()
+            await router._retry_outbound_job(job)
         finally:
             router._wazzup_request = original
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(json.loads(response.body)["queued"])
         self.assertEqual(captured[-1][0:2], ("POST", "/message"))
         message = captured[-1][2]
         self.assertEqual(message["channelId"], "max-1")
@@ -988,11 +993,11 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 },
                 token=token,
             ))
+            job = await router._claim_outbound_job()
+            await router._retry_outbound_job(job)
         body = json.loads(response.body)
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(body["sent"])
-        self.assertEqual(body["message"]["status"], "failed")
-        self.assertEqual(body["notice"], "У клиента не найден MAX. Сообщение не доставлено.")
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(body["queued"])
         async with aiosqlite.connect(router._must_db()) as db:
             row = await (await db.execute(
                 "SELECT status,text FROM wazzup_messages WHERE text='Проверка MAX'"
@@ -1015,6 +1020,8 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(router, "_wazzup_request", new=fake_wazzup):
             response = await router.widget_send(request_for("/widget/send", payload, token=token))
+            job = await router._claim_outbound_job()
+            await router._retry_outbound_job(job)
             duplicate = await router.widget_send(request_for("/widget/send", payload, token=token))
         self.assertEqual(response.status_code, 202)
         self.assertTrue(json.loads(response.body)["queued"])
@@ -1024,6 +1031,80 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT request_key,status,attempts FROM outbound_jobs WHERE request_key='batch-1:max'"
             )).fetchone()
         self.assertEqual(row, ("batch-1:max", "retry", 1))
+
+    async def test_pending_delivery_is_visible_in_operations_and_metrics(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code})
+        )).body)["device_token"]
+
+        async def fake_wazzup(method, path, body=None, **_kwargs):
+            if (method, path) == ("GET", "/channels"):
+                return [{"channelId": "max-1", "transport": "max", "state": "active", "name": "MAX"}]
+            raise AssertionError("provider delivery must not run in the request")
+
+        with patch.object(router, "_wazzup_request", new=fake_wazzup):
+            response = await router.widget_send(request_for(
+                "/widget/send",
+                {
+                    "request_id": "pending-visible", "phone": "+79108758427", "name": "Елена",
+                    "source_url": "https://club.sobakovod.pro/user/control/user/update/id/42",
+                    "channel_id": "max-1", "transport": "max", "text": "Напишите мне завтра",
+                }, token=token,
+            ))
+        self.assertEqual(response.status_code, 202)
+        journal = json.loads((await router.widget_operations(
+            request_for("/widget/operations", {}, token=token)
+        )).body)
+        item = next(row for row in journal["items"] if row["id"].startswith("outbound:"))
+        self.assertEqual(item["status"], "pending")
+        self.assertIn("Напишите мне завтра", item["result"])
+        with patch.object(router, "_require_admin", new=AsyncMock(return_value={"username": "admin"})):
+            metrics = await router.communication_metrics(request_for("/communication-metrics", {}), days=7)
+        pending = next(row for row in metrics["outbound"] if row["status"] == "pending")
+        self.assertEqual(pending["retries"], 0)
+        self.assertEqual(metrics["queue"]["outbound"], 1)
+        self.assertGreaterEqual(metrics["queue"]["outbound_oldest_age_seconds"], 0)
+
+    async def test_ten_managers_can_queue_and_workers_claim_unique_jobs(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code})
+        )).body)["device_token"]
+
+        async def fake_wazzup(method, path, body=None, **_kwargs):
+            if (method, path) == ("GET", "/channels"):
+                return [{"channelId": "max-1", "transport": "max", "state": "active", "name": "MAX"}]
+            raise AssertionError("provider delivery must stay in workers")
+
+        async def enqueue(index):
+            return await router.widget_send(request_for(
+                "/widget/send",
+                {
+                    "request_id": f"parallel-{index}", "phone": "+79108758427", "name": "Елена",
+                    "source_url": "https://club.sobakovod.pro/user/control/user/update/id/42",
+                    "channel_id": "max-1", "transport": "max", "text": f"Сообщение {index}",
+                }, token=token,
+            ))
+
+        with patch.object(router, "_wazzup_request", new=fake_wazzup):
+            responses = await asyncio.gather(*(enqueue(index) for index in range(10)))
+        self.assertTrue(all(response.status_code == 202 for response in responses))
+        jobs = await asyncio.gather(*(router._claim_outbound_job() for _ in range(10)))
+        self.assertEqual(len({job["id"] for job in jobs if job}), 10)
+        sender = AsyncMock(side_effect=lambda **kwargs: {
+            "message": {
+                "external_id": f"sent:{kwargs['idempotency_key']}", "direction": "outgoing",
+                "status": "sent", "text": kwargs["text"], "sent_at": router._iso(),
+            }
+        })
+        with patch.object(router, "service_streams_send", new=sender):
+            await asyncio.gather(*(router._retry_outbound_job(job) for job in jobs))
+        async with aiosqlite.connect(router._must_db()) as db:
+            sent = (await (await db.execute(
+                "SELECT COUNT(*) FROM outbound_jobs WHERE status='sent'"
+            )).fetchone())[0]
+        self.assertEqual(sent, 10)
 
     async def test_empty_max_chat_history_is_scoped_to_the_current_phone(self):
         now = router._iso()
@@ -1127,6 +1208,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(response.body)["channels"], [{
             **channel,
             "available": True, "can_send": True, "has_chat": False, "send_reason": "",
+            "chat_id": "215204074",
         }])
 
     async def test_direct_channel_names_come_from_the_exact_provider_chat(self):
@@ -1286,7 +1368,10 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 },
                 token=token,
             ))
-        self.assertEqual(response.status_code, 200)
+            job = await router._claim_outbound_job()
+            await router._retry_outbound_job(job)
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(json.loads(response.body)["queued"])
         sender.assert_awaited_once_with("700", "mock", author_name="Анна")
 
     async def test_amocrm_telegram_requires_live_phone_resolution_and_persists_entity_link(self):
