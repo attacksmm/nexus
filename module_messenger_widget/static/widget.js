@@ -919,8 +919,8 @@
     var failed = [];
     var batchId = window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(36).slice(2);
     await Promise.all(targets.map(async function (channel, index) {
-      if (attachment && attachment.attachment_url && ["salebot", "vk", "telegram_personal"].indexOf(channel.provider) < 0) {
-        failed.push(channelLabel(channel) + ": изображения доступны через VK, TG Personal или SaleBot");
+      if (attachment && attachment.attachment_url && ["salebot", "vk", "telegram_personal", "wazzup"].indexOf(channel.provider) < 0) {
+        failed.push(channelLabel(channel) + ": изображения доступны через MAX, VK, TG Personal или SaleBot");
         return;
       }
       try {

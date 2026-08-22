@@ -3365,7 +3365,8 @@ def _delivery_retry_delay(error: Any, attempts: int) -> int:
 def _delivery_error_is_transient(error: Any) -> bool:
     if isinstance(error, (TimeoutError, httpx.TimeoutException, ConnectionError)):
         return True
-    status_code = int(getattr(error, "status_code", 0) or 0)
+    response = getattr(error, "response", None)
+    status_code = int(getattr(error, "status_code", 0) or getattr(response, "status_code", 0) or 0)
     text_value = _clean(getattr(error, "detail", error), 1000).casefold()
     if any(token in text_value for token in (
         "vk 901", "without permission", "не найден max", "не найден telegram",
@@ -3377,7 +3378,8 @@ def _delivery_error_is_transient(error: Any) -> bool:
     return status_code in {408, 425, 429, 500, 502, 503, 504} or any(token in text_value for token in (
         "too many requests", "flood_wait", "wait of", "timeout", "timed out",
         "временно", "недоступен", "connection", "transport", "http 429",
-        "http 500", "http 502", "http 503", "http 504",
+        "http 500", "http 502", "http 503", "http 504", "500 server error",
+        "502 bad gateway", "503 service unavailable", "504 gateway timeout",
     ))
 
 
@@ -7270,40 +7272,65 @@ async def service_streams_send(
             telegram_options.update(attachment_url=attachment_url, attachment_type=attachment_type)
         message = await _telegram_send_text(chat_id, message_text, **telegram_options)
     else:
-        if attachment_url:
-            raise ValueError("Изображения можно отправить через VK, TG Personal или SaleBot")
         if not normalized_phone:
             raise ValueError("Для этого канала нужен телефон")
         known_chat_id, has_chat, _ = await _conversation_rows(channel_id, transport, normalized_phone, 1)
         target_chat = chat_id or known_chat_id
         identity = await resolve_client_identity(phone=normalized_phone, email=email, getcourse_user_id=gc_user_id)
         payload: dict[str, Any] = {
-            "channelId": channel_id, "chatType": transport, "text": message_text,
+            "channelId": channel_id, "chatType": transport,
             "crmUserId": admin["wazzup_user_id"],
-            "crmMessageId": f"nexus-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:32] if idempotency_key else secrets.token_hex(16)}",
         }
         if has_chat and target_chat:
             payload["chatId"] = target_chat
         else:
             payload.update(_first_message_recipient(channel, transport, normalized_phone, identity))
-        response = await _wazzup_request("POST", "/message", payload)
-        external_id = _clean((response or {}).get("messageId") or (response or {}).get("id"), 250) or f"local-{payload['crmMessageId']}"
+        message_key = hashlib.sha256(idempotency_key.encode()).hexdigest()[:32] if idempotency_key else secrets.token_hex(16)
+        deliveries: list[tuple[dict[str, Any], str, str]] = []
+        if attachment_url:
+            attachment_payload = {
+                **payload, "contentUri": attachment_url,
+                "crmMessageId": f"nexus-{message_key}-file",
+            }
+            deliveries.append((
+                await _wazzup_request("POST", "/message", attachment_payload),
+                attachment_payload["crmMessageId"], attachment_url,
+            ))
+        if message_text:
+            text_payload = {
+                **payload, "text": message_text,
+                "crmMessageId": f"nexus-{message_key}" + ("-text" if attachment_url else ""),
+            }
+            deliveries.append((
+                await _wazzup_request("POST", "/message", text_payload),
+                text_payload["crmMessageId"], "",
+            ))
+        response, response_key, _ = deliveries[-1]
+        external_id = _clean((response or {}).get("messageId") or (response or {}).get("id"), 250) or f"local-{response_key}"
         response_chat_id = _clean((response or {}).get("chatId"), 250) or target_chat
         db = await _connect()
         try:
-            await db.execute(
-                """INSERT OR IGNORE INTO wazzup_messages(
-                   external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
-                   ) VALUES(?,?,?,?,?,'outgoing','accepted',?,'',?,?,?,?)""",
-                (external_id, channel_id, transport, response_chat_id, _phone_hash(normalized_phone),
-                 message_text, admin["name"], now, "", now),
-            )
+            for delivery, delivery_key, content_uri in deliveries:
+                delivery_id = _clean(
+                    (delivery or {}).get("messageId") or (delivery or {}).get("id"), 250,
+                ) or f"local-{delivery_key}"
+                delivery_chat_id = _clean((delivery or {}).get("chatId"), 250) or target_chat
+                await db.execute(
+                    """INSERT OR IGNORE INTO wazzup_messages(
+                       external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
+                       ) VALUES(?,?,?,?,?,'outgoing','accepted',?,?,?,?,?,?)""",
+                    (
+                        delivery_id, channel_id, transport, delivery_chat_id, _phone_hash(normalized_phone),
+                        message_text if not content_uri else "", content_uri, admin["name"], now, "", now,
+                    ),
+                )
             await db.commit()
         finally:
             await db.close()
         message = {
             "external_id": external_id, "chat_id": response_chat_id, "direction": "outgoing",
-            "status": "sent", "text": message_text, "author_name": admin["name"], "sent_at": now,
+            "status": "sent", "text": message_text, "content_uri": attachment_url,
+            "content_type": attachment_type, "author_name": admin["name"], "sent_at": now,
         }
     if record_communication and _db_path is not None:
         await _record_communication(

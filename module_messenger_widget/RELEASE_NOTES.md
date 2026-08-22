@@ -1,6 +1,13 @@
-# Messenger Widget 5.15.3
+# Messenger Widget 5.15.4
 
 Release candidate for the week-long production observation period.
+
+## 5.15.4 — reliable image delivery and compact profile refresh
+
+- Profile enrichment uses one compact spinner beside the already found profile buttons; the duplicate floating refresh message was removed.
+- MAX/Wazzup image attachments are delivered through the documented `contentUri` field. Text plus image is split into two idempotent provider messages because mixed content is not accepted on every transport.
+- Temporary HTTP 5xx failures from provider upload servers, including VK image upload 502 responses, stay in the durable retry queue instead of becoming final failures.
+- Both amoCRM and GetCourse composers allow images for Wazzup/MAX in addition to VK, TG Personal and SaleBot.
 
 ## 5.15.3 — reliable templates and image drafts
 

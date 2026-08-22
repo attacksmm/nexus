@@ -34,6 +34,12 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertTrue(router._delivery_error_is_transient(error))
         self.assertEqual(router._delivery_retry_delay(error, 1), 39)
 
+    def test_delivery_retry_treats_provider_upload_502_as_transient(self):
+        request = router.httpx.Request("POST", "https://upload.example.test/image")
+        response = router.httpx.Response(502, request=request)
+        error = router.httpx.HTTPStatusError("502 Bad Gateway", request=request, response=response)
+        self.assertTrue(router._delivery_error_is_transient(error))
+
     def test_auto_markup_completes_allow_listed_urls_without_replacing_existing_values(self):
         domains = "club.sobakovod.pro;sobakovod.pro;start.bizon365.ru"
         tail = "?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}"
@@ -922,7 +928,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         ])
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertIn("['pending','unverified'].includes(row.verification)", amo)
-        self.assertIn("Уточняем остальные профили…", amo)
+        self.assertIn("aria-label','Уточняем остальные профили'", amo)
         self.assertIn("if(result.sent.length){await refreshActive(true);loadProfileLinks(bootGeneration,true)}", amo)
         self.assertIn("else if(result.queued.length)setTimeout(()=>refreshActive(true),2500)", amo)
 
@@ -1253,8 +1259,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.8.3")
-        self.assertIn("static/amocrm.html?v=51503", script)
+        self.assertEqual(manifest["widget"]["version"], "1.8.4")
+        self.assertIn("static/amocrm.html?v=51504", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
@@ -1415,6 +1421,66 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(calls, [("965776230", "Проверка", "", "")])
+
+    def test_streams_send_uses_wazzup_content_uri_for_max_image(self):
+        calls = []
+
+        async def channel(channel_id, transport, provider):
+            return {
+                "channel_id": channel_id, "transport": transport, "provider": provider,
+                "channel_transport": "max", "plain_id": "",
+            }
+
+        async def admin(_operator_name):
+            return {"id": 1, "wazzup_user_id": "manager-1", "name": "Никита Попов", "role": "employee"}
+
+        async def conversation(_channel_id, _transport, _phone, _limit):
+            return "max-chat-1", True, []
+
+        async def wazzup(method, path, body=None, **_kwargs):
+            calls.append((method, path, body))
+            return {"messageId": "max-image-1", "chatId": "max-chat-1"}
+
+        originals = (
+            router._requested_channel, router._streams_admin, router._conversation_rows,
+            router._wazzup_request, router.resolve_client_identity,
+        )
+        original_db = router._db_path
+        with tempfile.TemporaryDirectory() as temp_dir:
+            router._db_path = Path(temp_dir) / "messenger-widget.db"
+            asyncio.run(router._init_db())
+            router._requested_channel, router._streams_admin = channel, admin
+            router._conversation_rows, router._wazzup_request = conversation, wazzup
+            router.resolve_client_identity = AsyncMock(return_value={})
+            try:
+                result = asyncio.run(router.service_streams_send(
+                    channel_id="max-1", transport="max", provider="wazzup",
+                    chat_id="max-chat-1", phone="+79991234567", text="",
+                    operator_name="Никита Попов", name="Тест",
+                    attachment_url="https://cdn.example.test/image.png", attachment_type="image/png",
+                    idempotency_key="image-test", record_communication=False,
+                ))
+            finally:
+                (
+                    router._requested_channel, router._streams_admin, router._conversation_rows,
+                    router._wazzup_request, router.resolve_client_identity,
+                ) = originals
+                router._db_path = original_db
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        payload = calls[0][2]
+        self.assertEqual(payload["contentUri"], "https://cdn.example.test/image.png")
+        self.assertNotIn("text", payload)
+        self.assertEqual(payload["chatId"], "max-chat-1")
+        self.assertRegex(payload["crmMessageId"], r"^nexus-[0-9a-f]{32}-file$")
+
+    def test_profile_refresh_has_one_spinner_without_visible_duplicate_text(self):
+        amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertNotIn("setRefreshTask('profiles'", amo)
+        self.assertIn("status.setAttribute('aria-label','Уточняем остальные профили')", amo)
+        self.assertNotIn("document.createTextNode(box.querySelector('.profile-link')?'Уточняем остальные профили", amo)
+        self.assertIn("['salebot','vk','telegram_personal','wazzup']", amo)
 
     def test_getcourse_widget_queues_access_changes_without_second_confirmation(self):
         module_dir = Path(__file__).resolve().parents[1]
