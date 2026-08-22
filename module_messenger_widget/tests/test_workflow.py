@@ -87,6 +87,79 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
         return code
 
+    async def test_telegram_outgoing_attachment_is_preserved_during_history_refresh(self):
+        class File:
+            name = "photo.png"
+            mime_type = "image/png"
+
+        class Message:
+            id = 42
+            out = True
+            file = File()
+            message = ""
+            date = None
+            sender_id = 7
+
+        class Entity:
+            id = 12345
+            first_name = "Анна"
+            last_name = ""
+            username = "anna"
+            phone = ""
+
+        channel = {"channel_id": "telegram-personal:test"}
+        link = {"phone": "+79990000000", "name": "Анна"}
+        url = "https://junior.sobakovod.pro/nexus/messenger-widget/api/widget/media/token/photo.png"
+        await router._telegram_store_messages(
+            channel, Entity(), [Message()], link,
+            outgoing_author_name="Менеджер", outgoing_attachment_url=url,
+            outgoing_attachment_type="image",
+        )
+        # A later Telethon history pass cannot erase the URL recorded by the
+        # successful send operation.
+        await router._telegram_store_messages(channel, Entity(), [Message()], link)
+        async with aiosqlite.connect(router._must_db()) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT text,content_uri,raw_json FROM wazzup_messages WHERE external_id=?",
+                ("telegram-personal:test:12345:42",),
+            )).fetchone()
+        self.assertEqual(row["text"], "")
+        self.assertEqual(row["content_uri"], url)
+        self.assertEqual(json.loads(row["raw_json"])["contentType"], "image/png")
+
+    async def test_failed_max_attachment_is_visible_from_durable_job(self):
+        now = router._iso()
+        request_key = "max-image-failure"
+        url = "https://junior.sobakovod.pro/nexus/messenger-widget/api/widget/media/token/photo.png"
+        async with aiosqlite.connect(router._must_db()) as db:
+            cursor = await db.execute(
+                """INSERT INTO outbound_jobs(
+                   request_key,admin_id,provider,channel_id,chat_type,chat_id,text,
+                   attachment_url,attachment_type,status,queued_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (request_key, self.admin_id, "wazzup", "max:1", "max", "chat-1", "",
+                 url, "image", "failed", now, now, now),
+            )
+            job_id = int(cursor.lastrowid)
+            await db.commit()
+        await router._finish_outbound_job({
+            "id": job_id, "request_key": request_key, "admin_id": self.admin_id,
+            "provider": "wazzup", "channel_id": "max:1", "chat_type": "max",
+            "chat_id": "chat-1", "phone": "", "text": "", "attachment_url": url,
+            "attachment_type": "image", "manager_name": "Менеджер", "attempts": 1,
+            "queued_at": now,
+        }, {}, status="failed", error="MAX не принял изображение")
+        async with aiosqlite.connect(router._must_db()) as db:
+            query = router._conversation_message_query(
+                "channel_id=? AND chat_type=? AND chat_id=?",
+            )
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(query, ("max:1", "max", "chat-1", 50, 0))).fetchone()
+        view = router._message_view(row)
+        self.assertEqual(view["content_uri"], url)
+        self.assertEqual(view["content_type"], "image")
+
     async def test_persistent_activation_and_global_iframe_flow(self):
         code = await self._code()
         activated = await router.widget_activate(request_for("/widget/activate", {"code": code}))

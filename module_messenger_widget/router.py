@@ -3470,6 +3470,8 @@ def _outbound_duplicate_payload(job: dict[str, Any]) -> dict[str, Any] | None:
         return {"ok": True, "sent": True, "duplicate": True, "message": {
             "external_id": _clean(job.get("external_id"), 250), "direction": "outgoing",
             "status": "sent", "text": _clean(job.get("text"), 4000),
+            "content_uri": _clean(job.get("attachment_url"), 4000),
+            "content_type": _clean(job.get("attachment_type"), 100),
             "author_name": _clean(job.get("manager_name"), 200),
             "sent_at": _clean(job.get("sent_at"), 80) or _iso(),
         }}
@@ -3503,6 +3505,8 @@ async def _queued_outbound_response(
         "message": {
             "external_id": f"queued:{job['request_key']}", "direction": "outgoing",
             "status": "queued", "text": _clean(job.get("text"), 4000),
+            "content_uri": _clean(job.get("attachment_url"), 4000),
+            "content_type": _clean(job.get("attachment_type"), 100),
             "author_name": _clean(device.get("admin_name"), 200),
             "sent_at": _clean(job.get("queued_at"), 80) or _iso(),
         },
@@ -3531,14 +3535,23 @@ async def _finish_outbound_job(
         db = await _connect()
         try:
             await db.execute(
-                """INSERT OR IGNORE INTO wazzup_messages(
+                """INSERT INTO wazzup_messages(
                    external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,
                    content_uri,author_name,sent_at,raw_json,created_at
-                   ) VALUES(?,?,?,?,?,'outgoing','failed',?,'',?,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,'outgoing','failed',?,?,?,?,?,?)
+                   ON CONFLICT(external_id) DO UPDATE SET
+                   status='failed',text=excluded.text,
+                   content_uri=CASE WHEN excluded.content_uri<>'' THEN excluded.content_uri ELSE wazzup_messages.content_uri END,
+                   author_name=excluded.author_name,sent_at=excluded.sent_at,raw_json=excluded.raw_json""",
                 (
                     failed_id, job["channel_id"], job["chat_type"], _clean(job.get("chat_id"), 250),
-                    _phone_hash(job.get("phone")), job["text"], _clean(job.get("manager_name"), 200),
-                    now, json.dumps({"error": _clean(error, 1000)}, ensure_ascii=False), now,
+                    _phone_hash(job.get("phone")), job["text"], _clean(job.get("attachment_url"), 4000),
+                    _clean(job.get("manager_name"), 200), now,
+                    json.dumps({
+                        "error": _clean(error, 1000),
+                        "contentType": _clean(job.get("attachment_type"), 100),
+                        "contentUri": _clean(job.get("attachment_url"), 4000),
+                    }, ensure_ascii=False), now,
                 ),
             )
             await db.commit()
@@ -4998,6 +5011,8 @@ async def _telegram_store_messages(
     link: dict[str, Any],
     *,
     outgoing_author_name: str = "",
+    outgoing_attachment_url: str = "",
+    outgoing_attachment_type: str = "",
     course_context: dict[str, Any] | None = None,
 ) -> int:
     if _telegram_is_user(entity):
@@ -5035,9 +5050,15 @@ async def _telegram_store_messages(
         date = getattr(message, "date", None)
         sent_at = _iso(date.astimezone(timezone.utc)) if isinstance(date, datetime) else now
         outgoing = bool(getattr(message, "out", False))
+        stored_attachment_url = _clean(outgoing_attachment_url, 4000) if outgoing else ""
+        if outgoing and stored_attachment_url:
+            content_type = _clean(outgoing_attachment_type, 200) or content_type or "image"
+            if text_value.startswith("[Вложение:"):
+                text_value = ""
         raw = {
             "id": message_id,
             "contentType": content_type,
+            "contentUri": stored_attachment_url,
             "filename": filename,
             "senderId": _clean(getattr(message, "sender_id", ""), 200),
         }
@@ -5045,7 +5066,7 @@ async def _telegram_store_messages(
             "external_id": f"{channel['channel_id']}:{peer_id}:{message_id}",
             "direction": "outgoing" if outgoing else "incoming",
             "text": text_value,
-            "content_uri": "",
+            "content_uri": stored_attachment_url,
             "author_name": (_clean(outgoing_author_name, 200) or "Telegram") if outgoing else name,
             "sent_at": sent_at,
             "raw_json": json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
@@ -5058,7 +5079,11 @@ async def _telegram_store_messages(
                 """INSERT INTO wazzup_messages(
                    external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
                    ) VALUES(?,?,?,?,?,?,'delivered',?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET
-                   text=excluded.text,content_uri=excluded.content_uri,
+                   text=CASE
+                     WHEN excluded.text LIKE '[Вложение:%' AND wazzup_messages.content_uri<>''
+                     THEN wazzup_messages.text ELSE excluded.text END,
+                   content_uri=CASE
+                     WHEN excluded.content_uri<>'' THEN excluded.content_uri ELSE wazzup_messages.content_uri END,
                    author_name=CASE
                      WHEN wazzup_messages.direction='outgoing' AND wazzup_messages.author_name NOT IN ('','Telegram')
                      THEN wazzup_messages.author_name ELSE excluded.author_name END,
@@ -5207,6 +5232,8 @@ async def _telegram_send_text(
             message = await client.send_message(entity, text)
         await _telegram_store_messages(
             channel, entity, [message], link, outgoing_author_name=author_name,
+            outgoing_attachment_url=attachment_url,
+            outgoing_attachment_type=attachment_type,
         )
         return {
             "external_id": f"{channel['channel_id']}:{peer_id}:{_clean(getattr(message, 'id', ''), 200)}",
@@ -5587,6 +5614,10 @@ def _message_view(row: Any) -> dict[str, Any]:
     content = _message_content(raw)
     if not content["content_uri"]:
         content["content_uri"] = _clean(item.get("content_uri"), 4000)
+    if not content["content_type"] and re.search(
+        r"\.(?:jpe?g|png|gif|webp|bmp)(?:[?#]|$)", content["content_uri"], re.IGNORECASE,
+    ):
+        content["content_type"] = "image"
     item.update(content)
     attachments = raw.get("nexus_attachments") if isinstance(raw, dict) else []
     item["attachments"] = [
@@ -5602,7 +5633,15 @@ def _message_view(row: Any) -> dict[str, Any]:
 
 def _conversation_message_query(where: str) -> str:
     return f"""SELECT external_id,direction,status,text,content_uri,author_name,sent_at,raw_json FROM (
-        SELECT id,external_id,direction,status,text,content_uri,author_name,sent_at,raw_json,
+        SELECT id,external_id,direction,status,text,
+               CASE WHEN content_uri<>'' THEN content_uri ELSE COALESCE(
+                   (SELECT attachment_url FROM outbound_jobs job
+                    WHERE job.external_id=wazzup_messages.external_id AND job.attachment_url<>''
+                    ORDER BY job.id DESC LIMIT 1),
+                   (SELECT attachment_url FROM outbound_jobs job
+                    WHERE wazzup_messages.external_id='failed:' || job.request_key AND job.attachment_url<>''
+                    ORDER BY job.id DESC LIMIT 1), '') END AS content_uri,
+               author_name,sent_at,raw_json,
                ROW_NUMBER() OVER (PARTITION BY CASE
                    WHEN chat_type='vk' AND json_valid(raw_json) AND json_extract(raw_json,'$.id') IS NOT NULL
                    THEN 'vk:' || json_extract(raw_json,'$.id') ELSE external_id END
@@ -11473,8 +11512,21 @@ async def _salebot_send(client_id: str, text: str, attachment_url: str = "", att
     if attachment_url:
         if not attachment_url.startswith("https://"):
             raise HTTPException(400, "Вложение должно иметь HTTPS-ссылку")
+        # Although SaleBot documents ``message`` as optional for a file-only
+        # send, its Telegram transport can otherwise fall back to a plain URL.
+        # A non-printing caption keeps the request on the native media path.
+        if not text:
+            body["message"] = "\u2060"
         body["attachment_url"] = attachment_url
-        body["attachment_type"] = attachment_type or "document"
+        requested_type = _clean(attachment_type, 100).lower()
+        if requested_type.startswith("image") or re.search(r"\.(?:jpe?g|png|gif|webp)(?:[?#]|$)", attachment_url, re.IGNORECASE):
+            body["attachment_type"] = "image"
+        elif requested_type.startswith("video"):
+            body["attachment_type"] = "video"
+        elif requested_type.startswith("audio") or requested_type == "voice":
+            body["attachment_type"] = "audio"
+        else:
+            body["attachment_type"] = "file"
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(f"{SALEBOT_API_BASE}/{key}/message", json=body)
     if response.status_code >= 400:

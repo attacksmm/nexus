@@ -13,6 +13,44 @@ import router
 
 
 class GetCourseWazzupLogicTests(unittest.TestCase):
+    def test_salebot_image_uses_native_image_attachment_type(self):
+        captured = {}
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"status": "success"}
+
+        class Client:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, json):
+                captured.update({"url": url, "body": json})
+                return Response()
+
+        with patch.dict(os.environ, {"SALEBOT_API_KEY": "secret"}, clear=False), patch.object(
+            router.httpx, "AsyncClient", Client,
+        ):
+            asyncio.run(router._salebot_send(
+                "771116046", "", "https://cdn.example.test/photo.png", "image/png",
+            ))
+
+        self.assertEqual(captured["body"], {
+            "client_id": "771116046",
+            "message": "\u2060",
+            "attachment_url": "https://cdn.example.test/photo.png",
+            "attachment_type": "image",
+        })
+
     def test_widget_image_type_accepts_only_supported_raster_images(self):
         self.assertEqual(router._widget_image_type(b"\x89PNG\r\n\x1a\nrest"), (".png", "image/png"))
         self.assertEqual(router._widget_image_type(b"\xff\xd8\xffrest"), (".jpg", "image/jpeg"))
@@ -1282,6 +1320,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("function restoreTemplateCache()", amo)
         self.assertIn("Загружаем шаблоны…", amo)
         self.assertIn("Изображение с компьютера", amo)
+        self.assertIn("row.content_uri,row.content_type,row.attachments", amo)
         self.assertIn("async function uploadImage(file)", amo)
         self.assertIn("event.clipboardData?.files", amo)
         self.assertIn('id="file" type="file" accept="image/jpeg,image/png,image/gif,image/webp"', amo)
@@ -1309,8 +1348,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.8.5")
-        self.assertIn("static/amocrm.html?v=51505", script)
+        self.assertEqual(manifest["widget"]["version"], "1.8.6")
+        self.assertIn("static/amocrm.html?v=51506", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)

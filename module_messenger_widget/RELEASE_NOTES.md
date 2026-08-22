@@ -1,6 +1,14 @@
-# Messenger Widget 5.15.5
+# Messenger Widget 5.15.6
 
 Release candidate for the week-long production observation period.
+
+## 5.15.6 — attachment history integrity
+
+- TG Personal keeps the public image URL and media type after sending, and later Telegram history refreshes cannot erase them.
+- Queued and duplicate delivery responses include attachment metadata so the widget can paint the image before provider synchronization finishes.
+- Failed MAX/Wazzup image attempts remain visible in the dialog; existing failed rows recover the attachment from the durable outbound job without a database rewrite.
+- SaleBot attachment types are normalized to its documented `image`, `video`, `audio`, or `file` values; image-only sends include a non-printing caption to prevent its Telegram transport from degrading the media to a plain URL.
+- Conversation repaint signatures include attachment metadata, so a background refresh can replace a placeholder with the actual image immediately.
 
 ## 5.15.5 — resilient VK image upload
 
