@@ -9849,25 +9849,54 @@ async def _widget_media_path(url: str) -> tuple[Path, str]:
 
 async def _vk_upload_widget_image(peer_id: str, attachment_url: str) -> str:
     path, mime_type = await _widget_media_path(attachment_url)
-    upload = await _vk_request("photos.getMessagesUploadServer", {"peer_id": peer_id})
-    upload_url = _clean((upload or {}).get("upload_url") if isinstance(upload, dict) else "", 4000)
-    if not upload_url:
-        raise HTTPException(502, "VK не подготовил загрузку изображения")
     content = await asyncio.to_thread(path.read_bytes)
-    async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
-        response = await client.post(upload_url, files={"photo": (path.name, content, mime_type)})
-        response.raise_for_status()
-        uploaded = response.json()
-    saved = await _vk_request("photos.saveMessagesPhoto", {
-        "server": uploaded.get("server"), "photo": uploaded.get("photo"), "hash": uploaded.get("hash"),
-    })
-    if not isinstance(saved, list) or not saved:
-        raise HTTPException(502, "VK не сохранил изображение")
-    photo = saved[0]
-    result = f"photo{photo.get('owner_id')}_{photo.get('id')}"
-    if photo.get("access_key"):
-        result += f"_{photo['access_key']}"
-    return result
+    last_error: Exception | None = None
+    # VK upload hosts occasionally answer with a transient 5xx or a JSON body
+    # without one of the save fields. Refreshing the upload URL once is much
+    # faster than spending a full durable-queue attempt on that host.
+    for upload_attempt in range(2):
+        try:
+            upload = await _vk_request("photos.getMessagesUploadServer", {
+                "peer_id": peer_id, "group_id": _vk_group_id(),
+            })
+            upload_url = _clean((upload or {}).get("upload_url") if isinstance(upload, dict) else "", 4000)
+            if not upload_url:
+                raise HTTPException(502, "VK временно не подготовил загрузку изображения")
+            async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+                response = await client.post(upload_url, files={"photo": (path.name, content, mime_type)})
+                response.raise_for_status()
+                uploaded = response.json()
+            server = uploaded.get("server") if isinstance(uploaded, dict) else None
+            photo_payload = uploaded.get("photo") if isinstance(uploaded, dict) else None
+            upload_hash = uploaded.get("hash") if isinstance(uploaded, dict) else None
+            if (
+                server in {None, ""}
+                or not isinstance(photo_payload, str)
+                or photo_payload.strip() in {"", "[]"}
+                or not isinstance(upload_hash, str)
+                or not upload_hash.strip()
+            ):
+                raise HTTPException(502, "VK временно не принял изображение")
+            saved = await _vk_request("photos.saveMessagesPhoto", {
+                "server": server, "photo": photo_payload, "hash": upload_hash,
+            })
+            if not isinstance(saved, list) or not saved:
+                raise HTTPException(502, "VK временно не сохранил изображение")
+            photo = saved[0]
+            if not isinstance(photo, dict) or photo.get("owner_id") is None or photo.get("id") is None:
+                raise HTTPException(502, "VK вернул неполные данные изображения")
+            result = f"photo{photo['owner_id']}_{photo['id']}"
+            if photo.get("access_key"):
+                result += f"_{photo['access_key']}"
+            return result
+        except Exception as exc:
+            last_error = exc
+            if upload_attempt == 0 and _delivery_error_is_transient(exc):
+                await asyncio.sleep(0.2)
+                continue
+            raise
+    assert last_error is not None
+    raise last_error
 
 
 @router.post("/widget/image-upload")

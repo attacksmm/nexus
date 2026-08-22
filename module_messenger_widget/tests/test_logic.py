@@ -40,6 +40,56 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         error = router.httpx.HTTPStatusError("502 Bad Gateway", request=request, response=response)
         self.assertTrue(router._delivery_error_is_transient(error))
 
+    def test_vk_image_upload_refreshes_incomplete_upload_response_once(self):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.body
+
+        class Client:
+            responses = iter((
+                {"server": 1, "hash": "first-without-photo"},
+                {"server": 2, "photo": "[{\"photo\":\"ok\"}]", "hash": "second"},
+            ))
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return Response(next(self.responses))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image = Path(temp_dir) / "test.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            vk = AsyncMock(side_effect=(
+                {"upload_url": "https://upload.example.test/one"},
+                {"upload_url": "https://upload.example.test/two"},
+                [{"owner_id": -225075265, "id": 42, "access_key": "key"}],
+            ))
+            with (
+                patch.object(router, "_widget_media_path", AsyncMock(return_value=(image, "image/png"))),
+                patch.object(router, "_vk_request", vk),
+                patch.object(router.httpx, "AsyncClient", Client),
+                patch.object(router.asyncio, "sleep", AsyncMock()) as sleep,
+            ):
+                result = asyncio.run(router._vk_upload_widget_image("1105209997", "https://example.test/image.png"))
+
+        self.assertEqual(result, "photo-225075265_42_key")
+        self.assertEqual(vk.await_count, 3)
+        self.assertEqual(vk.await_args_list[0].args[1]["group_id"], router._vk_group_id())
+        sleep.assert_awaited_once_with(0.2)
+
     def test_auto_markup_completes_allow_listed_urls_without_replacing_existing_values(self):
         domains = "club.sobakovod.pro;sobakovod.pro;start.bizon365.ru"
         tail = "?utm_term={{utm.term}}&param1={{ym_uid}}&param2={{conversation_id}}"
@@ -1259,8 +1309,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.8.4")
-        self.assertIn("static/amocrm.html?v=51504", script)
+        self.assertEqual(manifest["widget"]["version"], "1.8.5")
+        self.assertIn("static/amocrm.html?v=51505", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)

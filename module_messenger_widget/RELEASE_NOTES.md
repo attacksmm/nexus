@@ -1,6 +1,12 @@
-# Messenger Widget 5.15.4
+# Messenger Widget 5.15.5
 
 Release candidate for the week-long production observation period.
+
+## 5.15.5 — resilient VK image upload
+
+- VK image delivery validates the upload-server response before saving the photo.
+- A transient 5xx or incomplete upload response gets one immediate retry with a fresh upload URL before the durable queue uses its normal backoff.
+- The VK community ID is passed explicitly when requesting the message-photo upload server.
 
 ## 5.15.4 — reliable image delivery and compact profile refresh
 
