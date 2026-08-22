@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.requests import ClientDisconnect
 
 from orchestrator.auth import (
@@ -92,6 +92,8 @@ ACTIVATION_EXPIRES_AT = "9999-12-31T23:59:59Z"
 AUDIT_RETENTION_DAYS = 30
 MAX_BODY_BYTES = 32 * 1024
 MAX_WEBHOOK_BYTES = 2 * 1024 * 1024
+MAX_WIDGET_IMAGE_BYTES = 8 * 1024 * 1024
+WIDGET_IMAGE_RETENTION_DAYS = 30
 HISTORY_SYNC_TTL_MINUTES = 12 * 60
 HISTORY_NOT_FOUND_TTL_MINUTES = 60
 HISTORY_ERROR_TTL_MINUTES = 10
@@ -535,7 +537,7 @@ def _cors_headers(origin: str) -> dict[str, str]:
         return {}
     return {
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Nexus-Messenger-Platform",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Max-Age": "600",
         "Vary": "Origin",
@@ -793,6 +795,14 @@ async def _init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(admin_id,template_id)
             );
+            CREATE TABLE IF NOT EXISTS widget_media (
+                token TEXT PRIMARY KEY,
+                admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+                stored_name TEXT NOT NULL UNIQUE,
+                mime_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS identity_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -1033,6 +1043,7 @@ async def _init_db() -> None:
             CREATE INDEX IF NOT EXISTS ix_mw_templates_owner ON message_templates(owner_admin_id,folder,enabled,sort_order,id);
             CREATE INDEX IF NOT EXISTS ix_mw_template_favorites_template ON template_favorites(template_id,admin_id);
             CREATE INDEX IF NOT EXISTS ix_mw_template_user_order ON template_user_order(admin_id,sort_order,template_id);
+            CREATE INDEX IF NOT EXISTS ix_mw_widget_media_created ON widget_media(created_at);
             CREATE INDEX IF NOT EXISTS ix_mw_rules_priority ON identity_rules(enabled,priority,id);
             CREATE INDEX IF NOT EXISTS ix_mw_entity_links_external ON entity_identity_links(provider,external_user_id);
             CREATE INDEX IF NOT EXISTS ix_mw_notify_pairings ON notification_pairings(provider,expires_at,used_at);
@@ -5173,6 +5184,7 @@ def _schedule_telegram_history(peer_id: str, identity: dict[str, Any]) -> None:
 
 async def _telegram_send_text(
     peer_id: str, text: str, *, identity: dict[str, Any] | None = None, author_name: str = "",
+    attachment_url: str = "", attachment_type: str = "",
 ) -> dict[str, Any]:
     channel = await _telegram_channel()
     link = await _external_link(peer_id=peer_id, provider=TELEGRAM_PROVIDER) or identity
@@ -5186,7 +5198,11 @@ async def _telegram_send_text(
             entity = await client.get_entity(int(peer_id))
         except Exception as exc:
             raise HTTPException(404, "Диалог Telegram не найден") from exc
-        message = await client.send_message(entity, text)
+        if attachment_url:
+            path, _ = await _widget_media_path(attachment_url)
+            message = await client.send_file(entity, str(path), caption=text or None)
+        else:
+            message = await client.send_message(entity, text)
         await _telegram_store_messages(
             channel, entity, [message], link, outgoing_author_name=author_name,
         )
@@ -5195,7 +5211,7 @@ async def _telegram_send_text(
             "direction": "outgoing",
             "status": "delivered",
             "text": text,
-            "content_uri": "",
+            "content_uri": attachment_url,
             "author_name": _clean(author_name, 200) or "Telegram",
             "sent_at": _iso(getattr(message, "date", None)),
         }
@@ -7221,18 +7237,19 @@ async def service_streams_send(
                 transport_author=admin["name"],
             )
         return response
-    if attachment_url:
-        raise ValueError("Вложения сейчас поддерживает канал SaleBot")
     if provider == "vk":
         if not chat_id:
             raise ValueError("Диалог VK не найден")
-        result = await _vk_request("messages.send", {
+        send_params: dict[str, Any] = {
             "group_id": _vk_group_id(), "peer_id": chat_id,
             "random_id": (
                 int(hashlib.sha256(idempotency_key.encode()).hexdigest()[:8], 16) % 2_000_000_000 + 1
                 if idempotency_key else secrets.randbelow(2_000_000_000) + 1
             ), "message": message_text,
-        })
+        }
+        if attachment_url:
+            send_params["attachment"] = await _vk_upload_widget_image(chat_id, attachment_url)
+        result = await _vk_request("messages.send", send_params)
         link = await _external_link(peer_id=chat_id) or {
             "phone": normalized_phone, "getcourse_user_id": _clean(gc_user_id, 200), "name": _clean(name, 200),
         }
@@ -7248,8 +7265,13 @@ async def service_streams_send(
     elif provider == TELEGRAM_PROVIDER:
         if not chat_id:
             raise ValueError("Диалог Telegram не найден")
-        message = await _telegram_send_text(chat_id, message_text, author_name=admin["name"])
+        telegram_options: dict[str, Any] = {"author_name": admin["name"]}
+        if attachment_url:
+            telegram_options.update(attachment_url=attachment_url, attachment_type=attachment_type)
+        message = await _telegram_send_text(chat_id, message_text, **telegram_options)
     else:
+        if attachment_url:
+            raise ValueError("Изображения можно отправить через VK, TG Personal или SaleBot")
         if not normalized_phone:
             raise ValueError("Для этого канала нужен телефон")
         known_chat_id, has_chat, _ = await _conversation_rows(channel_id, transport, normalized_phone, 1)
@@ -9760,6 +9782,151 @@ async def widget_templates(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "Не удалось обработать шаблоны"}, 500)
 
 
+def _widget_image_type(content: bytes) -> tuple[str, str]:
+    """Return a safe extension and MIME type from image bytes, never a filename."""
+
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif", "image/gif"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    raise HTTPException(415, "Можно прикрепить только JPG, PNG, GIF или WebP")
+
+
+async def _widget_media_path(url: str) -> tuple[Path, str]:
+    prefix = PUBLIC_API_BASE + "/widget/media/"
+    if not _clean(url, 4000).startswith(prefix):
+        raise ValueError("Используйте изображение, загруженное через Nexus")
+    suffix = url[len(prefix):].split("?", 1)[0]
+    token, separator, filename = suffix.partition("/")
+    token, filename = unquote(token), unquote(filename)
+    if not separator or not token or not filename:
+        raise ValueError("Изображение Nexus не найдено")
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT stored_name,mime_type FROM widget_media WHERE token=?", (token,),
+        )).fetchone()
+    finally:
+        await db.close()
+    if not row or filename != row["stored_name"]:
+        raise ValueError("Изображение Nexus не найдено")
+    path = _must_db().parent / "widget-media" / row["stored_name"]
+    if not path.is_file():
+        raise ValueError("Изображение Nexus не найдено")
+    return path, _clean(row["mime_type"], 100)
+
+
+async def _vk_upload_widget_image(peer_id: str, attachment_url: str) -> str:
+    path, mime_type = await _widget_media_path(attachment_url)
+    upload = await _vk_request("photos.getMessagesUploadServer", {"peer_id": peer_id})
+    upload_url = _clean((upload or {}).get("upload_url") if isinstance(upload, dict) else "", 4000)
+    if not upload_url:
+        raise HTTPException(502, "VK не подготовил загрузку изображения")
+    content = await asyncio.to_thread(path.read_bytes)
+    async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+        response = await client.post(upload_url, files={"photo": (path.name, content, mime_type)})
+        response.raise_for_status()
+        uploaded = response.json()
+    saved = await _vk_request("photos.saveMessagesPhoto", {
+        "server": uploaded.get("server"), "photo": uploaded.get("photo"), "hash": uploaded.get("hash"),
+    })
+    if not isinstance(saved, list) or not saved:
+        raise HTTPException(502, "VK не сохранил изображение")
+    photo = saved[0]
+    result = f"photo{photo.get('owner_id')}_{photo.get('id')}"
+    if photo.get("access_key"):
+        result += f"_{photo['access_key']}"
+    return result
+
+
+@router.post("/widget/image-upload")
+async def widget_image_upload(request: Request) -> JSONResponse:
+    """Store a small public image for asynchronous messenger delivery."""
+
+    mode = await _widget_request_mode(request)
+    if not mode:
+        return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(
+                request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401,
+            )
+        enforce_rate_limit(
+            request, "messenger-widget-image-upload", limit=60,
+            window_seconds=3600, subject=str(device["id"]),
+        )
+        content_length = request.headers.get("content-length", "")
+        if content_length:
+            try:
+                if int(content_length) > MAX_WIDGET_IMAGE_BYTES:
+                    raise HTTPException(413, "Изображение должно быть не больше 8 МБ")
+            except ValueError:
+                pass
+        content = await request.body()
+        if not content:
+            raise HTTPException(400, "Выберите изображение")
+        if len(content) > MAX_WIDGET_IMAGE_BYTES:
+            raise HTTPException(413, "Изображение должно быть не больше 8 МБ")
+        extension, mime_type = _widget_image_type(content)
+        token = secrets.token_urlsafe(32)
+        stored_name = secrets.token_hex(24) + extension
+        media_dir = _must_db().parent / "widget-media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        target = media_dir / stored_name
+        await asyncio.to_thread(target.write_bytes, content)
+        try:
+            db = await _connect()
+            try:
+                await db.execute(
+                    "INSERT INTO widget_media(token,admin_id,stored_name,mime_type,size,created_at) VALUES(?,?,?,?,?,?)",
+                    (token, int(device["admin_id"]), stored_name, mime_type, len(content), _iso()),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        url = f"{PUBLIC_API_BASE}/widget/media/{quote(token, safe='')}/{quote(stored_name, safe='')}"
+        return _widget_response(request, {
+            "ok": True, "url": url, "attachment_type": "image",
+            "mime_type": mime_type, "size": len(content),
+        })
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except ClientDisconnect:
+        return _widget_response(request, {"ok": False, "error": "Загрузка изображения прервана"}, 499)
+    except Exception:
+        _log("exception", "Messenger image upload failed")
+        return _widget_response(request, {"ok": False, "error": "Не удалось загрузить изображение"}, 500)
+
+
+@router.get("/widget/media/{token}/{filename}")
+async def widget_media(token: str, filename: str) -> Response:
+    clean_token = _clean(token, 100)
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT stored_name,mime_type FROM widget_media WHERE token=?", (clean_token,),
+        )).fetchone()
+    finally:
+        await db.close()
+    if not row or filename != row["stored_name"]:
+        raise HTTPException(404, "Изображение не найдено")
+    path = _must_db().parent / "widget-media" / row["stored_name"]
+    if not path.is_file():
+        raise HTTPException(404, "Изображение не найдено")
+    return FileResponse(
+        str(path), media_type=row["mime_type"],
+        headers={"Cache-Control": "public, max-age=2592000, immutable", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @router.post("/widget/template-preview")
 async def widget_template_preview(request: Request) -> JSONResponse:
     mode = await _widget_request_mode(request)
@@ -9788,7 +9955,9 @@ async def widget_template_preview(request: Request) -> JSONResponse:
         if not body:
             raise HTTPException(400, "Текст не указан")
         resolved = await _resolve_widget_context(data, mode, device)
-        rendered = render_message_template(body, resolved.get("variables", {}))
+        variables = resolved.get("variables", {})
+        rendered = render_message_template(body, variables)
+        rendered["text"] = await _auto_markup_for_send(rendered["text"], variables)
         return _widget_response(request, {"ok": True, **rendered, "variables": resolved.get("variables", {}), "accounts": resolved.get("accounts", [])})
     except (TypeError, ValueError):
         return _widget_response(request, {"ok": False, "error": "Некорректный шаблон"}, 400)
@@ -11492,12 +11661,16 @@ async def widget_send(request: Request) -> JSONResponse:
         if not message_text and not attachment_url:
             raise HTTPException(400, "Введите сообщение")
         resolved_context = await _resolve_widget_context(data, mode, device)
-        message_text = await _auto_markup_for_send(message_text, resolved_context.get("variables", {}))
+        variables = resolved_context.get("variables") if isinstance(resolved_context.get("variables"), dict) else {}
+        # The API is the final safety boundary: never rely on the browser having
+        # called template-preview first. This also protects old tabs and direct
+        # API callers from sending literal {{utm.*}} markers to a client.
+        message_text = render_message_template(message_text, variables)["text"]
+        message_text = await _auto_markup_for_send(message_text, variables)
         if len(message_text) > 4000:
             raise HTTPException(400, "После авторазметки сообщение длиннее 4000 символов")
         if re.search(r"\{\{\s*[a-zA-Z0-9_.:-]+\s*\}\}", message_text):
             raise HTTPException(400, "Подставьте все переменные шаблона")
-        variables = resolved_context.get("variables") if isinstance(resolved_context.get("variables"), dict) else {}
         expected_client_name = _clean(
             variables.get("contact.name") or variables.get("contact.first_name") or data.get("name"), 200,
         )

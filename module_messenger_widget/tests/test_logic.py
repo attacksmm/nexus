@@ -13,6 +13,14 @@ import router
 
 
 class GetCourseWazzupLogicTests(unittest.TestCase):
+    def test_widget_image_type_accepts_only_supported_raster_images(self):
+        self.assertEqual(router._widget_image_type(b"\x89PNG\r\n\x1a\nrest"), (".png", "image/png"))
+        self.assertEqual(router._widget_image_type(b"\xff\xd8\xffrest"), (".jpg", "image/jpeg"))
+        self.assertEqual(router._widget_image_type(b"GIF89arest"), (".gif", "image/gif"))
+        self.assertEqual(router._widget_image_type(b"RIFF\x00\x00\x00\x00WEBPrest"), (".webp", "image/webp"))
+        with self.assertRaises(router.HTTPException):
+            router._widget_image_type(b"<svg></svg>")
+
     def test_salutation_guard_blocks_name_from_another_client(self):
         self.assertEqual(
             router._salutation_name_mismatch("Здравствуйте, Екатерина! Чем помочь?", "Ирина Скуратова"),
@@ -1215,6 +1223,12 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("conversationCache.get(key)", amo)
         self.assertIn("CARD_CACHE_TTL=30*60*1000", amo)
         self.assertIn("function restoreCardSnapshot()", amo)
+        self.assertIn("function restoreTemplateCache()", amo)
+        self.assertIn("Загружаем шаблоны…", amo)
+        self.assertIn("Изображение с компьютера", amo)
+        self.assertIn("async function uploadImage(file)", amo)
+        self.assertIn("event.clipboardData?.files", amo)
+        self.assertIn('id="file" type="file" accept="image/jpeg,image/png,image/gif,image/webp"', amo)
         self.assertIn("writeCardSnapshot({channels:cardChannels})", amo)
         self.assertIn("Показываем сохранённые данные · обновляем…", amo)
         self.assertIn('id="refreshState" class="cache-refresh" hidden', amo)
@@ -1239,8 +1253,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.8.2")
-        self.assertIn("static/amocrm.html?v=51502", script)
+        self.assertEqual(manifest["widget"]["version"], "1.8.3")
+        self.assertIn("static/amocrm.html?v=51503", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
@@ -1265,6 +1279,13 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
         self.assertIn("function optimisticTemplate", amo)
         self.assertIn("function optimisticTemplate", widget)
+        self.assertIn("var templateCacheKey", widget)
+        self.assertIn("function ensureTemplates(next)", widget)
+        self.assertIn("async function uploadImage(imageFile)", widget)
+        self.assertIn("event.clipboardData && event.clipboardData.files", widget)
+        self.assertIn('file.accept = "image/jpeg,image/png,image/gif,image/webp"', widget)
+        self.assertIn('render_message_template(message_text, variables)["text"]', backend)
+        self.assertIn("CREATE TABLE IF NOT EXISTS widget_media", backend)
         self.assertIn("height:76px;min-height:76px;max-height:min(58vh,460px);resize:none", amo)
         self.assertIn("function sizeMessageInput()", amo)
         self.assertIn("$('message').addEventListener('input',sizeMessageInput)", amo)

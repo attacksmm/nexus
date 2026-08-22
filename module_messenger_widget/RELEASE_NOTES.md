@@ -1,6 +1,14 @@
-# Messenger Widget 5.15.2
+# Messenger Widget 5.15.3
 
 Release candidate for the week-long production observation period.
+
+## 5.15.3 — reliable templates and image drafts
+
+- Template menus paint the employee's last successful list immediately and refresh it in the background.
+- A pending template request is rendered as a spinner, never as the false state “Шаблонов нет”.
+- amoCRM and GetCourse composers accept JPG, PNG, GIF, and WebP images from the file picker or clipboard; upload progress remains visible until the draft is usable.
+- Uploaded images are size- and signature-checked, stored under random public URLs, and limited to 8 MB.
+- The send API now renders template variables itself and applies automatic UTM markup, so an old browser tab cannot send literal `{{utm.*}}` markers.
 
 ## 5.15.2 — instant repeat opens
 
