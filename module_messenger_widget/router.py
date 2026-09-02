@@ -103,6 +103,8 @@ HISTORY_MAX_CHATS = 500
 HISTORY_MAX_MESSAGES = 500
 HISTORY_IDENTITY_PROBES = 12
 INBOX_LIMIT = 50
+INBOX_CANDIDATES_PER_OWNER = 80
+INBOX_CACHE_SECONDS = 4
 CONVERSATION_PAGE_SIZE = 12
 CHANNEL_CACHE_SECONDS = 60
 CHANNEL_REQUEST_TIMEOUT_SECONDS = 5
@@ -241,6 +243,7 @@ _salebot_history_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _telegram_history_inflight: set[tuple[str, int]] = set()
 _wazzup_history_inflight: set[tuple[str, str, int]] = set()
 _card_link_cache: dict[tuple[str, ...], tuple[float, dict[str, str]]] = {}
+_inbox_response_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _telegram_profile_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _telegram_state_cache: tuple[float, dict[str, Any]] = (0.0, {})
 _telegram_auth_pending: dict[str, dict[str, Any]] = {}
@@ -9063,6 +9066,7 @@ async def _mark_thread_read(device_id: int, channel_id: str, chat_type: str, cha
             (device_id, channel_id, chat_type, chat_id, _iso()),
         )
         await db.commit()
+        _inbox_response_cache.clear()
     finally:
         await db.close()
 
@@ -9101,6 +9105,14 @@ async def _inbox_items(
     channel_ids = [channel_id for channel_id in channel_map if not known_selected or channel_id in known_selected]
     if not channel_ids:
         return {"items": [], "unread": 0, "unanswered": 0}
+    query = _clean(query, 200)
+    cache_key = (
+        device_id, int(device.get("admin_id") or 0), _clean(device.get("admin_role"), 20),
+        tuple(sorted(channel_ids)), query.casefold(),
+    )
+    cached = _inbox_response_cache.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return {**cached[1], "cached": True}
     placeholders = ",".join("?" for _ in channel_ids)
     where = [f"c.channel_id IN ({placeholders})"]
     params: list[Any] = list(channel_ids)
@@ -9110,21 +9122,50 @@ async def _inbox_items(
         f"AND c.chat_id IN ({hidden_peer_placeholders}))"
     )
     params.extend(sorted(TELEGRAM_HIDDEN_PEER_IDS))
-    if _clean(device.get("admin_role"), 20) == "employee":
-        where.append("c.responsible_admin_id=?")
-        params.append(int(device["admin_id"]))
-    query = _clean(query, 200)
-    if query:
-        like = f"%{query}%"
-        phone_query = re.sub(r"\D+", "", query)
-        where.append("(c.contact_name LIKE ? OR c.chat_id LIKE ? OR l.name LIKE ? OR l.phone LIKE ? OR l.getcourse_user_id LIKE ?)")
-        params.extend((like, like, like, f"%{phone_query or query}%", like))
     where_sql = " AND ".join(where)
     db = await _connect()
     try:
-        rows = await (
-            await db.execute(
-                    f"""SELECT c.channel_id,c.chat_type,c.chat_id,c.phone_hash,c.contact_name,c.last_message_at,
+        if _clean(device.get("admin_role"), 20) == "employee":
+            owner_ids: list[int | None] = [int(device["admin_id"])]
+        else:
+            admin_rows = await (
+                await db.execute("SELECT id FROM admins WHERE enabled=1 ORDER BY id")
+            ).fetchall()
+            owner_ids = [None, *(int(row["id"]) for row in admin_rows)]
+
+        # The previous query sorted all matching chats before LIMIT.  On a
+        # multi-million-row history that made Inbox wait for many seconds.
+        # Take a small indexed slice per responsible employee and merge it.
+        candidate_by_id: dict[int, dict[str, Any]] = {}
+        for owner_id in owner_ids:
+            owner_clause = "c.responsible_admin_id IS NULL" if owner_id is None else "c.responsible_admin_id=?"
+            owner_params: tuple[Any, ...] = () if owner_id is None else (owner_id,)
+            owner_rows = await (
+                await db.execute(
+                    f"""SELECT c.id,c.channel_id,c.chat_type,c.chat_id,c.last_message_at
+                        FROM wazzup_chats c
+                        WHERE {where_sql} AND {owner_clause}
+                        ORDER BY c.last_message_at DESC,c.id DESC LIMIT ?""",
+                    (*params, *owner_params, INBOX_CANDIDATES_PER_OWNER),
+                )
+            ).fetchall()
+            for row in owner_rows:
+                candidate_by_id[int(row["id"])] = dict(row)
+        candidates = sorted(
+            candidate_by_id.values(),
+            key=lambda row: (_clean(row.get("last_message_at"), 80), int(row.get("id") or 0)),
+            reverse=True,
+        )
+        enrichment_limit = len(candidates) if query else min(len(candidates), INBOX_LIMIT * 2)
+        enriched_by_id: dict[int, dict[str, Any]] = {}
+        for offset in range(0, enrichment_limit, 200):
+            batch_ids = [int(row["id"]) for row in candidates[offset:offset + 200]]
+            if not batch_ids:
+                continue
+            id_placeholders = ",".join("?" for _ in batch_ids)
+            detail_rows = await (
+                await db.execute(
+                    f"""SELECT c.id,c.channel_id,c.chat_type,c.chat_id,c.phone_hash,c.contact_name,c.last_message_at,
                            l.phone,l.getcourse_user_id,l.name AS link_name,l.source AS link_source,
                            x.provider AS external_provider,x.getcourse_user_id AS external_getcourse_user_id,
                            x.phone AS external_phone,x.name AS external_name,
@@ -9147,11 +9188,33 @@ async def _inbox_items(
                            WHEN c.channel_id LIKE 'vk:%' THEN 'vk'
                            WHEN c.channel_id LIKE 'telegram-personal:%' THEN 'telegram_personal'
                            ELSE '' END
-                    WHERE {where_sql}
-                    ORDER BY c.last_message_at DESC,c.id DESC LIMIT ?""",
-                (*params, INBOX_LIMIT),
-            )
-        ).fetchall()
+                    WHERE c.id IN ({id_placeholders})""",
+                    batch_ids,
+                )
+            ).fetchall()
+            for row in detail_rows:
+                enriched_by_id[int(row["id"])] = dict(row)
+        rows: list[dict[str, Any]] = []
+        query_folded = query.casefold()
+        query_digits = re.sub(r"\D+", "", query)
+        for candidate in candidates:
+            item = enriched_by_id.get(int(candidate["id"]))
+            if not item:
+                continue
+            if query:
+                haystack = " ".join(
+                    _clean(item.get(key), 500)
+                    for key in (
+                        "contact_name", "chat_id", "link_name", "phone", "getcourse_user_id",
+                        "external_name", "external_phone", "external_getcourse_user_id",
+                    )
+                ).casefold()
+                digits = re.sub(r"\D+", "", haystack)
+                if query_folded not in haystack and (not query_digits or query_digits not in digits):
+                    continue
+            rows.append(item)
+            if len(rows) >= INBOX_LIMIT:
+                break
         visible_keys = [(row["channel_id"], row["chat_type"], row["chat_id"]) for row in rows]
         if visible_keys:
             visible_values = ",".join("(?,?,?)" for _ in visible_keys)
@@ -9243,11 +9306,18 @@ async def _inbox_items(
         )
     await _remember_client_links(links_to_remember)
     items = _sort_inbox_items(items)
-    return {
+    result = {
         "items": items,
         "unread": sum(item["unread"] for item in items),
         "unanswered": sum(1 for item in items if item["needs_reply"]),
     }
+    _inbox_response_cache[cache_key] = (time.monotonic() + INBOX_CACHE_SECONDS, result)
+    if len(_inbox_response_cache) > 256:
+        now_mono = time.monotonic()
+        for key, value in list(_inbox_response_cache.items()):
+            if value[0] <= now_mono:
+                _inbox_response_cache.pop(key, None)
+    return result
 
 
 @router.get("/health")

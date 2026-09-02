@@ -64,6 +64,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         router._wazzup_history_inflight.clear()
         router._telegram_auth_pending.clear()
         router._card_link_cache.clear()
+        router._inbox_response_cache.clear()
         router._amo_mobile_field_cache = (0.0, 0)
         router._amo_mobile_sync_cache.clear()
         await router._init_db()

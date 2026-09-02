@@ -101,10 +101,17 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("request('/inbox/read'", script)
         self.assertIn("inbox_thread:thread", script)
         self.assertIn("FRAME+'?standalone=1'", script)
+        self.assertIn('id="appearanceButton"', page)
+        self.assertIn('data-theme-choice="light"', page)
+        self.assertIn('data-scale-choice="xlarge"', page)
+        self.assertIn("restoreInbox()", script)
+        self.assertIn("nexus-messenger-fullscreen-preferences", script)
 
     def test_standalone_mode_does_not_change_embedded_widget_defaults(self):
         self.assertIn("STANDALONE=new URLSearchParams(location.search).get('standalone')==='1'", self.amocrm)
-        self.assertIn("theme=STANDALONE?'dark'", self.amocrm)
+        self.assertIn("nexus-messenger-fullscreen-preferences", self.amocrm)
+        self.assertIn("document.documentElement.dataset.uiScale=scale", self.amocrm)
+        self.assertNotIn("theme=STANDALONE?'dark'", self.amocrm)
         self.assertIn("if(!STANDALONE)parent.postMessage({type:'nexus-messenger-resize'", self.amocrm)
         self.assertIn("context?.inbox_thread||null", self.amocrm)
         self.assertIn("scope:'inbox'", self.amocrm)

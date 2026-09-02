@@ -15,6 +15,7 @@
   var BUTTON_ID = "nexus-messenger-widget-button";
   var DRAWER_ID = "nexus-messenger-widget-drawer";
   var INBOX_ID = "nexus-messenger-widget-inbox";
+  var INBOX_CACHE_KEY = "nexus:messenger-widget:inbox-cache:v1";
   var REQUEST_TIMEOUT_MS = 15000;
   var CHANNEL_CACHE_TTL_MS = 45000;
   var PALETTE_COLORS = ["#337ab7", "#46b45f", "#8b5cf6", "#d97706", "#374151"];
@@ -1923,6 +1924,9 @@
     var items = Array.isArray(data.items) ? data.items : [];
     view.items = items;
     view.unanswered = Number(data.unanswered) || 0;
+    if (!view.query) {
+      try { localStorage.setItem(INBOX_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), data: { items: items, unread: Number(data.unread) || 0, unanswered: view.unanswered } })); } catch (error) {}
+    }
     var signature = JSON.stringify([view.query || "", readPrefs().inboxChannels, data.unread, data.unanswered, items.map(function (item) { return [item.channel_id, item.chat_id, item.sent_at, item.unread, item.preview, item.needs_reply]; })]);
     updateInboxBadge(data.unread, data.unanswered);
     if (view.view !== "list") return;
@@ -2007,12 +2011,18 @@
     var token = localStorage.getItem(STORAGE_KEY) || "";
     if (!token) return;
     var view = ensureInbox();
+    if (!view.items.length && !view.query) {
+      try {
+        var cachedInbox = JSON.parse(localStorage.getItem(INBOX_CACHE_KEY) || "{}");
+        if (cachedInbox.data && Date.now() - Number(cachedInbox.savedAt || 0) < 86400000) renderInbox(cachedInbox.data, true);
+      } catch (error) {}
+    }
     var refreshButton = view.refresh;
     if (!silent) {
       refreshButton.disabled = true;
       refreshButton.classList.add("busy");
       refreshButton.setAttribute("aria-busy", "true");
-      if (view.view === "list") {
+      if (view.view === "list" && !view.items.length) {
         view.body.className = "list";
         view.body.innerHTML = '<div class="empty inbox-loading"><span class="spinner" aria-hidden="true"></span><span>Загружаем диалоги…</span></div>';
         view.list = view.body;
@@ -2030,7 +2040,7 @@
         localStorage.removeItem(STORAGE_KEY);
         if (inbox) inbox.host.remove();
         inbox = null;
-      } else if (!silent) {
+      } else if (!silent && !view.items.length) {
         var list = ensureInbox().list;
         list.innerHTML = '<div class="empty">Не удалось загрузить входящие<br><button class="reset inbox-retry" type="button">Повторить</button></div>';
         list.querySelector(".inbox-retry").addEventListener("click", function () { loadInbox(false); });
