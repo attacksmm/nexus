@@ -14,9 +14,9 @@
     .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;background:var(--bg)}
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel)}
     .title{display:flex;align-items:center;gap:10px;min-width:0}.title strong{font-size:15px}.badge{display:inline-flex;align-items:center;min-height:22px;padding:2px 8px;border:1px solid #265733;background:#07160b;color:var(--ok);font-size:12px}
-    .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.btn{min-height:30px;padding:5px 10px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}.btn:hover{background:var(--panel-soft)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn.danger{background:#241413;border-color:#5f3137;color:var(--bad)}
+    .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.btn{min-height:30px;padding:5px 10px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}.btn:hover{background:var(--panel-soft)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn.danger{background:#241413;border-color:#5f3137;color:var(--bad)}.btn.busy::before,.statusbar.busy::before{content:"";width:12px;height:12px;flex:0 0 12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
     .tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);background:#090909;overflow-x:auto}.tab{min-height:30px;padding:5px 12px;border:1px solid var(--border);background:transparent;color:var(--muted)}.tab.active{background:var(--panel-strong);border-color:var(--border-strong);color:var(--text)}
-    .view{min-height:0;overflow:hidden;display:none}.view.active{display:grid;grid-template-columns:320px minmax(0,1fr)}#view-aliases.active{display:block;overflow:auto}
+    .view{min-height:0;overflow:hidden;display:none}.view.active{display:grid;grid-template-columns:320px minmax(0,1fr)}.view.registry-view.active,#view-aliases.active{display:block;overflow:auto}
     .side{min-height:0;overflow:auto;border-right:1px solid var(--border);background:#0b0b0b}.main{min-height:0;overflow:auto;padding:12px;display:grid;gap:12px;align-content:start}
     .row{display:grid;gap:4px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer}.row:hover,.row.active{background:var(--panel-strong)}.row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row .meta{color:var(--subtle);font-size:12px}
     .toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.field{display:grid;gap:5px;min-width:0}.label{font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
@@ -41,38 +41,16 @@
   </header>
 
   <nav class="tabs">
-    <button class="tab active" data-view="accounts" type="button">Люди и доступы</button>
+    <button class="tab active" data-view="accounts" type="button">Сотрудники</button>
     <button class="tab" data-view="aliases" type="button">Названия промптов</button>
   </nav>
 
-  <section id="view-accounts" class="view active">
-    <aside class="side" id="accountList"></aside>
+  <section id="view-accounts" class="view registry-view active">
     <main class="main">
-      <div class="toolbar">
-        <div>
-          <div class="section-title">Настройки человека</div>
-          <div class="meta">Выберите аккаунт слева или создайте новый.</div>
-        </div>
-        <div class="actions">
-          <button class="btn" id="newAccountBtn" type="button">Новый человек</button>
-          <button class="btn danger" id="deleteAccountBtn" type="button">Удалить</button>
-          <button class="btn primary" id="saveAccountBtn" type="button">Сохранить</button>
-        </div>
-      </div>
-      <div class="grid">
-        <div class="field"><label class="label">Логин для входа в чат</label><input id="loginInput" autocomplete="off"></div>
-        <div class="field"><label class="label">Имя в интерфейсе</label><input id="displayInput" autocomplete="off"></div>
-        <div class="field"><label class="label">Промпт по умолчанию</label><select id="defaultPrompt"></select></div>
-        <div class="field"><label class="label">Модель по умолчанию</label><select id="defaultModel"></select></div>
-        <label class="toggle"><input id="activeInput" type="checkbox" checked> Аккаунт активен</label>
-      </div>
       <div class="section">
-        <div class="toolbar"><div class="section-title">Доступные промпты</div><div class="actions"><button class="btn ghost" id="allPromptsBtn" type="button">Все</button><button class="btn ghost" id="noPromptsBtn" type="button">Ни одного</button></div></div>
-        <div class="check-grid" id="promptChecks"></div>
-      </div>
-      <div class="section">
-        <div class="toolbar"><div class="section-title">Модели в сервисе для этого человека</div><div class="actions"><button class="btn ghost" id="allModelsBtn" type="button">Все</button><button class="btn ghost" id="noModelsBtn" type="button">Ни одной</button></div></div>
-        <div class="check-grid" id="modelChecks"></div>
+        <div class="section-title">Управление перенесено в единый реестр</div>
+        <div class="meta">Создавайте аккаунты, назначайте модели и промпты в карточке сотрудника. Общие названия промптов остаются в отдельном разделе этой панели.</div>
+        <div class="actions"><a class="btn primary" href="/nexus/staff-registry/panel/" target="_top">Открыть реестр сотрудников</a></div>
       </div>
     </main>
   </section>
@@ -87,10 +65,10 @@
 <script>
 const API = new URL('../api', location.href).pathname.replace(/\/$/, '');
 const $ = id => document.getElementById(id);
-const state = {accounts:[], prompts:[], models:[], selected:null, access:null, admin:false};
+const state = {prompts:[], admin:false};
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-function setStatus(text, bad=false){$('statusText').textContent=text;$('statusText').classList.toggle('error',bad)}
+function setStatus(text, bad=false, busy=false){$('statusText').textContent=text;$('statusText').classList.toggle('error',bad);$('statusText').parentElement.classList.toggle('busy',busy)}
 async function api(path, options={}){
   const res = await fetch(API+path,{credentials:'same-origin',...options});
   const raw = await res.text();
@@ -99,125 +77,17 @@ async function api(path, options={}){
   return data;
 }
 const json = (method, body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-
-function optionList(select, items, value, label, selected){
-  select.innerHTML = '<option value="">Не задано</option>';
-  for(const item of items){
-    const opt=document.createElement('option');
-    opt.value=item[value]; opt.textContent=item[label]||item[value];
-    if(opt.value===selected) opt.selected=true;
-    select.append(opt);
-  }
-}
-function checkbox(name, value, label, checked){
-  const node=document.createElement('label');
-  node.className='check';
-  node.innerHTML=`<input type="checkbox" name="${name}" value="${esc(value)}"${checked?' checked':''}><span title="${esc(label)}">${esc(label)}</span>`;
-  return node;
-}
-function checkedValues(name){return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map(x=>x.value)}
+async function runButton(button,label,task){const text=button.textContent;button.disabled=true;button.classList.add('busy');button.textContent=label;try{return await task()}finally{button.disabled=false;button.classList.remove('busy');button.textContent=text}}
 
 async function loadAll(){
-  setStatus('Загрузка...');
+  setStatus('Загружаем настройки промптов…',false,true);
   const me = await api('/admin/me');
   state.admin = true;
   $('adminState').textContent = `Nexus admin: ${me.username}`;
-  const [accounts,prompts,models] = await Promise.all([
-    api('/admin/accounts'),
-    api('/admin/prompts'),
-    api('/admin/models'),
-  ]);
-  state.accounts = accounts.items||[];
+  const prompts = await api('/admin/prompts');
   state.prompts = prompts.items||[];
-  state.models = models.items||[];
-  state.selected = state.selected || state.accounts[0]?.id || null;
-  renderAccounts();
   renderAliases();
-  if(state.selected) await loadAccess(state.selected);
-  else newAccount();
   setStatus('Готово');
-}
-
-function renderAccounts(){
-  const list=$('accountList');
-  list.innerHTML='';
-  if(!state.accounts.length){list.innerHTML='<div class="empty">Аккаунтов пока нет</div>';return}
-  for(const account of state.accounts){
-    const row=document.createElement('div');
-    row.className='row'+(account.id===state.selected?' active':'');
-    row.innerHTML=`<strong>${esc(account.login)}</strong><span class="meta">${account.active?'активен':'выключен'} · промптов ${account.prompt_count} · моделей ${account.model_count}</span>`;
-    row.onclick=()=>loadAccess(account.id).catch(e=>setStatus(e.message,true));
-    list.append(row);
-  }
-}
-
-async function loadAccess(id){
-  state.selected=id;
-  renderAccounts();
-  const data=await api('/admin/accounts/'+id+'/access');
-  state.access=data;
-  const a=data.account;
-  $('loginInput').value=a.login||'';
-  $('displayInput').value=a.display_name||'';
-  $('activeInput').checked=!!a.active;
-  optionList($('defaultPrompt'), state.prompts.map(p=>({id:p.path,name:p.label||p.path})), 'id', 'name', a.default_prompt);
-  optionList($('defaultModel'), state.models, 'id', 'name', a.default_model);
-  renderChecks(data.prompt_paths||[], data.models||[]);
-}
-
-function renderChecks(promptPaths=[], models=[]){
-  $('promptChecks').innerHTML='';
-  for(const p of state.prompts) $('promptChecks').append(checkbox('prompt', p.path, p.label||p.path, promptPaths.includes(p.path)));
-  $('modelChecks').innerHTML='';
-  for(const m of state.models) $('modelChecks').append(checkbox('model', m.id, m.name||m.id, models.includes(m.id)));
-}
-
-function newAccount(){
-  state.selected=null;
-  renderAccounts();
-  $('loginInput').value='';
-  $('displayInput').value='';
-  $('activeInput').checked=true;
-  optionList($('defaultPrompt'), state.prompts.map(p=>({id:p.path,name:p.label||p.path})), 'id', 'name', state.prompts[0]?.path||'');
-  optionList($('defaultModel'), state.models, 'id', 'name', 'openai/gpt-4.1-mini');
-  renderChecks(state.prompts.map(p=>p.path), state.models.filter(m=>['openai/gpt-4.1-mini','openai/gpt-4.1'].includes(m.id)).map(m=>m.id));
-  setStatus('Новый аккаунт');
-}
-
-async function saveAccount(){
-  const body = {
-    login: $('loginInput').value.trim(),
-    display_name: $('displayInput').value.trim(),
-    active: $('activeInput').checked,
-    default_prompt: $('defaultPrompt').value,
-    default_model: $('defaultModel').value,
-  };
-  if(!body.login) throw new Error('Логин обязателен');
-  let id=state.selected;
-  if(id) await api('/admin/accounts/'+id, json('PUT', body));
-  else {
-    const created = await api('/admin/accounts', json('POST', body));
-    id = created.id;
-    state.selected = id;
-  }
-  await api('/admin/accounts/'+id+'/access', json('PUT', {
-    prompt_paths: checkedValues('prompt'),
-    models: checkedValues('model'),
-    default_prompt: body.default_prompt,
-    default_model: body.default_model,
-    active: body.active,
-  }));
-  setStatus('Сохранено');
-  await loadAll();
-}
-
-async function deleteAccount(){
-  if(!state.selected) return;
-  if(!confirm('Удалить аккаунт и всю его историю?')) return;
-  await api('/admin/accounts/'+state.selected,{method:'DELETE'});
-  state.selected=null;
-  setStatus('Аккаунт удалён');
-  await loadAll();
 }
 
 function renderAliases(){
@@ -228,7 +98,7 @@ function renderAliases(){
     row.className='alias-row';
     row.dataset.path=p.path;
     row.innerHTML=`<div class="path" title="${esc(p.path)}">${esc(p.path)}</div><input class="alias-title" value="${esc(p.title||'')}" placeholder="Название"><input class="alias-folder" value="${esc(p.folder||'')}" placeholder="Группа"><button class="btn" type="button">Сохранить</button>`;
-    row.querySelector('button').onclick=()=>saveAlias(row).catch(e=>setStatus(e.message,true));
+    row.querySelector('button').onclick=event=>runButton(event.currentTarget,'Сохраняем…',()=>saveAlias(row)).catch(e=>setStatus(e.message,true));
     list.append(row);
   }
 }
@@ -245,14 +115,7 @@ document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active', x===tab));
   document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active', x.id === 'view-'+tab.dataset.view));
 });
-$('reloadBtn').onclick=()=>loadAll().catch(e=>setStatus(e.message,true));
-$('newAccountBtn').onclick=newAccount;
-$('saveAccountBtn').onclick=()=>saveAccount().catch(e=>setStatus(e.message,true));
-$('deleteAccountBtn').onclick=()=>deleteAccount().catch(e=>setStatus(e.message,true));
-$('allPromptsBtn').onclick=()=>document.querySelectorAll('input[name=prompt]').forEach(x=>x.checked=true);
-$('noPromptsBtn').onclick=()=>document.querySelectorAll('input[name=prompt]').forEach(x=>x.checked=false);
-$('allModelsBtn').onclick=()=>document.querySelectorAll('input[name=model]').forEach(x=>x.checked=true);
-$('noModelsBtn').onclick=()=>document.querySelectorAll('input[name=model]').forEach(x=>x.checked=false);
+$('reloadBtn').onclick=()=>runButton($('reloadBtn'),'Обновляем…',loadAll).catch(e=>setStatus(e.message,true));
 
 loadAll().catch(e=>{
   $('adminState').textContent='нет доступа';

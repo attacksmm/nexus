@@ -86,7 +86,7 @@
           <span class="module-item__name">Состояние сервера</span>
         </button>
         <button class="module-item" data-tab="users" type="button">
-          <span class="module-item__name">Пользователи</span>
+          <span class="module-item__name">Команда и доступы</span>
         </button>
         <button class="module-item" data-tab="credentials" type="button">
           <span class="module-item__name">Подключения</span>
@@ -436,27 +436,19 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
       <section id="tabUsers" class="settings-section" hidden>
         <div class="settings-header">
           <div>
-            <p class="eyebrow">Управление доступом</p>
-            <h2>Пользователи</h2>
+            <p class="eyebrow">Единое управление</p>
+            <h2>Команда и доступы</h2>
           </div>
-          <button id="addUserBtn" class="btn btn--sm btn--primary" type="button">+ Добавить</button>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Логин</th>
-                <th>Роль</th>
-                <th>Доступ к модулям</th>
-                <th>Создан</th>
-                <th>Статус</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="usersTable"></tbody>
-          </table>
+        <div class="panel" style="padding:18px;display:grid;gap:12px;max-width:720px">
+          <div>
+            <h3 style="margin:0 0 6px">Сотрудники теперь ведутся в одном месте</h3>
+            <p style="margin:0;color:var(--text-subtle)">Создание аккаунтов Nexus, роли и доступ к панелям настраиваются в карточке сотрудника вместе с его правами в остальных модулях. Локальное редактирование отключено, чтобы настройки не расходились.</p>
+          </div>
+          <div>
+            <a class="btn btn--primary" href="/nexus/staff-registry/panel/">Открыть модуль «Команда»</a>
+          </div>
         </div>
-        <p id="usersStatus" class="status-line" style="padding:10px 0"></p>
       </section>
 
       <!-- ENV -->
@@ -493,43 +485,6 @@ curl -b cookies.txt -F 'file=@mymod.zip' https://junior.sobakovod.pro/nexus/api/
       </section>
 
     </main>
-  </div>
-</div>
-
-<!-- User dialog -->
-<div id="userDialog" class="overlay" hidden>
-  <div class="dialog">
-    <div class="dialog__head">
-      <div><p class="eyebrow">Пользователь</p><h2 id="userDialogTitle">Новый пользователь</h2></div>
-      <button id="userDialogClose" class="btn btn--sm btn--ghost" type="button">×</button>
-    </div>
-    <div class="dialog__body">
-      <input id="userDialogId" type="hidden" />
-      <label class="form-label">Логин
-        <input id="userDialogUsername" class="form-input" placeholder="username" />
-      </label>
-      <label class="form-label">Пароль <span id="userDialogPwdNote" style="color:var(--text-subtle)"></span>
-        <input id="userDialogPassword" class="form-input" type="password" placeholder="Минимум 8 символов" />
-      </label>
-      <label class="form-label">Роль
-        <select id="userDialogRole" class="form-input">
-          <option value="viewer">viewer — только просмотр</option>
-          <option value="editor">editor — пауза/возобновление разрешённых модулей</option>
-          <option value="admin">admin — полный доступ</option>
-        </select>
-      </label>
-      <div class="form-label">Доступ к модулям
-        <label class="check-row check-row--all">
-          <input id="userDialogAllModules" type="checkbox" />
-          <span>Все модули</span>
-        </label>
-        <div id="userDialogModuleChecks" class="module-check-list"></div>
-      </div>
-      <p id="userDialogStatus" class="status-line"></p>
-    </div>
-    <div class="dialog__foot">
-      <button id="userDialogSave" class="btn btn--primary" type="button">Сохранить</button>
-    </div>
   </div>
 </div>
 
@@ -615,6 +570,9 @@ loadServerStats();
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
+// Legacy editor is intentionally retained only in source for rollback. The UI and APIs
+// are inactive while the central staff registry is installed.
+if (false) {
 let accessModules = [];
 
 async function loadAccessModules() {
@@ -772,6 +730,7 @@ document.getElementById("userDialogSave").addEventListener("click", async () => 
   document.getElementById("userDialog").hidden = true;
   loadUsers();
 });
+}
 
 // ── Telegram proxy ───────────────────────────────────────────────────────────
 
@@ -1204,7 +1163,6 @@ function esc(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
 
 // init
-loadUsers();
 const initialTab = new URLSearchParams(location.search).get("tab");
 const initialButton = document.querySelector(`.module-item[data-tab="${initialTab || ""}"]`);
 if (initialButton) initialButton.click();

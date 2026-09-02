@@ -2,6 +2,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,20 @@ router = APIRouter()
 
 _tpl_dir = str(__import__("pathlib").Path(__file__).parent.parent / "templates")
 templates = Jinja2Templates(directory=_tpl_dir)
+
+
+def _staff_registry_manages_users() -> bool:
+    """Keep legacy user APIs available only as an automatic rollback path."""
+    return sys.modules.get("_nexus_mod_staff-registry") is not None
+
+
+def _reject_legacy_user_mutation() -> None:
+    if _staff_registry_manages_users():
+        raise HTTPException(
+            409,
+            "Управление сотрудниками и доступами перенесено в модуль «Команда»",
+            headers={"Location": "/nexus/staff-registry/panel/"},
+        )
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -199,6 +214,7 @@ async def api_user_create(request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    _reject_legacy_user_mutation()
     enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     username = data.get("username", "").strip()
@@ -223,6 +239,7 @@ async def api_user_update(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    _reject_legacy_user_mutation()
     enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     role = data.get("role", "viewer")
@@ -241,6 +258,7 @@ async def api_user_password(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    _reject_legacy_user_mutation()
     enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     data = await request.json()
     pwd = data.get("password", "").strip()
@@ -255,6 +273,7 @@ async def api_user_delete(uid: int, request: Request):
     user = await verify_token_from_request(request)
     if not require_admin(user):
         return _forbidden()
+    _reject_legacy_user_mutation()
     enforce_rate_limit(request, "nexus-admin-users", limit=60, window_seconds=3600, subject=user["username"])
     # нельзя удалить себя
     if user["username"] == (await _get_user_by_id(uid)):

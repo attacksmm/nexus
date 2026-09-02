@@ -78,6 +78,18 @@ parse_utm_term = _graph.parse_utm_term
 router = APIRouter()
 
 MODULE_ID = "messenger-widget"
+STAFF_REGISTRY_MODULE_NAME = "_nexus_mod_staff-registry"
+STAFF_REGISTRY_PANEL_PATH = "/nexus/staff-registry/panel/"
+
+
+def _ensure_local_staff_mutation_allowed() -> None:
+    if sys.modules.get(STAFF_REGISTRY_MODULE_NAME) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сотрудники управляются в едином реестре: {STAFF_REGISTRY_PANEL_PATH}",
+        )
+
+
 ENV_KEY = "NEXUS_MESSENGER_WIDGET_API_KEY"
 LEGACY_ENV_KEY = "NEXUS_GETCOURSE_WAZZUP_API_KEY"
 ORIGIN_ENV_KEY = "NEXUS_MESSENGER_WIDGET_GETCOURSE_ORIGIN"
@@ -8157,6 +8169,601 @@ async def service_email_staff() -> list[dict[str, Any]]:
     return [{"id": str(row["id"]), "name": _clean(row["name"], 200)} for row in rows if _clean(row["name"], 200)]
 
 
+async def service_staff_connector() -> dict[str, Any]:
+    """Describe the employee settings managed by the central staff registry."""
+    db = await _connect()
+    try:
+        admins = await (await db.execute(
+            "SELECT id,name FROM admins WHERE enabled=1 ORDER BY name,id"
+        )).fetchall()
+    finally:
+        await db.close()
+    recipient_options = [
+        {"value": str(row["id"]), "label": _clean(row["name"], 150) or f"Сотрудник #{row['id']}"}
+        for row in admins
+    ]
+    fields = [
+        {"key": "role", "label": "Роль", "type": "select", "options": ["employee", "admin"]},
+        {"key": "amo_task_enabled", "label": "Создавать задачи amoCRM", "type": "bool"},
+        {"key": "amo_task_sources", "label": "Каналы задач", "type": "list"},
+        {"key": "course_chat_notifications", "label": "Уведомления учебных чатов", "type": "bool"},
+        {"key": "notification_recipient_ids", "label": "Кому отправлять уведомления", "type": "multiselect", "options": recipient_options},
+    ]
+    return {
+        "module_id": MODULE_ID,
+        "version": 1,
+        "label": "Мессенджеры",
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {
+            "role": {"type": "choice", "choices": ["employee", "admin"], "default": "employee"},
+            "enabled": {"type": "boolean", "default": True},
+            "amo_task_enabled": {"type": "boolean", "default": True},
+            "amo_task_sources": {"type": "multi_choice", "choices": list(AMO_TASK_SOURCES)},
+            "course_chat_notifications": {"type": "boolean", "default": False},
+            "notification_recipient_ids": {"type": "multiselect", "options": recipient_options},
+            "bindings": {"type": "identity_bindings", "providers": ["getcourse", "amocrm"]},
+        },
+    }
+
+
+def _staff_source_link(employee: dict[str, Any], module_id: str) -> str:
+    links = employee.get("source_links")
+    if not isinstance(links, dict):
+        return ""
+    value = links.get(module_id)
+    if value is None:
+        value = links.get(module_id.replace("-", "_"))
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    return _clean(value, 200)
+
+
+def _staff_identities(employee: dict[str, Any]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for raw in employee.get("identities", []) if isinstance(employee.get("identities"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        provider = _clean(raw.get("provider"), 40).casefold().replace("_", "-")
+        external_id = _clean(raw.get("external_id") or raw.get("id"), 200)
+        if not provider:
+            continue
+        result.append({
+            "provider": provider,
+            "external_id": external_id,
+            "username": _clean(raw.get("username"), 200),
+            "email": _clean(raw.get("email"), 320).casefold(),
+            "phone": _normalize_phone(raw.get("phone")),
+        })
+    return result
+
+
+def _staff_binding_rows(employee: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str]]:
+    """Build exact platform bindings; names and phones are deliberately excluded."""
+    rows: list[dict[str, str]] = []
+    for identity in _staff_identities(employee):
+        if identity["provider"] in {"getcourse", "amocrm"} and identity["external_id"]:
+            rows.append({
+                "platform": identity["provider"],
+                "platform_user_id": identity["external_id"],
+                "platform_user_email": identity["email"],
+            })
+    configured = config.get("bindings")
+    if configured is None:
+        configured = config.get("manager_bindings")
+    for raw in configured if isinstance(configured, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        platform = _clean(raw.get("platform") or raw.get("provider"), 40).casefold()
+        external_id = _clean(raw.get("platform_user_id") or raw.get("external_id"), 200)
+        if platform not in {"getcourse", "amocrm"} or not external_id:
+            raise ValueError("Messenger binding requires an exact GetCourse or amoCRM user ID")
+        rows.append({
+            "platform": platform,
+            "platform_user_id": external_id,
+            "platform_user_email": _clean(raw.get("platform_user_email") or raw.get("email"), 320).casefold(),
+        })
+    for platform in ("getcourse", "amocrm"):
+        external_id = _clean(config.get(f"{platform}_id"), 200)
+        if external_id:
+            rows.append({
+                "platform": platform,
+                "platform_user_id": external_id,
+                "platform_user_email": _clean(config.get(f"{platform}_email"), 320).casefold(),
+            })
+    merged: dict[tuple[str, str], dict[str, str]] = {}
+    for row in rows:
+        key = (row["platform"], row["platform_user_id"])
+        previous = merged.get(key)
+        if not previous or (not previous["platform_user_email"] and row["platform_user_email"]):
+            merged[key] = row
+    return sorted(merged.values(), key=lambda row: (row["platform"], row["platform_user_id"]))
+
+
+def _staff_wazzup_id(employee: dict[str, Any], config: dict[str, Any]) -> str:
+    configured = _clean(config.get("wazzup_user_id"), 100)
+    if configured:
+        return configured
+    for identity in _staff_identities(employee):
+        if identity["provider"] in {"wazzup", "wazzup24"} and identity["external_id"]:
+            return identity["external_id"][:100]
+    employee_id = _clean(employee.get("id"), 500)
+    if not employee_id:
+        raise ValueError("Employee UUID is required to provision Messenger")
+    return "staff-registry-" + hashlib.sha256(employee_id.encode("utf-8")).hexdigest()[:32]
+
+
+async def _staff_admin_matches(employee: dict[str, Any]) -> tuple[list[int], list[str]]:
+    """Resolve only durable source links and provider IDs, never display fields."""
+    local_id = _staff_source_link(employee, MODULE_ID)
+    candidate_ids: set[int] = set()
+    warnings: list[str] = []
+    db = await _connect()
+    try:
+        if local_id:
+            if not local_id.isdigit():
+                warnings.append("Messenger source link is not a numeric local ID")
+            else:
+                row = await (await db.execute("SELECT id FROM admins WHERE id=?", (int(local_id),))).fetchone()
+                if row:
+                    candidate_ids.add(int(row["id"]))
+                else:
+                    warnings.append("Messenger source link points to a missing employee")
+        for identity in _staff_identities(employee):
+            provider, external_id = identity["provider"], identity["external_id"]
+            if not external_id:
+                continue
+            if provider in {"messenger-widget", "messenger-widget-local"} and external_id.isdigit():
+                row = await (await db.execute("SELECT id FROM admins WHERE id=?", (int(external_id),))).fetchone()
+            elif provider in {"wazzup", "wazzup24"}:
+                row = await (await db.execute(
+                    "SELECT id FROM admins WHERE wazzup_user_id=?", (external_id,),
+                )).fetchone()
+            elif provider in {"getcourse", "amocrm"}:
+                row = await (await db.execute(
+                    "SELECT admin_id AS id FROM manager_bindings WHERE platform=? AND platform_user_id=?",
+                    (provider, external_id),
+                )).fetchone()
+            else:
+                row = None
+            if row:
+                candidate_ids.add(int(row["id"]))
+    finally:
+        await db.close()
+    return sorted(candidate_ids), warnings
+
+
+async def _staff_admin_snapshot_by_id(admin_id: int) -> dict[str, Any]:
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT a.*,
+               COALESCE(SUM(CASE WHEN d.revoked_at='' AND d.expires_at>? THEN 1 ELSE 0 END),0) active_devices,
+               COALESCE((SELECT CAST(s.value AS INTEGER) FROM module_settings s
+                         WHERE s.key='admin_amo_task_enabled:'||a.id),1) amo_task_enabled,
+               (SELECT s.value FROM module_settings s
+                WHERE s.key='admin_amo_task_sources:'||a.id) amo_task_sources_json,
+               COALESCE((SELECT p.course_chats FROM notification_preferences p WHERE p.admin_id=a.id),0)
+                 course_chat_notifications
+               FROM admins a LEFT JOIN devices d ON d.admin_id=a.id WHERE a.id=? GROUP BY a.id""",
+            (_iso(), int(admin_id)),
+        )).fetchone()
+        if not row:
+            return {"ok": True, "module_id": MODULE_ID, "found": False, "status": "unlinked", "local_id": ""}
+        bindings = await (await db.execute(
+            """SELECT platform,platform_user_id,platform_user_email FROM manager_bindings
+               WHERE admin_id=? ORDER BY platform,platform_user_id""", (int(admin_id),),
+        )).fetchall()
+        policy = await (await db.execute(
+            "SELECT configured FROM notification_route_policies WHERE source_admin_id=?",
+            (int(admin_id),),
+        )).fetchone()
+        recipients = await (await db.execute(
+            "SELECT recipient_admin_id FROM notification_routes WHERE source_admin_id=? ORDER BY recipient_admin_id",
+            (int(admin_id),),
+        )).fetchall()
+    finally:
+        await db.close()
+    raw = dict(row)
+    config = {
+        "role": raw["role"],
+        "enabled": bool(raw["enabled"]),
+        "phone": raw["phone"],
+        "wazzup_user_id": raw["wazzup_user_id"],
+        "amo_task_enabled": bool(raw["amo_task_enabled"]),
+        "amo_task_sources": _parse_amo_task_sources(raw["amo_task_sources_json"]),
+        "course_chat_notifications": bool(raw["course_chat_notifications"]),
+        "notification_recipient_ids": (
+            [str(item["recipient_admin_id"]) for item in recipients]
+            if policy and bool(policy["configured"])
+            else [str(admin_id)]
+        ),
+        "notification_routing_configured": bool(policy and policy["configured"]),
+        "bindings": [dict(binding) for binding in bindings],
+    }
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": True,
+        "status": "active" if raw["enabled"] else "inactive",
+        "local_id": str(raw["id"]),
+        "display_name": raw["name"],
+        "active": bool(raw["enabled"]),
+        "active_devices": int(raw["active_devices"]),
+        "config": config,
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    """Export safe existing candidates for the central registry import screen."""
+    db = await _connect()
+    try:
+        rows = await (await db.execute("SELECT id FROM admins ORDER BY name,id")).fetchall()
+    finally:
+        await db.close()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        snapshot = await _staff_admin_snapshot_by_id(int(row["id"]))
+        identities = [{
+            "provider": "wazzup",
+            "external_id": snapshot["config"]["wazzup_user_id"],
+        }]
+        identities.extend({
+            "provider": binding["platform"],
+            "external_id": binding["platform_user_id"],
+            "email": binding["platform_user_email"],
+        } for binding in snapshot["config"]["bindings"])
+        result.append({
+            "module_id": MODULE_ID,
+            "local_id": snapshot["local_id"],
+            "full_name": snapshot["display_name"],
+            "display_name": snapshot["display_name"],
+            "phone": snapshot["config"]["phone"],
+            "identities": identities,
+            "config": snapshot["config"],
+            "active": snapshot["active"],
+        })
+    return result
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    matches, warnings = await _staff_admin_matches(employee)
+    if len(matches) > 1:
+        return {
+            "ok": False, "module_id": MODULE_ID, "found": False, "status": "conflict", "local_id": "",
+            "warnings": ["Exact employee identities point to different Messenger users"],
+        }
+    if not matches:
+        return {
+            "ok": True, "module_id": MODULE_ID, "found": False, "status": "unlinked", "local_id": "",
+            **({"warnings": warnings} if warnings else {}),
+        }
+    result = await _staff_admin_snapshot_by_id(matches[0])
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+async def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any] | None, operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """Idempotently provision, update, or disable one explicitly linked employee."""
+    desired = dict(config or {})
+    action = _clean(operation, 40).casefold().replace("_", "-")
+    if action not in {"upsert", "create", "update", "activate", "deactivate", "disable", "remove"}:
+        raise ValueError(f"Unsupported Messenger staff operation: {operation}")
+    matches, match_warnings = await _staff_admin_matches(employee)
+    if len(matches) > 1:
+        raise ValueError("Exact employee identities point to different Messenger users")
+    admin_id = matches[0] if matches else 0
+    deactivate = action in {"deactivate", "disable", "remove"}
+    if deactivate and not admin_id:
+        return {
+            "ok": True, "module_id": MODULE_ID, "operation": "deactivate", "local_id": "",
+            "changed": False, "snapshot": {"found": False, "status": "unlinked"},
+            "idempotency_key": _clean(idempotency_key, 300),
+            **({"warnings": match_warnings} if match_warnings else {}),
+        }
+
+    name = _clean(employee.get("display_name") or employee.get("full_name"), 150)
+    if not deactivate and len(name) < 2:
+        raise ValueError("Messenger employee name is required")
+    raw_phone = _clean(desired.get("phone", employee.get("phone")), 100)
+    phone = _normalize_phone(raw_phone)
+    if raw_phone and not phone:
+        raise ValueError("Messenger employee phone is invalid")
+    role = _clean(desired.get("role"), 20).casefold() or "employee"
+    if role not in {"admin", "employee"}:
+        raise ValueError("Messenger role must be admin or employee")
+    employee_status = _clean(employee.get("status"), 40).casefold()
+    enabled = bool(desired.get("enabled", employee_status not in {"disabled", "inactive", "dismissed", "terminated", "fired"}))
+    if deactivate:
+        enabled = False
+    bindings = [] if deactivate else _staff_binding_rows(employee, desired)
+    warnings = list(match_warnings)
+    changed = False
+    now = _iso()
+
+    wazzup_id = ""
+    if not admin_id:
+        wazzup_id = _staff_wazzup_id(employee, desired)
+    else:
+        db = await _connect()
+        try:
+            current = await (await db.execute("SELECT * FROM admins WHERE id=?", (admin_id,))).fetchone()
+        finally:
+            await db.close()
+        if not current:
+            raise ValueError("Linked Messenger employee no longer exists")
+        wazzup_id = _clean(current["wazzup_user_id"], 100)
+        explicit_wazzup = _clean(desired.get("wazzup_user_id"), 100)
+        if explicit_wazzup and explicit_wazzup != wazzup_id:
+            raise ValueError("Messenger Wazzup ID cannot be replaced after provisioning")
+
+    # Validate configured identities before changing Wazzup or local state.
+    if bindings:
+        db = await _connect()
+        try:
+            for binding in bindings:
+                conflict = await (await db.execute(
+                    """SELECT admin_id FROM manager_bindings WHERE platform=? AND platform_user_id=?
+                       AND admin_id<>?""",
+                    (binding["platform"], binding["platform_user_id"], admin_id),
+                )).fetchone()
+                if conflict:
+                    raise ValueError(
+                        f"{binding['platform']} user {binding['platform_user_id']} is linked to another Messenger employee"
+                    )
+        finally:
+            await db.close()
+
+    # Keep the actual Wazzup roster in sync when the integration is configured.
+    # Local development remains usable and reports the omitted provider step.
+    if not deactivate and _api_key():
+        payload: dict[str, str] = {"id": wazzup_id, "name": name}
+        if phone:
+            payload["phone"] = phone[1:]
+        await _wazzup_request("POST", "/users", [payload])
+    elif not deactivate:
+        warnings.append("Wazzup API is not configured; the local Messenger account was updated only")
+
+    db = await _connect()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        if admin_id:
+            current = await (await db.execute("SELECT * FROM admins WHERE id=?", (admin_id,))).fetchone()
+            values = ({
+                "name": current["name"], "phone": current["phone"], "role": current["role"], "enabled": 0,
+            } if deactivate else {
+                "name": name, "phone": phone, "role": role, "enabled": int(enabled),
+            })
+            changed = any(current[key] != value for key, value in values.items())
+            await db.execute(
+                "UPDATE admins SET name=?,phone=?,role=?,enabled=?,updated_at=? WHERE id=?",
+                (values["name"], values["phone"], values["role"], values["enabled"], now, admin_id),
+            )
+        else:
+            cursor = await db.execute(
+                """INSERT INTO admins(wazzup_user_id,name,phone,role,enabled,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (wazzup_id, name, phone, role, int(enabled), now, now),
+            )
+            admin_id = int(cursor.lastrowid)
+            changed = True
+
+        if not enabled:
+            cursor = await db.execute(
+                "UPDATE devices SET revoked_at=? WHERE admin_id=? AND revoked_at=''", (now, admin_id),
+            )
+            changed = changed or bool(cursor.rowcount)
+            await db.execute(
+                "UPDATE browser_notification_subscriptions SET enabled=0,updated_at=? WHERE admin_id=? AND enabled=1",
+                (now, admin_id),
+            )
+
+        if not deactivate:
+            existing_bindings = [dict(row) for row in await (await db.execute(
+                """SELECT platform,platform_user_id,platform_user_email FROM manager_bindings
+                   WHERE admin_id=? AND platform IN ('getcourse','amocrm') ORDER BY platform,platform_user_id""",
+                (admin_id,),
+            )).fetchall()]
+            if existing_bindings != bindings:
+                changed = True
+            await db.execute(
+                "DELETE FROM manager_bindings WHERE admin_id=? AND platform IN ('getcourse','amocrm')", (admin_id,),
+            )
+            for binding in bindings:
+                await db.execute(
+                    """INSERT INTO manager_bindings(
+                       platform,platform_user_id,platform_user_email,admin_id,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (binding["platform"], binding["platform_user_id"], binding["platform_user_email"], admin_id, now, now),
+                )
+
+        for key, value in (
+            (_admin_amo_task_setting_key(admin_id), desired.get("amo_task_enabled")),
+            (_admin_amo_task_sources_setting_key(admin_id), desired.get("amo_task_sources")),
+        ):
+            if value is None or deactivate:
+                continue
+            if key.startswith("admin_amo_task_sources:"):
+                if not isinstance(value, list) or any(source not in AMO_TASK_SOURCES for source in value):
+                    raise ValueError("Messenger amo_task_sources contains an unsupported channel")
+                stored = json.dumps([source for source in AMO_TASK_SOURCES if source in set(value)], ensure_ascii=False)
+            else:
+                stored = "1" if bool(value) else "0"
+            previous = await (await db.execute("SELECT value FROM module_settings WHERE key=?", (key,))).fetchone()
+            changed = changed or not previous or previous["value"] != stored
+            await db.execute(
+                """INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",
+                (key, stored, now),
+            )
+        if "course_chat_notifications" in desired and not deactivate:
+            course_chats = int(bool(desired["course_chat_notifications"]))
+            previous = await (await db.execute(
+                "SELECT course_chats FROM notification_preferences WHERE admin_id=?", (admin_id,),
+            )).fetchone()
+            changed = changed or not previous or int(previous["course_chats"]) != course_chats
+            await db.execute(
+                """INSERT INTO notification_preferences(admin_id,fallback_unassigned,course_chats,updated_at)
+                   VALUES(?,0,?,?) ON CONFLICT(admin_id) DO UPDATE SET
+                   course_chats=excluded.course_chats,updated_at=excluded.updated_at""",
+                (admin_id, course_chats, now),
+            )
+        if "notification_recipient_ids" in desired and not deactivate:
+            raw_recipients = desired["notification_recipient_ids"]
+            if not isinstance(raw_recipients, list) or len(raw_recipients) > 200:
+                raise ValueError("Messenger notification recipients must be a list")
+            try:
+                recipient_ids = sorted({int(value) for value in raw_recipients})
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Messenger notification recipient IDs must be numeric") from exc
+            if not recipient_ids and not bool(desired.get("notification_routing_configured")):
+                recipient_ids = [admin_id]
+            valid_rows = await (await db.execute(
+                "SELECT id FROM admins WHERE enabled=1 AND (id=? OR id IN (SELECT value FROM json_each(?)))",
+                (admin_id, json.dumps(recipient_ids)),
+            )).fetchall()
+            valid_ids = {int(row["id"]) for row in valid_rows}
+            if admin_id not in valid_ids or set(recipient_ids).difference(valid_ids):
+                raise ValueError("Messenger notification recipient points to a missing or disabled employee")
+            previous_policy = await (await db.execute(
+                "SELECT configured FROM notification_route_policies WHERE source_admin_id=?", (admin_id,),
+            )).fetchone()
+            previous_recipients = {
+                int(row["recipient_admin_id"]) for row in await (await db.execute(
+                    "SELECT recipient_admin_id FROM notification_routes WHERE source_admin_id=?", (admin_id,),
+                )).fetchall()
+            }
+            changed = changed or not previous_policy or not bool(previous_policy["configured"]) or previous_recipients != set(recipient_ids)
+            await db.execute("DELETE FROM notification_routes WHERE source_admin_id=?", (admin_id,))
+            await db.execute("DELETE FROM notification_route_policies WHERE source_admin_id=?", (admin_id,))
+            await db.execute(
+                "INSERT INTO notification_route_policies(source_admin_id,configured,updated_at) VALUES(?,1,?)",
+                (admin_id, now),
+            )
+            await db.executemany(
+                "INSERT INTO notification_routes(source_admin_id,recipient_admin_id,created_at,updated_at) VALUES(?,?,?,?)",
+                ((admin_id, recipient_id, now, now) for recipient_id in recipient_ids),
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    snapshot = await _staff_admin_snapshot_by_id(admin_id)
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "operation": "deactivate" if deactivate else "upsert",
+        "local_id": str(admin_id),
+        "changed": changed,
+        "config": snapshot.get("config", {}),
+        "snapshot": snapshot,
+        "idempotency_key": _clean(idempotency_key, 300),
+        **({"warnings": warnings} if warnings else {}),
+    }
+
+
+async def _staff_admin_id(employee: dict[str, Any]) -> int:
+    matches, _warnings = await _staff_admin_matches(employee)
+    if len(matches) > 1:
+        raise ValueError("Exact employee identities point to different Messenger users")
+    if not matches:
+        raise ValueError("Сотрудник не связан с аккаунтом Messenger")
+    return matches[0]
+
+
+async def service_staff_access(*, employee: dict[str, Any]) -> dict[str, Any]:
+    """Return safe session metadata for the central access hub."""
+    admin_id = await _staff_admin_id(employee)
+    db = await _connect()
+    try:
+        admin = await (await db.execute(
+            "SELECT id,name,enabled FROM admins WHERE id=?", (admin_id,),
+        )).fetchone()
+        devices = await (await db.execute(
+            """SELECT id,token_hint,created_at,last_used_at,expires_at,revoked_at
+               FROM devices WHERE admin_id=? ORDER BY last_used_at DESC,id DESC""",
+            (admin_id,),
+        )).fetchall()
+    finally:
+        await db.close()
+    if not admin:
+        raise ValueError("Аккаунт Messenger не найден")
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "local_id": str(admin_id),
+        "display_name": admin["name"],
+        "active": bool(admin["enabled"]),
+        "devices": [{**dict(row), "active": not bool(row["revoked_at"])} for row in devices],
+    }
+
+
+async def _issue_activation_code(admin_id: int) -> dict[str, Any]:
+    code = _activation_code()
+    expires = ACTIVATION_EXPIRES_AT
+    db = await _connect()
+    try:
+        admin = await (await db.execute("SELECT id,name,enabled FROM admins WHERE id=?", (admin_id,))).fetchone()
+        if not admin:
+            raise ValueError("Сотрудник не найден")
+        if not admin["enabled"]:
+            raise ValueError("Сотрудник выключен")
+        previous = await (await db.execute(
+            "SELECT 1 FROM activation_codes WHERE admin_id=? AND expires_at>? LIMIT 1", (admin_id, _iso()),
+        )).fetchone()
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute("DELETE FROM activation_codes WHERE admin_id=?", (admin_id,))
+        revoked = 0
+        if previous:
+            cursor = await db.execute(
+                "UPDATE devices SET revoked_at=? WHERE admin_id=? AND revoked_at=''", (_iso(), admin_id),
+            )
+            revoked = int(cursor.rowcount or 0)
+        await db.execute(
+            "INSERT INTO activation_codes(admin_id,code_hash,expires_at,created_at) VALUES(?,?,?,?)",
+            (admin_id, _hash(_normalize_code(code)), expires, _iso()),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    return {
+        "ok": True, "code": code, "expires_at": expires, "admin_name": admin["name"],
+        "persistent": True, "reissued": bool(previous), "revoked_devices": revoked,
+    }
+
+
+async def service_staff_issue_activation_code(*, employee: dict[str, Any]) -> dict[str, Any]:
+    """Issue a one-time login code through the central registry only."""
+    return await _issue_activation_code(await _staff_admin_id(employee))
+
+
+async def service_staff_revoke_device(*, employee: dict[str, Any], device_id: int) -> dict[str, Any]:
+    """Revoke one Messenger device after verifying employee ownership."""
+    admin_id = await _staff_admin_id(employee)
+    db = await _connect()
+    try:
+        cursor = await db.execute(
+            "UPDATE devices SET revoked_at=? WHERE id=? AND admin_id=? AND revoked_at=''",
+            (_iso(), int(device_id), admin_id),
+        )
+        if not cursor.rowcount:
+            raise ValueError("Активное устройство сотрудника не найдено")
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": True, "module_id": MODULE_ID, "local_id": str(admin_id), "device_id": int(device_id)}
+
+
 async def _streams_vk_profile_name(vk_id: str) -> str:
     clean_id = _clean(vk_id, 200)
     if not clean_id:
@@ -10028,6 +10635,7 @@ async def snippet(request: Request) -> dict[str, Any]:
 @router.post("/admins/sync")
 async def sync_admins(request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(request, "getcourse-wazzup-sync", limit=20, window_seconds=3600, subject=user["username"])
     db = await _connect()
     try:
@@ -10094,6 +10702,7 @@ async def _upsert_admins(items: list[dict[str, str]], actor: str = "") -> int:
 @router.post("/admins")
 async def create_admin(request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(request, "getcourse-wazzup-admin-create", limit=60, window_seconds=3600, subject=user["username"])
     data = await _read_json(request)
     name = _clean(data.get("name"), 150)
@@ -10117,6 +10726,7 @@ async def create_admin(request: Request) -> dict[str, Any]:
 @router.post("/admins/sync-getcourse")
 async def sync_getcourse_staff(request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     data = await _read_json(request)
     rows = data.get("staff")
     if not isinstance(rows, list) or not rows:
@@ -10292,6 +10902,7 @@ async def notification_routing(request: Request) -> dict[str, Any]:
 @router.put("/notification-routing/course-chats/{admin_id}")
 async def save_course_chat_notifications(admin_id: int, request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(request, "messenger-widget-course-chat-routing", limit=240, window_seconds=3600, subject=user["username"])
     data = await _read_json(request)
     if not isinstance(data.get("enabled"), bool):
@@ -10319,6 +10930,7 @@ async def save_course_chat_notifications(admin_id: int, request: Request) -> dic
 @router.put("/notification-routing/{source_admin_id}")
 async def save_notification_routing(source_admin_id: int, request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(request, "messenger-widget-notification-routing", limit=240, window_seconds=3600, subject=user["username"])
     data = await _read_json(request)
     reset = bool(data.get("reset"))
@@ -10364,6 +10976,7 @@ async def save_notification_routing(source_admin_id: int, request: Request) -> d
 @router.put("/admins/{admin_id}/bindings")
 async def save_admin_bindings(admin_id: int, request: Request) -> dict[str, Any]:
     await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     data = await _read_json(request)
     rows = data.get("bindings")
     if not isinstance(rows, list) or len(rows) > 20:
@@ -10478,6 +11091,7 @@ async def set_admin_template_order(admin_id: int, request: Request) -> dict[str,
 @router.patch("/admins/{admin_id}")
 async def update_admin(admin_id: int, request: Request) -> dict[str, Any]:
     await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     data = await _read_json(request)
     if not {"enabled", "role", "amo_task_enabled", "amo_task_sources"}.intersection(data):
         raise HTTPException(400, "Нет изменений")
@@ -10542,37 +11156,12 @@ async def update_admin(admin_id: int, request: Request) -> dict[str, Any]:
 @router.post("/admins/{admin_id}/activation-code")
 async def create_activation_code(admin_id: int, request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(request, "getcourse-wazzup-codes", limit=100, window_seconds=3600, subject=user["username"])
-    code = _activation_code()
-    expires = ACTIVATION_EXPIRES_AT
-    db = await _connect()
     try:
-        admin = await (await db.execute("SELECT id,name,enabled FROM admins WHERE id=?", (admin_id,))).fetchone()
-        if not admin:
-            raise HTTPException(404, "Сотрудник не найден")
-        if not admin["enabled"]:
-            raise HTTPException(409, "Сотрудник выключен")
-        previous = await (await db.execute(
-            "SELECT 1 FROM activation_codes WHERE admin_id=? AND expires_at>? LIMIT 1", (admin_id, _iso()),
-        )).fetchone()
-        await db.execute("DELETE FROM activation_codes WHERE admin_id=?", (admin_id,))
-        revoked = 0
-        if previous:
-            cursor = await db.execute(
-                "UPDATE devices SET revoked_at=? WHERE admin_id=? AND revoked_at=''", (_iso(), admin_id),
-            )
-            revoked = cursor.rowcount
-        await db.execute(
-            "INSERT INTO activation_codes(admin_id,code_hash,expires_at,created_at) VALUES(?,?,?,?)",
-            (admin_id, _hash(_normalize_code(code)), expires, _iso()),
-        )
-        await db.commit()
-    finally:
-        await db.close()
-    return {
-        "ok": True, "code": code, "expires_at": expires, "admin_name": admin["name"],
-        "persistent": True, "reissued": bool(previous), "revoked_devices": revoked,
-    }
+        return await _issue_activation_code(admin_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/devices")
@@ -10594,6 +11183,7 @@ async def list_devices(request: Request) -> dict[str, Any]:
 @router.delete("/devices/{device_id}")
 async def revoke_device(device_id: int, request: Request) -> dict[str, Any]:
     await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     db = await _connect()
     try:
         cur = await db.execute("UPDATE devices SET revoked_at=? WHERE id=? AND revoked_at=''", (_iso(), device_id))

@@ -918,7 +918,7 @@ def _assigned_flow_for_order(data: dict[str, Any], course_key: str, fields: dict
 
 
 def _curator_name_map(settings: dict[str, str] | None = None) -> tuple[tuple[str, str], ...]:
-    raw_map = _clean((settings or {}).get("curator_map") or DEFAULT_CURATOR_MAP, 5000)
+    raw_map = _clean(settings.get("curator_map") if settings is not None and "curator_map" in settings else DEFAULT_CURATOR_MAP, 5000)
     items: list[tuple[str, str]] = []
     for part in re.split(r"[;\n]+", raw_map):
         part = part.strip()
@@ -936,7 +936,7 @@ def _curator_name_map(settings: dict[str, str] | None = None) -> tuple[tuple[str
         result = _clean(result, 100)
         if marker and result:
             items.append((marker, result))
-    return tuple(items) or (("ирина", "Куратор 1"), ("слава", "Куратор 2"), ("настас", "Куратор 3"))
+    return tuple(items)
 
 
 def _map_curator(raw_value: Any, curator_map: tuple[tuple[str, str], ...] | dict[str, str] | None = None) -> str:
@@ -8240,6 +8240,102 @@ async def service_transfer_write_curator(
     }
 
 
+def _staff_source_link(employee: dict[str, Any]) -> str:
+    links = employee.get("source_links") if isinstance(employee, dict) else {}
+    value = links.get(MODULE_ID) if isinstance(links, dict) else ""
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    return _norm(_clean(value, 200))
+
+
+def _staff_curator_rows(settings: dict[str, str]) -> list[tuple[str, str]]:
+    return list(_curator_name_map(settings))
+
+
+def service_staff_connector() -> dict[str, Any]:
+    fields = [
+        {"key": "name_markers", "label": "Варианты имени в таблицах", "type": "list", "required": True},
+        {"key": "curator_value", "label": "Значение поля куратора", "type": "text", "required": True},
+    ]
+    return {
+        "ok": True, "module_id": MODULE_ID, "version": 1,
+        "label": "Поля чатов GetCourse", "entity": "curator_mapping",
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "operations": ["upsert", "deactivate"], "supports_deactivate": True,
+        "deactivate_preserves_history": True, "matching": ["source_link"],
+        "fields": fields, "config_fields": fields,
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    settings = await _settings_map()
+    return [
+        {
+            "local_id": marker, "full_name": marker, "display_name": value, "active": True,
+            "identities": [], "config": {"name_markers": [marker], "curator_value": value},
+        }
+        for marker, value in _staff_curator_rows(settings)
+    ]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    rows = await service_staff_list()
+    source = _staff_source_link(employee)
+    item = next((row for row in rows if _norm(row["local_id"]) == source), None) if source else None
+    return {
+        "ok": True, "module_id": MODULE_ID, "found": bool(item),
+        "local_id": item["local_id"] if item else "", "snapshot": item,
+    }
+
+
+async def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any], operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    del idempotency_key
+    if operation not in {"upsert", "deactivate"}:
+        raise ValueError("operation должен быть upsert или deactivate")
+    if not isinstance(employee, dict) or not isinstance(config, dict):
+        raise ValueError("employee и config должны быть объектами")
+    source = _staff_source_link(employee)
+    raw_markers = config.get("name_markers")
+    if isinstance(raw_markers, str):
+        raw_markers = re.split(r"[,;\n]+", raw_markers)
+    desired = []
+    for raw in raw_markers if isinstance(raw_markers, list) else []:
+        marker = _norm(_clean(raw, 200))
+        if marker and marker not in desired:
+            desired.append(marker)
+    value = _clean(config.get("curator_value"), 100)
+    async with _registry_write_lock:
+        settings = await _settings_map()
+        rows = _staff_curator_rows(settings)
+        before = list(rows)
+        # A linked old marker belongs to this employee. Desired markers belong to
+        # it only when they already point at the same curator value.
+        owned = {source} if source else set()
+        owned.update(marker for marker, current in rows if marker in desired and value and current == value)
+        rows = [(marker, current) for marker, current in rows if marker not in owned]
+        if operation == "upsert":
+            if not desired:
+                raise ValueError("Укажите хотя бы один вариант имени куратора")
+            if not value:
+                raise ValueError("Укажите значение поля куратора")
+            conflicts = [marker for marker, current in rows if marker in desired and current != value]
+            if conflicts:
+                raise ValueError(f"Вариант имени уже принадлежит другому куратору: {conflicts[0]}")
+            rows = [(marker, current) for marker, current in rows if marker not in set(desired)]
+            rows.extend((marker, value) for marker in desired)
+        serialized = ";".join(f"{marker}={current}" for marker, current in rows)
+        await _save_settings({"curator_map": serialized})
+    local_id = desired[0] if operation == "upsert" else source
+    return {
+        "ok": True, "module_id": MODULE_ID, "changed": rows != before,
+        "local_id": local_id, "status": "active" if operation == "upsert" else "disabled",
+        "snapshot": {"local_id": local_id, "config": {"name_markers": desired, "curator_value": value}},
+    }
+
+
 @router.get("/health")
 async def health():
     return {"ok": True, "module": MODULE_ID}
@@ -8262,12 +8358,20 @@ async def get_settings(request: Request):
     }
 
 
+def _staff_registry_loaded() -> bool:
+    return sys.modules.get("_nexus_mod_staff-registry") is not None
+
+
 @router.post("/settings")
 async def post_settings(request: Request):
     await _require_user(request)
     data = await request.json()
     if not isinstance(data, dict):
         return JSONResponse({"error": "JSON object required"}, status_code=400)
+    if _staff_registry_loaded():
+        data = dict(data)
+        current = await _settings_map()
+        data["curator_map"] = current["curator_map"] if "curator_map" in current else DEFAULT_CURATOR_MAP
     return await get_settings_from_map(await _save_settings(data))
 
 

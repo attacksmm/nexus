@@ -28,6 +28,8 @@
       font-size: .8rem;
     }
     button:hover { background: var(--panel-soft); }
+    button:disabled { opacity:.55; cursor:default; }
+    .button-spinner{display:inline-block;width:12px;height:12px;margin-right:7px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-2px;animation:button-spin .7s linear infinite}@keyframes button-spin{to{transform:rotate(360deg)}}
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
     button.danger { background: var(--bad-bg); border-color: var(--bad-bd); color: var(--bad); }
     button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
@@ -371,10 +373,8 @@
           <button id="saveSettingsBtn" class="primary">Сохранить</button>
         </div>
         <div class="grid2">
-          <div class="field"><label>Кто может добавлять TG-бота</label><input id="tgAllowed"></div>
+          <div class="field" style="grid-column:1/-1"><label>Сотрудники и служебные доступы</label><a class="btn" href="/nexus/staff-registry/panel/" target="_top">Управлять в модуле «Команда»</a><div class="hint">VK-администраторы, доверенные отправители и право добавлять Telegram-бота задаются в единой карточке сотрудника.</div></div>
           <div class="field"><label>TG чат уведомлений</label><input id="tgLogChat"></div>
-          <div class="field"><label>VK админы модуля</label><input id="vkAdmins"></div>
-          <div class="field"><label>VK служебные отправители для ссылок</label><input id="vkTrusted"></div>
           <div class="field"><label>Хранить историю, дней</label><input id="retention" type="number" min="1"></div>
         </div>
         <div class="field" style="margin-top:12px">
@@ -510,10 +510,10 @@
           <button class="toggle ${on ? "on" : ""}" data-key="${key}" aria-label="${escapeHtml(title)}"></button>
         </div>`;
       }).join("");
-      $("tgAllowed").value = settings.tg_allowed_adders || "";
+      if ($("tgAllowed")) $("tgAllowed").value = settings.tg_allowed_adders || "";
       $("tgLogChat").value = settings.telegram_log_chat_id || "-1002852064172";
-      $("vkAdmins").value = settings.vk_allowed_admins || "";
-      $("vkTrusted").value = settings.vk_trusted_senders || "";
+      if ($("vkAdmins")) $("vkAdmins").value = settings.vk_allowed_admins || "";
+      if ($("vkTrusted")) $("vkTrusted").value = settings.vk_trusted_senders || "";
       $("retention").value = settings.history_retention_days || "90";
       $("chatTitleContains").value = settings.chat_title_contains || "";
       $("vkPromptPath").value = settings.vk_ai_prompt_path || "prompts/kuratorbot_promt.txt";
@@ -580,10 +580,7 @@
     async function saveSettings(extra = {}) {
       const payload = {
         ...state.settings,
-        tg_allowed_adders: $("tgAllowed").value,
         telegram_log_chat_id: $("tgLogChat").value,
-        vk_allowed_admins: $("vkAdmins").value,
-        vk_trusted_senders: $("vkTrusted").value,
         history_retention_days: $("retention").value,
         chat_title_contains: $("chatTitleContains").value,
         vk_ai_prompt_path: $("vkPromptPath").value,
@@ -594,6 +591,15 @@
       renderSettings();
       toast("Настройки сохранены");
       await loadStatus();
+    }
+    async function withButtonBusy(button, label, operation) {
+      if (button.disabled) return;
+      const previous = button.innerHTML;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.innerHTML = `<span class="button-spinner" aria-hidden="true"></span>${escapeHtml(label)}`;
+      try { return await operation(); }
+      finally { button.innerHTML = previous; button.disabled = false; button.removeAttribute("aria-busy"); }
     }
     async function saveSecrets(clearKey = "") {
       const payload = {};
@@ -674,7 +680,7 @@
     $("startBtn").addEventListener("click", () => startRuntime().catch(err => toast(err.message, true)));
     $("stopBtn").addEventListener("click", () => stopRuntime().catch(err => toast(err.message, true)));
     $("historyApply").addEventListener("click", () => loadActions().catch(err => toast(err.message, true)));
-    $("saveSettingsBtn").addEventListener("click", () => saveSettings().catch(err => toast(err.message, true)));
+    $("saveSettingsBtn").addEventListener("click", event => withButtonBusy(event.currentTarget, "Сохраняю настройки…", saveSettings).catch(err => toast(err.message, true)));
     $("saveSecretsBtn").addEventListener("click", () => saveSecrets().catch(err => toast(err.message, true)));
     $("saveTemplatesBtn").addEventListener("click", () => saveTemplates().catch(err => toast(err.message, true)));
     $("modalClose").addEventListener("click", () => $("modal").classList.remove("open"));

@@ -1,7 +1,7 @@
 {
   "id": "getcourse-amocrm",
   "name": "GetCourse -> amoCRM",
-  "version": "1.7.23",
+  "version": "1.7.24",
   "description": "Синхронизирует заказы GetCourse и связывает профиль со сделкой по приоритетному utm_term или точному телефону.",
   "env_vars": {
     "AMO_BASE_URL": "URL аккаунта amoCRM, например https://sobakovodpro.amocrm.ru",

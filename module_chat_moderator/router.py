@@ -2069,10 +2069,12 @@ class TelegramModeratorRuntime:
         self.analyzer = analyzer
         self.app: Any | None = None
         self.running = False
+        self.settings: dict[str, str] = {}
         self.last_polling_error_signature = ""
         self.last_polling_error_at = 0.0
 
     async def start(self, settings: dict[str, str]) -> None:
+        self.settings = settings
         if self.running:
             return
         token = _secret_value("telegram_bot_token_moderator")
@@ -2085,7 +2087,6 @@ class TelegramModeratorRuntime:
 
         runtime = self
         dry_run = _truthy(settings.get("dry_run"))
-        allowed_adders = _int_set_csv(settings.get("tg_allowed_adders"))
         bot_api_proxy_url = global_telegram_bot_api_proxy_url(settings.get("telegram_bot_api_proxy_url"))
         telegram_log_chat_id = _safe_int(
             settings.get("telegram_log_chat_id")
@@ -2439,7 +2440,7 @@ class TelegramModeratorRuntime:
                     request_json={"reason": "known_chat", "title": getattr(chat, "title", "")},
                 )
                 return
-            if adder_id not in allowed_adders:
+            if adder_id not in _int_set_csv(runtime.settings.get("tg_allowed_adders")):
                 _record_action(
                     platform="telegram",
                     action="unauthorized_add",
@@ -3477,7 +3478,13 @@ async def get_settings(request: Request):
 async def save_settings(request: Request):
     await _require_user(request)
     data = await request.json()
-    settings = _save_settings(data if isinstance(data, dict) else {})
+    values = dict(data) if isinstance(data, dict) else {}
+    if sys.modules.get("_nexus_mod_staff-registry") is not None:
+        current = _settings()
+        for key in ("vk_allowed_admins", "vk_trusted_senders", "tg_allowed_adders"):
+            if key in values:
+                values[key] = current[key]
+    settings = _save_settings(values)
     _record_action(platform="system", action="settings_update", status="ok", request_json={key: settings.get(key) for key in DEFAULT_SETTINGS})
     return {"ok": True, "settings": settings}
 
@@ -3751,3 +3758,308 @@ async def debug_analyze(request: Request):
         category = await analyzer.analyze_vk(text)
     action_id = _record_action(platform=platform, action="debug_analyze", category=category, status="ok", text=text)
     return {"ok": True, "category": category, "action_id": action_id}
+
+
+# Staff Registry connector. Keep this append-only: the production copy of this
+# module can be ahead of the repository, while the settings contract is stable.
+_STAFF_VK_SETTING_KEYS = ("vk_allowed_admins", "vk_trusted_senders")
+_STAFF_TG_SETTING_KEY = "tg_allowed_adders"
+_STAFF_VK_CONFIG_TO_SETTING = {
+    "allowed_admin": "vk_allowed_admins",
+    "trusted_sender": "vk_trusted_senders",
+}
+_STAFF_VK_PROVIDERS = {"vk", "vkontakte", "vk.com"}
+_STAFF_TG_PROVIDERS = {"telegram", "tg", "telegram.org"}
+
+
+def _staff_vk_source_id(employee: dict[str, Any]) -> int | None:
+    links = employee.get("source_links") if isinstance(employee, dict) else None
+    value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if value is None and isinstance(links, dict):
+        value = links.get(MODULE_ID.replace("-", "_"))
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    if value in (None, ""):
+        return None
+    raw = str(value).strip()
+    if raw.startswith("tg:"):
+        return None
+    if not raw.removeprefix("vk:").isdigit() or int(raw.removeprefix("vk:")) <= 0:
+        raise ValueError(f"invalid {MODULE_ID} source_links local_id")
+    return int(raw.removeprefix("vk:"))
+
+
+def _staff_tg_source_id(employee: dict[str, Any]) -> int | None:
+    links = employee.get("source_links") if isinstance(employee, dict) else None
+    value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    raw = str(value or "").strip()
+    return int(raw[3:]) if raw.startswith("tg:") and raw[3:].isdigit() and int(raw[3:]) > 0 else None
+
+
+def _staff_vk_identity_ids(employee: dict[str, Any]) -> set[int]:
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    result: set[int] = set()
+    identities = employee.get("identities")
+    for identity in identities if isinstance(identities, list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", ".")
+        if provider not in _STAFF_VK_PROVIDERS:
+            continue
+        external_id = _clean(identity.get("external_id") or identity.get("id"), 100)
+        if not external_id.isdigit() or int(external_id) <= 0:
+            raise ValueError("VK identity должен содержать точный положительный numeric ID")
+        result.add(int(external_id))
+    if len(result) > 1:
+        raise ValueError("Точные VK identities указывают на разные аккаунты")
+    return result
+
+
+def _staff_tg_identity_ids(employee: dict[str, Any]) -> set[int]:
+    result: set[int] = set()
+    identities = employee.get("identities") if isinstance(employee, dict) else []
+    for identity in identities if isinstance(identities, list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", ".")
+        if provider not in _STAFF_TG_PROVIDERS:
+            continue
+        external_id = _clean(identity.get("external_id") or identity.get("id"), 100)
+        if not external_id.isdigit() or int(external_id) <= 0:
+            raise ValueError("Telegram identity должен содержать точный положительный numeric ID")
+        result.add(int(external_id))
+    if len(result) > 1:
+        raise ValueError("Точные Telegram identities указывают на разные аккаунты")
+    return result
+
+
+def _staff_vk_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"false", "0", "no", "off", "нет"}:
+            return False
+        if normalized in {"true", "1", "yes", "on", "да"}:
+            return True
+    return bool(value)
+
+
+def _staff_vk_config(vk_id: int, settings: dict[str, str] | None = None) -> dict[str, bool]:
+    current = settings or _settings()
+    return {
+        config_key: vk_id in _int_set_csv(current.get(setting_key))
+        for config_key, setting_key in _STAFF_VK_CONFIG_TO_SETTING.items()
+    }
+
+
+def _staff_vk_view(vk_id: int, settings: dict[str, str] | None = None, tg_id: int | None = None) -> dict[str, Any]:
+    config = _staff_vk_config(vk_id, settings)
+    config["telegram_allowed_adder"] = bool(tg_id and tg_id in _int_set_csv((settings or _settings()).get(_STAFF_TG_SETTING_KEY)))
+    active = any(config.values())
+    display_name = f"VK ID {vk_id}"
+    return {
+        "module_id": MODULE_ID,
+        "local_id": str(vk_id),
+        "full_name": display_name,
+        "display_name": display_name,
+        "identities": ([{"provider": "vk", "external_id": str(vk_id)}] + ([{"provider": "telegram", "external_id": str(tg_id)}] if tg_id else [])),
+        "config": config,
+        "active": active,
+    }
+
+
+def service_staff_connector() -> dict[str, Any]:
+    fields = [
+        {
+            "key": "allowed_admin", "type": "boolean", "default": True,
+            "label": "Считать администратором VK",
+        },
+        {
+            "key": "trusted_sender", "type": "boolean", "default": True,
+            "label": "Доверенный отправитель VK",
+        },
+        {
+            "key": "telegram_allowed_adder", "type": "boolean", "default": False,
+            "label": "Может добавлять Telegram-бота",
+        },
+    ]
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "Модератор клубных чатов",
+        "label": "Модератор клубных чатов",
+        "version": 1,
+        "entity": "vk_identity",
+        "operations": ["upsert", "deactivate"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "supports_deactivate": True,
+        "matching": ["source_link", "exact_vk_identity", "exact_telegram_identity"],
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {field["key"]: {key: value for key, value in field.items() if key != "key"} for field in fields},
+        "unmanaged_capabilities": [{
+            "key": "course_chat_creator_vk_staff",
+            "source_module": "course-chat-creator",
+            "managed": False,
+            "read_only": True,
+            "effects": ["auto_promote_vk_chat_admin", "protect_from_moderation"],
+        }],
+    }
+
+
+def service_staff_list() -> list[dict[str, Any]]:
+    settings = _settings()
+    user_ids: set[int] = set()
+    for key in _STAFF_VK_SETTING_KEYS:
+        user_ids.update(_int_set_csv(settings.get(key)))
+    items = [_staff_vk_view(vk_id, settings) for vk_id in sorted(user_ids) if vk_id > 0]
+    for tg_id in sorted(_int_set_csv(settings.get(_STAFF_TG_SETTING_KEY))):
+        items.append({
+            "module_id": MODULE_ID, "local_id": f"tg:{tg_id}",
+            "full_name": f"Telegram ID {tg_id}", "display_name": f"Telegram ID {tg_id}",
+            "identities": [{"provider": "telegram", "external_id": str(tg_id)}],
+            "config": {"allowed_admin": False, "trusted_sender": False, "telegram_allowed_adder": True},
+            "active": True,
+        })
+    return items
+
+
+def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    linked_id = _staff_vk_source_id(employee)
+    linked_tg_id = _staff_tg_source_id(employee)
+    identity_ids = _staff_vk_identity_ids(employee)
+    tg_identity_ids = _staff_tg_identity_ids(employee)
+    vk_id = linked_id or (next(iter(identity_ids)) if identity_ids else None)
+    tg_id = linked_tg_id or (next(iter(tg_identity_ids)) if tg_identity_ids else None)
+    if vk_id is None and tg_id is None:
+        return {"ok": True, "module_id": MODULE_ID, "found": False, "local_id": "", "snapshot": None}
+    settings = _settings()
+    snapshot = _staff_vk_view(vk_id, settings, tg_id) if vk_id is not None else {
+        "module_id": MODULE_ID, "local_id": f"tg:{tg_id}", "full_name": f"Telegram ID {tg_id}",
+        "identities": [{"provider": "telegram", "external_id": str(tg_id)}],
+        "config": {"allowed_admin": False, "trusted_sender": False, "telegram_allowed_adder": tg_id in _int_set_csv(settings.get(_STAFF_TG_SETTING_KEY))},
+        "active": tg_id in _int_set_csv(settings.get(_STAFF_TG_SETTING_KEY)),
+    }
+    if not snapshot["active"]:
+        return {"ok": True, "module_id": MODULE_ID, "found": False, "local_id": str(vk_id) if vk_id is not None else f"tg:{tg_id}", "snapshot": None}
+    return {
+        "ok": True, "module_id": MODULE_ID, "found": True,
+        "local_id": str(vk_id) if vk_id is not None else f"tg:{tg_id}", "snapshot": snapshot,
+    }
+
+
+def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any], operation: str, idempotency_key: str = "",
+) -> dict[str, Any]:
+    del idempotency_key  # Desired-state writes are naturally idempotent.
+    if not isinstance(employee, dict) or not isinstance(config, dict):
+        raise ValueError("employee и config должны быть объектами")
+    action = _clean(operation, 40).casefold()
+    if action not in {"upsert", "deactivate"}:
+        raise ValueError(f"{MODULE_ID} поддерживает только upsert и deactivate")
+
+    linked_id = _staff_vk_source_id(employee)
+    linked_tg_id = _staff_tg_source_id(employee)
+    identity_ids = _staff_vk_identity_ids(employee)
+    tg_identity_ids = _staff_tg_identity_ids(employee)
+    identity_id = next(iter(identity_ids)) if identity_ids else None
+    tg_identity_id = next(iter(tg_identity_ids)) if tg_identity_ids else None
+    if action == "upsert" and identity_id is None and linked_id is None and tg_identity_id is None and linked_tg_id is None:
+        raise ValueError(f"Для {MODULE_ID} требуется точный VK или Telegram identity")
+    target_id = identity_id or linked_id
+    affected_ids = {value for value in (linked_id, identity_id) if value is not None}
+    target_tg_id = tg_identity_id or linked_tg_id
+    if action == "upsert" and target_id is None and any(
+        _staff_vk_bool(config.get(key)) for key in _STAFF_VK_CONFIG_TO_SETTING if key in config
+    ):
+        raise ValueError(f"Для VK-доступа {MODULE_ID} требуется точный VK identity")
+    if action == "upsert" and target_tg_id is None and _staff_vk_bool(config.get("telegram_allowed_adder")):
+        raise ValueError(f"Для Telegram-доступа {MODULE_ID} требуется точный Telegram identity")
+    affected_tg_ids = {value for value in (linked_tg_id, tg_identity_id) if value is not None}
+    now = _now()
+
+    with _db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        all_staff_keys = (*_STAFF_VK_SETTING_KEYS, _STAFF_TG_SETTING_KEY)
+        rows = db.execute(
+            "SELECT key,value FROM settings WHERE key IN (?,?,?)",
+            all_staff_keys,
+        ).fetchall()
+        stored = {row["key"]: row["value"] for row in rows}
+        sets = {
+            key: _int_set_csv(stored.get(key, DEFAULT_SETTINGS[key]))
+            for key in _STAFF_VK_SETTING_KEYS
+        }
+        before = {key: set(values) for key, values in sets.items()}
+        tg_set = _int_set_csv(stored.get(_STAFF_TG_SETTING_KEY, DEFAULT_SETTINGS[_STAFF_TG_SETTING_KEY]))
+        before_tg = set(tg_set)
+
+        if action == "deactivate":
+            for values in sets.values():
+                values.difference_update(affected_ids)
+            tg_set.difference_update(affected_tg_ids)
+        else:
+            basis_id = (
+                linked_id
+                if linked_id is not None and any(linked_id in before[key] for key in _STAFF_VK_SETTING_KEYS)
+                else target_id
+            )
+            basis_known = basis_id is not None and any(basis_id in before[key] for key in _STAFF_VK_SETTING_KEYS)
+            desired = {
+                setting_key: _staff_vk_bool(config[config_key]) if config_key in config else (
+                    basis_id in before[setting_key] if basis_known else bool(target_id)
+                )
+                for config_key, setting_key in _STAFF_VK_CONFIG_TO_SETTING.items()
+            }
+            if linked_id is not None and linked_id != target_id:
+                for values in sets.values():
+                    values.discard(linked_id)
+            if target_id is not None:
+                for key, enabled in desired.items():
+                    if enabled:
+                        sets[key].add(target_id)
+                    else:
+                        sets[key].discard(target_id)
+            if target_tg_id is not None:
+                tg_enabled = _staff_vk_bool(config.get("telegram_allowed_adder", target_tg_id in before_tg))
+                if tg_enabled:
+                    tg_set.add(target_tg_id)
+                else:
+                    tg_set.discard(target_tg_id)
+
+        changed = any(before[key] != sets[key] for key in _STAFF_VK_SETTING_KEYS) or before_tg != tg_set
+        if changed:
+            for key in _STAFF_VK_SETTING_KEYS:
+                value = ",".join(str(item) for item in sorted(sets[key]) if item > 0)
+                db.execute(
+                    "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                    (key, value, now),
+                )
+            tg_value = ",".join(str(item) for item in sorted(tg_set) if item > 0)
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (_STAFF_TG_SETTING_KEY, tg_value, now),
+            )
+
+    settings = _settings()
+    if _runtime is not None:
+        _runtime.vk.settings = settings
+        _runtime.telegram.settings = settings
+    local_id = target_id or linked_id
+    snapshot = _staff_vk_view(local_id, settings, target_tg_id) if local_id is not None else ({
+        "module_id": MODULE_ID, "local_id": f"tg:{target_tg_id}",
+        "config": {"allowed_admin": False, "trusted_sender": False, "telegram_allowed_adder": target_tg_id in _int_set_csv(settings.get(_STAFF_TG_SETTING_KEY))},
+        "active": target_tg_id in _int_set_csv(settings.get(_STAFF_TG_SETTING_KEY)),
+    } if target_tg_id is not None else None)
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "operation": action,
+        "local_id": str(local_id) if local_id is not None else (f"tg:{target_tg_id}" if target_tg_id is not None else ""),
+        "changed": changed,
+        "config": snapshot["config"] if snapshot else {},
+        "snapshot": snapshot,
+    }

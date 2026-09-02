@@ -12,7 +12,7 @@
     h1{font-size:20px;margin:0}.muted{color:var(--muted)}.tabs{display:flex;gap:8px;flex-wrap:wrap}.tab{border:1px solid var(--line);background:#0f1318;color:var(--text);padding:9px 12px;border-radius:7px;cursor:pointer}.tab.active{border-color:var(--accent);color:#dcebff}
     .panel{display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.panel.active{display:block}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.full{grid-column:1/-1}.section-title{font-size:15px;font-weight:650;margin:0 0 10px}
     label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}.input,textarea,select{width:100%;background:#0b0f14;color:var(--text);border:1px solid var(--line);border-radius:7px;padding:9px 10px;font:inherit}textarea{min-height:92px;resize:vertical}
-    .btn{border:1px solid var(--line);background:#17202a;color:var(--text);border-radius:7px;padding:9px 12px;cursor:pointer}.btn.primary{background:#17446d;border-color:#2d76b8}.btn:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.metric{border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1117}.metric b{display:block;font-size:18px}.ok{color:var(--ok)}.bad{color:var(--bad)}
+    .btn{border:1px solid var(--line);background:#17202a;color:var(--text);border-radius:7px;padding:9px 12px;cursor:pointer}.btn.primary{background:#17446d;border-color:#2d76b8}.btn:disabled{opacity:.55;cursor:not-allowed}.btn-spinner{display:inline-block;width:12px;height:12px;margin-right:7px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-2px;animation:button-spin .7s linear infinite}@keyframes button-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.btn-spinner{animation-duration:1.4s}}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.metric{border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1117}.metric b{display:block;font-size:18px}.ok{color:var(--ok)}.bad{color:var(--bad)}
     .rule-grid{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(160px,1fr) auto;gap:8px;margin-bottom:8px;align-items:center}.hint{font-size:12px;color:var(--muted);margin-top:6px}
     .people{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.person{display:flex;gap:7px;align-items:center;padding:8px;border:1px solid var(--line);background:#0b0b0b;color:var(--text)}.person input{accent-color:#ddd}
     pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:880px}th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:600;background:#0d1117}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
@@ -74,13 +74,12 @@
           <div><label>Активна</label><select id="binding_active" class="input"><option value="1">Да</option><option value="0">Нет</option></select></div>
           <div><label>Воронка</label><select id="binding_pipeline_id" class="input" onchange="renderBindingStatuses();renderMoveFromStatuses([])"></select></div>
           <div><label>Статус</label><select id="binding_status_id" class="input"></select></div>
-          <div><label>Ответственный за сделку</label><select id="binding_responsible_user_id" class="input"></select><div class="hint">Можно выбрать сотрудника только для этой связки или оставить общую очередь.</div></div>
+          <div class="full"><label>Ответственные за сделку и задачу</label><div class="hint">Назначения этой связки управляются в карточках сотрудников.</div><a class="btn" href="/nexus/staff-registry/panel/" target="_top">Открыть модуль «Команда»</a></div>
           <div><label>Если найден дубль</label><select id="binding_duplicate_policy" class="input"><option value="update">Обновить найденную сделку</option><option value="create">Создать новую сделку</option><option value="skip">Пропустить дубль</option></select></div>
           <div><label>Где искать дубль</label><select id="binding_duplicate_search_entity" class="input" onchange="renderDuplicateRules()"><option value="leads">В сделках</option><option value="contacts">В контактах</option></select></div>
           <div class="full hint"><b>Фиксированные правила:</b> заказы «Автооплата» работают по полной связке. Для остальных заказов новая сделка не создаётся: по точному телефону находится контакт, а примечание добавляется во все его сделки, включая upsell. Поля, цены, статусы, названия, теги и ответственные не меняются. Созданная неоплаченная автооплата объединяется с последней неоплаченной попыткой по телефону; частичная и полная автооплата ищутся только по № ГК.</div>
           <div class="full"><label>Из каких статусов разрешено передвигать найденную сделку</label><select id="binding_move_from_statuses" class="input" multiple size="8"></select><div class="hint">Поля и примечание обновляются всегда. Статус меняется только если текущий статус выбран здесь. Успешную сделку другого заказа модуль никогда не двигает.</div></div>
           <div><label>Ставить задачу</label><select id="binding_task_enabled" class="input"><option value="0">Нет</option><option value="1">Да</option></select></div>
-          <div><label>Ответственный за задачу</label><select id="binding_task_responsible_user_id" class="input"></select></div>
           <div><label>Тип задачи</label><select id="binding_task_type_id" class="input"><option value="1">Связаться</option><option value="2">Встреча</option></select></div>
           <div><label>Срок задачи, минут</label><input id="binding_task_due_minutes" class="input"></div>
           <div class="full">
@@ -89,7 +88,7 @@
             <div class="row"><button class="btn" type="button" onclick="addDuplicateRule()">Добавить поле</button><span class="hint">Сначала проверяется № ГК в выбранной воронке, затем автоматически телефон контакта.</span></div>
           </div>
           <div class="full"><label>Текст задачи</label><textarea id="binding_task_text"></textarea></div>
-          <div class="row full"><button class="btn primary" onclick="saveBinding()">Сохранить связку</button><button class="btn" onclick="hideBindingForm()">Отмена</button><span id="bindingSaveState" class="muted"></span></div>
+          <div class="row full"><button class="btn primary" id="saveBindingBtn" onclick="saveBinding()">Сохранить связку</button><button class="btn" onclick="hideBindingForm()">Отмена</button><span id="bindingSaveState" class="muted" aria-live="polite"></span></div>
         </div>
       </div>
     </div>
@@ -119,8 +118,8 @@
 
   <section id="settings" class="panel">
     <div class="grid">
-      <input id="pipeline_id" type="hidden"><input id="status_id" type="hidden"><input id="responsible_user_id" type="hidden">
-      <div class="full"><label>Ответственные за новые сделки и задачи — распределение по очереди</label><div id="responsiblePool" class="people"></div></div>
+      <input id="pipeline_id" type="hidden"><input id="status_id" type="hidden">
+      <div class="full"><label>Ответственные за новые сделки и задачи</label><div class="hint">Общая очередь и персональные назначения теперь задаются только в едином реестре.</div><a class="btn" href="/nexus/staff-registry/panel/" target="_top">Открыть модуль «Команда»</a></div>
       <div><label>Бюджет новой/обновлённой сделки</label><select id="budget_source" class="input"><option value="paid">Фактически оплачено</option><option value="cost">Полная стоимость заказа</option><option value="none">Не заполнять</option></select></div>
       <div><label>GetCourse base URL</label><input id="getcourse_base_url" class="input"></div>
       <div><label>Duplicate policy</label><select id="duplicate_policy" class="input"><option value="update">Обновлять найденную сделку</option><option value="create">Всегда создавать новую</option></select></div>
@@ -133,7 +132,7 @@
       <div class="full"><label>Шаблон примечания</label><textarea id="note_template" class="mono" style="min-height:220px"></textarea></div>
       <div class="full"><label>Webhook secret</label><input id="webhook_secret" class="input"></div>
       <div class="full"><label>Примеры сделок Vakas для пресета</label><div class="row"><input id="presetLeadIds" class="input mono" value="17954261,17169867" style="max-width:360px"><button class="btn" type="button" onclick="loadAmoPreset()">Прочитать через API</button></div><pre id="presetResult" style="margin-top:8px"></pre></div>
-      <div class="row full"><button class="btn primary" onclick="saveSettings()">Сохранить</button><span id="saveState" class="muted"></span></div>
+      <div class="row full"><button class="btn primary" id="saveSettingsBtn" onclick="saveSettings()">Сохранить</button><span id="saveState" class="muted" aria-live="polite"></span></div>
     </div>
   </section>
 
@@ -182,6 +181,7 @@ const orderSources = [
 ];
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function withButtonBusy(button,label,operation){if(button.disabled)return;const previous=button.innerHTML;button.disabled=true;button.setAttribute('aria-busy','true');button.innerHTML=`<span class="btn-spinner" aria-hidden="true"></span>${esc(label)}`;try{return await operation()}finally{button.innerHTML=previous;button.disabled=false;button.removeAttribute('aria-busy')}}
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
   document.querySelectorAll('.tab,.panel').forEach(el => el.classList.remove('active'));
   btn.classList.add('active'); $(btn.dataset.tab).classList.add('active');
@@ -194,8 +194,7 @@ async function fetchJson(path, opts){
 }
 async function loadSettings(){
   currentSettings = await fetchJson('/settings');
-  ['pipeline_id','status_id','responsible_user_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','minicourse_curator_mediums','webhook_secret','lead_name_template','note_template','budget_source'].forEach(k => { if($(k)) $(k).value = currentSettings[k] || ''; });
-  let selected=[];try{selected=JSON.parse(currentSettings.responsible_user_ids_json||'[]')}catch(_e){};$('responsiblePool').innerHTML=amoUsers.filter(u=>u.is_active!==false).map(u=>`<label class="person"><input class="responsible-pool-user" type="checkbox" value="${esc(u.id)}" ${selected.map(String).includes(String(u.id))?'checked':''}><span>${esc(u.name||u.email||u.id)}</span></label>`).join('');
+  ['pipeline_id','status_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','minicourse_curator_mediums','webhook_secret','lead_name_template','note_template','budget_source'].forEach(k => { if($(k)) $(k).value = currentSettings[k] || ''; });
   const urls = currentSettings.webhook_urls || {};
   $('webhookCreated').textContent = urls.created || currentSettings.webhook_url || '';
   $('webhookPartial').textContent = urls.partial || currentSettings.webhook_url || '';
@@ -312,13 +311,11 @@ function editBinding(id){
   $('binding_name').value = row.name || '';
   $('binding_active').value = String(row.active ?? 1);
   $('binding_pipeline_id').innerHTML = pipelineOptions(row.pipeline_id);$('binding_pipeline_id').value=row.pipeline_id||amoPipelines[0]?.id||'';renderBindingStatuses(row.status_id);renderMoveFromStatuses(row.move_from_statuses||[]);
-  $('binding_responsible_user_id').innerHTML = dealResponsibleOptions(row.responsible_user_id);
   $('binding_duplicate_policy').value = row.duplicate_policy || 'update';
   $('binding_duplicate_search_entity').value = row.duplicate_search_entity || 'leads';
   duplicateRules = (row.duplicate_search_fields || []).map(rule => Object.assign({}, rule));
   renderDuplicateRules();
   $('binding_task_enabled').value = String(row.task_enabled ? 1 : 0);
-  $('binding_task_responsible_user_id').innerHTML = userOptions(row.task_responsible_user_id, true);
   $('binding_task_type_id').value = String(row.task_type_id || 1);
   $('binding_task_due_minutes').value = row.task_due_minutes || 60;
   $('binding_task_text').value = row.task_text || '';
@@ -326,28 +323,33 @@ function editBinding(id){
 }
 function hideBindingForm(){ $('bindingFormWrap').style.display = 'none'; }
 async function saveBinding(){
-  $('bindingSaveState').textContent = 'Сохраняю...';
-  const payload = {
-    id: $('binding_id').value,
-    process: $('binding_process').value,
-    name: $('binding_name').value,
-    active: $('binding_active').value,
-    pipeline_id: $('binding_pipeline_id').value,
-    status_id: $('binding_status_id').value,
-    responsible_user_id: $('binding_responsible_user_id').value,
-    duplicate_policy: $('binding_duplicate_policy').value,
-    duplicate_search_entity: $('binding_duplicate_search_entity').value,
-    duplicate_search_fields: duplicateRules,
-    move_from_statuses_json: JSON.stringify(Array.from($('binding_move_from_statuses').selectedOptions).map(x=>x.value)),
-    task_enabled: $('binding_task_enabled').value,
-    task_responsible_user_id: $('binding_task_responsible_user_id').value,
-    task_type_id: $('binding_task_type_id').value,
-    task_due_minutes: $('binding_task_due_minutes').value,
-    task_text: $('binding_task_text').value
-  };
-  await fetchJson('/bindings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  $('bindingSaveState').textContent = 'Сохранено';
-  await loadBindings();
+  return withButtonBusy($('saveBindingBtn'), 'Сохраняю связку…', async () => {
+    $('bindingSaveState').textContent = 'Сохраняю связку…';
+    const payload = {
+      id: $('binding_id').value,
+      process: $('binding_process').value,
+      name: $('binding_name').value,
+      active: $('binding_active').value,
+      pipeline_id: $('binding_pipeline_id').value,
+      status_id: $('binding_status_id').value,
+      duplicate_policy: $('binding_duplicate_policy').value,
+      duplicate_search_entity: $('binding_duplicate_search_entity').value,
+      duplicate_search_fields: duplicateRules,
+      move_from_statuses_json: JSON.stringify(Array.from($('binding_move_from_statuses').selectedOptions).map(x=>x.value)),
+      task_enabled: $('binding_task_enabled').value,
+      task_type_id: $('binding_task_type_id').value,
+      task_due_minutes: $('binding_task_due_minutes').value,
+      task_text: $('binding_task_text').value
+    };
+    try {
+      await fetchJson('/bindings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      await loadBindings();
+      $('bindingSaveState').textContent = 'Сохранено';
+    } catch (error) {
+      $('bindingSaveState').textContent = error.message || 'Не удалось сохранить связку';
+      throw error;
+    }
+  });
 }
 async function loadStatus(){
   const env = await fetchJson('/env-status');
@@ -378,12 +380,19 @@ async function toggleBindingsPause(){
   }
 }
 async function saveSettings(){
-  $('saveState').textContent = 'Сохраняю...';
-  const payload = {};
-  ['pipeline_id','status_id','responsible_user_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','minicourse_curator_mediums','webhook_secret','lead_name_template','note_template','budget_source'].forEach(k => payload[k] = $(k).value);payload.responsible_user_ids_json=JSON.stringify(Array.from(document.querySelectorAll('.responsible-pool-user:checked')).map(x=>x.value));
-  await fetchJson('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-  $('saveState').textContent = 'Сохранено';
-  await refreshAll();
+  return withButtonBusy($('saveSettingsBtn'), 'Сохраняю настройки…', async () => {
+    $('saveState').textContent = 'Сохраняю настройки…';
+    const payload = {};
+    ['pipeline_id','status_id','getcourse_base_url','request_timeout','duplicate_policy','cdb_sync_enabled','cdb_poll_seconds','tags','minicourse_curator_mediums','webhook_secret','lead_name_template','note_template','budget_source'].forEach(k => payload[k] = $(k).value);
+    try {
+      await fetchJson('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      await refreshAll();
+      $('saveState').textContent = 'Сохранено';
+    } catch (error) {
+      $('saveState').textContent = error.message || 'Не удалось сохранить настройки';
+      throw error;
+    }
+  });
 }
 async function loadAmoPreset(){
   const lead_ids = $('presetLeadIds').value.split(',').map(v => Number(v.trim())).filter(Boolean);

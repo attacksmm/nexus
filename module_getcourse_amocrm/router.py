@@ -932,6 +932,329 @@ async def _bindings() -> list[dict[str, Any]]:
     return rows
 
 
+def _staff_amo_user_id(employee: dict[str, Any]) -> str:
+    """Resolve one exact amoCRM user ID without names, email, or phone matching."""
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    candidates: set[str] = set()
+    links = employee.get("source_links")
+    source_value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if source_value is None and isinstance(links, dict):
+        source_value = links.get(MODULE_ID.replace("-", "_"))
+    if isinstance(source_value, dict):
+        source_value = source_value.get("local_id")
+    if source_value not in (None, ""):
+        source_id = _int_or_none(source_value)
+        if not source_id:
+            raise ValueError("getcourse-amocrm source link должен содержать точный amoCRM user ID")
+        candidates.add(str(source_id))
+    identities = employee.get("identities")
+    for identity in identities if isinstance(identities, list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", "-")
+        if provider not in {"amocrm", "amo", "amo-crm"}:
+            continue
+        external_id = _int_or_none(identity.get("external_id") or identity.get("id"))
+        if not external_id:
+            raise ValueError("amoCRM identity должен содержать точный числовой external_id")
+        candidates.add(str(external_id))
+    if len(candidates) > 1:
+        raise ValueError("Точные amoCRM identity указывают на разных ответственных")
+    return next(iter(candidates), "")
+
+
+def _staff_binding_ids(value: Any, *, field: str) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} должен быть списком ID привязок")
+    result: list[int] = []
+    for raw in value:
+        binding_id = _int_or_none(raw)
+        if not binding_id:
+            raise ValueError(f"{field} содержит некорректный ID привязки")
+        if binding_id not in result:
+            result.append(binding_id)
+    return result
+
+
+def _staff_round_robin_pool(value: Any) -> list[str]:
+    try:
+        raw = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        raw = []
+    result: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        user_id = _int_or_none(item)
+        if user_id and str(user_id) not in result:
+            result.append(str(user_id))
+    return result
+
+
+def _staff_gc_view(
+    user_id: str,
+    *,
+    settings: dict[str, str],
+    bindings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    pool = _staff_round_robin_pool(settings.get("responsible_user_ids_json", "[]"))
+    fallback = str(_int_or_none(settings.get("responsible_user_id")) or "")
+    round_robin_enabled = user_id in pool or (not pool and fallback == user_id)
+    deal_binding_ids = [
+        int(row["id"])
+        for row in bindings
+        if _clean(row.get("responsible_user_id"), 64) == user_id
+    ]
+    task_binding_ids = [
+        int(row["id"])
+        for row in bindings
+        if _clean(row.get("task_responsible_user_id"), 64) == user_id
+    ]
+    active = bool(round_robin_enabled or deal_binding_ids or task_binding_ids)
+    config = {
+        "round_robin_enabled": round_robin_enabled,
+        "deal_binding_ids": deal_binding_ids,
+        "task_binding_ids": task_binding_ids,
+    }
+    return {
+        "module_id": MODULE_ID,
+        "local_id": user_id,
+        "full_name": f"amoCRM #{user_id}",
+        "display_name": f"amoCRM #{user_id}",
+        "identities": [{"provider": "amocrm", "external_id": user_id}],
+        "config": config,
+        "active": active,
+        "status": "active" if active else "unlinked",
+    }
+
+
+async def service_staff_connector() -> dict[str, Any]:
+    """Describe GetCourse CRM routing assignments managed by Staff Registry."""
+    bindings = await _bindings()
+    options = [
+        {
+            "value": str(row["id"]),
+            "label": _clean(row.get("name"), 200) or _clean(row.get("process"), 80) or f"Привязка #{row['id']}",
+        }
+        for row in bindings
+        if row.get("id") is not None
+    ]
+    fields = [
+        {
+            "key": "round_robin_enabled",
+            "label": "Участвует в общей очереди",
+            "type": "bool",
+            "default": False,
+        },
+        {
+            "key": "deal_binding_ids",
+            "label": "Ответственный за сделки",
+            "type": "multiselect",
+            "options": options,
+        },
+        {
+            "key": "task_binding_ids",
+            "label": "Ответственный за задачи",
+            "type": "multiselect",
+            "options": options,
+        },
+    ]
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "GetCourse → amoCRM",
+        "label": "GetCourse → amoCRM",
+        "version": 1,
+        "operations": ["upsert", "deactivate"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "entity": "amocrm_responsible",
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "amocrm"],
+        "identity": {"provider": "amocrm", "match": "exact", "required": True},
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {
+            "round_robin_enabled": {"type": "boolean", "default": False},
+            "deal_binding_ids": {"type": "multiselect", "options": options},
+            "task_binding_ids": {"type": "multiselect", "options": options},
+        },
+        "deactivation": {"mode": "remove_exact_id", "preserves_history": True},
+    }
+
+
+async def _staff_gc_state() -> tuple[dict[str, str], list[dict[str, Any]]]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        settings_rows = await (await db.execute(
+            """SELECT key,value FROM settings
+               WHERE key IN ('responsible_user_id','responsible_user_ids_json')"""
+        )).fetchall()
+        binding_rows = await (await db.execute(
+            """SELECT id,process,name,responsible_user_id,task_responsible_user_id,active
+               FROM bindings ORDER BY id"""
+        )).fetchall()
+    settings = {str(row["key"]): str(row["value"] or "") for row in settings_rows}
+    return settings, [dict(row) for row in binding_rows]
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    settings, bindings = await _staff_gc_state()
+    user_ids = set(_staff_round_robin_pool(settings.get("responsible_user_ids_json", "[]")))
+    fallback = _int_or_none(settings.get("responsible_user_id"))
+    if fallback:
+        user_ids.add(str(fallback))
+    for row in bindings:
+        for key in ("responsible_user_id", "task_responsible_user_id"):
+            user_id = _int_or_none(row.get(key))
+            if user_id:
+                user_ids.add(str(user_id))
+    return [_staff_gc_view(user_id, settings=settings, bindings=bindings) for user_id in sorted(user_ids, key=int)]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    user_id = _staff_amo_user_id(employee)
+    if not user_id:
+        return {"ok": True, "module_id": MODULE_ID, "found": False, "local_id": "", "status": "unlinked", "snapshot": None}
+    settings, bindings = await _staff_gc_state()
+    snapshot = _staff_gc_view(user_id, settings=settings, bindings=bindings)
+    found = bool(snapshot["active"])
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": found,
+        "local_id": user_id if found else "",
+        "status": snapshot["status"],
+        "snapshot": snapshot if found else None,
+    }
+
+
+async def service_staff_apply(
+    *,
+    employee: dict[str, Any],
+    config: dict[str, Any] | None,
+    operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """Atomically reconcile global round-robin and exact binding assignments."""
+    del idempotency_key  # Desired-state reconciliation is naturally idempotent.
+    desired = config if isinstance(config, dict) else {}
+    action = _clean(operation, 40).casefold().replace("_", "-")
+    if action not in {"upsert", "deactivate"}:
+        raise ValueError("getcourse-amocrm поддерживает только upsert и deactivate")
+    user_id = _staff_amo_user_id(employee)
+    if not user_id:
+        if action == "deactivate":
+            return {
+                "ok": True, "module_id": MODULE_ID, "operation": action, "local_id": "",
+                "changed": False, "config": {}, "snapshot": None,
+                "warnings": ["Точный amoCRM user ID не найден; отключать нечего"],
+            }
+        raise ValueError("Для getcourse-amocrm требуется точный amoCRM identity")
+
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout=60000")
+        await db.execute("BEGIN IMMEDIATE")
+        settings_rows = await (await db.execute(
+            """SELECT key,value FROM settings
+               WHERE key IN ('responsible_user_id','responsible_user_ids_json')"""
+        )).fetchall()
+        settings = {str(row["key"]): str(row["value"] or "") for row in settings_rows}
+        rows = [dict(row) for row in await (await db.execute(
+            """SELECT id,process,name,responsible_user_id,task_responsible_user_id,active
+               FROM bindings ORDER BY id"""
+        )).fetchall()]
+        known_ids = {int(row["id"]) for row in rows}
+        current_deal_ids = {
+            int(row["id"]) for row in rows if _clean(row.get("responsible_user_id"), 64) == user_id
+        }
+        current_task_ids = {
+            int(row["id"]) for row in rows if _clean(row.get("task_responsible_user_id"), 64) == user_id
+        }
+        if action == "deactivate":
+            round_robin_enabled = False
+            deal_ids: set[int] = set()
+            task_ids: set[int] = set()
+        else:
+            pool = _staff_round_robin_pool(settings.get("responsible_user_ids_json", "[]"))
+            fallback = str(_int_or_none(settings.get("responsible_user_id")) or "")
+            currently_global = user_id in pool or (not pool and fallback == user_id)
+            round_robin_enabled = bool(desired.get("round_robin_enabled")) if "round_robin_enabled" in desired else currently_global
+            deal_ids = set(_staff_binding_ids(desired.get("deal_binding_ids"), field="deal_binding_ids")) if "deal_binding_ids" in desired else current_deal_ids
+            task_ids = set(_staff_binding_ids(desired.get("task_binding_ids"), field="task_binding_ids")) if "task_binding_ids" in desired else current_task_ids
+        missing = sorted((deal_ids | task_ids) - known_ids)
+        if missing:
+            raise ValueError(f"GetCourse привязки не найдены: {', '.join(map(str, missing))}")
+        for row in rows:
+            binding_id = int(row["id"])
+            deal_owner = _clean(row.get("responsible_user_id"), 64)
+            task_owner = _clean(row.get("task_responsible_user_id"), 64)
+            if binding_id in deal_ids and deal_owner not in {"", user_id}:
+                raise ValueError(f"Привязка #{binding_id} уже назначена другому ответственному за сделки")
+            if binding_id in task_ids and task_owner not in {"", user_id}:
+                raise ValueError(f"Привязка #{binding_id} уже назначена другому ответственному за задачи")
+
+        changed = False
+        pool = _staff_round_robin_pool(settings.get("responsible_user_ids_json", "[]"))
+        fallback = str(_int_or_none(settings.get("responsible_user_id")) or "")
+        before_pool = list(pool)
+        before_fallback = fallback
+        if round_robin_enabled:
+            if not pool and fallback and fallback != user_id:
+                pool.append(fallback)
+            if user_id not in pool and fallback != user_id:
+                pool.append(user_id)
+        else:
+            pool = [item for item in pool if item != user_id]
+            if fallback == user_id:
+                fallback = ""
+        if pool != before_pool:
+            await db.execute(
+                """INSERT INTO settings(key,value) VALUES('responsible_user_ids_json',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (json.dumps(pool, ensure_ascii=False),),
+            )
+            settings["responsible_user_ids_json"] = json.dumps(pool, ensure_ascii=False)
+            changed = True
+        if fallback != before_fallback:
+            await db.execute(
+                """INSERT INTO settings(key,value) VALUES('responsible_user_id',?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (fallback,),
+            )
+            settings["responsible_user_id"] = fallback
+            changed = True
+        for row in rows:
+            binding_id = int(row["id"])
+            before_deal = _clean(row.get("responsible_user_id"), 64)
+            before_task = _clean(row.get("task_responsible_user_id"), 64)
+            after_deal = user_id if binding_id in deal_ids else ("" if before_deal == user_id else before_deal)
+            after_task = user_id if binding_id in task_ids else ("" if before_task == user_id else before_task)
+            if (after_deal, after_task) == (before_deal, before_task):
+                continue
+            await db.execute(
+                """UPDATE bindings SET responsible_user_id=?,task_responsible_user_id=?,
+                   updated_at=? WHERE id=?""",
+                (after_deal, after_task, _now(), binding_id),
+            )
+            row["responsible_user_id"] = after_deal
+            row["task_responsible_user_id"] = after_task
+            changed = True
+        await db.commit()
+    snapshot = _staff_gc_view(user_id, settings=settings, bindings=rows)
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "operation": action,
+        "local_id": user_id,
+        "changed": changed,
+        "config": snapshot["config"],
+        "snapshot": snapshot,
+    }
+
+
 async def _binding_for_process(process: str, settings: dict[str, str]) -> dict[str, Any]:
     process = _binding_process(process)
     if process == "minicourse_paid":
@@ -5570,7 +5893,13 @@ async def get_settings(request: Request):
 async def post_settings(request: Request):
     await _require_panel_user(request)
     data = await request.json()
-    return await _save_settings(data if isinstance(data, dict) else {})
+    values = data if isinstance(data, dict) else {}
+    if sys.modules.get("_nexus_mod_staff-registry") is not None:
+        current = await _settings_map()
+        values = dict(values)
+        for key in ("responsible_user_id", "responsible_user_ids_json"):
+            values[key] = current.get(key, "")
+    return await _save_settings(values)
 
 
 @router.get("/amo/catalog")
@@ -5666,6 +5995,12 @@ async def save_binding(request: Request):
     data = await request.json()
     if not isinstance(data, dict):
         return JSONResponse({"error": "ожидался JSON object"}, status_code=400)
+    if sys.modules.get("_nexus_mod_staff-registry") is not None:
+        data = dict(data)
+        binding_id = _int_or_none(data.get("id"))
+        current = next((row for row in await _bindings() if int(row["id"]) == int(binding_id or 0)), None)
+        data["responsible_user_id"] = (current or {}).get("responsible_user_id", "")
+        data["task_responsible_user_id"] = (current or {}).get("task_responsible_user_id", "")
     return await _save_binding(data)
 
 

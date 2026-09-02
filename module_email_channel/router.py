@@ -25,6 +25,18 @@ from orchestrator.auth import can_access_module, enforce_rate_limit, verify_toke
 
 router = APIRouter()
 MODULE_ID = "email-channel"
+STAFF_REGISTRY_MODULE_NAME = "_nexus_mod_staff-registry"
+STAFF_REGISTRY_PANEL_PATH = "/nexus/staff-registry/panel/"
+
+
+def _ensure_local_staff_mutation_allowed() -> None:
+    if sys.modules.get(STAFF_REGISTRY_MODULE_NAME) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сотрудники управляются в едином реестре: {STAFF_REGISTRY_PANEL_PATH}",
+        )
+
+
 API_KEY_ENV = "NEXUS_EMAIL_DASHAMAIL_API_KEY"
 EVENT_KEY_ENV = "NEXUS_EMAIL_DASHAMAIL_EVENT_WEBHOOK_KEY"
 ROUTER_KEY_ENV = "NEXUS_EMAIL_DASHAMAIL_ROUTER_SIGNING_KEY"
@@ -639,6 +651,193 @@ async def _sync_sender_profiles() -> list[dict[str, Any]]:
         await db.close()
     domain = _sender_domain(settings)
     return [{**dict(row), "email": f"{row['local_part']}@{domain}"} for row in rows]
+
+
+def service_staff_connector() -> dict[str, Any]:
+    """Describe the email sender settings managed by the staff registry."""
+    return {
+        "module_id": MODULE_ID,
+        "version": 1,
+        "label": "Email-канал",
+        "dependencies": ["messenger-widget"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "config_schema": {
+            "local_part": {"type": "string", "label": "Персональный email", "max_length": 64},
+            "enabled": {"type": "boolean", "default": True},
+            "messenger_admin_id": {"type": "source_link", "module_id": "messenger-widget"},
+        },
+    }
+
+
+def _staff_link(employee: dict[str, Any], module_id: str) -> str:
+    links = employee.get("source_links")
+    if not isinstance(links, dict):
+        return ""
+    value = links.get(module_id)
+    if value is None:
+        value = links.get(module_id.replace("-", "_"))
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    return _clean(value, 200)
+
+
+def _staff_messenger_manager_id(employee: dict[str, Any], config: dict[str, Any] | None = None) -> str:
+    """Resolve a sender only from an explicit Messenger link/identity/config."""
+    linked = _staff_link(employee, "messenger-widget")
+    if linked:
+        return linked
+    for identity in employee.get("identities", []) if isinstance(employee.get("identities"), list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", "-")
+        if provider in {"messenger-widget", "messenger-widget-local"}:
+            external_id = _clean(identity.get("external_id") or identity.get("id"), 200)
+            if external_id:
+                return external_id
+    values = config if isinstance(config, dict) else {}
+    return _clean(values.get("messenger_admin_id") or values.get("manager_id"), 200)
+
+
+async def _staff_sender_snapshot(manager_id: str) -> dict[str, Any]:
+    clean_id = _clean(manager_id, 200)
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            "SELECT * FROM sender_profiles WHERE manager_id=?", (clean_id,),
+        )).fetchone() if clean_id else None
+    finally:
+        await db.close()
+    if not row:
+        return {
+            "ok": True, "module_id": MODULE_ID, "found": False, "status": "unlinked", "local_id": clean_id,
+        }
+    settings = await _settings()
+    value = dict(row)
+    config = {"local_part": value["local_part"], "enabled": bool(value["enabled"]), "manager_id": clean_id}
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": True,
+        "status": "active" if value["enabled"] else "inactive",
+        "local_id": clean_id,
+        "display_name": value["manager_name"],
+        "active": bool(value["enabled"]),
+        "email": f"{value['local_part']}@{_sender_domain(settings)}",
+        "config": config,
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    """Export sender profiles without messages, credentials, or delivery data."""
+    db = await _connect()
+    try:
+        profiles = [dict(row) for row in await (await db.execute(
+            "SELECT * FROM sender_profiles ORDER BY manager_name,manager_id",
+        )).fetchall()]
+    finally:
+        await db.close()
+    return [{
+        "module_id": MODULE_ID,
+        "local_id": _clean(row["manager_id"], 200),
+        "full_name": _clean(row["manager_name"], 200),
+        "display_name": _clean(row["manager_name"], 200),
+        "identities": [{"provider": "messenger-widget", "external_id": _clean(row["manager_id"], 200)}],
+        "config": {
+            "local_part": _clean(row["local_part"], 64),
+            "enabled": bool(row["enabled"]),
+            "manager_id": _clean(row["manager_id"], 200),
+        },
+        "active": bool(row["enabled"]),
+    } for row in profiles]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    manager_id = _staff_messenger_manager_id(employee) or _staff_link(employee, MODULE_ID)
+    result = await _staff_sender_snapshot(manager_id)
+    if not _staff_messenger_manager_id(employee):
+        result["warnings"] = ["Email sender is not linked to a Messenger employee"]
+    return result
+
+
+async def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any] | None, operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    desired = dict(config or {})
+    action = _clean(operation, 40).casefold().replace("_", "-")
+    if action not in {"upsert", "create", "update", "activate", "deactivate", "disable", "remove"}:
+        raise ValueError(f"Unsupported Email staff operation: {operation}")
+    deactivate = action in {"deactivate", "disable", "remove"}
+    messenger_id = _staff_messenger_manager_id(employee, desired)
+    existing_email_id = _staff_link(employee, MODULE_ID)
+    manager_id = messenger_id or (existing_email_id if deactivate else "")
+    if not manager_id:
+        if deactivate:
+            return {
+                "ok": True, "module_id": MODULE_ID, "operation": "deactivate", "local_id": "",
+                "changed": False, "snapshot": {"found": False, "status": "unlinked"},
+                "idempotency_key": _clean(idempotency_key, 300),
+            }
+        raise ValueError("Email sender requires an explicit Messenger employee link")
+    if existing_email_id and messenger_id and existing_email_id != messenger_id:
+        raise ValueError("Email and Messenger source links point to different employees")
+
+    before = await _staff_sender_snapshot(manager_id)
+    if deactivate:
+        if not before.get("found"):
+            return {
+                "ok": True, "module_id": MODULE_ID, "operation": "deactivate", "local_id": manager_id,
+                "changed": False, "snapshot": before, "idempotency_key": _clean(idempotency_key, 300),
+            }
+        db = await _connect()
+        try:
+            await db.execute(
+                "UPDATE sender_profiles SET enabled=0,updated_at=? WHERE manager_id=? AND enabled=1",
+                (_iso(), manager_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        snapshot = await _staff_sender_snapshot(manager_id)
+        return {
+            "ok": True, "module_id": MODULE_ID, "operation": "deactivate", "local_id": manager_id,
+            "changed": bool(before.get("active")), "config": snapshot.get("config", {}), "snapshot": snapshot,
+            "idempotency_key": _clean(idempotency_key, 300),
+        }
+
+    name = _clean(employee.get("display_name") or employee.get("full_name"), 200)
+    if not name:
+        raise ValueError("Email sender name is required")
+    profile = await _ensure_sender_profile(manager_id, name)
+    if not profile:
+        raise ValueError("Email sender profile could not be created")
+    local_part = _clean(desired.get("local_part") or desired.get("alias") or profile["local_part"], 100).casefold()
+    if not LOCAL_PART_RE.fullmatch(local_part) or len(local_part) > 64 or local_part in RESERVED_LOCAL_PARTS:
+        raise ValueError("Email alias may contain latin letters, digits, dots, dashes, and underscores")
+    employee_status = _clean(employee.get("status"), 40).casefold()
+    enabled = bool(desired.get("enabled", employee_status not in {"disabled", "inactive", "dismissed", "terminated", "fired"}))
+    changed = (
+        not before.get("found") or before.get("display_name") != name
+        or before.get("config", {}).get("local_part") != local_part
+        or bool(before.get("active")) != enabled
+    )
+    db = await _connect()
+    try:
+        await db.execute(
+            "UPDATE sender_profiles SET manager_name=?,local_part=?,enabled=?,updated_at=? WHERE manager_id=?",
+            (name, local_part, int(enabled), _iso(), manager_id),
+        )
+        await db.commit()
+    except aiosqlite.IntegrityError as exc:
+        raise ValueError("Email alias is already assigned to another employee") from exc
+    finally:
+        await db.close()
+    snapshot = await _staff_sender_snapshot(manager_id)
+    return {
+        "ok": True, "module_id": MODULE_ID, "operation": "upsert", "local_id": manager_id,
+        "changed": changed, "config": snapshot.get("config", {}), "snapshot": snapshot,
+        "idempotency_key": _clean(idempotency_key, 300),
+    }
 
 
 async def _sender_for_message(settings: dict[str, str], manager_id: Any, manager_name: Any) -> str:
@@ -1578,6 +1777,7 @@ async def list_senders(request: Request) -> dict[str, Any]:
 @router.put("/senders/{manager_id}")
 async def update_sender(manager_id: str, request: Request) -> dict[str, Any]:
     user = await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     enforce_rate_limit(
         request, "email-sender-update", limit=100, window_seconds=3600,
         subject=_clean(user.get("username"), 200),

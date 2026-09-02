@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -495,6 +496,228 @@ async def _bindings() -> list[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM bindings ORDER BY priority ASC,id ASC")
         return [_binding_dict(dict(row)) for row in await cur.fetchall()]
+
+
+def _staff_amo_user_id(employee: dict[str, Any]) -> str:
+    """Resolve one exact amoCRM user ID without matching names or emails."""
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    candidates: set[str] = set()
+    links = employee.get("source_links")
+    source_value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if source_value is None and isinstance(links, dict):
+        source_value = links.get(MODULE_ID.replace("-", "_"))
+    if isinstance(source_value, dict):
+        source_value = source_value.get("local_id")
+    if source_value not in (None, ""):
+        source_id = _int(source_value)
+        if not source_id or source_id <= 0:
+            raise ValueError("bizon-amocrm source link должен содержать точный amoCRM user ID")
+        candidates.add(str(source_id))
+    identities = employee.get("identities")
+    for identity in identities if isinstance(identities, list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", "-")
+        if provider not in {"amocrm", "amo", "amo-crm"}:
+            continue
+        external_id = _int(identity.get("external_id") or identity.get("id"))
+        if not external_id or external_id <= 0:
+            raise ValueError("amoCRM identity должен содержать точный числовой external_id")
+        candidates.add(str(external_id))
+    if len(candidates) > 1:
+        raise ValueError("Точные amoCRM identity указывают на разных ответственных")
+    return next(iter(candidates), "")
+
+
+def _staff_binding_id_list(value: Any, *, field: str) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} должен быть списком ID привязок")
+    result: list[int] = []
+    for raw in value:
+        binding_id = _int(raw)
+        if not binding_id or binding_id <= 0:
+            raise ValueError(f"{field} содержит некорректный ID привязки")
+        if binding_id not in result:
+            result.append(binding_id)
+    return result
+
+
+def _staff_responsible_pool(value: Any) -> list[str]:
+    raw = _json(value, [])
+    result: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        user_id = _int(item)
+        if user_id and user_id > 0 and str(user_id) not in result:
+            result.append(str(user_id))
+    return result
+
+
+def _staff_bizon_view(user_id: str, bindings: list[dict[str, Any]]) -> dict[str, Any]:
+    assigned = [
+        int(row["id"])
+        for row in bindings
+        if user_id in _staff_responsible_pool(row.get("responsible_user_ids_json"))
+    ]
+    assigned_set = set(assigned)
+    active = any(int(row.get("active") or 0) and int(row["id"]) in assigned_set for row in bindings)
+    return {
+        "module_id": MODULE_ID,
+        "local_id": user_id,
+        "full_name": f"amoCRM #{user_id}",
+        "display_name": f"amoCRM #{user_id}",
+        "identities": [{"provider": "amocrm", "external_id": user_id}],
+        "config": {"responsible_binding_ids": assigned},
+        "active": active,
+        "status": "active" if active else ("inactive" if assigned else "unlinked"),
+    }
+
+
+async def service_staff_connector() -> dict[str, Any]:
+    """Describe Bizon binding pools managed by the central staff registry."""
+    bindings = await _bindings()
+    options = [
+        {"value": str(row["id"]), "label": _clean(row.get("name"), 200) or f"Привязка #{row['id']}"}
+        for row in bindings
+    ]
+    fields = [{
+        "key": "responsible_binding_ids",
+        "label": "Очереди привязок",
+        "type": "multiselect",
+        "options": options,
+    }]
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "Bizon → amoCRM",
+        "label": "Bizon → amoCRM",
+        "version": 1,
+        "operations": ["upsert", "deactivate"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "entity": "amocrm_responsible",
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "amocrm"],
+        "identity": {"provider": "amocrm", "match": "exact", "required": True},
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {"responsible_binding_ids": {"type": "multiselect", "options": options}},
+        "deactivation": {"mode": "remove_exact_id", "preserves_history": True},
+    }
+
+
+async def _staff_bizon_bindings() -> list[dict[str, Any]]:
+    async with aiosqlite.connect(_must_db()) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT id,name,responsible_user_ids_json,active FROM bindings ORDER BY priority,id"
+        )).fetchall()
+    return [dict(row) for row in rows]
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    bindings = await _staff_bizon_bindings()
+    user_ids = sorted({
+        user_id
+        for row in bindings
+        for user_id in _staff_responsible_pool(row.get("responsible_user_ids_json"))
+    }, key=int)
+    return [_staff_bizon_view(user_id, bindings) for user_id in user_ids]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    user_id = _staff_amo_user_id(employee)
+    if not user_id:
+        return {"ok": True, "module_id": MODULE_ID, "found": False, "local_id": "", "status": "unlinked", "snapshot": None}
+    bindings = await _staff_bizon_bindings()
+    snapshot = _staff_bizon_view(user_id, bindings)
+    found = bool(snapshot["config"]["responsible_binding_ids"])
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": found,
+        "local_id": user_id if found else "",
+        "status": snapshot["status"],
+        "snapshot": snapshot if found else None,
+    }
+
+
+async def service_staff_apply(
+    *,
+    employee: dict[str, Any],
+    config: dict[str, Any] | None,
+    operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """Atomically reconcile this exact amoCRM ID across Bizon responsible pools."""
+    del idempotency_key  # Desired-state reconciliation is naturally idempotent.
+    desired = config if isinstance(config, dict) else {}
+    action = _clean(operation, 40).casefold().replace("_", "-")
+    if action not in {"upsert", "deactivate"}:
+        raise ValueError("bizon-amocrm поддерживает только upsert и deactivate")
+    user_id = _staff_amo_user_id(employee)
+    if not user_id:
+        if action == "deactivate":
+            return {
+                "ok": True, "module_id": MODULE_ID, "operation": action, "local_id": "",
+                "changed": False, "config": {}, "snapshot": None,
+                "warnings": ["Точный amoCRM user ID не найден; отключать нечего"],
+            }
+        raise ValueError("Для bizon-amocrm требуется точный amoCRM identity")
+
+    async with aiosqlite.connect(_must_db(), timeout=60) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout=60000")
+        await db.execute("BEGIN IMMEDIATE")
+        rows = [dict(row) for row in await (await db.execute(
+            "SELECT id,name,responsible_user_ids_json,active FROM bindings ORDER BY priority,id"
+        )).fetchall()]
+        current_ids = {
+            int(row["id"])
+            for row in rows
+            if user_id in _staff_responsible_pool(row.get("responsible_user_ids_json"))
+        }
+        if action == "deactivate":
+            selected_ids: set[int] = set()
+        elif "responsible_binding_ids" in desired:
+            selected_ids = set(_staff_binding_id_list(
+                desired.get("responsible_binding_ids"), field="responsible_binding_ids"
+            ))
+        else:
+            selected_ids = set(current_ids)
+        known_ids = {int(row["id"]) for row in rows}
+        missing = sorted(selected_ids - known_ids)
+        if missing:
+            raise ValueError(f"Bizon привязки не найдены: {', '.join(map(str, missing))}")
+        changed = False
+        for row in rows:
+            binding_id = int(row["id"])
+            before = _staff_responsible_pool(row.get("responsible_user_ids_json"))
+            after = [item for item in before if item != user_id]
+            if binding_id in selected_ids:
+                after.append(user_id)
+            if after == before:
+                continue
+            changed = True
+            stored = json.dumps(after, ensure_ascii=False)
+            await db.execute(
+                "UPDATE bindings SET responsible_user_ids_json=?,updated_at=? WHERE id=?",
+                (stored, _now(), binding_id),
+            )
+            row["responsible_user_ids_json"] = stored
+        await db.commit()
+    snapshot = _staff_bizon_view(user_id, rows)
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "operation": action,
+        "local_id": user_id,
+        "changed": changed,
+        "config": snapshot["config"],
+        "snapshot": snapshot,
+    }
 
 
 def _binding_matches(binding: dict[str, Any], attendance: dict[str, Any]) -> bool:
@@ -1636,6 +1859,14 @@ async def list_bindings(request: Request):
 @router.post("/bindings")
 async def save_binding(data: BindingIn, request: Request):
     await _require_user(request)
+    registry_managed = sys.modules.get("_nexus_mod_staff-registry") is not None
+    if registry_managed:
+        current_pool: list[str] = []
+        if data.id:
+            current = next((row for row in await _bindings() if int(row["id"]) == int(data.id)), None)
+            if current:
+                current_pool = [str(value) for value in current.get("responsible_user_ids") or []]
+        data.responsible_user_ids = current_pool
     if data.match_type not in {"all", "webinar", "room", "contains", "regex"}:
         raise HTTPException(400, "invalid match_type")
     if data.match_type != "all" and not data.match_value:
@@ -1657,7 +1888,7 @@ async def save_binding(data: BindingIn, request: Request):
         raise HTTPException(400, "Некорректный статус для клика")
     if not data.pipeline_scope:
         raise HTTPException(400, "Выберите хотя бы одну воронку поиска дублей")
-    if not data.responsible_user_ids:
+    if not data.responsible_user_ids and not registry_managed:
         raise HTTPException(400, "Выберите ответственных для round-robin")
     duplicate_action = _clean(data.duplicate_action, 30) or "note_only"
     if duplicate_action not in {"update", "merge_empty", "note_only", "skip", "create"}:

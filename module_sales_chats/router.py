@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,18 @@ from orchestrator.telegram_proxy import telegram_bot_api_base, telegram_bot_api_
 router = APIRouter()
 
 MODULE_ID = "sales-chats"
+STAFF_REGISTRY_MODULE_NAME = "_nexus_mod_staff-registry"
+STAFF_REGISTRY_PANEL_PATH = "/nexus/staff-registry/panel/"
+
+
+def _ensure_local_staff_mutation_allowed() -> None:
+    if sys.modules.get(STAFF_REGISTRY_MODULE_NAME) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сотрудники управляются в едином реестре: {STAFF_REGISTRY_PANEL_PATH}",
+        )
+
+
 SESSION_COOKIE = "sales_chats_session"
 SESSION_TTL_DAYS = 30
 VK_API_BASE = "https://api.vk.com/method"
@@ -173,6 +186,227 @@ def _log(level: str, message: str, *args: Any) -> None:
 def _normalize_login(value: str) -> str:
     raw = unicodedata.normalize("NFKC", str(value or "").strip()).lower().replace("ё", "е")
     return " ".join(raw.split())
+
+
+def _staff_local_id(employee: dict[str, Any]) -> int | None:
+    """Return only an explicit staff-registry link for this module."""
+    links = employee.get("source_links") if isinstance(employee, dict) else None
+    value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    if value in (None, ""):
+        return None
+    try:
+        local_id = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid {MODULE_ID} source_links local_id") from exc
+    if local_id <= 0:
+        raise ValueError(f"invalid {MODULE_ID} source_links local_id")
+    return local_id
+
+
+def service_staff_connector() -> dict[str, Any]:
+    """Describe the employee settings supported by the central staff registry."""
+    fields = [
+        {"key": "login", "type": "string", "required": True, "label": "Логин"},
+        {"key": "display_name", "type": "string", "label": "Имя в чате"},
+        {"key": "active", "type": "boolean", "default": True, "label": "Доступ включён"},
+    ]
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "Чаты продаж",
+        "label": "Чаты продаж",
+        "version": 1,
+        "operations": ["upsert", "deactivate"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "entity": "account",
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "exact_login"],
+        "identity": {
+            "source": "source_links",
+            "local_id": True,
+            "fallback": "config.login",
+            "match": "exact",
+        },
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {field["key"]: {key: value for key, value in field.items() if key != "key"} for field in fields},
+        "deactivation": {"mode": "soft", "preserves_history": True, "revokes_sessions": True},
+    }
+
+
+async def _staff_account(employee: dict[str, Any], config: dict[str, Any]) -> aiosqlite.Row | None:
+    local_id = _staff_local_id(employee)
+    login = _clean(config.get("login"), 160)
+    async with _connect() as db:
+        if local_id is not None:
+            return await (await db.execute("SELECT * FROM accounts WHERE id=?", (local_id,))).fetchone()
+        if login:
+            return await (await db.execute(
+                "SELECT * FROM accounts WHERE login_key=?", (_normalize_login(login),)
+            )).fetchone()
+    return None
+
+
+def _staff_account_config(account: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "login": str(account.get("login") or ""),
+        "display_name": str(account.get("display_name") or ""),
+        "active": bool(account.get("active")),
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    """Export safe account metadata for the registry import/reconciliation UI."""
+    async with _connect() as db:
+        rows = await (await db.execute("SELECT * FROM accounts ORDER BY id")).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        display_name = str(item.get("display_name") or item.get("login") or "")
+        result.append({
+            "module_id": MODULE_ID,
+            "local_id": str(item["id"]),
+            "full_name": display_name,
+            "display_name": display_name,
+            "identities": [{
+                "provider": MODULE_ID,
+                "external_id": str(item["id"]),
+                "username": str(item.get("login") or ""),
+            }],
+            "config": _staff_account_config(item),
+            "active": bool(item.get("active")),
+        })
+    return result
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    """Read an explicitly linked account without guessing from a person's name."""
+    config = employee.get("module_config") if isinstance(employee.get("module_config"), dict) else {}
+    account = await _staff_account(employee, config)
+    if not account:
+        return {
+            "ok": True,
+            "module_id": MODULE_ID,
+            "found": False,
+            "local_id": None,
+            "status": "absent",
+            "config": {},
+            "source_link": None,
+        }
+    item = dict(account)
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": True,
+        "local_id": str(item["id"]),
+        "status": "active" if item.get("active") else "inactive",
+        "display_name": str(item.get("display_name") or item.get("login") or ""),
+        "active": bool(item.get("active")),
+        "config": _staff_account_config(item),
+        "source_link": {"local_id": str(item["id"])},
+    }
+
+
+async def service_staff_apply(
+    *,
+    employee: dict[str, Any],
+    config: dict[str, Any],
+    operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """Create/update or softly deactivate a Sales Chats account."""
+    del idempotency_key  # Desired-state writes below are naturally idempotent.
+    config = config if isinstance(config, dict) else {}
+    op = _clean(operation, 40).lower() or "upsert"
+    if op not in {"upsert", "create", "update", "activate", "deactivate", "disable", "remove", "delete", "offboard"}:
+        raise ValueError(f"unsupported staff operation: {op}")
+    deactivate = op in {"deactivate", "disable", "remove", "delete", "offboard"}
+    if config.get("enabled") is False:
+        deactivate = True
+
+    account = await _staff_account(employee, config)
+    if deactivate:
+        if not account:
+            snapshot = await service_staff_snapshot(employee=employee)
+            return {
+                "ok": True, "module_id": MODULE_ID, "operation": "deactivate",
+                "local_id": None, "changed": False, "snapshot": snapshot,
+            }
+        item = dict(account)
+        changed = bool(item.get("active"))
+        if changed:
+            async with _connect() as db:
+                await db.execute("UPDATE accounts SET active=0,updated_at=? WHERE id=?", (_now(), int(item["id"])))
+                await db.execute("DELETE FROM sessions WHERE account_id=?", (int(item["id"]),))
+                await db.commit()
+        updated_employee = {**employee, "source_links": {**(employee.get("source_links") or {}), MODULE_ID: str(item["id"])}}
+        snapshot = await service_staff_snapshot(employee=updated_employee)
+        return {
+            "ok": True, "module_id": MODULE_ID, "operation": "deactivate",
+            "local_id": str(item["id"]), "changed": changed, "snapshot": snapshot,
+        }
+
+    current_item = dict(account) if account else {}
+    login = _clean(config.get("login") if "login" in config else current_item.get("login"), 160)
+    if not login:
+        raise ValueError("sales-chats config.login is required")
+    display_name = _clean(
+        config.get("display_name") if "display_name" in config else (
+            current_item.get("display_name") or employee.get("display_name") or employee.get("full_name")
+        ),
+        160,
+    ) or login
+    inactive_statuses = {"disabled", "inactive", "dismissed", "terminated", "fired"}
+    if "active" in config:
+        active = bool(config.get("active"))
+    elif "enabled" in config:
+        active = bool(config.get("enabled"))
+    elif account:
+        active = bool(current_item.get("active"))
+    else:
+        active = _clean(employee.get("status"), 40).casefold() not in inactive_statuses
+    now = _now()
+    if account:
+        item = dict(account)
+        desired = {"login": login, "display_name": display_name, "active": active}
+        changed = _staff_account_config(item) != desired
+        if changed:
+            async with _connect() as db:
+                try:
+                    await db.execute(
+                        "UPDATE accounts SET login=?,login_key=?,display_name=?,active=?,updated_at=? WHERE id=?",
+                        (login, _normalize_login(login), display_name, int(active), now, int(item["id"])),
+                    )
+                    if not active:
+                        await db.execute("DELETE FROM sessions WHERE account_id=?", (int(item["id"]),))
+                    await db.commit()
+                except aiosqlite.IntegrityError as exc:
+                    raise ValueError("sales-chats login already belongs to another account") from exc
+        local_id = int(item["id"])
+        result_operation = "updated"
+    else:
+        async with _connect() as db:
+            try:
+                cursor = await db.execute(
+                    "INSERT INTO accounts(login,login_key,display_name,active,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (login, _normalize_login(login), display_name, int(active), now, now),
+                )
+                await db.commit()
+            except aiosqlite.IntegrityError as exc:
+                raise ValueError("sales-chats login already belongs to another account") from exc
+        local_id = int(cursor.lastrowid)
+        changed = True
+        result_operation = "created"
+
+    updated_employee = {**employee, "source_links": {**(employee.get("source_links") or {}), MODULE_ID: str(local_id)}}
+    snapshot = await service_staff_snapshot(employee=updated_employee)
+    return {
+        "ok": True, "module_id": MODULE_ID, "operation": "upsert", "result": result_operation,
+        "local_id": str(local_id), "changed": changed, "config": snapshot["config"], "snapshot": snapshot,
+    }
 
 
 def _cookie_path(request: Request) -> str:
@@ -1295,6 +1529,7 @@ async def admin_accounts(request: Request):
 @router.post("/admin/accounts")
 async def admin_create_account(data: AccountIn, request: Request):
     await _require_panel_user(request, admin=True)
+    _ensure_local_staff_mutation_allowed()
     login = _clean(data.login, 160)
     if not login:
         raise HTTPException(400, "login is required")
@@ -1314,6 +1549,7 @@ async def admin_create_account(data: AccountIn, request: Request):
 @router.put("/admin/accounts/{account_id}")
 async def admin_update_account(account_id: int, data: AccountIn, request: Request):
     await _require_panel_user(request, admin=True)
+    _ensure_local_staff_mutation_allowed()
     login = _clean(data.login, 160)
     if not login:
         raise HTTPException(400, "login is required")
@@ -1330,6 +1566,7 @@ async def admin_update_account(account_id: int, data: AccountIn, request: Reques
 @router.delete("/admin/accounts/{account_id}")
 async def admin_delete_account(account_id: int, request: Request):
     await _require_panel_user(request, admin=True)
+    _ensure_local_staff_mutation_allowed()
     async with _connect() as db:
         await db.execute("DELETE FROM sessions WHERE account_id=?", (int(account_id),))
         await db.execute("DELETE FROM accounts WHERE id=?", (int(account_id),))

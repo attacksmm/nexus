@@ -1,7 +1,7 @@
 {
   "id": "sales-chats",
   "name": "Чаты продаж",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Единый рабочий чат отдела продаж по клиентам из customer-db с отправкой через VK Community API и Telegram Bot API.",
   "env_vars": {
     "SBKVD_LETTER_VK_TOKEN": "Токен сообщества VK с доступом к сообщениям. Используется тот же токен, что в модуле Рассылки.",

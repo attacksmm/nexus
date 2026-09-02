@@ -545,6 +545,252 @@ async def _admins_payload(days: int = 90) -> dict[str, Any]:
     }
 
 
+def service_staff_connector() -> dict[str, Any]:
+    """Describe the exact VK allow-list managed by the staff registry."""
+    fields = [
+        {
+            "key": "protect_dialogs",
+            "label": "Разрешить работу с диалогами",
+            "type": "bool",
+            "default": True,
+        },
+    ]
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "Общение с администрацией",
+        "label": "Общение с администрацией",
+        "version": 1,
+        "operations": ["upsert", "deactivate"],
+        "capabilities": ["list", "snapshot", "upsert", "deactivate"],
+        "entity": "vk_admin",
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "vk"],
+        "identity": {"provider": "vk", "match": "exact", "required": True},
+        "fields": fields,
+        "config_fields": fields,
+        "config_schema": {
+            "protect_dialogs": {"type": "boolean", "default": True},
+        },
+        "deactivation": {"mode": "remove_exact_id", "preserves_history": True},
+    }
+
+
+def _staff_vk_id(employee: dict[str, Any]) -> str:
+    """Resolve one exact numeric VK ID; never use names or fuzzy matching."""
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    candidates: set[str] = set()
+    links = employee.get("source_links")
+    source_value: Any = links.get(MODULE_ID) if isinstance(links, dict) else None
+    if source_value is None and isinstance(links, dict):
+        source_value = links.get(MODULE_ID.replace("-", "_"))
+    if isinstance(source_value, dict):
+        source_value = source_value.get("local_id")
+    if source_value not in (None, ""):
+        source_id = _numeric(source_value, 32)
+        if not source_id:
+            raise ValueError("admin-handoff source link должен содержать точный VK ID")
+        candidates.add(source_id)
+    identities = employee.get("identities")
+    for identity in identities if isinstance(identities, list) else []:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 40).casefold().replace("_", "-")
+        if provider not in {"vk", "vkontakte", "vk.com"}:
+            continue
+        external_id = _numeric(identity.get("external_id") or identity.get("id"), 32)
+        if not external_id:
+            raise ValueError("VK identity должен содержать точный числовой external_id")
+        candidates.add(external_id)
+    if len(candidates) > 1:
+        raise ValueError("Точные VK identity указывают на разных администраторов")
+    return next(iter(candidates), "")
+
+
+def _staff_admin_view(
+    admin_id: str,
+    *,
+    name: str = "",
+    allowed_ids: set[str],
+    filter_enabled: bool,
+) -> dict[str, Any]:
+    protected = admin_id in allowed_ids
+    display_name = _clean(name, 200) or f"VK #{admin_id}"
+    return {
+        "module_id": MODULE_ID,
+        "local_id": admin_id,
+        "full_name": display_name,
+        "display_name": display_name,
+        "identities": [{"provider": "vk", "external_id": admin_id}],
+        "config": {
+            "protect_dialogs": protected,
+            "admin_filter_enabled": filter_enabled,
+        },
+        "active": protected,
+        "status": "active" if protected else "inactive",
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    """Export safe VK candidates without returning provider credentials."""
+    payload = await _admins_payload()
+    allowed_ids = set(payload.get("allowed_admin_ids") or [])
+    filter_enabled = bool(payload.get("admin_filter_enabled"))
+    candidates = {
+        _numeric(item.get("id"), 32): _clean(item.get("name"), 200)
+        for item in payload.get("items") or []
+        if isinstance(item, dict) and _numeric(item.get("id"), 32)
+    }
+    for admin_id in allowed_ids:
+        candidates.setdefault(admin_id, "")
+    effective_allowed = allowed_ids if filter_enabled else set(candidates)
+    return [
+        _staff_admin_view(
+            admin_id,
+            name=candidates[admin_id],
+            allowed_ids=effective_allowed,
+            filter_enabled=filter_enabled,
+        )
+        for admin_id in sorted(candidates, key=int)
+    ]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    admin_id = _staff_vk_id(employee)
+    if not admin_id:
+        return {
+            "ok": True,
+            "module_id": MODULE_ID,
+            "found": False,
+            "local_id": "",
+            "status": "unlinked",
+            "snapshot": None,
+        }
+    payload = await _admins_payload()
+    allowed_ids = set(payload.get("allowed_admin_ids") or [])
+    filter_enabled = bool(payload.get("admin_filter_enabled"))
+    observed = {
+        _numeric(item.get("id"), 32) for item in payload.get("items") or [] if isinstance(item, dict)
+    }
+    if not filter_enabled and admin_id in observed:
+        allowed_ids.add(admin_id)
+    snapshot = _staff_admin_view(
+        admin_id,
+        allowed_ids=allowed_ids,
+        filter_enabled=filter_enabled,
+    )
+    found = admin_id in allowed_ids
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "found": found,
+        "local_id": admin_id if found else "",
+        "status": snapshot["status"] if found else "unlinked",
+        "snapshot": snapshot if found else None,
+    }
+
+
+async def service_staff_apply(
+    *,
+    employee: dict[str, Any],
+    config: dict[str, Any] | None,
+    operation: str,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """Atomically add/remove only this employee's exact VK ID from the allow-list."""
+    del idempotency_key  # This is a naturally idempotent desired-state write.
+    desired = config if isinstance(config, dict) else {}
+    action = _clean(operation, 40).casefold().replace("_", "-")
+    if action not in {"upsert", "deactivate"}:
+        raise ValueError("admin-handoff поддерживает только upsert и deactivate")
+    admin_id = _staff_vk_id(employee)
+    if not admin_id:
+        if action == "deactivate":
+            return {
+                "ok": True,
+                "module_id": MODULE_ID,
+                "operation": action,
+                "local_id": "",
+                "changed": False,
+                "config": {},
+                "snapshot": None,
+                "warnings": ["Точный VK ID не найден; отключать нечего"],
+            }
+        raise ValueError("Для admin-handoff требуется точный VK identity")
+    protect_dialogs = action != "deactivate" and bool(desired.get("protect_dialogs", True))
+    observed_payload = await _admins_payload()
+    observed_ids = {
+        value for value in (
+            _numeric(item.get("id"), 32)
+            for item in observed_payload.get("items") or [] if isinstance(item, dict)
+        ) if value
+    }
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute(
+                "SELECT value FROM settings WHERE key='allowed_admin_ids'"
+            )).fetchone()
+            try:
+                raw_ids = json.loads(str(row["value"] or "[]")) if row else []
+            except Exception:
+                raw_ids = []
+            allowed_ids = {
+                value for value in (_numeric(item, 32) for item in raw_ids if isinstance(raw_ids, list)) if value
+            }
+            before = set(allowed_ids)
+            if protect_dialogs:
+                allowed_ids.add(admin_id)
+            else:
+                allowed_ids.discard(admin_id)
+            if allowed_ids != before:
+                await db.execute(
+                    """INSERT INTO settings(key,value) VALUES('allowed_admin_ids',?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    (_json_dumps(sorted(allowed_ids, key=int)),),
+                )
+            filter_row = await (await db.execute(
+                "SELECT value FROM settings WHERE key='admin_filter_enabled'"
+            )).fetchone()
+            filter_enabled = str(filter_row["value"] or "").casefold() in {"1", "true", "yes", "on", "да"} if filter_row else False
+            if not filter_enabled:
+                # Switching from legacy "allow every observed administrator" to
+                # the registry must not silently revoke colleagues. Seed the
+                # exact observed roster, then apply only this employee's change.
+                allowed_ids.update(observed_ids)
+                if protect_dialogs:
+                    allowed_ids.add(admin_id)
+                else:
+                    allowed_ids.discard(admin_id)
+                await db.execute(
+                    """INSERT INTO settings(key,value) VALUES('allowed_admin_ids',?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    (_json_dumps(sorted(allowed_ids, key=int)),),
+                )
+                await db.execute(
+                    """INSERT INTO settings(key,value) VALUES('admin_filter_enabled','1')
+                       ON CONFLICT(key) DO UPDATE SET value='1'"""
+                )
+                filter_enabled = True
+            await db.commit()
+    snapshot = _staff_admin_view(
+        admin_id,
+        allowed_ids=allowed_ids,
+        filter_enabled=filter_enabled,
+    )
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "operation": action,
+        "local_id": admin_id,
+        "changed": allowed_ids != before,
+        "config": snapshot["config"],
+        "snapshot": snapshot,
+    }
+
+
 def _looks_like_salebot_client_id(value: str) -> bool:
     return bool(re.fullmatch(r"\d{5,20}", str(value or "").strip()))
 
@@ -1796,6 +2042,11 @@ async def save_settings(request: Request):
         body = {}
     if not isinstance(body, dict):
         raise HTTPException(400, "invalid settings payload")
+    if sys.modules.get("_nexus_mod_staff-registry") is not None:
+        current = await _settings_payload()
+        body = dict(body)
+        body["admin_filter_enabled"] = bool(current.get("admin_filter_enabled"))
+        body["allowed_admin_ids"] = list(current.get("allowed_admin_ids") or [])
     return await _save_settings(body)
 
 

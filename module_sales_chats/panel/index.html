@@ -13,9 +13,9 @@
     .shell{height:100vh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto}
     .top{height:48px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;border-bottom:1px solid var(--border);background:var(--panel)}
     .title{display:flex;align-items:center;gap:10px;min-width:0}.title strong{font-size:15px}.badge{min-height:22px;display:inline-flex;align-items:center;padding:2px 8px;border:1px solid #315f3a;background:#102417;color:var(--ok);font-size:12px}.muted{color:var(--muted)}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.btn{min-height:30px;padding:5px 10px;border:1px solid var(--border2);background:var(--panel2);color:var(--text);display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap}.btn:hover{background:var(--soft)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn.danger{background:#251315;border-color:#5f3137;color:var(--bad)}
+    .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.btn{min-height:30px;padding:5px 10px;border:1px solid var(--border2);background:var(--panel2);color:var(--text);display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap}.btn:hover{background:var(--soft)}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}.btn.ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn.danger{background:#251315;border-color:#5f3137;color:var(--bad)}.btn.busy::before,.statusbar.busy::before{content:"";width:12px;height:12px;flex:0 0 12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
     .tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border);background:#090909;overflow:auto}.tab{min-height:30px;padding:5px 12px;border:1px solid var(--border);background:transparent;color:var(--muted)}.tab.active{background:var(--panel2);border-color:var(--border2);color:var(--text)}
-    .view{min-height:0;overflow:hidden;display:none}.view.active{display:grid}.view.accounts.active,.view.templates.active{grid-template-columns:300px minmax(0,1fr)}.view.tables.active,.view.status.active{display:block;overflow:auto}
+    .view{min-height:0;overflow:hidden;display:none}.view.active{display:grid}.view.accounts.active,.view.templates.active{grid-template-columns:300px minmax(0,1fr)}.view.accounts.registry-view.active,.view.tables.active,.view.status.active{display:block;overflow:auto}
     .side{min-height:0;overflow:auto;border-right:1px solid var(--border);background:#0b0b0b}.main{min-height:0;overflow:auto;padding:12px;display:grid;gap:12px;align-content:start}
     .row-item{display:grid;gap:3px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer}.row-item:hover,.row-item.active{background:var(--panel2)}.row-item strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{color:var(--subtle);font-size:12px}
     .toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.field{display:grid;gap:5px;min-width:0}.label{font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
@@ -32,24 +32,15 @@
     <div class="actions"><a class="btn primary" href="chat/" target="_blank" rel="noreferrer">Открыть fullscreen</a><button id="reloadBtn" class="btn ghost" type="button">Обновить</button></div>
   </header>
   <nav class="tabs">
-    <button class="tab active" data-view="accounts" type="button">Люди</button>
+    <button class="tab active" data-view="accounts" type="button">Сотрудники</button>
     <button class="tab" data-view="tables" type="button">Листы customer-db</button>
     <button class="tab" data-view="templates" type="button">Общие шаблоны</button>
     <button class="tab" data-view="status" type="button">Статус и webhook</button>
   </nav>
 
-  <section id="view-accounts" class="view accounts active">
-    <aside class="side" id="accountList"></aside>
+  <section id="view-accounts" class="view accounts registry-view active">
     <main class="main">
-      <div class="toolbar">
-        <div><div class="section-title">Доступ в fullscreen-чат</div><div class="meta">Логин без пароля, как в SBKVD GPT. Управление доступно только Nexus admin.</div></div>
-        <div class="actions"><button id="newAccountBtn" class="btn" type="button">Новый</button><button id="deleteAccountBtn" class="btn danger" type="button">Удалить</button><button id="saveAccountBtn" class="btn primary" type="button">Сохранить</button></div>
-      </div>
-      <div class="grid">
-        <div class="field"><label class="label">Логин</label><input id="loginInput" autocomplete="off"></div>
-        <div class="field"><label class="label">Имя в интерфейсе</label><input id="displayInput" autocomplete="off"></div>
-        <label class="toggle"><input id="activeInput" type="checkbox" checked> Аккаунт активен</label>
-      </div>
+      <div class="section"><div class="section-title">Управление перенесено в единый реестр</div><div class="meta">Создавайте сотрудников и настраивайте доступ к чатам продаж в центральной карточке. Листы customer-db, шаблоны и webhook по-прежнему настраиваются в соседних разделах.</div><div class="actions"><a class="btn primary" href="/nexus/staff-registry/panel/" target="_top">Открыть реестр сотрудников</a></div></div>
     </main>
   </section>
 
@@ -105,37 +96,10 @@ const API = new URL('../api', location.href).pathname.replace(/\/$/, '');
 const $ = id => document.getElementById(id);
 const state = {accounts:[], selected:null, tables:[], configs:[], templates:[], selectedTemplate:null};
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-function setStatus(text,bad=false){$('statusText').textContent=text;$('statusText').classList.toggle('error',bad)}
+function setStatus(text,bad=false,busy=false){$('statusText').textContent=text;$('statusText').classList.toggle('error',bad);$('statusText').parentElement.classList.toggle('busy',busy)}
 async function api(path, options={}){const res=await fetch(API+path,{credentials:'same-origin',...options});const raw=await res.text();let data={};try{data=raw?JSON.parse(raw):{}}catch{data={detail:raw}}if(!res.ok)throw new Error(data.detail||data.error||`HTTP ${res.status}`);return data}
 const json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-
-function renderAccounts(){
-  const list=$('accountList'); list.innerHTML='';
-  if(!state.accounts.length){list.innerHTML='<div class="empty">Аккаунтов пока нет</div>'; return}
-  for(const a of state.accounts){
-    const row=document.createElement('div'); row.className='row-item'+(a.id===state.selected?' active':'');
-    row.innerHTML=`<strong>${esc(a.login)}</strong><span class="meta">${a.active?'активен':'выключен'} · ${esc(a.display_name||a.login)}</span>`;
-    row.onclick=()=>selectAccount(a.id); list.append(row);
-  }
-}
-function selectAccount(id){
-  state.selected=id; renderAccounts();
-  const a=state.accounts.find(x=>x.id===id);
-  $('loginInput').value=a?.login||''; $('displayInput').value=a?.display_name||''; $('activeInput').checked=a?!!a.active:true;
-}
-function newAccount(){state.selected=null;renderAccounts();$('loginInput').value='';$('displayInput').value='';$('activeInput').checked=true;setStatus('Новый аккаунт')}
-async function saveAccount(){
-  const body={login:$('loginInput').value.trim(),display_name:$('displayInput').value.trim(),active:$('activeInput').checked};
-  if(!body.login) throw new Error('Логин обязателен');
-  if(state.selected) await api('/admin/accounts/'+state.selected,json('PUT',body));
-  else {const created=await api('/admin/accounts',json('POST',body));state.selected=created.id}
-  setStatus('Аккаунт сохранён'); await loadAccounts();
-}
-async function deleteAccount(){
-  if(!state.selected)return; if(!confirm('Удалить аккаунт?'))return;
-  await api('/admin/accounts/'+state.selected,{method:'DELETE'}); state.selected=null; await loadAccounts(); setStatus('Аккаунт удалён');
-}
-async function loadAccounts(){const data=await api('/admin/accounts');state.accounts=data.items||[];if(!state.selected&&state.accounts[0])state.selected=state.accounts[0].id;renderAccounts();selectAccount(state.selected)}
+async function runButton(button,label,task){const text=button.textContent;button.disabled=true;button.classList.add('busy');button.textContent=label;try{return await task()}finally{button.disabled=false;button.classList.remove('busy');button.textContent=text}}
 
 function renderCommonTemplates(){
   const list=$('templateList'); list.innerHTML='';
@@ -194,10 +158,10 @@ async function loadStatus(){
   $('statusBox').innerHTML=`customer-db: <span class="${data.customer_db_ready?'ok':'error'}">${data.customer_db_ready?'готов':'не найден'}</span><br>VK token: <span class="${env.vk?'ok':'error'}">${env.vk?'готов':'нет'}</span><br>Telegram bot token: <span class="${env.telegram?'ok':'error'}">${env.telegram?'готов':'нет'}</span><br>Telegram API: <span class="mono">${esc(env.telegram_api_base||'')}</span>${env.telegram_proxy?' · proxy включён':''}<br>VK group: <span class="mono">${esc(env.vk_group_id||'')}</span>`;
   $('webhookInput').value=data.telegram_inbound_webhook||'';
 }
-async function loadAll(){setStatus('Загрузка...');await Promise.all([loadAccounts(),loadTables(),loadCommonTemplates(),loadStatus()]);$('adminState').textContent='Nexus admin';setStatus('Готово')}
+async function loadAll(){setStatus('Загружаем рабочие настройки…',false,true);await Promise.all([loadTables(),loadCommonTemplates(),loadStatus()]);$('adminState').textContent='Nexus admin';setStatus('Готово')}
 
 document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===tab));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='view-'+tab.dataset.view))});
-$('reloadBtn').onclick=()=>loadAll().catch(e=>setStatus(e.message,true)); $('newAccountBtn').onclick=newAccount; $('saveAccountBtn').onclick=()=>saveAccount().catch(e=>setStatus(e.message,true)); $('deleteAccountBtn').onclick=()=>deleteAccount().catch(e=>setStatus(e.message,true)); $('newTemplateBtn').onclick=newCommonTemplate; $('saveTemplateBtn').onclick=()=>saveCommonTemplate().catch(e=>setStatus(e.message,true)); $('deleteTemplateBtn').onclick=()=>deleteCommonTemplate().catch(e=>setStatus(e.message,true)); $('saveTablesBtn').onclick=()=>saveTables().catch(e=>setStatus(e.message,true)); $('copyWebhookBtn').onclick=async()=>{try{await navigator.clipboard.writeText($('webhookInput').value);setStatus('Webhook URL скопирован')}catch{setStatus('Не удалось скопировать',true)}};
+$('reloadBtn').onclick=()=>runButton($('reloadBtn'),'Обновляем…',loadAll).catch(e=>setStatus(e.message,true)); $('newTemplateBtn').onclick=newCommonTemplate; $('saveTemplateBtn').onclick=()=>runButton($('saveTemplateBtn'),'Сохраняем…',saveCommonTemplate).catch(e=>setStatus(e.message,true)); $('deleteTemplateBtn').onclick=()=>runButton($('deleteTemplateBtn'),'Выключаем…',deleteCommonTemplate).catch(e=>setStatus(e.message,true)); $('saveTablesBtn').onclick=()=>runButton($('saveTablesBtn'),'Сохраняем…',saveTables).catch(e=>setStatus(e.message,true)); $('copyWebhookBtn').onclick=()=>runButton($('copyWebhookBtn'),'Копируем…',async()=>{try{await navigator.clipboard.writeText($('webhookInput').value);setStatus('Webhook URL скопирован')}catch{setStatus('Не удалось скопировать',true)}});
 loadAll().catch(e=>{document.querySelector('.shell').innerHTML=`<header class="top"><div class="title"><strong>Чаты продаж</strong><span class="badge">VK + Telegram</span></div><a class="btn primary" href="chat/" target="_blank" rel="noreferrer">Открыть fullscreen</a></header><main class="main"><div class="section"><div class="section-title">Нет доступа к настройкам</div><div class="meta">Управление доступами и листами доступно только Nexus admin.</div><div class="error">${esc(e.message)}</div></div></main>`});
 </script>
 </body>

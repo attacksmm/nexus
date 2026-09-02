@@ -10,6 +10,7 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import time
 from urllib.parse import parse_qs, urlparse
 from contextlib import contextmanager
@@ -52,6 +53,8 @@ VK_STAFF_SOURCE_DISCOVERY_LIMIT = 250
 SENLER_API_BASE = "https://senler.ru/api"
 SENLER_COURSE_CHAT_SUBSCRIPTION_ID = "3801272"
 DEFAULT_MODULE_ID = "course-chat-creator"
+STAFF_REGISTRY_MODULE_NAME = "_nexus_mod_staff-registry"
+STAFF_REGISTRY_PANEL_PATH = "/nexus/staff-registry/panel/"
 DEFAULT_CHAT_LINKS_SPREADSHEET_ID = "1zu1__XcKxJH8yC9ForDvibaUnKFCS1pxWHEjLgqlVXA"
 CHAT_LINK_SHEETS = {
     "dog": {"telegram": "304757615", "vk": "443062527"},
@@ -75,6 +78,14 @@ _chat_links_sync_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
 _vk_staff_reconcile_last = 0.0
 _vk_staff_registry_refresh_last = 0.0
 _vk_staff_registry_discovery_last = 0.0
+
+
+def _ensure_local_staff_mutation_allowed() -> None:
+    if sys.modules.get(STAFF_REGISTRY_MODULE_NAME) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сотрудники управляются в едином реестре: {STAFF_REGISTRY_PANEL_PATH}",
+        )
 _vk_pin_watchdog_state: dict[str, Any] = {
     "interval_seconds": 10,
     "last_check_at": "",
@@ -929,6 +940,265 @@ def _mentions(people: list[dict[str, Any]], platform: str) -> str:
         if ref:
             items.append(ref)
     return ", ".join(items) if items else "не указаны"
+
+
+def _staff_source_local_id(employee: dict[str, Any]) -> int:
+    links = employee.get("source_links") if isinstance(employee, dict) else {}
+    if not isinstance(links, dict):
+        return 0
+    value = links.get(DEFAULT_MODULE_ID)
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    try:
+        local_id = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return local_id if local_id > 0 else 0
+
+
+def _staff_identity_values(employee: dict[str, Any], providers: set[str]) -> list[str]:
+    result: list[str] = []
+    identities = employee.get("identities") if isinstance(employee, dict) else []
+    if not isinstance(identities, list):
+        return result
+    for identity in identities:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider")).casefold().replace("_", "-")
+        if provider not in providers:
+            continue
+        for key in ("external_id", "username"):
+            value = _clean(identity.get(key))
+            if value and value not in result:
+                result.append(value)
+    return result
+
+
+def _staff_vk_keys(value: Any) -> set[str]:
+    raw = _clean(value)
+    if not raw:
+        return set()
+    result = {match for match in re.findall(r"\bid(\d+)\b", raw, flags=re.IGNORECASE)}
+    screen_name = _vk_screen_name(raw).casefold()
+    if screen_name:
+        result.add(screen_name)
+    return result
+
+
+def _staff_tg_key(value: Any) -> str:
+    return _tg_username(value).casefold()
+
+
+def _staff_person_view(row: dict[str, Any]) -> dict[str, Any]:
+    vk_value = _clean(row.get("vk_id"))
+    vk_screen = _vk_screen_name(vk_value)
+    tg_ref = _tg_username(row.get("tg_ref"))
+    identities: list[dict[str, Any]] = []
+    if vk_value:
+        identity = {"provider": "vk", "external_id": vk_value}
+        if vk_screen and not vk_screen.isdigit():
+            identity["username"] = vk_screen
+        identities.append(identity)
+    if tg_ref:
+        identities.append({"provider": "telegram", "username": tg_ref})
+    config = {
+        "kind": _clean(row.get("kind")),
+        "vk_id": vk_value,
+        "tg_ref": tg_ref,
+        "offer_id": int(row.get("offer_id") or 0),
+        "parity": _clean(row.get("parity")) or "any",
+        "note": _clean(row.get("note")),
+        "enabled": bool(row.get("enabled")),
+    }
+    return {
+        "module_id": DEFAULT_MODULE_ID,
+        "local_id": str(int(row["id"])),
+        "full_name": _clean(row.get("name")),
+        "display_name": _clean(row.get("name")),
+        "identities": identities,
+        "config": config,
+        "active": bool(row.get("enabled")),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _staff_find_person(
+    employee: dict[str, Any], rows: list[dict[str, Any]], config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    local_id = _staff_source_local_id(employee)
+    matched_ids: set[int] = set()
+    if local_id:
+        matched_ids.update(int(row["id"]) for row in rows if int(row["id"]) == local_id)
+
+    vk_values = _staff_identity_values(employee, {"vk", "vkontakte", "vk.com"})
+    tg_values = _staff_identity_values(employee, {"telegram", "tg"})
+    if isinstance(config, dict):
+        if "vk_id" in config and _clean(config.get("vk_id")):
+            vk_values.append(_clean(config.get("vk_id")))
+        if "tg_ref" in config and _clean(config.get("tg_ref")):
+            tg_values.append(_clean(config.get("tg_ref")))
+    requested_vk = set().union(*(_staff_vk_keys(value) for value in vk_values)) if vk_values else set()
+    requested_tg = {_staff_tg_key(value) for value in tg_values if _staff_tg_key(value)}
+    for row in rows:
+        row_vk = _staff_vk_keys(row.get("vk_id")) | _staff_vk_keys(row.get("vk_mention"))
+        row_tg = _staff_tg_key(row.get("tg_ref"))
+        if (requested_vk and requested_vk.intersection(row_vk)) or (requested_tg and row_tg in requested_tg):
+            matched_ids.add(int(row["id"]))
+    if len(matched_ids) > 1:
+        raise ValueError("Точные идентификаторы указывают на разные записи course-chat-creator")
+    if not matched_ids:
+        return None
+    person_id = next(iter(matched_ids))
+    return next(row for row in rows if int(row["id"]) == person_id)
+
+
+def _staff_default_kind(employee: dict[str, Any]) -> str:
+    values: list[str] = []
+    job_profile = employee.get("job_profile") if isinstance(employee, dict) else ""
+    if isinstance(job_profile, dict):
+        values.extend(_clean(job_profile.get(key)).casefold() for key in ("key", "id", "name"))
+    else:
+        values.append(_clean(job_profile).casefold())
+    for role in employee.get("roles") or []:
+        if isinstance(role, dict):
+            values.extend(_clean(role.get(key)).casefold() for key in ("key", "id", "name"))
+        else:
+            values.append(_clean(role).casefold())
+    aliases = {
+        "admin": "admin", "administrator": "admin", "администратор": "admin",
+        "author": "author", "автор": "author",
+        "kurator": "kurator", "curator": "kurator", "куратор": "kurator",
+        "tech": "tech", "support": "tech", "техподдержка": "tech",
+    }
+    return next((aliases[value] for value in values if value in aliases), "")
+
+
+def service_staff_connector() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "module_id": DEFAULT_MODULE_ID,
+        "title": "Учебные чаты",
+        "entity": "person",
+        "operations": ["upsert", "deactivate"],
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "vk", "telegram"],
+        "config_fields": [
+            {"key": "kind", "type": "select", "required": True, "options": ["admin", "kurator", "author", "tech"]},
+            {"key": "vk_id", "type": "string"},
+            {"key": "tg_ref", "type": "string"},
+            {"key": "offer_id", "type": "integer", "minimum": 0},
+            {"key": "parity", "type": "select", "options": ["any", "even", "odd"]},
+            {"key": "note", "type": "string"},
+            {"key": "enabled", "type": "boolean"},
+        ],
+    }
+
+
+def service_staff_list() -> list[dict[str, Any]]:
+    return [_staff_person_view(row) for row in _people(enabled=False)]
+
+
+def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    items = service_staff_list()
+    if not employee:
+        return {"ok": True, "module_id": DEFAULT_MODULE_ID, "items": items}
+    rows = [{**item["config"], "id": int(item["local_id"]), "name": item["display_name"], "updated_at": item.get("updated_at")} for item in items]
+    row = _staff_find_person(employee, rows)
+    if not row:
+        return {"ok": True, "module_id": DEFAULT_MODULE_ID, "found": False, "local_id": "", "snapshot": None}
+    snapshot = _staff_person_view(row)
+    return {"ok": True, "module_id": DEFAULT_MODULE_ID, "found": True, "local_id": snapshot["local_id"], "snapshot": snapshot}
+
+
+def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any], operation: str, idempotency_key: str = "",
+) -> dict[str, Any]:
+    if not isinstance(employee, dict) or not isinstance(config, dict):
+        raise ValueError("employee и config должны быть объектами")
+    operation = _clean(operation).casefold()
+    if operation not in {"upsert", "deactivate"}:
+        raise ValueError("course-chat-creator поддерживает только upsert и deactivate")
+    _ensure_db()
+    marker = f"staff_apply:{hashlib.sha256(_clean(idempotency_key).encode()).hexdigest()}" if _clean(idempotency_key) else ""
+    with _db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = [dict(row) for row in db.execute("SELECT * FROM people ORDER BY id").fetchall()]
+        if marker:
+            replay = db.execute("SELECT value FROM meta WHERE key=?", (marker,)).fetchone()
+            if replay:
+                replay_data = json.loads(replay["value"])
+                replay_row = next((row for row in rows if int(row["id"]) == int(replay_data.get("local_id") or 0)), None)
+                if replay_row:
+                    snapshot = _staff_person_view(replay_row)
+                    return {"ok": True, "module_id": DEFAULT_MODULE_ID, "operation": operation, "local_id": snapshot["local_id"], "changed": False, "config": snapshot["config"], "snapshot": snapshot, "idempotent_replay": True}
+        row = _staff_find_person(employee, rows, config)
+        if operation == "deactivate":
+            if not row:
+                return {"ok": True, "module_id": DEFAULT_MODULE_ID, "operation": operation, "local_id": "", "changed": False, "config": {}, "snapshot": None, "warnings": ["Локальная запись не найдена; отключать нечего"]}
+            changed = bool(row.get("enabled"))
+            if changed:
+                db.execute("UPDATE people SET enabled=0,updated_at=strftime('%s','now') WHERE id=?", (int(row["id"]),))
+            person_id = int(row["id"])
+        else:
+            name = (_clean(employee.get("display_name")) or _clean(employee.get("full_name")))[:200]
+            if not name and row:
+                name = _clean(row.get("name"))[:200]
+            if not name:
+                raise ValueError("Для course-chat-creator требуется имя сотрудника")
+            kind = _clean(config.get("kind") if "kind" in config else (row or {}).get("kind")) or _staff_default_kind(employee)
+            if kind not in {"admin", "kurator", "author", "tech"}:
+                raise ValueError("kind должен быть admin, kurator, author или tech")
+            parity = _clean(config.get("parity") if "parity" in config else (row or {}).get("parity")) or "any"
+            if parity not in {"any", "even", "odd"}:
+                raise ValueError("parity должен быть any, even или odd")
+            try:
+                offer_id = max(0, int(config.get("offer_id") if "offer_id" in config else (row or {}).get("offer_id") or 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("offer_id должен быть целым неотрицательным числом") from exc
+            if kind != "kurator":
+                offer_id = 0
+            vk_values = _staff_identity_values(employee, {"vk", "vkontakte", "vk.com"})
+            tg_values = _staff_identity_values(employee, {"telegram", "tg"})
+            vk_id = _clean(config.get("vk_id") if "vk_id" in config else (row or {}).get("vk_id"))
+            if not vk_id and not row and vk_values:
+                vk_id = vk_values[0]
+            tg_ref = _tg_username(config.get("tg_ref") if "tg_ref" in config else (row or {}).get("tg_ref"))
+            if not tg_ref and not row:
+                tg_ref = next((_tg_username(value) for value in tg_values if _tg_username(value)), "")
+            enabled = bool(config.get("enabled")) if "enabled" in config else bool((row or {}).get("enabled", 1))
+            note = _clean(config.get("note") if "note" in config else (row or {}).get("note"))[:2000]
+            old_vk = _clean((row or {}).get("vk_id"))
+            vk_mention = _clean((row or {}).get("vk_mention")) if old_vk == vk_id else ""
+            if vk_id and not vk_mention:
+                vk_screen = _vk_screen_name(vk_id)
+                vk_mention = f"[id{vk_screen}|{name}]" if vk_screen.isdigit() else (f"@{vk_screen}" if vk_screen else "")
+            payload = {"kind": kind, "name": name, "vk_id": vk_id, "vk_mention": vk_mention, "tg_ref": tg_ref, "offer_id": offer_id, "parity": parity, "enabled": int(enabled), "note": note}
+            if row:
+                changed = any(row.get(key) != value for key, value in payload.items())
+                person_id = int(row["id"])
+                if changed:
+                    db.execute(
+                        """UPDATE people SET kind=:kind,name=:name,vk_id=:vk_id,vk_mention=:vk_mention,
+                           tg_ref=:tg_ref,offer_id=:offer_id,parity=:parity,enabled=:enabled,note=:note,
+                           updated_at=strftime('%s','now') WHERE id=:id""",
+                        {**payload, "id": person_id},
+                    )
+            else:
+                cur = db.execute(
+                    """INSERT INTO people(kind,name,vk_id,vk_mention,tg_ref,offer_id,parity,enabled,note)
+                       VALUES(:kind,:name,:vk_id,:vk_mention,:tg_ref,:offer_id,:parity,:enabled,:note)""",
+                    payload,
+                )
+                person_id, changed = int(cur.lastrowid), True
+        if marker:
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (marker, json.dumps({"local_id": person_id, "operation": operation})))
+        db.commit()
+        applied = dict(db.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone())
+    snapshot = _staff_person_view(applied)
+    return {"ok": True, "module_id": DEFAULT_MODULE_ID, "operation": operation, "local_id": snapshot["local_id"], "changed": changed, "config": snapshot["config"], "snapshot": snapshot}
 
 
 def _template(key: str) -> str:
@@ -5315,6 +5585,7 @@ async def list_people(request: Request):
 @router.post("/people")
 async def upsert_person(request: Request):
     await _require_panel_access(request)
+    _ensure_local_staff_mutation_allowed()
     _ensure_db()
     data = await request.json()
     kind = _clean(data.get("kind"))
@@ -5361,6 +5632,7 @@ async def upsert_person(request: Request):
 @router.delete("/people/{person_id}")
 async def delete_person(person_id: int, request: Request):
     await _require_panel_access(request)
+    _ensure_local_staff_mutation_allowed()
     _ensure_db()
     with _db() as db:
         db.execute("DELETE FROM people WHERE id=?", (person_id,))

@@ -30,6 +30,7 @@
     .f-group{display:grid;gap:4px;min-width:0}.f-group label{font-size:.72rem;color:var(--subtle);text-transform:uppercase;letter-spacing:.08em}
     .f-input{min-height:30px;width:100%;min-width:0;padding:4px 8px;border:1px solid var(--border-strong);background:#090909;color:var(--text)}
     .btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:30px;padding:4px 11px;border:1px solid var(--border-strong);background:var(--panel-strong);color:var(--text);font-size:.8rem;white-space:nowrap;text-decoration:none}.btn:disabled{opacity:.35;cursor:default}.btn--primary{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}.btn--ghost{background:transparent;border-color:var(--border);color:var(--muted)}.btn--sm{min-height:24px;padding:2px 7px;font-size:.74rem}
+    .spinner{display:none;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}.btn.is-busy .spinner{display:inline-block}@keyframes spin{to{transform:rotate(360deg)}}
     .badge{display:inline-block;padding:1px 7px;border:1px solid;font-size:.72rem}.badge--ok{color:var(--ok);border-color:var(--ok-bd);background:var(--ok-bg)}.badge--bad{color:var(--bad);border-color:var(--bad-bd);background:var(--bad-bg)}.badge--warn{color:var(--warn);border-color:var(--warn-bd);background:var(--warn-bg)}.badge--off{color:var(--subtle);border-color:var(--border-mid)}
     .mono{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.76rem}.muted{color:var(--subtle)}.bad{color:var(--bad)}.warn{color:var(--warn)}.ok{color:var(--ok)}.empty{padding:24px;text-align:center;color:var(--subtle)}
     .table-wrap{overflow:auto;flex:1;min-width:0}table{width:100%;max-width:100%;border-collapse:collapse;font-size:.82rem;table-layout:fixed}th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}th{color:var(--subtle);font-weight:500;background:var(--panel);position:sticky;top:0;z-index:1}tr:hover td{background:var(--panel-strong)}
@@ -150,7 +151,7 @@
         <div class="f-group"><label>Dry-run GetCourse</label><select id="dry_run" class="f-input"><option value="0">Нет</option><option value="1">Да</option></select></div>
         <div class="f-group"><label>Стартовая дата</label><input id="start_date" class="f-input" type="date"></div>
         <div class="f-group"><label>Polling, сек</label><input id="poll_seconds" class="f-input" type="number" min="10" max="3600"></div>
-        <button class="btn btn--primary" id="saveBtn" type="button">Сохранить</button>
+        <button class="btn btn--primary" id="saveBtn" type="button"><span class="spinner"></span><span>Сохранить</span></button>
       </div>
       <div class="form-grid" style="padding:0;border:0;background:transparent;grid-template-columns:repeat(4,minmax(150px,1fr))">
         <div class="f-group"><label>Timeout GetCourse, сек</label><input id="request_timeout" class="f-input" type="number" min="5" max="60"></div>
@@ -162,7 +163,7 @@
         <div class="f-group"><label>Credentials path</label><input id="curator_credentials_path" class="f-input mono" placeholder="ENV если пусто"></div>
         <div class="f-group"><label>Ячейка куратора</label><input id="curator_cell" class="f-input mono" value="K2"></div>
         <div class="f-group"><label>Диапазон поиска куратора</label><input id="curator_search_range" class="f-input mono" value="J2:AC2"></div>
-        <div class="f-group"><label>Сопоставление кураторов</label><input id="curator_map" class="f-input" placeholder="Ирина=Куратор 1;Слава=Куратор 2;Настасья=Куратор 3"></div>
+        <div class="f-group" style="grid-column:span 2"><label>Кураторы и варианты имён</label><a class="btn btn--ghost" href="/nexus/staff-registry/panel/">Управлять в модуле «Команда»</a></div>
         <div class="f-group"><label>Таблица ссылок</label><input id="chat_links_spreadsheet_id" class="f-input mono"></div>
         <div class="f-group"><label>Credentials ссылок</label><input id="chat_links_credentials_path" class="f-input mono" placeholder="ENV если пусто"></div>
         <div class="f-group"><label>Кэш учеников, минут</label><input id="students_cache_minutes" class="f-input" type="number" min="1" max="1440"></div>
@@ -237,9 +238,9 @@ function renderStats(){
 }
 async function loadSettings(){
   settings = await api('/settings');
-  ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','curator_map','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'].forEach(k=>{ if($(k)) $(k).value = settings[k] || ''; });
+  ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'].forEach(k=>{ if($(k)) $(k).value = settings[k] || ''; });
   if($('sourceDate') && !$('sourceDate').value) $('sourceDate').value = settings.start_date || '';
-  $('envBox').textContent = JSON.stringify({env:settings.env, paths:settings.paths, curator_spreadsheet_id:settings.curator_spreadsheet_id, chat_links_spreadsheet_id:settings.chat_links_spreadsheet_id, curator_cell:settings.curator_cell, curator_search_range:settings.curator_search_range, curator_map:settings.curator_map}, null, 2);
+  $('envBox').textContent = JSON.stringify({env:settings.env, paths:settings.paths, curator_spreadsheet_id:settings.curator_spreadsheet_id, chat_links_spreadsheet_id:settings.chat_links_spreadsheet_id, curator_cell:settings.curator_cell, curator_search_range:settings.curator_search_range, curator_map_source:'staff-registry'}, null, 2);
   renderStats();
 }
 function flowKey(flow){return `${flow.course_key || ''}:${flow.stream || ''}`}
@@ -366,12 +367,13 @@ async function loadChatFlows(){
   $('flowsTable').innerHTML = rows || `<tr><td colspan="5" class="empty">${esc(errorText || 'Потоки не найдены')}</td></tr>`;
 }
 async function saveSettings(){
-  const keys = ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','curator_map','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'];
+  const keys = ['enabled','dry_run','start_date','poll_seconds','request_timeout','field_stream','field_vk','field_tg','field_curator','curator_spreadsheet_id','curator_credentials_path','curator_cell','curator_search_range','chat_links_spreadsheet_id','chat_links_credentials_path','students_cache_minutes','students_data_range','students_order_lookup_limit','getcourse_web_base_url','gc_export_lookup_enabled','gc_export_lookup_max_requests_2h','gc_export_lookup_max_missing_per_refresh','gc_export_lookup_batch_size','gc_export_lookup_poll_attempts','gc_export_lookup_poll_delay_seconds','gc_export_lookup_cache_days','gc_export_lookup_auto_enqueue_enabled','gc_export_lookup_auto_enqueue_batch_size','gc_export_lookup_worker_interval_seconds','gc_export_lookup_job_timeout_seconds','gc_export_lookup_job_max_attempts','gc_fields_write_enabled','gc_fields_write_worker_interval_seconds','gc_fields_write_job_max_attempts'];
   const payload = {};
   keys.forEach(k=>payload[k]=$(k).value);
-  $('saveState').textContent = 'Сохраняю...';
+  const button=$('saveBtn');button.disabled=true;button.classList.add('is-busy');button.querySelector('span:last-child').textContent='Сохраняю…';$('saveState').textContent = 'Сохраняю настройки…';
   try { await api('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}); $('saveState').textContent='Сохранено'; await refreshAll(); }
   catch(e){ $('saveState').textContent = e.message; }
+  finally{button.disabled=false;button.classList.remove('is-busy');button.querySelector('span:last-child').textContent='Сохранить'}
 }
 async function scanNow(){
   $('scanBtn').disabled = true;

@@ -30,6 +30,16 @@ from orchestrator.auth import enforce_rate_limit, require_admin, verify_token_fr
 router = APIRouter()
 
 MODULE_ID = "student-transfer"
+STAFF_REGISTRY_MODULE_NAME = "_nexus_mod_staff-registry"
+STAFF_REGISTRY_PANEL_PATH = "/nexus/staff-registry/panel/"
+
+
+def _ensure_local_staff_mutation_allowed() -> None:
+    if sys.modules.get(STAFF_REGISTRY_MODULE_NAME) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Сотрудники управляются в едином реестре: {STAFF_REGISTRY_PANEL_PATH}",
+        )
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 SESSION_COOKIE = "student_transfer_session"
 SESSION_TTL_DAYS = 30
@@ -7839,9 +7849,272 @@ async def admin_operators(request: Request):
     } | {"password_set": bool(row["password_hash"])} for row in rows]}
 
 
+def _staff_source_local_id(employee: dict[str, Any]) -> int:
+    links = employee.get("source_links") if isinstance(employee, dict) else {}
+    if not isinstance(links, dict):
+        return 0
+    value = links.get(MODULE_ID)
+    if isinstance(value, dict):
+        value = value.get("local_id")
+    try:
+        local_id = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return local_id if local_id > 0 else 0
+
+
+def _staff_identity_values(employee: dict[str, Any]) -> tuple[set[int], set[str]]:
+    local_ids: set[int] = set()
+    logins: set[str] = set()
+    identities = employee.get("identities") if isinstance(employee, dict) else []
+    if not isinstance(identities, list):
+        return local_ids, logins
+    for identity in identities:
+        if not isinstance(identity, dict):
+            continue
+        provider = _clean(identity.get("provider"), 100).casefold().replace("_", "-")
+        if provider not in {MODULE_ID, "streams", "student-transfer-operator"}:
+            continue
+        external_id = _clean(identity.get("external_id"), 100)
+        if external_id.isdigit() and int(external_id) > 0:
+            local_ids.add(int(external_id))
+        username = _clean(identity.get("username"), 200)
+        if username:
+            logins.add(_norm(username))
+    return local_ids, logins
+
+
+def _staff_curator_requested(employee: dict[str, Any], config: dict[str, Any] | None = None) -> bool:
+    if isinstance(config, dict) and "curator" in config:
+        return bool(config.get("curator"))
+    values: list[str] = []
+    for role in employee.get("roles") or []:
+        if isinstance(role, dict):
+            values.extend(_norm(role.get(key)) for key in ("key", "id", "name"))
+        else:
+            values.append(_norm(role))
+    return any(value in {"curator", "kurator", "куратор"} for value in values)
+
+
+def _staff_operator_view(row: dict[str, Any], *, curator: bool | None = None) -> dict[str, Any]:
+    if curator is None:
+        curator = any(_norm(row.get("display_name")) == _norm(name) for name in CURATOR_NAMES.values())
+    config = {
+        "login": _clean(row.get("login"), 200),
+        "display_name": _clean(row.get("display_name"), 200),
+        "active": bool(row.get("active")),
+        "curator": bool(curator),
+    }
+    return {
+        "module_id": MODULE_ID,
+        "local_id": str(int(row["id"])),
+        "full_name": _clean(row.get("display_name"), 200),
+        "display_name": _clean(row.get("display_name"), 200),
+        "identities": [{"provider": MODULE_ID, "external_id": str(int(row["id"])), "username": _clean(row.get("login"), 200)}],
+        "config": config,
+        "role_metadata": {"curator": bool(curator), "flow_assignments_managed": False},
+        "active": bool(row.get("active")),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _staff_find_operator(
+    employee: dict[str, Any], rows: list[dict[str, Any]], config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    requested_ids, requested_logins = _staff_identity_values(employee)
+    local_id = _staff_source_local_id(employee)
+    if local_id:
+        requested_ids.add(local_id)
+    if isinstance(config, dict) and _clean(config.get("login"), 200):
+        requested_logins.add(_norm(config.get("login")))
+    matched_ids = {
+        int(row["id"])
+        for row in rows
+        if int(row["id"]) in requested_ids or _norm(row.get("login")) in requested_logins
+    }
+    if len(matched_ids) > 1:
+        raise ValueError("Точные идентификаторы указывают на разных операторов student-transfer")
+    if not matched_ids:
+        return None
+    operator_id = next(iter(matched_ids))
+    return next(row for row in rows if int(row["id"]) == operator_id)
+
+
+def service_staff_connector() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "module_id": MODULE_ID,
+        "title": "Управление потоками",
+        "entity": "operator",
+        "operations": ["upsert", "deactivate"],
+        "supports_deactivate": True,
+        "deactivate_preserves_history": True,
+        "matching": ["source_link", "student-transfer_identity", "login"],
+        "config_fields": [
+            {"key": "login", "type": "string", "required": True},
+            {"key": "display_name", "type": "string"},
+            {"key": "active", "type": "boolean"},
+            {"key": "password", "type": "password", "write_only": True, "minimum_length": PASSWORD_MIN_LENGTH},
+            {"key": "clear_password", "type": "boolean", "write_only": True},
+            {"key": "curator", "type": "boolean", "storage": "registry_metadata"},
+        ],
+        "role_metadata": {"curator": {"flow_assignments_managed": False}},
+    }
+
+
+async def service_staff_list() -> list[dict[str, Any]]:
+    async with _connect() as db:
+        rows = await (
+            await db.execute(
+                "SELECT id,login,display_name,active,created_at,updated_at FROM operators ORDER BY login_key,id"
+            )
+        ).fetchall()
+    return [_staff_operator_view(dict(row)) for row in rows]
+
+
+async def service_staff_snapshot(*, employee: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(employee, dict):
+        raise ValueError("employee должен быть объектом")
+    async with _connect() as db:
+        rows = [dict(row) for row in await (await db.execute(
+            "SELECT id,login,login_key,display_name,active,created_at,updated_at FROM operators ORDER BY id"
+        )).fetchall()]
+    if not employee:
+        return {"ok": True, "module_id": MODULE_ID, "items": [_staff_operator_view(row) for row in rows]}
+    row = _staff_find_operator(employee, rows)
+    if not row:
+        return {"ok": True, "module_id": MODULE_ID, "found": False, "local_id": "", "snapshot": None}
+    snapshot = _staff_operator_view(row, curator=_staff_curator_requested(employee))
+    return {"ok": True, "module_id": MODULE_ID, "found": True, "local_id": snapshot["local_id"], "snapshot": snapshot}
+
+
+async def service_staff_apply(
+    *, employee: dict[str, Any], config: dict[str, Any], operation: str, idempotency_key: str = "",
+) -> dict[str, Any]:
+    if not isinstance(employee, dict) or not isinstance(config, dict):
+        raise ValueError("employee и config должны быть объектами")
+    operation = _clean(operation, 50).casefold()
+    if operation not in {"upsert", "deactivate"}:
+        raise ValueError("student-transfer поддерживает только upsert и deactivate")
+    raw_password = str(config.get("password") or "")
+    if len(raw_password) > 200:
+        raise ValueError("Пароль не может быть длиннее 200 символов")
+    if raw_password and len(raw_password) < PASSWORD_MIN_LENGTH:
+        raise ValueError(f"Пароль должен быть не короче {PASSWORD_MIN_LENGTH} символов")
+    clear_password = bool(config.get("clear_password"))
+    marker = f"staff_apply:{hashlib.sha256(_clean(idempotency_key, 500).encode()).hexdigest()}" if _clean(idempotency_key, 500) else ""
+    curator = _staff_curator_requested(employee, config)
+    warnings = ["Роль куратора сохранена как метаданные; назначения потоков не изменялись"] if curator else []
+    if marker:
+        async with _connect() as db:
+            replay = await (
+                await db.execute(
+                    """SELECT o.id,o.login,o.login_key,o.display_name,o.active,o.created_at,o.updated_at
+                       FROM registry_meta m JOIN operators o
+                         ON o.id=CAST(json_extract(m.value,'$.local_id') AS INTEGER)
+                       WHERE m.key=?""",
+                    (marker,),
+                )
+            ).fetchone()
+        if replay:
+            snapshot = _staff_operator_view(dict(replay), curator=curator)
+            return {"ok": True, "module_id": MODULE_ID, "operation": operation, "local_id": snapshot["local_id"], "changed": False, "config": snapshot["config"], "snapshot": snapshot, "warnings": warnings, "idempotent_replay": True}
+    password_hash = await asyncio.to_thread(_password_ctx.hash, raw_password) if raw_password else ""
+    async with _connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        rows = [dict(row) for row in await (await db.execute(
+            "SELECT id,login,login_key,display_name,active,created_at,updated_at FROM operators ORDER BY id"
+        )).fetchall()]
+        if marker:
+            replay = await (await db.execute("SELECT value FROM registry_meta WHERE key=?", (marker,))).fetchone()
+            if replay:
+                replay_data = json.loads(replay["value"])
+                replay_row = next((row for row in rows if int(row["id"]) == int(replay_data.get("local_id") or 0)), None)
+                if replay_row:
+                    snapshot = _staff_operator_view(replay_row, curator=curator)
+                    return {"ok": True, "module_id": MODULE_ID, "operation": operation, "local_id": snapshot["local_id"], "changed": False, "config": snapshot["config"], "snapshot": snapshot, "warnings": warnings, "idempotent_replay": True}
+        row = _staff_find_operator(employee, rows, config)
+        now = _now()
+        if operation == "deactivate":
+            if not row:
+                return {"ok": True, "module_id": MODULE_ID, "operation": operation, "local_id": "", "changed": False, "config": {}, "snapshot": None, "warnings": ["Локальная запись не найдена; отключать нечего"]}
+            operator_id = int(row["id"])
+            changed = bool(row.get("active"))
+            if changed:
+                await db.execute("UPDATE operators SET active=0,updated_at=? WHERE id=?", (now, operator_id))
+            await db.execute("DELETE FROM sessions WHERE operator_id=?", (operator_id,))
+        else:
+            login = _clean(config.get("login") if "login" in config else (row or {}).get("login"), 200)
+            if not login:
+                raise ValueError("Для student-transfer требуется логин")
+            if not row and not raw_password and not clear_password:
+                return {
+                    "ok": False,
+                    "module_id": MODULE_ID,
+                    "operation": operation,
+                    "local_id": "",
+                    "changed": False,
+                    "needs_input": "password",
+                    "error": "Для нового оператора Streams установите пароль из карточки сотрудника",
+                    "warnings": warnings,
+                }
+            display_name = _clean(
+                config.get("display_name") if "display_name" in config else (
+                    (row or {}).get("display_name") or employee.get("display_name") or employee.get("full_name")
+                ),
+                200,
+            )
+            active = bool(config.get("active")) if "active" in config else bool((row or {}).get("active", 1))
+            try:
+                if row:
+                    operator_id = int(row["id"])
+                    changed = any((row.get("login") != login, row.get("display_name") != display_name, bool(row.get("active")) != active, bool(raw_password), clear_password))
+                    if changed:
+                        if clear_password:
+                            await db.execute(
+                                "UPDATE operators SET login=?,login_key=?,display_name=?,password_hash='',active=?,updated_at=? WHERE id=?",
+                                (login, _norm(login), display_name, int(active), now, operator_id),
+                            )
+                        elif raw_password:
+                            await db.execute(
+                                "UPDATE operators SET login=?,login_key=?,display_name=?,password_hash=?,active=?,updated_at=? WHERE id=?",
+                                (login, _norm(login), display_name, password_hash, int(active), now, operator_id),
+                            )
+                        else:
+                            await db.execute(
+                                "UPDATE operators SET login=?,login_key=?,display_name=?,active=?,updated_at=? WHERE id=?",
+                                (login, _norm(login), display_name, int(active), now, operator_id),
+                            )
+                else:
+                    if clear_password:
+                        password_hash = ""
+                    cur = await db.execute(
+                        "INSERT INTO operators(login,login_key,display_name,password_hash,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                        (login, _norm(login), display_name, password_hash, int(active), now, now),
+                    )
+                    operator_id, changed = int(cur.lastrowid), True
+            except aiosqlite.IntegrityError as exc:
+                raise ValueError("Такой логин student-transfer уже существует") from exc
+            if raw_password or clear_password or not active:
+                await db.execute("DELETE FROM sessions WHERE operator_id=?", (operator_id,))
+        if marker:
+            await db.execute(
+                "INSERT OR REPLACE INTO registry_meta(key,value) VALUES(?,?)",
+                (marker, json.dumps({"local_id": operator_id, "operation": operation})),
+            )
+        await db.commit()
+        applied = await (await db.execute(
+            "SELECT id,login,login_key,display_name,active,created_at,updated_at FROM operators WHERE id=?",
+            (operator_id,),
+        )).fetchone()
+    snapshot = _staff_operator_view(dict(applied), curator=curator)
+    return {"ok": True, "module_id": MODULE_ID, "operation": operation, "local_id": snapshot["local_id"], "changed": changed, "config": snapshot["config"], "snapshot": snapshot, "warnings": warnings}
+
+
 @router.post("/admin/operators")
 async def admin_create_operator(data: OperatorIn, request: Request):
     await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     login = _clean(data.login, 200)
     if not login:
         raise HTTPException(400, "Логин обязателен")
@@ -7865,6 +8138,7 @@ async def admin_create_operator(data: OperatorIn, request: Request):
 @router.put("/admin/operators/{operator_id}")
 async def admin_update_operator(operator_id: int, data: OperatorIn, request: Request):
     await _require_admin(request)
+    _ensure_local_staff_mutation_allowed()
     login = _clean(data.login, 200)
     if not login:
         raise HTTPException(400, "Логин обязателен")

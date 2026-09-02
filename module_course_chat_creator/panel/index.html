@@ -42,7 +42,7 @@
 <div class="shell">
   <nav class="tabs" aria-label="Разделы модуля">
     <button class="tab active" data-view="create" type="button">Создать</button>
-    <button class="tab" data-view="people" type="button">Люди</button>
+    <button class="tab" data-view="people" type="button">Сотрудники</button>
     <button class="tab" data-view="courses" type="button">Курсы</button>
     <button class="tab" data-view="templates" type="button">Шаблоны</button>
     <button class="tab" data-view="telegram" type="button">Telegram</button>
@@ -95,23 +95,11 @@
     </section>
 
     <section class="view" id="view-people" hidden>
-      <div class="head"><h1>Люди и роли</h1><p class="muted">Кураторы выбираются по номеру потока только если задана четность. Сейчас основной куратор — Ирина.</p></div>
+      <div class="head"><h1>Сотрудники</h1><p class="muted">Единая карточка сотрудника управляет ролями, контактами и доступом к модулю.</p></div>
       <div class="surface">
-        <div class="grid3">
-          <label>Роль<select id="pKind"><option value="admin">Админ</option><option value="author">Автор курса</option><option value="kurator">Куратор</option><option value="tech">Техподдержка</option></select></label>
-          <label>Имя<input id="pName"></label>
-          <label>Потоки<select id="pParity"><option value="any">Все потоки</option><option value="even">Только четные</option><option value="odd">Только нечетные</option></select></label>
-          <label>VK страница / username / ID<input id="pVkId" placeholder="https://vk.com/name или @name"></label>
-          <label>Telegram username<input id="pTgRef" placeholder="@username"></label>
-          <label>Предложение GetCourse<input id="pOfferId" inputmode="numeric" placeholder="8593080"></label>
-          <label>Активен<select id="pEnabled"><option value="1">да</option><option value="0">нет</option></select></label>
-        </div>
-        <div class="actions"><button class="btn" id="personSave" type="button">Сохранить</button><button class="btn ghost" id="personClear" type="button">Новая запись</button></div>
-        <pre id="peopleStatus" hidden></pre>
-      </div>
-      <div class="table">
-        <div class="table-head people-head"><span>Роль</span><span>Имя</span><span>VK</span><span>Telegram</span><span>Потоки</span><span>Статус</span><span></span></div>
-        <div id="peopleList"></div>
+        <h2>Управление перенесено в единый реестр</h2>
+        <p class="muted">Добавляйте сотрудников, меняйте роли и настройки учебных чатов в центральном реестре. Текущие назначения кураторов продолжают использоваться при создании чатов.</p>
+        <div class="actions"><a class="btn" href="/nexus/staff-registry/panel/" target="_top">Открыть реестр сотрудников</a></div>
       </div>
     </section>
 
@@ -258,9 +246,7 @@ const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const show = (el, data) => { el.hidden = false; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
 const hide = el => { el.hidden = true; el.textContent = ""; };
-let people = [], courses = [], templates = [], broadcastChats = [], broadcastHistory = [], editPersonId = null;
-const roleLabels = {admin:"Админ", author:"Автор курса", kurator:"Куратор", tech:"Техподдержка"};
-const parityLabels = {any:"Все", even:"Четные", odd:"Нечетные"};
+let people = [], courses = [], templates = [], broadcastChats = [], broadcastHistory = [];
 const enabledLabel = value => value ? "Да" : "Нет";
 function vkHandle(person) {
   const mention = String(person.vk_mention || "");
@@ -290,7 +276,6 @@ async function getJson(path, opts) {
   return data;
 }
 const postJson = (path, payload) => getJson(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
-const deleteJson = path => getJson(path, {method:"DELETE"});
 
 async function loadStatus() {
   try {
@@ -327,14 +312,6 @@ async function loadPeople() {
   const data = await getJson("/people");
   people = data.items;
   renderCurators();
-  $("peopleList").innerHTML = people.map(p => `<div class="row people-row">
-    <span>${esc(roleLabels[p.kind] || p.kind)}</span>
-    <span><span class="cell-main">${esc(p.name)}</span></span>
-    <span>${esc(p.vk_id || "")}</span><span>${esc(p.tg_ref || "")}</span>
-    <span>${esc(parityLabels[p.parity] || p.parity)}</span>
-    <span class="${p.enabled ? "on" : "off"}">${enabledLabel(p.enabled)}</span>
-    <span class="actions"><button class="btn ghost" type="button" data-person-action="edit" data-id="${p.id}">Править</button><button class="btn danger" type="button" data-person-action="delete" data-id="${p.id}">Удалить</button></span>
-  </div>`).join("");
 }
 function renderCurators() {
   const active = people.filter(p => p.kind === "kurator" && p.enabled);
@@ -342,37 +319,6 @@ function renderCurators() {
   $("curator").innerHTML = `<option value="">Выберите куратора</option>` + active.map(p => `<option value="${p.id}">${esc(curatorLabel(p))}</option>`).join("");
   $("curator").value = active.some(p => String(p.id) === current) ? current : "";
 }
-function editPerson(p) {
-  editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pOfferId").value = p.offer_id || ""; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
-  const form = $("pName").closest(".surface"); form?.scrollIntoView({block:"start",behavior:"smooth"}); $("pName").focus(); show($("peopleStatus"), `Редактируется: ${p.name}`);
-}
-$("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pTgRef","pOfferId"].forEach(id => $(id).value = ""); $("pParity").value = "any"; $("pEnabled").value = "1"; };
-$("personSave").onclick = async () => {
-  try {
-    const payload = {id:editPersonId, kind:$("pKind").value, name:$("pName").value, vk_id:$("pVkId").value, tg_ref:$("pTgRef").value, offer_id:Number($("pOfferId").value||0), parity:$("pParity").value, enabled:$("pEnabled").value === "1"};
-    hide($("peopleStatus")); await postJson("/people", payload); await loadPeople(); $("personClear").click();
-  } catch(e) { show($("peopleStatus"), e); }
-};
-
-$("peopleList").addEventListener("click", async event => {
-  const btn = event.target.closest("button[data-person-action]");
-  if (!btn) return;
-  const id = Number(btn.dataset.id);
-  const person = people.find(p => Number(p.id) === id);
-  if (!person) return;
-  if (btn.dataset.personAction === "edit") {
-    editPerson(person);
-    return;
-  }
-  if (!confirm(`Удалить сотрудника «${person.name}» из списка?`)) return;
-  try {
-    hide($("peopleStatus"));
-    await deleteJson(`/people/${id}`);
-    if (editPersonId === id) $("personClear").click();
-    await loadPeople();
-  } catch(e) { show($("peopleStatus"), e); }
-});
-
 $("courseList").addEventListener("click", event => {
   const btn = event.target.closest("button[data-course-action='edit']");
   if (!btn) return;
