@@ -9213,24 +9213,34 @@ async def _inbox_items(
         visible_keys = [(row["channel_id"], row["chat_type"], row["chat_id"]) for row in rows]
         if visible_keys:
             visible_values = ",".join("(?,?,?)" for _ in visible_keys)
-            unread_params: list[Any] = []
+            read_params: list[Any] = []
             for key in visible_keys:
-                unread_params.extend(key)
-            unread_params.extend((device_id, initialized_at))
-            unread_rows = await (
+                read_params.extend(key)
+            read_rows = await (
                 await db.execute(
                     f"""WITH visible(channel_id,chat_type,chat_id) AS (VALUES {visible_values})
-                        SELECT m.channel_id,m.chat_type,m.chat_id,COUNT(*) AS unread
-                        FROM visible v
-                        JOIN wazzup_messages m ON m.channel_id=v.channel_id
-                             AND m.chat_type=v.chat_type AND m.chat_id=v.chat_id
-                        LEFT JOIN inbox_reads r ON r.device_id=? AND r.channel_id=m.channel_id
-                             AND r.chat_type=m.chat_type AND r.chat_id=m.chat_id
-                        WHERE m.direction='incoming' AND m.sent_at>COALESCE(r.last_read_at,?)
-                        GROUP BY m.channel_id,m.chat_type,m.chat_id""",
-                    unread_params,
+                        SELECT v.channel_id,v.chat_type,v.chat_id,r.last_read_at
+                        FROM visible v LEFT JOIN inbox_reads r ON r.device_id=?
+                             AND r.channel_id=v.channel_id AND r.chat_type=v.chat_type AND r.chat_id=v.chat_id""",
+                    (*read_params, device_id),
                 )
             ).fetchall()
+            unread_rows = []
+            for read_row in read_rows:
+                last_read_at = _clean(read_row["last_read_at"], 80) or initialized_at
+                count_row = await (
+                    await db.execute(
+                        """SELECT COUNT(*) AS unread FROM (
+                           SELECT 1 FROM wazzup_messages INDEXED BY ix_gcw_messages_chat
+                           WHERE channel_id=? AND chat_type=? AND chat_id=?
+                             AND direction='incoming' AND sent_at>? LIMIT 100)""",
+                        (read_row["channel_id"], read_row["chat_type"], read_row["chat_id"], last_read_at),
+                    )
+                ).fetchone()
+                unread_rows.append({
+                    "channel_id": read_row["channel_id"], "chat_type": read_row["chat_type"],
+                    "chat_id": read_row["chat_id"], "unread": int(count_row["unread"]),
+                })
         else:
             unread_rows = []
     finally:
