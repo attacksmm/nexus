@@ -104,9 +104,14 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('id="sidebarClose"', page)
         self.assertNotIn('id="appearanceButton"', page)
         self.assertNotIn('id="appearanceClose"', page)
+        self.assertNotIn('id="refreshInbox"', page)
+        self.assertNotIn('Каналы подключены', page)
+        self.assertIn('.threads{height:auto;min-height:0;align-self:stretch;overflow-x:hidden;overflow-y:auto', page)
         self.assertIn('data-theme-choice="light"', page)
         self.assertIn('data-scale-choice="xlarge"', page)
         self.assertIn("restoreInbox()", script)
+        self.assertIn("scheduleInboxPoll()", script)
+        self.assertIn("},8000)", script)
         self.assertIn("nexus-messenger-fullscreen-preferences", script)
         self.assertIn("path==='/inbox'?30000:15000", script)
 
@@ -143,6 +148,7 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn(".frame{position:absolute!important", page)
         self.assertIn("height:100%!important", page)
         self.assertIn("ORDER BY sent_at DESC,id DESC LIMIT 200", router)
+        self.assertIn("base=STANDALONE?(innerWidth<=680?48:52):76", self.amocrm)
 
 
 if __name__ == "__main__":
