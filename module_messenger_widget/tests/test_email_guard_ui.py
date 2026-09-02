@@ -128,6 +128,7 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("request('/channels',{scope:'inbox'})", script)
         self.assertIn('id="conversationSettings"', page)
         self.assertIn("nexus-messenger-open-settings", script)
+        self.assertIn("data:image/svg+xml", self.amocrm)
 
     def test_fullscreen_conversation_is_bounded_to_the_visible_viewport(self):
         module = Path(__file__).resolve().parents[1]
