@@ -602,24 +602,62 @@ class IdentityIndex:
                         )
                         if value
                     }
-                    clauses: list[str] = []
-                    params: list[str] = []
-                    for email in sorted(emails):
-                        clauses.append("custom_fields LIKE ?")
-                        params.append(f"%{email}%")
-                    for phone in sorted(phones):
-                        clauses.append("custom_fields LIKE ?")
-                        params.append(f"%{phone.removeprefix('+')[-10:]}%")
-                    for gc_id in sorted(gc_ids):
-                        clauses.append("custom_fields LIKE ?")
-                        params.append(f"%{gc_id}%")
-                    if clauses:
+                    tokens = {
+                        *(f"email:{value}" for value in emails),
+                        *(f"phone:{value}" for value in phones),
+                        *(f"getcourse_user:{value}" for value in gc_ids),
+                    }
+                    order_ids: list[int] = []
+                    if tokens and self.index_db.is_file():
+                        try:
+                            with sqlite3.connect(
+                                f"file:{self.index_db.as_posix()}?mode=ro", uri=True, timeout=5,
+                            ) as index:
+                                hashes = tuple(token_hash(value) for value in tokens)
+                                placeholders = ",".join("?" for _ in hashes)
+                                entity_ids = [int(row[0]) for row in index.execute(
+                                    f"SELECT DISTINCT entity_id FROM tokens WHERE token_hash IN ({placeholders})",
+                                    hashes,
+                                )]
+                                if entity_ids:
+                                    entity_placeholders = ",".join("?" for _ in entity_ids)
+                                    order_ids = [int(row[0]) for row in index.execute(
+                                        f"SELECT DISTINCT record_id FROM record_refs "
+                                        f"WHERE entity_id IN ({entity_placeholders}) "
+                                        "AND table_name='cdb_getcourse_orders' LIMIT 200",
+                                        tuple(entity_ids),
+                                    )]
+                        except sqlite3.Error:
+                            order_ids = []
+                    if order_ids:
+                        order_placeholders = ",".join("?" for _ in order_ids)
+                        rows = source.execute(
+                            f"SELECT custom_fields FROM cdb_getcourse_orders "
+                            f"WHERE id IN ({order_placeholders}) "
+                            "ORDER BY updated_at DESC,id DESC LIMIT 200",
+                            tuple(order_ids),
+                        ).fetchall()
+                    elif not self.index_db.is_file():
+                        clauses: list[str] = []
+                        params: list[str] = []
+                        for email in sorted(emails):
+                            clauses.append("custom_fields LIKE ?")
+                            params.append(f"%{email}%")
+                        for phone in sorted(phones):
+                            clauses.append("custom_fields LIKE ?")
+                            params.append(f"%{phone.removeprefix('+')[-10:]}%")
+                        for gc_id in sorted(gc_ids):
+                            clauses.append("custom_fields LIKE ?")
+                            params.append(f"%{gc_id}%")
                         rows = source.execute(
                             "SELECT custom_fields FROM cdb_getcourse_orders WHERE "
                             + " OR ".join(clauses)
                             + " ORDER BY updated_at DESC,id DESC LIMIT 200",
                             params,
-                        ).fetchall()
+                        ).fetchall() if clauses else []
+                    else:
+                        rows = []
+                    if rows:
                         for row in rows:
                             fields = parse_object(row[0])
                             row_phones, row_emails = contact_identity(fields)

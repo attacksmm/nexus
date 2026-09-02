@@ -2,7 +2,9 @@ define(['jquery'], function ($) {
   'use strict';
   const Widget = function () {
     const self = this;
-    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html?v=51506';
+    const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html';
+    const WIDGET_BOOTSTRAP_VERSION = '1.9.3';
+    const REMOTE_CACHE_WINDOW_MS = 5 * 60 * 1000;
     const AMO_REQUEST_TIMEOUT = 6000;
     const CONTEXT_TIMEOUT = 20000;
 
@@ -130,9 +132,18 @@ define(['jquery'], function ($) {
       const attrs = Object.assign({}, json(app.data && app.data.current_card), json((app.constant && app.constant('card')) || {}));
       const fields = scalarFields(attrs, '', {});
       addCustomFields(fields, attrs.custom_fields_values || attrs.custom_fields, page.entity === 'contacts' ? 'contact' : 'lead', true);
+      const contacts = (attrs._embedded && attrs._embedded.contacts) || attrs.contacts || [];
+      const localContact = page.entity === 'contacts' ? attrs : json(contacts.find(function (item) { return item.is_main; }) || contacts[0] || {});
+      addCustomFields(fields, localContact.custom_fields_values || localContact.custom_fields, 'contact', false);
+      let phone = '', email = '';
+      (localContact.custom_fields_values || localContact.custom_fields || []).forEach(function (field) {
+        const code = String(field.field_code || field.code || '').toUpperCase(), value = fieldValue(field);
+        if (code === 'PHONE' && !phone) phone = value;
+        if (code === 'EMAIL' && !email) email = value.toLowerCase();
+      });
       return Object.assign(currentUser(), {
         platform: 'amocrm', entity_type:page.entity === 'contacts' ? 'contact' : 'lead', entity_id:page.id,
-        name:String(attrs.name || '').trim(), phone:'', email:'', source_url:location.href, fields:fields
+        name:String(localContact.name || attrs.name || '').trim(), phone:phone, email:email, source_url:location.href, fields:fields
       });
     }
 
@@ -150,7 +161,19 @@ define(['jquery'], function ($) {
     function widgetUrl() {
       const settings = typeof self.get_settings === 'function' ? self.get_settings() : {};
       const value = String(settings.nexus_url || '').trim();
-      return /^https:\/\//i.test(value) ? value.replace(/\/$/, '') : DEFAULT_URL;
+      const base = /^https:\/\//i.test(value) ? value.replace(/\/$/, '') : DEFAULT_URL;
+      try {
+        const url = new URL(base);
+        // The amoCRM archive is only a bootstrap. Its remote interface may be
+        // released with the Nexus module, so use a short rolling cache key:
+        // repeated opens stay fast while UI releases arrive without another
+        // amoCRM ZIP upload.
+        const cacheSlot = Math.floor(Date.now() / REMOTE_CACHE_WINDOW_MS);
+        url.searchParams.set('v', WIDGET_BOOTSTRAP_VERSION + '-' + cacheSlot);
+        return url.toString();
+      } catch (_) {
+        return DEFAULT_URL + '?v=' + encodeURIComponent(WIDGET_BOOTSTRAP_VERSION);
+      }
     }
 
     function closeModal() {
@@ -168,6 +191,8 @@ define(['jquery'], function ($) {
       if (window.innerWidth <= 680) { layer.css('padding', 0); shell.css({width:'100vw',height:'100dvh',minWidth:0,minHeight:0,maxWidth:'none',maxHeight:'none',resize:'none'}); }
       const targetOrigin = new URL(frameUrl).origin;
       let contextDelivered = false;
+      let enrichmentPromise = null;
+      let deliveredContextSignature = '';
       let frameDeadline;
       let loadingTheme = 'light';
       function applyLoadingTheme(theme) {
@@ -194,19 +219,31 @@ define(['jquery'], function ($) {
           loading.empty().append($('<div>Виджет не загрузился</div>'), retry);
           retry.on('click', function () {
             contextDelivered = false;
+            deliveredContextSignature = '';
             paintLoading('Получаем данные клиента…');
             frame.attr('src', frameUrl);
             armFrameDeadline();
           });
         }, 30000);
       }
-      async function sendContext() {
-        if (contextDelivered || !frame[0].contentWindow) return;
-        const resolvedContext = await fastContext();
-        if (contextDelivered || !frame[0].contentWindow) return;
+      function contextSignature(value) {
+        return JSON.stringify([value.entity_type,value.entity_id,value.phone,value.email,value.name,value.fields]);
+      }
+      function postContext(value) {
+        if (!frame[0].isConnected || !frame[0].contentWindow) return;
+        const signature = contextSignature(value);
+        if (contextDelivered && signature === deliveredContextSignature) return;
         contextDelivered = true;
-        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:resolvedContext}, targetOrigin);
-        setTimeout(paint, 1200);
+        deliveredContextSignature = signature;
+        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:value}, targetOrigin);
+      }
+      function sendContext() {
+        if (!contextDelivered) {
+          postContext(basicContext());
+          setTimeout(paint, 1200);
+        }
+        if (!enrichmentPromise) enrichmentPromise = cardContext().catch(function () { return null; });
+        enrichmentPromise.then(function (resolvedContext) { if (resolvedContext) postContext(resolvedContext); });
       }
       async function ready(event) {
         if (event.source !== frame[0].contentWindow || event.origin !== targetOrigin || !event.data) return;
@@ -227,10 +264,10 @@ define(['jquery'], function ($) {
           }
           return;
         }
-        if (event.data.type === 'nexus-messenger-ready') sendContext().catch(function () { contextDelivered = false; });
+        if (event.data.type === 'nexus-messenger-ready') sendContext();
       }
       window.addEventListener('message', ready, {once:false});
-      frame.on('load', function () { sendContext().catch(function () { contextDelivered = false; }); });
+      frame.on('load', sendContext);
       shell.append(loading, frame); layer.append(shell).on('click', function (event) { if (event.target === layer[0]) closeModal(); }); $('body').append(layer);
       armFrameDeadline();
       layer.on('remove', function () { clearTimeout(frameDeadline); window.removeEventListener('message', ready); });

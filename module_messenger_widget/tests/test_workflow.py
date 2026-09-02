@@ -128,6 +128,38 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["content_uri"], url)
         self.assertEqual(json.loads(row["raw_json"])["contentType"], "image/png")
 
+    async def test_hidden_personal_telegram_dialog_is_never_stored(self):
+        class Message:
+            id = 42
+            out = False
+            file = None
+            message = "Служебное сообщение"
+            date = None
+            sender_id = 943871493
+
+        class Entity:
+            id = 943871493
+            first_name = "Дмитрий"
+            last_name = ""
+            username = "papaproduser"
+            phone = "79997301959"
+
+        stored = await router._telegram_store_messages(
+            {"channel_id": "telegram-personal:test"},
+            Entity(),
+            [Message()],
+            {"phone": "+79997301959", "name": "Дмитрий"},
+        )
+        self.assertEqual(stored, 0)
+        async with aiosqlite.connect(router._must_db()) as db:
+            chats = (await (await db.execute(
+                "SELECT COUNT(*) FROM wazzup_chats WHERE chat_id='943871493'",
+            )).fetchone())[0]
+            messages = (await (await db.execute(
+                "SELECT COUNT(*) FROM wazzup_messages WHERE chat_id='943871493'",
+            )).fetchone())[0]
+        self.assertEqual((chats, messages), (0, 0))
+
     async def test_failed_max_attachment_is_visible_from_durable_job(self):
         now = router._iso()
         request_key = "max-image-failure"
@@ -520,6 +552,54 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             {"owned", "other"},
         )
 
+    async def test_hidden_personal_telegram_dialogs_are_absent_from_inbox(self):
+        now = router._iso()
+        channel_id = "telegram-personal:1"
+        async with aiosqlite.connect(router._must_db()) as db:
+            cursor = await db.execute(
+                """INSERT INTO devices(admin_id,token_hash,token_hint,created_at,last_used_at,expires_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (self.admin_id, "hidden-dialog-test", "hidden", now, now, "2999-01-01T00:00:00Z"),
+            )
+            device_id = int(cursor.lastrowid)
+            for chat_id, name in (
+                ("943871493", "Дмитрий"),
+                ("328268937", "Артем"),
+                ("702", "Клиент"),
+            ):
+                await db.execute(
+                    """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,contact_name,last_message_at,
+                       last_message_preview,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)""",
+                    (channel_id, "telegram", chat_id, name, now, "Входящее", now, now),
+                )
+                await db.execute(
+                    """INSERT INTO wazzup_messages(external_id,channel_id,chat_type,chat_id,direction,text,sent_at,created_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (f"tg:{chat_id}", channel_id, "telegram", chat_id, "incoming", "Входящее", now, now),
+                )
+                await db.execute(
+                    """INSERT INTO external_identity_links(
+                       provider,external_user_id,getcourse_user_id,phone,name,source,updated_at
+                       ) VALUES(?,?,?,?,?,?,?)""",
+                    (router.TELEGRAM_PROVIDER, chat_id, f"gc-{chat_id}", "", name, "test", now),
+                )
+            await db.commit()
+        channel = {
+            "channel_id": channel_id, "transport": "telegram",
+            "provider": router.TELEGRAM_PROVIDER, "label": "Telegram Personal",
+        }
+        result = await router._inbox_items(
+            {"id": device_id, "admin_id": self.admin_id, "admin_role": "admin"},
+            [channel],
+        )
+        self.assertEqual([row["chat_id"] for row in result["items"]], ["702"])
+        with self.assertRaises(router.HTTPException) as blocked:
+            await router._inbox_thread_context(
+                channel_id, "telegram", "328268937", [channel],
+                {"id": device_id, "admin_id": self.admin_id, "admin_role": "admin"},
+            )
+        self.assertEqual(blocked.exception.status_code, 404)
+
     async def test_snippet_uses_stable_widget_url(self):
         with patch.object(router, "_require_admin", new=AsyncMock(return_value={"username": "admin"})):
             result = await router.snippet(request_for("/snippet", {}))
@@ -648,6 +728,28 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "send_reason": "Телефон не найден",
         }])
 
+    async def test_hidden_personal_telegram_contact_has_no_widget_channel(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code}),
+        )).body)["device_token"]
+        channels = [{
+            "channel_id": "telegram-personal:1", "provider": router.TELEGRAM_PROVIDER,
+            "transport": "telegram", "channel_transport": "personal", "name": "operator",
+            "plain_id": "1", "label": "Telegram Personal · operator",
+        }]
+        with patch.object(router, "_all_channels", new=AsyncMock(return_value=channels)):
+            response = await router.widget_channels(request_for(
+                "/widget/channels",
+                {
+                    "phone": "+79997301959", "name": "Дмитрий",
+                    "source_url": "https://club.sobakovod.pro/user/control/user/update/id/42",
+                },
+                token=token,
+            ))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["channels"], [])
+
     async def test_widget_initial_channels_never_wait_for_live_provider_discovery(self):
         code = await self._code()
         token = json.loads((await router.widget_activate(request_for("/widget/activate", {"code": code}))).body)["device_token"]
@@ -684,10 +786,11 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         views = json.loads(response.body)["channels"]
         self.assertTrue(views[0]["can_send"])
         self.assertNotIn("pending", views[0])
-        self.assertFalse(views[1]["can_send"])
-        self.assertNotIn("pending", views[1])
-        self.assertEqual(views[1]["send_reason"], "Пользователь Telegram не найден")
-        self.assertFalse(json.loads(repeated.body)["channels"][1]["can_send"])
+        self.assertTrue(views[1]["can_send"])
+        self.assertTrue(views[1]["pending"])
+        self.assertEqual(views[1]["label"], "TG Personal")
+        self.assertEqual(views[1]["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
+        self.assertTrue(json.loads(repeated.body)["channels"][1]["can_send"])
 
     async def test_ten_simultaneous_cards_share_one_provider_catalogue_request(self):
         calls = 0
@@ -949,6 +1052,44 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": "700",
         }])
 
+    async def test_getcourse_card_can_attempt_vk_from_utm_and_telegram_from_phone(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code})
+        )).body)["device_token"]
+        channels = [
+            {
+                "channel_id": "vk:group", "provider": "vk", "transport": "vk",
+                "channel_transport": "vk", "name": "VK", "plain_id": "group", "label": "VK · Канал",
+            },
+            {
+                "channel_id": "telegram-personal:account", "provider": router.TELEGRAM_PROVIDER,
+                "transport": "telegram", "channel_transport": "personal", "name": "operator",
+                "plain_id": "account", "label": "Telegram Personal · operator",
+            },
+        ]
+        with (
+            patch.object(router, "_all_channels", new=AsyncMock(return_value=channels)),
+            patch.object(router, "_conversation_presence", new=AsyncMock(return_value=set())),
+            patch.object(router, "_entity_external_link", new=AsyncMock(return_value={})),
+            patch.object(router, "_external_link_for_identity", new=AsyncMock(return_value={})),
+        ):
+            response = await router.widget_channels(request_for(
+                "/widget/channels",
+                {
+                    "source_url": "https://club.sobakovod.pro/user/control/user/update/id/514110600",
+                    "phone": "+79132456535", "fields": {"utm_term": "32500899"},
+                },
+                token=token,
+            ))
+
+        self.assertEqual(response.status_code, 200)
+        views = {row["provider"]: row for row in json.loads(response.body)["channels"]}
+        self.assertTrue(views["vk"]["can_send"])
+        self.assertEqual(views["vk"]["label"], "VK · найти по utm_term")
+        self.assertTrue(views[router.TELEGRAM_PROVIDER]["can_send"])
+        self.assertIn("Telegram", views[router.TELEGRAM_PROVIDER]["send_reason"])
+
     async def test_webhook_stores_incoming_message_without_sending(self):
         payload = {
             "messages": [{
@@ -1065,6 +1206,119 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async with aiosqlite.connect(router._must_db()) as db:
             row = await (await db.execute("SELECT direction,status,text FROM wazzup_messages WHERE external_id='msg-out-1'")).fetchone()
         self.assertEqual(row, ("outgoing", "accepted", "Сообщение только для mock-теста"))
+
+    async def test_email_guard_response_keeps_structured_code_and_versioned_ack(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code})
+        )).body)["device_token"]
+        captured = {}
+
+        class GuardError(ValueError):
+            status_code = 409
+
+            def as_dict(self):
+                return {
+                    "ok": False,
+                    "error": "Подтвердите рекомендации",
+                    "code": "email_guidelines_confirmation_required",
+                    "confirmation_required": True,
+                    "checklist_version": "2026-09-01",
+                }
+
+        async def context(_data, _mode, _device):
+            return {
+                "platform": "amocrm", "entity_type": "lead", "entity_id": "42",
+                "email": "client@example.com", "name": "Клиент", "variables": {
+                    "utm.term": {"value": "741919467"},
+                    "utm.source": {"value": "vk_ai"},
+                    "utm.medium": {"value": "cpc"},
+                    "utm.campaign": {"value": "1030134194"},
+                    "utm.content": {"value": "177638832"},
+                    "conversation_id": {"value": "17696535"},
+                },
+            }
+
+        async def setting(key):
+            return {
+                "auto_markup_domains": "sobakovod.pro;club.sobakovod.pro",
+                "auto_markup_tail": router.AUTO_MARKUP_DEFAULT_TAIL,
+            }[key]
+
+        async def channel(channel_id, transport, provider):
+            return {"channel_id": channel_id, "transport": transport, "provider": provider}
+
+        async def email_send(**kwargs):
+            captured.update(kwargs)
+            raise GuardError("Подтвердите рекомендации")
+
+        with patch.object(router, "_resolve_widget_context", new=context), patch.object(
+            router, "_requested_channel", new=channel,
+        ), patch.object(router, "_setting", new=setting), patch.object(
+            router, "_module_service", return_value=email_send,
+        ):
+            response = await router.widget_send(request_for(
+                "/widget/send",
+                {
+                    "request_id": "email-guard", "entity_type": "lead", "entity_id": "42",
+                    "source_url": "https://sobakovodpro.amocrm.ru/leads/detail/42",
+                    "channel_id": "email:info", "transport": "email", "provider": "email",
+                    "email": "client@example.com", "text": "Здравствуйте", "subject": "Ваша заявка",
+                    "email_guidelines_confirmed": True,
+                    "email_guidelines_version": "2026-09-01",
+                }, token=token,
+            ))
+
+        body = json.loads(response.body)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body["code"], "email_guidelines_confirmation_required")
+        self.assertTrue(body["confirmation_required"])
+        self.assertIs(captured["email_guidelines_confirmed"], True)
+        self.assertEqual(captured["email_guidelines_version"], "2026-09-01")
+        self.assertEqual(
+            captured["signature_url"],
+            "https://sobakovod.pro/?utm_term=741919467&utm_source=vk_ai&utm_medium=cpc"
+            "&utm_campaign=1030134194&utm_content=177638832&param1=&param2=17696535",
+        )
+
+    async def test_widget_send_accepts_matching_salutation_from_identity_variable_metadata(self):
+        code = await self._code()
+        token = json.loads((await router.widget_activate(
+            request_for("/widget/activate", {"code": code})
+        )).body)["device_token"]
+
+        async def fake_wazzup(method, path, body=None, **_kwargs):
+            if (method, path) == ("GET", "/channels"):
+                return [{
+                    "channelId": "max-1", "transport": "max", "state": "active",
+                    "name": "Служба заботы",
+                }]
+            raise AssertionError("provider delivery must stay in the outbound worker")
+
+        resolved = {
+            "accounts": [],
+            "variables": {
+                "contact.name": {"value": "Галина Бутенко", "source": "current"},
+            },
+        }
+        with (
+            patch.object(router, "_wazzup_request", new=fake_wazzup),
+            patch.object(router, "_resolve_widget_context", new=AsyncMock(return_value=resolved)),
+        ):
+            response = await router.widget_send(request_for(
+                "/widget/send",
+                {
+                    "request_id": "salutation-metadata-regression",
+                    "phone": "+79108758427", "name": "Галина Бутенко",
+                    "source_url": "https://club.sobakovod.pro/user/control/user/update/id/42",
+                    "channel_id": "max-1", "transport": "max",
+                    "text": "Доброе утро, Галина!",
+                },
+                token=token,
+            ))
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(json.loads(response.body)["queued"])
 
     async def test_max_absent_is_stored_as_not_delivered(self):
         code = await self._code()
@@ -1393,7 +1647,7 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         view = json.loads(response.body)["channels"][0]
         self.assertTrue(view["can_send"])
         self.assertNotIn("pending", view)
-        self.assertEqual(view["label"], "TG Personal · попробовать")
+        self.assertEqual(view["label"], "TG Personal · найти по номеру")
         self.assertEqual(view["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
         resolver.assert_not_awaited()
 
@@ -1651,6 +1905,54 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         link = await router._external_link(peer_id="702", provider=router.TELEGRAM_PROVIDER)
         self.assertEqual(link["phone"], "+79108758427")
 
+    async def test_telegram_sync_skips_hidden_personal_dialogs(self):
+        class Message:
+            id = 10
+            message = "Входящее"
+            date = None
+            out = False
+            file = None
+
+        def user(peer_id, username, phone):
+            return type("User", (), {
+                "id": peer_id, "phone": phone, "username": username,
+                "first_name": username, "last_name": "",
+            })()
+
+        dialogs = [
+            type("Dialog", (), {"entity": user(943871493, "papaproduser", "79997301959"), "message": Message()})(),
+            type("Dialog", (), {"entity": user(328268937, "Rareru", ""), "message": Message()})(),
+            type("Dialog", (), {"entity": user(702, "client", "79108758427"), "message": Message()})(),
+        ]
+
+        class Client:
+            async def is_user_authorized(self):
+                return True
+
+            async def iter_dialogs(self, limit):
+                for dialog in dialogs:
+                    yield dialog
+
+        async def run(callback):
+            return await callback(Client())
+
+        channel = {
+            "channel_id": "telegram-personal:1", "provider": router.TELEGRAM_PROVIDER,
+            "transport": "telegram", "channel_transport": "personal", "name": "operator",
+            "plain_id": "1", "label": "Telegram Personal · operator",
+        }
+        with (
+            patch.object(router, "_telegram_channel", new=AsyncMock(return_value=channel)),
+            patch.object(router, "_telegram_run", new=run),
+        ):
+            result = await router._sync_telegram_dialogs(full=True)
+        self.assertEqual(result["dialogs"], 1)
+        async with aiosqlite.connect(router._must_db()) as db:
+            hidden = (await (await db.execute(
+                "SELECT COUNT(*) FROM wazzup_chats WHERE chat_id IN ('943871493','328268937')",
+            )).fetchone())[0]
+        self.assertEqual(hidden, 0)
+
     async def test_salebot_related_fields_supply_telegram_id(self):
         accounts = [{"service": "salebot", "platform_id": "sb-1", "fields": {"telegram_id": "703"}}]
         self.assertEqual(router._account_identity_value(accounts, router.TELEGRAM_PROVIDER), "703")
@@ -1686,6 +1988,33 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(row["platform"], row["platform_user_id"]) for row in bindings}, {
             ("getcourse", "42"), ("amocrm", "84"),
         })
+
+    async def test_admin_amo_task_setting_defaults_on_and_can_be_disabled(self):
+        with patch.object(router, "_require_admin", new=AsyncMock(return_value={"username": "admin"})):
+            initial = await router.list_admins(request_for("/admins"))
+            self.assertTrue(initial["admins"][0]["amo_task_enabled"])
+            self.assertEqual(
+                initial["admins"][0]["amo_task_sources"],
+                list(router.AMO_TASK_SOURCES),
+            )
+            await router.update_admin(self.admin_id, request_for(
+                f"/admins/{self.admin_id}", {
+                    "amo_task_enabled": True, "amo_task_sources": ["max"],
+                },
+            ))
+            updated = await router.list_admins(request_for("/admins"))
+        self.assertTrue(updated["admins"][0]["amo_task_enabled"])
+        self.assertEqual(updated["admins"][0]["amo_task_sources"], ["max"])
+        self.assertTrue(await router._admin_amo_task_allowed(self.admin_id, "max"))
+        self.assertFalse(await router._admin_amo_task_allowed(self.admin_id, "vk"))
+
+    async def test_admin_amo_task_sources_reject_unknown_channel(self):
+        with patch.object(router, "_require_admin", new=AsyncMock(return_value={"username": "admin"})):
+            with self.assertRaises(router.HTTPException) as caught:
+                await router.update_admin(self.admin_id, request_for(
+                    f"/admins/{self.admin_id}", {"amo_task_sources": ["max", "unknown"]},
+                ))
+        self.assertEqual(caught.exception.status_code, 400)
 
     async def test_rejects_foreign_origin(self):
         code = await self._code()

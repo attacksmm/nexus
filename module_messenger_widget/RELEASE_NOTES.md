@@ -1,6 +1,103 @@
-# Messenger Widget 5.15.6
+# Messenger Widget 5.19.0
 
 Release candidate for the week-long production observation period.
+
+## 5.19.0 — stable reopen and channel order
+
+- amoCRM and GetCourse keep the selected channel, draft, Email subject and scroll position when the same card widget is closed and reopened.
+- amoCRM waits briefly for the complete contact context instead of painting and caching a provisional channel list; background polling pauses while the widget is hidden.
+- The channel catalogue uses stale-while-revalidate and never drops Email merely because a provider refresh exceeds the first-paint deadline.
+- Channel keys and ordering are stable across refreshes; stale responses can no longer overwrite a newer GetCourse card.
+- Email actions stay inside the message editor, and the Send button stretches to the bottom of the message field on both surfaces.
+- A GetCourse profile link is suppressed for an active staff account unless that person also has real paid student access.
+- Email is added once to every employee's existing amoCRM task-source selection, while preserving every source they selected or disabled before the release.
+- Short replies to an automated funnel message or voice note no longer create a notification or amoCRM task; the same reply to a manager remains actionable, and meaningful client text is never hidden by this rule.
+
+## 5.18.7 — confirmed means confirmed
+
+- A queued email remains visible in history but no longer promotes Email to the established-dialog tier until the provider accepts it or the client replies.
+
+## 5.18.6 — channel confidence and first-email guidance
+
+- Channel tabs are ordered by delivery confidence: an established dialog first, then an exact available destination, a best-effort lookup/delivery, and unavailable channels last.
+- The email deliverability checklist is required only before the first outgoing message in a thread; replies no longer interrupt the operator with the same confirmation.
+- The branded `sobakovod.pro` link in every email signature receives the same card-specific UTM and attribution parameters as links in the message body.
+
+## 5.18.5 — remotely updatable amoCRM interface
+
+- The amoCRM archive is now a stable bootstrap: normal widget HTML, CSS and client-logic releases arrive with the Nexus module without another amoCRM ZIP upload.
+- A five-minute rolling cache key keeps repeat opens fast while making a newly deployed interface visible within five minutes.
+- Re-uploading the amoCRM ZIP remains necessary only for bootstrap, manifest, permission, placement or amoCRM card-context changes.
+
+## 5.18.4 — protected email sending
+
+- amoCRM, GetCourse cards and the shared inbox show the same two-action deliverability checklist before every manual email.
+- The shared email service rejects old clients that omit the current acknowledgement, so the confirmation cannot be bypassed through a stale tab or direct widget request.
+- Only direct HTTPS links on `sobakovod.pro` and its subdomains are accepted; shorteners, external or nested redirects, bare domains and client personal data in URLs are blocked.
+- The first accepted conversation starts with at most one body link and no attachments. Failed or merely queued attempts do not relax that rule.
+- Unsubscribe, bounce and spam-complaint events cancel queued/retry work and are checked again immediately before DashaMail submission.
+- Numeric attribution IDs remain valid, and normal template rendering plus personalized UTM completion still runs before the guardrail check.
+
+## 5.18.3 — reliable email context
+
+- Preserves the exact amoCRM/GetCourse card coordinates while exposing the resolved contact email, phone and name to channel services.
+- Email no longer reports that the address is missing after identity resolution has already found it in the linked amoCRM contact or GetCourse user.
+- Initial conversation loading automatically retries one transient timeout in both widgets while keeping an explicit spinner visible.
+
+## 5.18.0 — pilot email channel
+
+- Adds the optional Nexus `email-channel` transport to amoCRM, GetCourse and Streams while keeping email excluded from “Отправить везде”.
+- A first email requires a subject; replies inherit the thread subject and show compact queued, sent, delivered, opened and failed states.
+- Incoming email tasks are fail-closed: Email is disabled for every employee until explicitly selected, and the email module starts in shadow mode.
+- Exact entity bindings prevent a shared address from attaching one thread to two amoCRM leads.
+
+## 5.17.7 — hidden personal Telegram dialogs
+
+- Personal Telegram accounts `@papaproduser` and `@Rareru` are excluded by stable peer identifiers, with phone/username aliases as an additional boundary.
+- The accounts are skipped by background and realtime synchronization, omitted from the shared inbox and GetCourse Streams view, and cannot be opened or messaged through a direct widget request.
+- Existing stored history remains untouched but is no longer returned to amoCRM or GetCourse widgets.
+
+## 5.17.4 — Faster concurrent cards and inbox
+
+- Reuses one card-local SQLite connection for direct-channel lookups without serializing employees.
+- Loads inbox identities with the main query and batches link updates into one transaction.
+
+## 5.17.3 — GetCourse card parity
+
+- GetCourse source fields are read from both table rows and the block layout used by current user cards, so `utm_term` participates in VK identity and template resolution.
+- Profile links now appear in the GetCourse header; the GetCourse access editor has a dedicated action beside settings with a visible loading/error state.
+- VK can be opened through a verified `utm_term`, and Telegram Personal can attempt an explicit phone lookup from a GetCourse card.
+- Removed the redundant in-chat Channels/Open Wazzup toolbar and the empty attachment strip below the composer.
+
+## 5.17.2 — MAX communication history
+
+- The MAX filter now resolves the durable Wazzup/MAX transport rows, including MAX group dialogs, instead of looking for a nonexistent standalone provider value.
+- MAX rows are labeled `MAX` in the communication history rather than the internal `wazzup` provider name.
+
+## 5.17.1 — finite refresh indicators
+
+- A staged amoCRM card context now owns and always clears its channel refresh state, including when it supersedes the first request or the enrichment request fails.
+- Background profile discovery continues without rendering a permanent spinner in the profile-link header.
+
+## 5.17.0 — clear delivery states and faster first paint
+
+- Outgoing messages use compact accessible states instead of raw provider words: a green check for sent, a red cross for delivery failure, and a blue eye when the provider confirms that the message was read.
+- amoCRM paints the exact deal and any safe cached conversation immediately while the full contact details continue loading in the background.
+- The background amoCRM enrichment updates the existing view without clearing a draft message.
+- GetCourse preloads channels while the employee views the card, reuses a fresh per-card result for 45 seconds, and joins duplicate channel requests without weakening identity checks.
+
+## 5.16.1 — exact messenger-to-deal integrity
+
+- An incoming profile can no longer use an amoCRM conversation context that contradicts the current exact VK, Telegram Personal, or SaleBot link for the deal.
+- Exact link replacement removes conflicting conversation contexts in the same transaction, and late stale context writes are rejected.
+- amoCRM task delivery rechecks the employee's selected sources, so a queued task is cancelled when its channel was disabled before delivery.
+
+## 5.16.0 — amoCRM tasks by employee and channel
+
+- Each employee can independently choose which incoming channels create amoCRM tasks: MAX, VK, Telegram Personal, and SaleBot.
+- Existing employees keep all channels enabled until an administrator changes the selection.
+- The master employee switch still disables all amoCRM task creation without disabling message history or Nexus notifications.
+- Saving shows a busy spinner and rejects an enabled configuration with no selected channels.
 
 ## 5.15.6 — attachment history integrity
 

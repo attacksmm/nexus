@@ -2,8 +2,9 @@ import json
 import logging
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 from starlette.requests import Request
@@ -56,6 +57,38 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.tmp.cleanup()
+
+    async def test_email_task_source_migration_is_once_only_and_preserves_choices(self):
+        key = router._admin_amo_task_sources_setting_key(self.admin_id)
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute("DELETE FROM module_settings WHERE key='amo_task_email_default_enabled_v1'")
+            await db.execute(
+                "INSERT OR REPLACE INTO module_settings(key,value,updated_at) VALUES(?,?,?)",
+                (key, '["max"]', now),
+            )
+            await db.commit()
+
+        await router._init_db()
+        async with aiosqlite.connect(router._must_db()) as db:
+            migrated = await (await db.execute(
+                "SELECT value FROM module_settings WHERE key=?", (key,),
+            )).fetchone()
+            marker = await (await db.execute(
+                "SELECT value FROM module_settings WHERE key='amo_task_email_default_enabled_v1'"
+            )).fetchone()
+        self.assertEqual(json.loads(migrated[0]), ["max", "email"])
+        self.assertEqual(marker[0], "1")
+
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute("UPDATE module_settings SET value='[\"max\"]' WHERE key=?", (key,))
+            await db.commit()
+        await router._init_db()
+        async with aiosqlite.connect(router._must_db()) as db:
+            unchanged = await (await db.execute(
+                "SELECT value FROM module_settings WHERE key=?", (key,),
+            )).fetchone()
+        self.assertEqual(json.loads(unchanged[0]), ["max"])
 
     async def test_pairing_is_single_use_and_binds_exact_manager(self):
         code = "ABCDEFGH23"
@@ -123,6 +156,74 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             )).fetchone()
         self.assertEqual(row, ("max", self.admin_id, "pending"))
 
+    async def test_short_reply_to_automated_funnel_message_is_silent(self):
+        now = router._iso()
+        before = router._iso(router._now_dt() - timedelta(minutes=1))
+        automated = "Приходите на занятие сегодня. " * 6
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES('out-auto','vk:225','vk','client-auto','outgoing','delivered',?,'Сообщество',?,? ,?)""",
+                (automated, before, json.dumps({"id": 700}), before),
+            )
+            await db.commit()
+        inserted = await router._enqueue_notification_message(
+            external_id="in-auto", channel_id="vk:225", chat_type="vk", chat_id="client-auto",
+            provider="vk", client_name="Клиент", text="Да.", sent_at=now,
+            raw_payload={"reply_message": {"id": 700}},
+        )
+        self.assertFalse(inserted)
+        async with aiosqlite.connect(router._must_db()) as db:
+            count = (await (await db.execute("SELECT COUNT(*) FROM notification_events")).fetchone())[0]
+        self.assertEqual(count, 0)
+
+    async def test_reply_to_manager_message_keeps_notification_and_task_flow(self):
+        now = router._iso()
+        before = router._iso(router._now_dt() - timedelta(minutes=1))
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,responsible_admin_id,created_at,updated_at)
+                   VALUES('vk:225','vk','client-manager',?,?,?)""",
+                (self.admin_id, before, now),
+            )
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES('out-manager','vk:225','vk','client-manager','outgoing','delivered',
+                            'Вам удобно созвониться?','Анна Менеджер',?,? ,?)""",
+                (before, json.dumps({"id": 701}), before),
+            )
+            await db.commit()
+        inserted = await router._enqueue_notification_message(
+            external_id="in-manager", channel_id="vk:225", chat_type="vk", chat_id="client-manager",
+            provider="vk", client_name="Клиент", text="Да.", sent_at=now,
+            raw_payload={"reply_message": {"id": 701}},
+        )
+        self.assertTrue(inserted)
+
+    async def test_meaningful_sales_intent_is_never_suppressed_by_short_reply_heuristic(self):
+        now = router._iso()
+        before = router._iso(router._now_dt() - timedelta(minutes=1))
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,responsible_admin_id,created_at,updated_at)
+                   VALUES('max-1','max','client-sale',?,?,?)""",
+                (self.admin_id, before, now),
+            )
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES('out-funnel','max-1','max','client-sale','outgoing','delivered',?,'',?,'{}',?)""",
+                ("Запишитесь на занятие. " * 8, before, before),
+            )
+            await db.commit()
+        inserted = await router._enqueue_notification_message(
+            external_id="in-sale", channel_id="max-1", chat_type="max", chat_id="client-sale",
+            provider="max", client_name="Клиент", text="Да, хочу купить курс", sent_at=now,
+        )
+        self.assertTrue(inserted)
+
     async def test_incoming_message_records_hidden_history_and_queues_amo_task(self):
         now = router._iso()
         async with aiosqlite.connect(router._must_db()) as db:
@@ -155,6 +256,179 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             )).fetchone()
         self.assertEqual(communication, ("incoming", "max", "18244969", "Перезвоните мне"))
         self.assertEqual(task, ("18244969", "7461291", "MAX", "Перезвоните мне", "pending"))
+
+    async def test_employee_can_disable_amo_task_without_disabling_notification_or_history(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                "INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?)",
+                (router._admin_amo_task_setting_key(self.admin_id), "0", now),
+            )
+            await db.execute(
+                """INSERT INTO conversation_contexts(
+                   provider,external_user_id,admin_id,platform,entity_type,entity_id,entity_url,updated_at
+                   ) VALUES('max','chat-no-amo-task',?,'amocrm','lead','18244970',
+                            'https://example.amocrm.ru/leads/detail/18244970',?)""",
+                (self.admin_id, now),
+            )
+            await db.commit()
+        with patch.object(router, "_amo_deal_delivery_details", return_value={
+            "responsible_user_id": "7461291", "client_name": "Ирина Скуратова",
+            "entity_url": "https://example.amocrm.ru/leads/detail/18244970",
+        }):
+            inserted = await router._enqueue_notification_message(
+                external_id="max-no-amo-task-1", channel_id="max-1", chat_type="max",
+                chat_id="chat-no-amo-task", provider="max", client_name="Ирина Скуратова",
+                text="Нужна консультация", sent_at=now,
+            )
+        self.assertTrue(inserted)
+        async with aiosqlite.connect(router._must_db()) as db:
+            notification_count = (await (await db.execute(
+                "SELECT COUNT(*) FROM notification_events"
+            )).fetchone())[0]
+            communication_count = (await (await db.execute(
+                "SELECT COUNT(*) FROM communication_messages"
+            )).fetchone())[0]
+            task_count = (await (await db.execute(
+                "SELECT COUNT(*) FROM amo_task_jobs"
+            )).fetchone())[0]
+        self.assertEqual((notification_count, communication_count, task_count), (1, 1, 0))
+
+    async def test_employee_can_create_amo_tasks_only_for_selected_sources(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                "INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?)",
+                (router._admin_amo_task_sources_setting_key(self.admin_id), '["max"]', now),
+            )
+            await db.executemany(
+                """INSERT INTO conversation_contexts(
+                   provider,external_user_id,admin_id,platform,entity_type,entity_id,entity_url,updated_at
+                   ) VALUES(?,?,?,'amocrm','lead',?,?,?)""",
+                [
+                    ("max", "selected-max", self.admin_id, "18244971", "https://example.amocrm.ru/leads/detail/18244971", now),
+                    ("vk", "filtered-vk", self.admin_id, "18244972", "https://example.amocrm.ru/leads/detail/18244972", now),
+                ],
+            )
+            await db.commit()
+        with patch.object(router, "_amo_deal_delivery_details", return_value={
+            "responsible_user_id": "7461291", "client_name": "Клиент",
+        }):
+            self.assertTrue(await router._enqueue_notification_message(
+                external_id="selected-max-1", channel_id="max-1", chat_type="max",
+                chat_id="selected-max", provider="max", client_name="Клиент",
+                text="MAX сообщение", sent_at=now,
+            ))
+            self.assertTrue(await router._enqueue_notification_message(
+                external_id="filtered-vk-1", channel_id="vk:225", chat_type="vk",
+                chat_id="filtered-vk", provider="vk", client_name="Клиент",
+                text="VK сообщение", sent_at=now,
+            ))
+        async with aiosqlite.connect(router._must_db()) as db:
+            tasks = await (await db.execute(
+                "SELECT amo_lead_id,messenger FROM amo_task_jobs ORDER BY id"
+            )).fetchall()
+            communications = (await (await db.execute(
+                "SELECT COUNT(*) FROM communication_messages"
+            )).fetchone())[0]
+        self.assertEqual(tasks, [("18244971", "MAX")])
+        self.assertEqual(communications, 2)
+
+    async def test_conflicting_exact_identity_cannot_route_or_queue_amo_task(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO entity_identity_links(
+                   platform,entity_type,entity_id,provider,external_user_id,confirmed_by,created_at,updated_at
+                   ) VALUES('amocrm','lead','18262251','vk','583266787',?,?,?)""",
+                (self.admin_id, now, now),
+            )
+            await db.execute(
+                """INSERT INTO conversation_contexts(
+                   provider,external_user_id,admin_id,platform,entity_type,entity_id,entity_url,updated_at
+                   ) VALUES('vk','329938523',?,'amocrm','lead','18262251',
+                            'https://example.amocrm.ru/leads/detail/18262251',?)""",
+                (self.admin_id, now),
+            )
+            await db.commit()
+        with patch.object(router, "_identity_amo_notification_context", new=AsyncMock(return_value={
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18262251",
+            "entity_url": "https://example.amocrm.ru/leads/detail/18262251",
+        })):
+            inserted = await router._enqueue_notification_message(
+                external_id="vk-marina-1", channel_id="vk:225", chat_type="vk",
+                chat_id="329938523", provider="vk", client_name="Марина Боровкова",
+                text="Здравствуйте", sent_at=now,
+            )
+        self.assertFalse(inserted)
+        async with aiosqlite.connect(router._must_db()) as db:
+            counts = [
+                (await (await db.execute(f"SELECT COUNT(*) FROM {table}")).fetchone())[0]
+                for table in ("notification_events", "communication_messages", "amo_task_jobs")
+            ]
+        self.assertEqual(counts, [0, 0, 0])
+
+    async def test_exact_link_update_removes_orphan_and_rejects_late_stale_context(self):
+        now = router._iso()
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18262252",
+            "entity_url": "https://example.amocrm.ru/leads/detail/18262252",
+        }
+        await router._remember_entity_external_link(context, "vk", "old-vk", self.admin_id)
+        await router._remember_notification_context(context, "vk", "old-vk", self.admin_id)
+        await router._remember_entity_external_link(context, "vk", "new-vk", self.admin_id)
+        await router._remember_notification_context(context, "vk", "old-vk", self.admin_id)
+        async with aiosqlite.connect(router._must_db()) as db:
+            exact = await (await db.execute(
+                """SELECT external_user_id FROM entity_identity_links
+                   WHERE platform='amocrm' AND entity_type='lead' AND entity_id='18262252' AND provider='vk'"""
+            )).fetchone()
+            contexts = await (await db.execute(
+                "SELECT external_user_id FROM conversation_contexts WHERE entity_id='18262252'"
+            )).fetchall()
+        self.assertEqual(exact[0], "new-vk")
+        self.assertEqual(contexts, [])
+
+    async def test_pending_amo_task_rechecks_employee_sources_before_delivery(self):
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO manager_bindings(
+                   platform,platform_user_id,platform_user_email,admin_id,created_at,updated_at
+                   ) VALUES('amocrm','7461291','',?,?,?)""",
+                (self.admin_id, now, now),
+            )
+            await db.commit()
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "18262253",
+            "amo_lead_id": "18262253", "external_user_id": "vk-client",
+        }
+        await router._remember_entity_external_link(context, "vk", "vk-client", self.admin_id)
+        with patch.object(router, "_amo_deal_delivery_details", return_value={"responsible_user_id": "7461291"}):
+            queued = await router._enqueue_amo_task_for_message(
+                message_key="vk-pending-setting-change", communication_id=0, context=context,
+                source="vk", messenger="VK", client_name="Клиент", message_text="Сообщение",
+                admin_id=self.admin_id,
+            )
+        self.assertTrue(queued)
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                "INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?)",
+                (router._admin_amo_task_sources_setting_key(self.admin_id), '["max"]', now),
+            )
+            db.row_factory = aiosqlite.Row
+            job = dict(await (await db.execute("SELECT * FROM amo_task_jobs")).fetchone())
+            await db.commit()
+        sender = AsyncMock(return_value=("task-id", []))
+        with patch.object(router, "_send_amo_task", new=sender):
+            await router._process_amo_task_job(job)
+        sender.assert_not_awaited()
+        async with aiosqlite.connect(router._must_db()) as db:
+            status = await (await db.execute(
+                "SELECT status,error FROM amo_task_jobs WHERE id=?", (job["id"],),
+            )).fetchone()
+        self.assertEqual(status[0], "cancelled")
+        self.assertIn("Канал отключён", status[1])
 
     async def test_five_minute_debounce_groups_messages_into_one_amo_task(self):
         now = router._iso()

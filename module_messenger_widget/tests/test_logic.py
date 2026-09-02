@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import sqlite3
@@ -6,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -13,6 +15,70 @@ import router
 
 
 class GetCourseWazzupLogicTests(unittest.TestCase):
+    def test_resolved_widget_context_exposes_contact_fields_to_email_channel(self):
+        class Index:
+            def resolve(self, context):
+                self_assert.assertEqual(context["entity_id"], "17696535")
+                return {
+                    "status": "resolved",
+                    "entity_id": 912,
+                    "accounts": [],
+                    "variables": {
+                        "contact.email": {"value": "Ovrklhdr@Gmail.com"},
+                        "contact.phone": {"value": "8 (900) 999-22-33"},
+                        "contact.name": {"value": "Никита Попов"},
+                    },
+                    "conflicts": [],
+                }
+
+        async def no_rules(_context):
+            return None
+
+        self_assert = self
+        previous = router._identity_index, router._apply_identity_rules
+        router._identity_index, router._apply_identity_rules = Index(), no_rules
+        try:
+            result = asyncio.run(router._resolve_widget_context(
+                {"entity_type": "lead", "entity_id": "17696535"},
+                "amocrm", {"admin_name": "Татьяна"},
+            ))
+        finally:
+            router._identity_index, router._apply_identity_rules = previous
+        self.assertEqual(result["platform"], "amocrm")
+        self.assertEqual(result["entity_type"], "lead")
+        self.assertEqual(result["entity_id"], "17696535")
+        self.assertEqual(result["identity_entity_id"], 912)
+        self.assertEqual(result["email"], "ovrklhdr@gmail.com")
+        self.assertEqual(result["phone"], "+79009992233")
+        self.assertEqual(result["name"], "Никита Попов")
+
+    def test_widgets_auto_retry_initial_conversation_timeout(self):
+        module_dir = Path(__file__).resolve().parents[1]
+        widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
+        amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
+        self.assertIn("autoRetry: true", widget)
+        self.assertIn("Повторяем загрузку", widget)
+        self.assertIn("requestWithRetry('/conversation'", amo)
+        self.assertIn("Повторяем загрузку", amo)
+
+    def test_email_staff_service_returns_only_active_managers(self):
+        previous_db = router._db_path
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                router._db_path = Path(directory) / "messenger-widget.db"
+                with sqlite3.connect(router._db_path) as db:
+                    db.execute("CREATE TABLE admins(id INTEGER PRIMARY KEY,name TEXT,enabled INTEGER)")
+                    db.executemany(
+                        "INSERT INTO admins(id,name,enabled) VALUES(?,?,?)",
+                        [(2, "Татьяна Истратова", 1), (1, "Анна", 1), (3, "Скрытый", 0)],
+                    )
+                self.assertEqual(asyncio.run(router.service_email_staff()), [
+                    {"id": "1", "name": "Анна"},
+                    {"id": "2", "name": "Татьяна Истратова"},
+                ])
+        finally:
+            router._db_path = previous_db
+
     def test_salebot_image_uses_native_image_attachment_type(self):
         captured = {}
 
@@ -66,6 +132,20 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         )
         self.assertIsNone(router._salutation_name_mismatch("Здравствуйте, Ирина!", "Ирина Скуратова"))
         self.assertIsNone(router._salutation_name_mismatch("Расскажу подробнее о курсе", "Ирина Скуратова"))
+
+    def test_salutation_guard_reads_the_contact_name_value_not_variable_metadata(self):
+        resolved = {"variables": {
+            "contact.name": {"value": "Галина Бутенко", "source": "current"},
+        }}
+        expected = router._resolved_contact_name(resolved, {"name": "Имя из карточки"})
+        self.assertEqual(expected, "Галина Бутенко")
+        self.assertIsNone(router._salutation_name_mismatch("Доброе утро, Галина!", expected))
+
+    def test_salutation_guard_does_not_stringify_malformed_name_objects(self):
+        self.assertEqual(
+            router._resolved_contact_name({"variables": {}}, {"name": {"unexpected": "object"}}),
+            "",
+        )
 
     def test_delivery_retry_honors_telegram_flood_wait(self):
         error = router.HTTPException(502, "Telegram: A wait of 37 seconds is required")
@@ -230,6 +310,21 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             "https://sobakovod.pro/course_tour?utm_source=1&utm_medium=2"
             "&utm_term=term&utm_campaign=campaign&utm_content=content"
             "&param1=ym-1&param2=conversation-1#program",
+        )
+
+    def test_channels_are_prioritized_by_delivery_confidence(self):
+        channels = [
+            {"provider": "vk", "label": "VK недоступен", "can_send": False, "has_chat": False},
+            {"provider": "wazzup", "label": "MAX", "can_send": True, "has_chat": False},
+            {"provider": "email", "label": "Email", "can_send": True, "has_chat": False},
+            {"provider": "email", "label": "Email в очереди", "can_send": True, "has_chat": True, "confirmed_chat": False},
+            {"provider": "vk", "label": "VK подтверждён", "can_send": True, "has_chat": True},
+            {"provider": "telegram-personal", "label": "TG · найти по номеру", "can_send": True, "has_chat": False},
+        ]
+        ordered = router._prioritize_channels(channels)
+        self.assertEqual(
+            [channel["label"] for channel in ordered],
+            ["VK подтверждён", "Email", "Email в очереди", "MAX", "TG · найти по номеру", "VK недоступен"],
         )
 
     def test_vk_callback_handles_disconnected_request_body(self):
@@ -589,6 +684,16 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         ])
         self.assertEqual([row["transport"] for row in channels], ["whatsapp", "telegram", "max"])
 
+    def test_hidden_personal_telegram_accounts_match_stable_identifiers(self):
+        self.assertTrue(router._telegram_dialog_hidden(peer_id="943871493"))
+        self.assertTrue(router._telegram_dialog_hidden(peer_id="328268937"))
+        self.assertTrue(router._telegram_dialog_hidden(phone="8 (999) 730-19-59"))
+        self.assertTrue(router._telegram_dialog_hidden(username="@PapaProduser"))
+        self.assertTrue(router._telegram_dialog_hidden({"telegram_username": "Rareru"}))
+        self.assertFalse(router._telegram_dialog_hidden({
+            "external_user_id": "702", "phone": "+79108758427", "username": "client",
+        }))
+
     def test_finds_existing_wazzup_chat_by_phone_and_channel(self):
         rows = [{
             "chatId": "62837516",
@@ -724,6 +829,95 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             router._process_vk_callback_payload = previous_processor
         self.assertEqual(processed, ["message_new"])
 
+    def test_cancelled_quick_profile_lookup_does_not_leak_coroutines(self):
+        async def probe(*_args, **_kwargs):
+            return {}
+
+        async def cancel_before_children_start(*awaitables):
+            for awaitable in awaitables:
+                awaitable.close()
+            raise asyncio.CancelledError
+
+        async def scenario():
+            with (
+                patch.object(router, "_apply_identity_rules", new=AsyncMock()),
+                patch.object(router, "_run_identity_lookup", new=probe),
+                patch.object(router, "_exact_provider_identity", new=probe),
+                patch.object(router, "_entity_external_link", new=probe),
+                patch.object(router, "_successful_card_delivery_link", new=probe),
+                patch.object(router.asyncio, "gather", new=cancel_before_children_start),
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await router._quick_widget_profile_links(
+                        {"entity_type": "lead", "entity_id": "1", "platform_user_id": "2"},
+                        "amocrm",
+                        {"id": 1, "admin_id": 1},
+                    )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            asyncio.run(scenario())
+            gc.collect()
+        self.assertFalse(any("was never awaited" in str(item.message) for item in caught))
+
+    def test_vk_callback_writer_batches_concurrent_durable_acks(self):
+        previous_db = router._db_path
+        previous_queue = router._vk_callback_write_queue
+        previous_task = router._vk_callback_writer_task
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                router._db_path = Path(directory) / "messenger-widget.db"
+
+                async def scenario():
+                    await router._init_vk_callback_queue()
+                    router._vk_callback_write_queue = asyncio.Queue(maxsize=64)
+                    writer = asyncio.create_task(router.vk_callback_writer_loop())
+                    router._vk_callback_writer_task = writer
+                    try:
+                        await asyncio.gather(*(
+                            router._enqueue_vk_callback(
+                                json.dumps({"type": "message_new", "event_id": index}).encode(),
+                                {"type": "message_new", "event_id": index},
+                            )
+                            for index in range(50)
+                        ))
+                    finally:
+                        writer.cancel()
+                        await asyncio.gather(writer, return_exceptions=True)
+                    with sqlite3.connect(router._vk_callback_queue_path()) as db:
+                        return db.execute("SELECT COUNT(*) FROM callback_events").fetchone()[0]
+
+                self.assertEqual(asyncio.run(scenario()), 50)
+        finally:
+            router._db_path = previous_db
+            router._vk_callback_write_queue = previous_queue
+            router._vk_callback_writer_task = previous_task
+
+    def test_vk_callback_enqueue_fails_if_writer_cannot_open_database(self):
+        previous_queue = router._vk_callback_write_queue
+        previous_task = router._vk_callback_writer_task
+
+        async def fail_connect():
+            raise sqlite3.OperationalError("database is locked")
+
+        async def scenario():
+            router._vk_callback_write_queue = asyncio.Queue(maxsize=1)
+            with patch.object(router, "_connect_vk_callback_queue", new=fail_connect):
+                writer = asyncio.create_task(router.vk_callback_writer_loop())
+                router._vk_callback_writer_task = writer
+                with self.assertRaisesRegex(RuntimeError, "VK callback writer stop"):
+                    await asyncio.wait_for(
+                        router._enqueue_vk_callback(b"callback", {"type": "message_new"}),
+                        timeout=1,
+                    )
+                await asyncio.gather(writer, return_exceptions=True)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            router._vk_callback_write_queue = previous_queue
+            router._vk_callback_writer_task = previous_task
+
     def test_vk_photo_uses_largest_image(self):
         files = router._vk_attachment_views([
             {"type": "photo", "photo": {"sizes": [
@@ -791,11 +985,31 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertEqual(widget.count('await request("/link"'), 1)
         self.assertIn("function enableHistoryScroll(feed, loader)", widget)
         self.assertIn("var conversationCache = new Map();", widget)
+        self.assertIn("var channelCache = new Map();", widget)
+        self.assertIn("function loadChannelsForContext(source, token)", widget)
+        self.assertIn("window.requestIdleCallback(prefetchCardChannels", widget)
+        self.assertIn("function deliveryStatus(status)", widget)
+        self.assertIn('label: "Прочитано"', widget)
+        self.assertIn("appendMessageMeta(meta, message)", widget)
+        self.assertNotIn("message.status || \"\"].filter(Boolean).join", widget)
         self.assertIn("loadInbox(true, true)", widget)
         self.assertNotIn('await request("/inbox/read"', widget)
         self.assertIn("function findVkId()", widget)
         self.assertIn("function visibleSourceFields()", widget)
         self.assertIn('document.querySelectorAll("tr")', widget)
+        self.assertIn('document.querySelectorAll("label,dt,th,td,div,span")', widget)
+        self.assertIn("function getCoursePageIdentity()", widget)
+        self.assertIn("fields.getcourse_user_id = page.entity_id", widget)
+        self.assertIn('request("/profile-links"', widget)
+        self.assertIn('aria-label="Профили клиента"', widget)
+        self.assertIn('class="gc-card-action"', widget)
+        self.assertIn("function openGetCourseCard()", widget)
+        self.assertIn(".attachment-draft[hidden]{display:none}", widget)
+        self.assertIn(".compose-error:empty{display:none}", widget)
+        self.assertNotIn('nativeButton.textContent = channel.provider', widget)
+        self.assertNotIn('back.textContent = "Каналы"', widget)
+        self.assertIn('direct_label = "VK · найти по utm_term"', backend)
+        self.assertIn("attemptable = bool(phone)", backend)
         self.assertIn('loadInbox(false);', widget)
         self.assertIn("vk_id: findVkId()", widget)
         self.assertIn('image.className = "message-image"', widget)
@@ -840,10 +1054,10 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('.chat-shell{min-width:0;', widget)
         self.assertIn('grid-template-columns:minmax(0,1fr);grid-template-rows:', widget)
         self.assertIn('.layer[data-drawer-size] .drawer{width:100%;', widget)
-        self.assertIn('.head{min-height:56px;display:grid;grid-template-columns:minmax(0,1fr) auto auto auto auto', widget)
-        self.assertIn('.drawer-send-all{grid-column:2;grid-row:1}.copy{grid-column:3;grid-row:1}.drawer-settings{grid-column:4;grid-row:1}', widget)
+        self.assertIn('.head{min-height:56px;display:grid;grid-template-columns:minmax(130px,.45fr) minmax(120px,1fr)', widget)
+        self.assertIn('.drawer-send-all{grid-column:3;grid-row:1}.copy{grid-column:4;grid-row:1}.gc-card-action{grid-column:5;grid-row:1}.drawer-settings{grid-column:6;grid-row:1}', widget)
         self.assertIn('.channels{grid-column:1/-1;grid-row:2;', widget)
-        self.assertIn('.drawer-send-all{grid-column:1;grid-row:2}', widget)
+        self.assertIn('.drawer-send-all{grid-column:1;grid-row:3}', widget)
         self.assertIn('folder || "Без папки"', widget)
         self.assertIn('menuButton("★ Избранное", showFavorites)', widget)
         self.assertIn('action: "favorite"', widget)
@@ -854,6 +1068,13 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('>Сотрудники <span id="adminCount">', panel)
         self.assertIn('class="input role-select"', panel)
         self.assertIn('class="input amo-select"', panel)
+        self.assertIn('class="amo-task-enabled"', panel)
+        self.assertIn('Ставить задачу при новом сообщении', panel)
+        self.assertIn('amo_task_enabled:amoTaskEnabled', panel)
+        self.assertIn('class="amo-task-source"', panel)
+        self.assertIn("['max','MAX']", panel)
+        self.assertIn('amo_task_sources:amoTaskSources', panel)
+        self.assertIn("button.textContent='Сохраняю…'", panel)
         self.assertIn("api('/staff/catalog')", panel)
         self.assertIn('id="employeeTemplatesModal"', panel)
         self.assertIn("employee-templates", panel)
@@ -1016,7 +1237,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         ])
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertIn("['pending','unverified'].includes(row.verification)", amo)
-        self.assertIn("aria-label','Уточняем остальные профили'", amo)
+        self.assertIn("profileRefreshTimer=setTimeout(()=>loadProfileLinks(expectedGeneration,true),2000)", amo)
+        self.assertNotIn("aria-label','Уточняем остальные профили'", amo)
         self.assertIn("if(result.sent.length){await refreshActive(true);loadProfileLinks(bootGeneration,true)}", amo)
         self.assertIn("else if(result.queued.length)setTimeout(()=>refreshActive(true),2500)", amo)
 
@@ -1291,7 +1513,17 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('id="authClose"', amo)
         self.assertIn("nexus-messenger-close", amo)
         self.assertIn("setInterval(refreshActive,5000)", amo)
-        self.assertIn('id="sendAll" type="checkbox" checked>Отправить везде', amo)
+        self.assertIn('id="sendAll" type="checkbox">Отправить везде', amo)
+        self.assertNotIn('id="sendAll" type="checkbox" checked', amo)
+        self.assertIn("if(!contextReady){context=next;return}enrichCardContext(next)", amo)
+        self.assertIn("contextBootTimer=setTimeout(()=>{contextReady=true;boot()},350)", amo)
+        self.assertIn("async function enrichCardContext(next)", amo)
+        self.assertIn("setRefreshTask('channels');setRefreshTask('cached');setRefreshTask('context','Уточняем данные клиента…')", amo)
+        self.assertIn("finally{if(expectedGeneration===bootGeneration){setRefreshTask('channels');setRefreshTask('cached');setRefreshTask('context')}}", amo)
+        self.assertNotIn("Уточняем остальные профили", amo)
+        self.assertIn(".profile-link.unverified::before{display:none}", amo)
+        profile_header = amo.split('id="profileLinks" class="profile-links">', 1)[1].split('</div>', 1)[0]
+        self.assertNotIn("spinner", profile_header)
         self.assertIn("async function sendText(raw,rows,attachment)", amo)
         self.assertIn("const preview=raw?await request('/template-preview',{body:raw,...threadFields()}):{text:''}", amo)
         self.assertIn("Promise.all(targets.map", amo)
@@ -1343,19 +1575,31 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn(".channels button:disabled::after", amo)
         self.assertIn("Загружаем историю переписки…", amo)
         self.assertIn("data.history_status!=='syncing'", amo)
+        self.assertIn("function deliveryStatus(status)", amo)
+        self.assertIn("label:'Отправлено'", amo)
+        self.assertIn("label:'Ошибка доставки'", amo)
+        self.assertIn("label:'Прочитано'", amo)
+        self.assertIn("appendMessageMeta(meta,row)", amo)
+        self.assertNotIn("row.status].filter(Boolean).join(' · ')", amo)
         self.assertIn("Выйти из аккаунта", amo)
         self.assertIn("request('/logout')", amo)
         self.assertIn("html[data-theme=\"dark\"] .auth", amo)
         self.assertIn(".profile-links{flex:1 1 0;width:0}", amo)
         script = (module_dir / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
-        self.assertEqual(manifest["widget"]["version"], "1.8.6")
-        self.assertIn("static/amocrm.html?v=51506", script)
+        self.assertEqual(manifest["widget"]["version"], "1.9.3")
+        self.assertIn("static/amocrm.html'", script)
+        self.assertIn("REMOTE_CACHE_WINDOW_MS = 5 * 60 * 1000", script)
+        self.assertIn("Math.floor(Date.now() / REMOTE_CACHE_WINDOW_MS)", script)
+        self.assertIn("WIDGET_BOOTSTRAP_VERSION + '-' + cacheSlot", script)
+        self.assertNotIn("WIDGET_CACHE_VERSION", script)
         self.assertIn("background:'#111c25'", script)
         self.assertIn("opacity:0", script)
         self.assertIn("height:'100dvh'", script)
         self.assertIn("const AMO_REQUEST_TIMEOUT = 6000", script)
         self.assertIn("const CONTEXT_TIMEOUT = 20000", script)
-        self.assertIn("context:resolvedContext", script)
+        self.assertIn("postContext(basicContext())", script)
+        self.assertIn("enrichmentPromise = cardContext()", script)
+        self.assertIn("context:value", script)
         self.assertIn("Получаем данные клиента…", script)
         self.assertIn("spinner[0].animate", script)
         self.assertIn("setTimeout(paint, 1200)", script)
@@ -1482,6 +1726,153 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             },
         ])
 
+    def test_streams_conversations_can_open_before_history_is_loaded(self):
+        history_called = False
+
+        async def recipients(**_kwargs):
+            return {"ok": True, "telegram": "", "vk": "", "salebot": "965776230"}
+
+        async def channels(**_kwargs):
+            return [{
+                "channel_id": "salebot:project", "transport": "salebot",
+                "provider": "salebot", "label": "SaleBot · Проект",
+            }]
+
+        async def history(_client_id):
+            nonlocal history_called
+            history_called = True
+            return []
+
+        async def admin(_operator_name):
+            return {"id": 1, "name": "Никита Попов"}
+
+        async def templates(_admin_id, *, can_edit_shared):
+            self.assertFalse(can_edit_shared)
+            return []
+
+        async def presence(_channels, _phone):
+            return set()
+
+        with patch.object(router, "service_transfer_recipients", new=recipients), patch.object(
+            router, "_all_channels", new=channels,
+        ), patch.object(router, "_salebot_history", new=history), patch.object(
+            router, "_streams_admin", new=admin,
+        ), patch.object(router, "_template_rows", new=templates), patch.object(
+            router, "_conversation_presence", new=presence,
+        ):
+            result = asyncio.run(router.service_streams_conversations(
+                email="mail@example.test", gc_user_id="505433216", name="Алина",
+                phone="79819793382", operator_name="Никита Попов", include_history=False,
+            ))
+
+        self.assertFalse(history_called)
+        self.assertEqual(result["channels"][0]["messages"], [])
+        self.assertFalse(result["channels"][0]["history_loaded"])
+        self.assertTrue(result["channels"][0]["can_send"])
+
+    def test_streams_conversations_hides_excluded_personal_telegram(self):
+        async def recipients(**_kwargs):
+            return {
+                "ok": True, "telegram": "328268937",
+                "telegram_username": "Rareru", "vk": "", "salebot": "",
+            }
+
+        async def channels(**_kwargs):
+            return [{
+                "channel_id": "telegram-personal:1", "transport": "telegram",
+                "provider": router.TELEGRAM_PROVIDER, "label": "Telegram Personal",
+            }]
+
+        async def admin(_operator_name):
+            return {"id": 1, "name": "Никита Попов"}
+
+        async def templates(_admin_id, *, can_edit_shared):
+            return []
+
+        with patch.object(router, "service_transfer_recipients", new=recipients), patch.object(
+            router, "_all_channels", new=channels,
+        ), patch.object(router, "_streams_admin", new=admin), patch.object(
+            router, "_template_rows", new=templates,
+        ):
+            result = asyncio.run(router.service_streams_conversations(
+                gc_user_id="42", name="Служебный контакт", phone="",
+                operator_name="Никита Попов",
+            ))
+
+        self.assertEqual(result["channels"], [])
+        self.assertEqual(result["profile_links"], [])
+
+    def test_streams_email_preview_and_service_complete_url_attribution(self):
+        variables = {
+            "utm.term": {"value": "term-42"},
+            "utm.source": {"value": "getcourse"},
+            "utm.medium": {"value": "manager-email"},
+            "utm.campaign": {"value": "follow-up"},
+            "utm.content": {"value": "personal"},
+            "ym_uid": {"value": "ym-7"},
+            "conversation_id": {"value": "gc-514110600"},
+        }
+        captured = {}
+
+        async def admin(_operator_name):
+            return {"id": 1, "name": "Татьяна Истратова", "role": "employee"}
+
+        async def resolved(_context):
+            return {"variables": variables}
+
+        async def setting(key):
+            return {
+                "auto_markup_domains": "sobakovod.pro;club.sobakovod.pro",
+                "auto_markup_tail": router.AUTO_MARKUP_DEFAULT_TAIL,
+            }[key]
+
+        async def channel(channel_id, transport, provider):
+            return {"channel_id": channel_id, "transport": transport, "provider": provider}
+
+        async def email_send(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True, "queued": True}
+
+        with patch.object(router, "_streams_admin", new=admin), patch.object(
+            router, "_resolve_identity_context", new=resolved,
+        ), patch.object(router, "_setting", new=setting), patch.object(
+            router, "_requested_channel", new=channel,
+        ), patch.object(router, "_identity_index", object()), patch.object(
+            router, "_module_service", return_value=email_send,
+        ):
+            preview = asyncio.run(router.service_streams_template_preview(
+                body="Подробнее: https://sobakovod.pro/course_tour",
+                email="client@example.com", gc_user_id="514110600",
+                name="Клиент", operator_name="Татьяна Истратова",
+            ))
+            result = asyncio.run(router.service_streams_send(
+                channel_id="email:info", transport="email", provider="email",
+                chat_id="", phone="+79990000000",
+                text="Подробнее: https://sobakovod.pro/course_tour",
+                operator_name="Татьяна Истратова", email="client@example.com",
+                gc_user_id="514110600", name="Клиент", subject="Информация",
+                idempotency_key="email-attribution-test",
+                email_guidelines_confirmed=True, email_guidelines_version="2026-09-01",
+            ))
+
+        expected_url = (
+            "https://sobakovod.pro/course_tour?utm_term=term-42"
+            "&utm_source=getcourse&utm_medium=manager-email&utm_campaign=follow-up"
+            "&utm_content=personal&param1=ym-7&param2=gc-514110600"
+        )
+        self.assertTrue(result["ok"])
+        self.assertIn(expected_url, preview["text"])
+        self.assertIn(expected_url, captured["text"])
+        self.assertEqual(captured["text"].count("utm_term="), 1)
+        self.assertEqual(
+            captured["signature_url"],
+            "https://sobakovod.pro/?utm_term=term-42&utm_source=getcourse"
+            "&utm_medium=manager-email&utm_campaign=follow-up&utm_content=personal"
+            "&param1=ym-7&param2=gc-514110600",
+        )
+        self.assertIs(captured["email_guidelines_confirmed"], True)
+        self.assertEqual(captured["email_guidelines_version"], "2026-09-01")
+
     def test_streams_send_uses_salebot_client_id(self):
         calls = []
 
@@ -1564,11 +1955,12 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertEqual(payload["chatId"], "max-chat-1")
         self.assertRegex(payload["crmMessageId"], r"^nexus-[0-9a-f]{32}-file$")
 
-    def test_profile_refresh_has_one_spinner_without_visible_duplicate_text(self):
+    def test_profile_refresh_runs_without_a_header_spinner(self):
         amo = (Path(__file__).resolve().parents[1] / "static" / "amocrm.html").read_text(encoding="utf-8")
         self.assertNotIn("setRefreshTask('profiles'", amo)
-        self.assertIn("status.setAttribute('aria-label','Уточняем остальные профили')", amo)
-        self.assertNotIn("document.createTextNode(box.querySelector('.profile-link')?'Уточняем остальные профили", amo)
+        self.assertNotIn("status.setAttribute('aria-label','Уточняем остальные профили')", amo)
+        self.assertIn(".profile-link.unverified::before{display:none}", amo)
+        self.assertIn("profileRefreshTimer=setTimeout(()=>loadProfileLinks(expectedGeneration,true),4000)", amo)
         self.assertIn("['salebot','vk','telegram_personal','wazzup']", amo)
 
     def test_getcourse_widget_queues_access_changes_without_second_confirmation(self):
@@ -1796,6 +2188,15 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
             "stacktrace",
             router._friendly_operation_error("unexpected stacktrace from provider", "salebot").casefold(),
         )
+
+    def test_max_communication_filter_uses_wazzup_max_transport_rows(self):
+        self.assertEqual(
+            router._communication_provider_filter("max"),
+            ("c.provider=? AND c.chat_type IN (?,?)", ["wazzup", "max", "maxgroup"]),
+        )
+        self.assertEqual(router._communication_provider_filter("salebot"), ("c.provider=?", ["salebot"]))
+        panel = (Path(__file__).resolve().parents[1] / "panel" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("providerLabel=item.provider==='wazzup'&&['max','maxgroup'].includes(transport)?'MAX'", panel)
 
 
 if __name__ == "__main__":
