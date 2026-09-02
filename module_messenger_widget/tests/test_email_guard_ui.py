@@ -101,7 +101,9 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("request('/inbox/read'", script)
         self.assertIn("inbox_thread:thread", script)
         self.assertIn("FRAME+'?standalone=1'", script)
-        self.assertIn('id="appearanceButton"', page)
+        self.assertIn('id="sidebarClose"', page)
+        self.assertNotIn('id="appearanceButton"', page)
+        self.assertNotIn('id="appearanceClose"', page)
         self.assertIn('data-theme-choice="light"', page)
         self.assertIn('data-scale-choice="xlarge"', page)
         self.assertIn("restoreInbox()", script)
@@ -128,7 +130,9 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn(".head{display:none!important}", self.amocrm)
         self.assertIn("request('/channels',{scope:'inbox'})", script)
         self.assertIn('id="conversationSettings"', page)
-        self.assertIn("nexus-messenger-open-settings", script)
+        self.assertIn("$('conversationSettings').onclick=toggleAppearance", script)
+        self.assertIn("$('sidebarClose').onclick=closeSidebar", script)
+        self.assertNotIn("nexus-messenger-open-settings", script)
         self.assertIn("data:image/svg+xml", self.amocrm)
 
     def test_fullscreen_conversation_is_bounded_to_the_visible_viewport(self):
