@@ -86,6 +86,30 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertNotIn("innerHTML", script)
         self.assertIn("syncMobileLink()", self.amocrm)
 
+    def test_fullscreen_messenger_has_inbox_search_and_responsive_sidebar(self):
+        module = Path(__file__).resolve().parents[1]
+        page = (module / "static" / "mobile.html").read_text(encoding="utf-8")
+        script = (module / "static" / "mobile.js").read_text(encoding="utf-8")
+        self.assertIn('id="sidebar"', page)
+        self.assertIn('id="search"', page)
+        self.assertIn('id="filters"', page)
+        self.assertIn('aria-label="Диалоги"', page)
+        self.assertIn("@media(max-width:760px)", page)
+        self.assertNotIn("maximum-scale", page)
+        self.assertNotIn("user-scalable=no", page)
+        self.assertIn("request('/inbox'", script)
+        self.assertIn("request('/inbox/read'", script)
+        self.assertIn("inbox_thread:thread", script)
+        self.assertIn("FRAME+'?standalone=1'", script)
+
+    def test_standalone_mode_does_not_change_embedded_widget_defaults(self):
+        self.assertIn("STANDALONE=new URLSearchParams(location.search).get('standalone')==='1'", self.amocrm)
+        self.assertIn("theme=STANDALONE?'dark'", self.amocrm)
+        self.assertIn("if(!STANDALONE)parent.postMessage({type:'nexus-messenger-resize'", self.amocrm)
+        self.assertIn("context?.inbox_thread||null", self.amocrm)
+        self.assertIn("scope:'inbox'", self.amocrm)
+        self.assertIn('html[data-standalone="1"] #close{display:none}', self.amocrm)
+
 
 if __name__ == "__main__":
     unittest.main()
