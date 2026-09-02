@@ -1,6 +1,13 @@
-# Messenger Widget 5.19.0
+# Messenger Widget 5.19.1
 
 Release candidate for the week-long production observation period.
+
+## 5.19.1 — exact reopen and composer alignment
+
+- The amoCRM bootstrap keeps the same-card iframe alive while the modal is closed, so the selected Email channel, subject, draft, scroll and attachment stay exactly where the operator left them.
+- A fresh same-card snapshot is restored without another channel discovery request, including while an older amoCRM bootstrap is still installed.
+- Reopening GetCourse resumes its existing polling timer without an immediate duplicate conversation request.
+- Textareas are block-level inside their composer wrappers, making the Send button exactly the same height as the visible message field; empty error rows no longer add stray space.
 
 ## 5.19.0 — stable reopen and channel order
 

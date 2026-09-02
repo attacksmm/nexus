@@ -3,7 +3,7 @@ define(['jquery'], function ($) {
   const Widget = function () {
     const self = this;
     const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html';
-    const WIDGET_BOOTSTRAP_VERSION = '1.9.3';
+    const WIDGET_BOOTSTRAP_VERSION = '1.9.4';
     const REMOTE_CACHE_WINDOW_MS = 5 * 60 * 1000;
     const AMO_REQUEST_TIMEOUT = 6000;
     const CONTEXT_TIMEOUT = 20000;
@@ -176,13 +176,44 @@ define(['jquery'], function ($) {
       }
     }
 
+    let modalState = null;
+
+    function modalCardKey() {
+      const card = pageCard();
+      return card.entity + ':' + card.id;
+    }
+
+    function postVisibility(visible) {
+      if (!modalState || !modalState.frame[0].contentWindow) return;
+      modalState.frame[0].contentWindow.postMessage({type:'nexus-messenger-visibility', visible:visible}, modalState.targetOrigin);
+    }
+
     function closeModal() {
-      $('#nexus-messenger-modal').remove();
+      if (!modalState) return;
+      postVisibility(false);
+      modalState.layer.attr('aria-hidden', 'true').css('display', 'none');
+      $(document).off('keydown.nexusMessenger');
+    }
+
+    function destroyModal() {
+      if (!modalState) return;
+      const state = modalState;
+      modalState = null;
+      clearTimeout(state.frameDeadline());
+      window.removeEventListener('message', state.ready);
+      state.layer.remove();
       $(document).off('keydown.nexusMessenger');
     }
 
     function openModal() {
-      closeModal();
+      const cardKey = modalCardKey();
+      if (modalState && modalState.cardKey === cardKey && modalState.layer[0].isConnected) {
+        modalState.layer.attr('aria-hidden', 'false').css('display', 'grid');
+        postVisibility(true);
+        $(document).off('keydown.nexusMessenger').on('keydown.nexusMessenger', function (event) { if (event.key === 'Escape') closeModal(); });
+        return;
+      }
+      destroyModal();
       const frameUrl = widgetUrl();
       const layer = $('<div id="nexus-messenger-modal" role="dialog" aria-modal="true"></div>').css({position:'fixed',inset:0,zIndex:10000,background:'rgba(20,29,35,.48)',display:'grid',placeItems:'center',padding:'22px'});
       const shell = $('<div></div>').css({width:'min(1180px,96vw)',height:'min(760px,92vh)',minWidth:'680px',minHeight:'460px',maxWidth:'96vw',maxHeight:'92vh',resize:'both',overflow:'hidden',background:'#f5f7f8',boxShadow:'0 18px 70px rgba(0,0,0,.35)',position:'relative'});
@@ -269,8 +300,8 @@ define(['jquery'], function ($) {
       window.addEventListener('message', ready, {once:false});
       frame.on('load', sendContext);
       shell.append(loading, frame); layer.append(shell).on('click', function (event) { if (event.target === layer[0]) closeModal(); }); $('body').append(layer);
+      modalState = {cardKey:cardKey, layer:layer, frame:frame, targetOrigin:targetOrigin, ready:ready, frameDeadline:function () { return frameDeadline; }};
       armFrameDeadline();
-      layer.on('remove', function () { clearTimeout(frameDeadline); window.removeEventListener('message', ready); });
       $(document).on('keydown.nexusMessenger', function (event) { if (event.key === 'Escape') closeModal(); });
     }
 
@@ -287,7 +318,7 @@ define(['jquery'], function ($) {
       init: function () { return true; },
       settings: function () { return true; },
       onSave: function () { return true; },
-      destroy: function () { $(document).off('.nexusMessenger'); closeModal(); }
+      destroy: function () { $(document).off('.nexusMessenger'); destroyModal(); }
     };
     return this;
   };

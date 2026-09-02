@@ -50,12 +50,22 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("cards:v2", self.amocrm)
         self.assertIn("function pauseConversationPoll()", self.getcourse)
         self.assertNotIn("drawer.host.remove();\n      drawer = null", self.getcourse)
+        self.assertIn("let modalState = null", bootstrap)
+        self.assertIn("postVisibility(false)", bootstrap)
+        self.assertIn("modalState.layer.attr('aria-hidden', 'false').css('display', 'grid')", bootstrap)
+        self.assertNotIn("$('#nexus-messenger-modal').remove()", bootstrap)
+        self.assertIn("CARD_RESUME_TTL=5*60*1000", self.amocrm)
+        self.assertNotIn("if(widgetVisible)refreshActive(true)", self.amocrm)
+        self.assertNotIn("fetchConversation(activeChannel, feed, true).catch", self.getcourse)
 
     def test_email_toolbar_belongs_to_message_and_send_stretches(self):
         composer = self.amocrm.split('<div class="composer">', 1)[1].split('</section>', 1)[0]
         self.assertLess(composer.index('id="emailSubject"'), composer.index('class="message-wrap"'))
         self.assertIn(".composer>.send{height:auto;align-self:stretch}", self.amocrm)
         self.assertIn(".composer>.send{height:auto;align-self:stretch}", self.getcourse)
+        self.assertIn(".composer .message-wrap textarea{display:block", self.amocrm)
+        self.assertIn(".composer-input textarea{display:block", self.getcourse)
+        self.assertIn(".composer>.error:empty{display:none}", self.amocrm)
         self.assertIn('class="email-subject"', self.getcourse)
 
     def test_channel_order_is_normalized_before_paint(self):
