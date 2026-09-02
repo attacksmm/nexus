@@ -9083,6 +9083,22 @@ def _inbox_preview(message: dict[str, Any]) -> str:
     return text or "Сообщение"
 
 
+def _inbox_display_name(*candidates: Any, phone: str = "") -> str:
+    """Prefer a real messenger/client name over transport-generated labels."""
+    fallback = ""
+    for candidate in candidates:
+        value = _clean(candidate, 200)
+        if not value:
+            continue
+        fallback = fallback or value
+        if re.fullmatch(r"(?:vk|telegram|salebot|max|whatsapp|viber|клиент)[\s:#_-]*\d*", value, re.I):
+            continue
+        if re.fullmatch(r"\+?\d[\d\s()_-]{6,}", value):
+            continue
+        return value
+    return _clean(phone, 40) or fallback or "Клиент"
+
+
 def _sort_inbox_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda item: (item["unread"] > 0, item["sent_at"]), reverse=True)
 
@@ -9170,7 +9186,14 @@ async def _inbox_items(
                            x.provider AS external_provider,x.getcourse_user_id AS external_getcourse_user_id,
                            x.phone AS external_phone,x.name AS external_name,
                            m.external_id,m.direction,m.status,m.text,m.content_uri,m.author_name,m.sent_at,m.raw_json,
-                           m.raw_json AS incoming_raw_json,m.author_name AS incoming_author
+                           (SELECT im.raw_json FROM wazzup_messages im
+                            WHERE im.channel_id=c.channel_id AND im.chat_type=c.chat_type AND im.chat_id=c.chat_id
+                              AND im.direction='incoming'
+                            ORDER BY im.sent_at DESC,im.id DESC LIMIT 1) AS incoming_raw_json,
+                           (SELECT im.author_name FROM wazzup_messages im
+                            WHERE im.channel_id=c.channel_id AND im.chat_type=c.chat_type AND im.chat_id=c.chat_id
+                              AND im.direction='incoming' AND im.author_name<>''
+                            ORDER BY im.sent_at DESC,im.id DESC LIMIT 1) AS incoming_author
                     FROM wazzup_chats c
                     JOIN wazzup_messages m ON m.id=(
                         SELECT lm.id FROM wazzup_messages lm
@@ -9276,10 +9299,10 @@ async def _inbox_items(
         if phone and not gc_user_id and _clean(item.get("link_source"), 80) != "inbox-resolved":
             identity = resolve_sync_identity(phone=phone)
             gc_user_id = _clean(identity.get("getcourse_user_id"), 200)
-        name = _clean(
-            external_link.get("name") or item.get("link_name") or item.get("contact_name") or item.get("incoming_author") or item.get("author_name"),
-            200,
-        ) or phone or "Клиент"
+        name = _inbox_display_name(
+            external_link.get("name"), item.get("link_name"), item.get("contact_name"),
+            item.get("incoming_author"), item.get("author_name"), phone=phone,
+        )
         should_remember = bool(phone) and (
             not _normalize_phone(item.get("phone"))
             or gc_user_id != _clean(item.get("getcourse_user_id"), 200)
