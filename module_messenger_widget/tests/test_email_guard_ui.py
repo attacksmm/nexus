@@ -117,6 +117,18 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("scope:'inbox'", self.amocrm)
         self.assertIn('html[data-standalone="1"] #close{display:none}', self.amocrm)
 
+    def test_fullscreen_layout_is_telegram_like_without_css_zoom(self):
+        module = Path(__file__).resolve().parents[1]
+        page = (module / "static" / "mobile.html").read_text(encoding="utf-8")
+        script = (module / "static" / "mobile.js").read_text(encoding="utf-8")
+        self.assertIn('id="telegram-fullscreen-v2"', page)
+        self.assertIn('id="telegram-standalone-v2"', self.amocrm)
+        self.assertIn("zoom:1!important", self.amocrm)
+        self.assertIn(".head{display:none!important}", self.amocrm)
+        self.assertIn("request('/channels',{scope:'inbox'})", script)
+        self.assertIn('id="conversationSettings"', page)
+        self.assertIn("nexus-messenger-open-settings", script)
+
 
 if __name__ == "__main__":
     unittest.main()

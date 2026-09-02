@@ -81,6 +81,16 @@ class MobileLinkSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result["scanned"], result["skipped"], result["updated"]), (1, 1, 0))
         self.assertEqual(patches, [])
 
+    def test_inbox_prefers_real_messenger_name_over_transport_placeholder(self):
+        self.assertEqual(
+            router._inbox_display_name("VK 412039845", "", "Катя Фролова", phone="+79161234567"),
+            "Катя Фролова",
+        )
+        self.assertEqual(
+            router._inbox_display_name("SaleBot 1011139004", "", phone="+79161234567"),
+            "+79161234567",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
