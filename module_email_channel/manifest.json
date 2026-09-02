@@ -1,0 +1,14 @@
+{
+  "id": "email-channel",
+  "name": "Email-канал",
+  "version": "0.2.4",
+  "description": "Двусторонняя персональная email-переписка через DashaMail и Даша.Роутер с очередью, цепочками и статусами доставки.",
+  "env_vars": {
+    "NEXUS_EMAIL_DASHAMAIL_API_KEY": "API-ключ DashaMail с правом transactional.send",
+    "NEXUS_EMAIL_DASHAMAIL_EVENT_WEBHOOK_KEY": "Ключ подписи транзакционных webhook DashaMail",
+    "NEXUS_EMAIL_DASHAMAIL_ROUTER_SIGNING_KEY": "Текущий signing key маршрута Даша.Роутер",
+    "NEXUS_EMAIL_DASHAMAIL_ROUTER_PREVIOUS_SIGNING_KEY": "Необязательный предыдущий signing key на время ротации",
+    "NEXUS_EMAIL_DASHAMAIL_API_BASE": "Необязательный API URL; используется только для тестового стенда"
+  },
+  "env_required": []
+}

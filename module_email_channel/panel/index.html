@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Email-канал</title>
+  <style>
+    :root{font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;--bg:#060606;--panel:#101010;--panel2:#171717;--text:#f2f2f2;--muted:#aaa;--border:#303030;--ok:#9fe0aa;--warn:#ffe08a;--bad:#ffc2ca}
+    *{box-sizing:border-box}html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text)}
+    body{display:grid;grid-template-rows:54px minmax(0,1fr)}header{display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--border);background:#0b0b0b}h1{margin:0;font-size:16px}header span{color:var(--muted);font-size:12px}
+    main{min-height:0;overflow:auto;padding:14px;scrollbar-color:#444 #111}.grid{display:grid;grid-template-columns:minmax(300px,430px) minmax(0,1fr);gap:12px}.box{border:1px solid var(--border);background:var(--panel)}.box h2{margin:0;padding:11px 12px;border-bottom:1px solid var(--border);font-size:13px}.body{padding:12px}
+    .state{display:flex;align-items:center;gap:8px;min-height:32px;color:var(--muted);font-size:12px}.spinner{width:15px;height:15px;flex:0 0 15px;border:2px solid #555;border-top-color:#eee;border-radius:50%;animation:spin .75s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    dl{display:grid;grid-template-columns:1fr auto;gap:8px;margin:0;font-size:12px}dt{color:var(--muted)}dd{margin:0}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+    label{display:grid;gap:5px;margin-bottom:10px;color:var(--muted);font-size:11px}input,select{height:34px;padding:0 9px;border:1px solid #444;background:var(--panel2);color:var(--text);min-width:0}label.check{display:flex;align-items:center}label.check input{width:16px;height:16px}
+    button{height:34px;padding:0 12px;border:1px solid #eee;background:#eee;color:#080808;font-weight:700;cursor:pointer}button.secondary{height:28px;border-color:#555;background:#171717;color:#eee;font-size:11px}button:disabled{opacity:.55;cursor:wait}.busy{display:flex;align-items:center;justify-content:center;gap:8px}.busy .spinner{width:13px;height:13px;border-color:#555;border-top-color:currentColor}
+    .threads{max-height:320px;overflow:auto}.thread{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:12px}.thread b,.thread span{overflow-wrap:anywhere}.thread small{color:var(--muted)}
+    .hint{margin:0;color:var(--muted);font-size:11px;line-height:1.5}.senders{max-height:calc(100vh - 360px);min-height:190px;overflow:auto;scrollbar-color:#444 #111}.sender{display:grid;grid-template-columns:minmax(140px,.8fr) minmax(260px,1.3fr) 190px;gap:8px;align-items:center;padding:9px 12px;border-bottom:1px solid var(--border);font-size:12px}.sender-name{min-width:0}.sender-name b,.sender-name small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sender-name small{color:var(--muted)}
+    .address{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}.address input{width:100%;height:30px}.address span{height:30px;display:flex;align-items:center;padding:0 7px;border:1px solid #444;border-left:0;background:#0d0d0d;color:var(--muted);white-space:nowrap}.sender-actions{display:flex;align-items:center;gap:8px}.toggle{display:flex;align-items:center;gap:6px;margin:0;color:var(--muted);font-size:11px}.toggle input{width:15px;height:15px}
+    @media(max-width:960px){.sender{grid-template-columns:minmax(120px,.7fr) minmax(210px,1fr)}.sender-actions{grid-column:2}.senders{max-height:none}}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}html{height:auto;min-height:100%;overflow-y:auto}body{height:auto;min-height:100%;overflow:visible;display:block}main{overflow:visible}header{height:54px;position:sticky;top:0;z-index:2}.threads,.senders{max-height:none}.sender{grid-template-columns:1fr}.sender-actions{grid-column:auto}.address span{max-width:155px;overflow:hidden;text-overflow:ellipsis}}
+  </style>
+</head>
+<body>
+  <header><h1>Email-канал</h1><span id="headline">Загружаем состояние…</span></header>
+  <main><div class="grid">
+    <section>
+      <div class="box"><h2>Состояние</h2><div class="body" id="status"><div class="state"><i class="spinner"></i><span>Проверяем настройки и очередь…</span></div></div></div>
+      <div class="box" style="margin-top:12px"><h2>Пилот</h2><form class="body" id="form">
+        <label class="check"><input name="enabled" type="checkbox">Канал включён</label>
+        <label class="check"><input name="pilot_mode" type="checkbox">Пилотный режим</label>
+        <label>Резервный отправитель<input name="from_email" type="email"></label>
+        <label>Домен ответов<input name="reply_domain"></label>
+        <label>Задачи amoCRM<select name="inbound_task_mode"><option value="shadow">Теневой режим</option><option value="disabled">Выключены</option><option value="enabled">Включены</option></select></label>
+        <label class="check"><input name="track_opens" type="checkbox">Показывать приблизительное открытие</label>
+        <label class="check"><input name="track_clicks" type="checkbox">Отслеживать клики</label>
+        <button id="save" type="submit">Сохранить</button>
+      </form></div>
+    </section>
+    <section>
+      <div class="box"><h2>Адреса сотрудников</h2><div class="body"><p class="hint">Nexus закрепляет за каждым активным сотрудником постоянный адрес на подтверждённом домене. Адрес можно отредактировать; выключенный сотрудник безопасно отправляет с резервного адреса.</p></div><div id="senders" class="senders"><div class="state" style="padding:0 12px"><i class="spinner"></i><span>Загружаем сотрудников и адреса…</span></div></div></div>
+      <div class="box" style="margin-top:12px"><h2>Последние цепочки</h2><div id="threads" class="threads"><div class="state" style="padding:0 12px"><i class="spinner"></i><span>Загружаем цепочки…</span></div></div></div>
+    </section>
+  </div></main>
+  <script>
+    const $=id=>document.getElementById(id);let senderDomain='support.sobakovod.pro';
+    async function api(path,options={}){const r=await fetch('/nexus/email-channel/api'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...options});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||data.error||'Ошибка '+r.status);return data}
+    function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+    function cred(label,ok){return `<dt>${esc(label)}</dt><dd class="${ok?'ok':'bad'}">${ok?'настроен':'нет'}</dd>`}
+    function busy(button,label){button.disabled=true;button.innerHTML=`<span class="busy"><i class="spinner"></i>${esc(label)}</span>`}
+    function idle(button,label){button.disabled=false;button.textContent=label}
+    async function load(){try{const [s,t,c,p]=await Promise.all([api('/status'),api('/settings'),api('/threads'),api('/senders')]);senderDomain=p.domain||senderDomain;$('headline').textContent=s.enabled?'Канал включён':s.pilot_mode?'Пилот · отправка выключена':'Канал выключен';$('status').innerHTML=`<dl><dt>Резервный отправитель</dt><dd>${esc(s.from_email)}</dd>${cred('API-ключ',s.credentials.api_key)}${cred('Webhook статусов',s.credentials.event_webhook_key)}${cred('Router signing key',s.credentials.router_signing_key)}<dt>В очереди</dt><dd>${s.counts.queued}</dd><dt>Проблемы</dt><dd class="${s.counts.problems?'bad':''}">${s.counts.problems}</dd><dt>Не сопоставлено</dt><dd class="${s.counts.unmatched?'warn':''}">${s.counts.unmatched}</dd><dt>Подавлено адресов</dt><dd>${s.counts.suppressed}</dd></dl>`;for(const [k,v] of Object.entries(t.settings)){const el=$('form').elements[k];if(!el)continue;if(el.type==='checkbox')el.checked=v==='1';else el.value=v}renderThreads(c.threads);renderSenders(p.senders)}catch(e){$('headline').textContent='Ошибка загрузки';$('status').innerHTML=`<div class="state bad">${esc(e.message)} · обновите страницу</div>`;$('threads').innerHTML='<div class="state bad">Цепочки не загружены</div>';$('senders').innerHTML='<div class="state bad" style="padding:0 12px">Сотрудники не загружены</div>'}}
+    function renderThreads(rows){$('threads').innerHTML=rows.length?rows.map(r=>`<article class="thread"><div><b>${esc(r.subject||'Без темы')}</b><br><small>${esc(r.client_name||r.client_email)} · ${esc(r.client_email)}</small></div><div><small>${r.messages} писем<br>${esc(r.updated_at)}</small></div></article>`).join(''):'<div class="state" style="padding:0 12px">Цепочек пока нет</div>'}
+    function renderSenders(rows){$('senders').innerHTML=rows.length?rows.map(r=>`<article class="sender" data-id="${esc(r.manager_id)}"><div class="sender-name"><b>${esc(r.manager_name)}</b><small>ID ${esc(r.manager_id)}</small></div><label class="address" style="margin:0"><input class="local" value="${esc(r.local_part)}" aria-label="Латинский адрес ${esc(r.manager_name)}"><span>@${esc(senderDomain)}</span></label><div class="sender-actions"><label class="toggle"><input class="enabled" type="checkbox" ${r.enabled?'checked':''}>использовать</label><button type="button" class="secondary save-sender">Сохранить</button></div></article>`).join(''):'<div class="state" style="padding:0 12px">Активных сотрудников пока нет</div>'}
+    $('senders').onclick=async e=>{const button=e.target.closest('.save-sender');if(!button)return;const row=button.closest('.sender'),local=row.querySelector('.local').value,enabled=row.querySelector('.enabled').checked;busy(button,'Сохраняем…');try{await api('/senders/'+encodeURIComponent(row.dataset.id),{method:'PUT',body:JSON.stringify({local_part:local,enabled})});await load()}catch(err){alert(err.message);idle(button,'Сохранить')}};
+    $('form').onsubmit=async e=>{e.preventDefault();const b=$('save'),fd=new FormData(e.target),body={};for(const name of ['enabled','pilot_mode','track_opens','track_clicks'])body[name]=e.target.elements[name].checked;for(const name of ['from_email','reply_domain','inbound_task_mode'])body[name]=fd.get(name);busy(b,'Сохраняем…');try{await api('/settings',{method:'PUT',body:JSON.stringify(body)});await load()}catch(err){alert(err.message)}finally{idle(b,'Сохранить')}};
+    load();
+  </script>
+</body></html>
