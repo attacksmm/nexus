@@ -565,7 +565,8 @@ def test_submit_adds_signature_and_one_click_headers(ready, monkeypatch):
         assert captured["from_name"] == "Татьяна · Современный собаковод"
         assert "Современный собаковод" in str(make_header(decode_header(headers["Reply-To"])))
         assert "case+abc@support.sobakovod.pro" in headers["Reply-To"]
-        assert "С заботой о вас" in captured["message"]
+        assert "С заботой о вас" not in captured["message"]
+        assert "Татьяна Истратова" in captured["message"]
         assert "Отписаться от писем" in captured["message"]
         assert "Отписаться от писем:" in captured["plain_text"]
     asyncio.run(run())
@@ -627,6 +628,6 @@ def test_panel_keeps_mobile_senders_reachable_and_actions_busy():
     panel = (ROOT / "panel" / "index.html").read_text(encoding="utf-8")
     assert "html{height:auto;min-height:100%;overflow-y:auto}" in panel
     assert "main{overflow:visible}" in panel
-    assert "Загружаем сотрудников и адреса…" in panel
-    assert "busy(button,'Сохраняем…')" in panel
+    assert "Открыть реестр сотрудников" in panel
+    assert "busy(b,'Сохраняем…')" in panel
     assert "Проверить DashaMail" not in panel

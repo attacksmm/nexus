@@ -1206,7 +1206,7 @@ def _signature_url_from_html(value: Any) -> str:
 def _signature_text(manager_name: Any, signature_url: Any = DEFAULT_SIGNATURE_URL) -> str:
     name = _clean(manager_name, 200) or "Служба заботы"
     safe_url = _safe_signature_url(signature_url) or DEFAULT_SIGNATURE_URL
-    return f"С заботой о вас,\n{name}\nСлужба заботы клуба «Современный собаковод»\n{safe_url}"
+    return f"{name}\nСлужба заботы клуба «Современный собаковод»\n{safe_url}"
 
 
 def _render_plain_text(
@@ -1243,7 +1243,7 @@ def _render_email_html(
 </td></tr>
 <tr><td style="padding:8px 28px 26px;font-size:16px;line-height:25px;color:#313131">{_email_text_html(body)}</td></tr>
 <tr><td style="padding:20px 28px;background:#fbfaf8;border-top:1px solid #e6ecef;font-size:14px;line-height:21px;color:#4d4d4d">
-С заботой о вас,<br><strong style="color:#313131">{name}</strong><br>Служба заботы клуба «Современный собаковод»<br>
+<strong style="color:#313131">{name}</strong><br>Служба заботы клуба «Современный собаковод»<br>
 <a data-nexus-signature-link="1" href="{safe_signature_url}" style="color:#2787cf;text-decoration:none">sobakovod.pro</a>
 </td></tr>
 <tr><td style="padding:15px 28px 22px;font-size:11px;line-height:17px;color:#8da1ad">{unsubscribe}</td></tr>
