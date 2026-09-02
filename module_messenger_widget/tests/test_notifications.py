@@ -178,6 +178,49 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
             count = (await (await db.execute("SELECT COUNT(*) FROM notification_events")).fetchone())[0]
         self.assertEqual(count, 0)
 
+    async def test_plain_time_button_after_automated_funnel_message_is_silent(self):
+        now = router._iso()
+        before = router._iso(router._now_dt() - timedelta(minutes=1))
+        automated = "Получится ли прийти на занятие сегодня? Выберите удобное время ниже. " * 3
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES('out-time-auto','vk:225','vk','client-time','outgoing','delivered',
+                            ?,'Сообщество',?,'{}',?)""",
+                (automated, before, before),
+            )
+            await db.commit()
+        inserted = await router._enqueue_notification_message(
+            external_id="in-time-auto", channel_id="vk:225", chat_type="vk", chat_id="client-time",
+            provider="vk", client_name="Клиент", text="19:00", sent_at=now,
+        )
+        self.assertFalse(inserted)
+
+    async def test_plain_time_reply_to_manager_is_not_suppressed(self):
+        now = router._iso()
+        before = router._iso(router._now_dt() - timedelta(minutes=1))
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO wazzup_chats(channel_id,chat_type,chat_id,responsible_admin_id,created_at,updated_at)
+                   VALUES('vk:225','vk','client-time-manager',?,?,?)""",
+                (self.admin_id, before, now),
+            )
+            await db.execute(
+                """INSERT INTO wazzup_messages(
+                   external_id,channel_id,chat_type,chat_id,direction,status,text,author_name,sent_at,raw_json,created_at
+                   ) VALUES('out-time-manager','vk:225','vk','client-time-manager','outgoing','delivered',
+                            'Во сколько вам удобно созвониться?','Анна Менеджер',?,'{}',?)""",
+                (before, before),
+            )
+            await db.commit()
+        inserted = await router._enqueue_notification_message(
+            external_id="in-time-manager", channel_id="vk:225", chat_type="vk",
+            chat_id="client-time-manager", provider="vk", client_name="Клиент",
+            text="19:00", sent_at=now,
+        )
+        self.assertTrue(inserted)
+
     async def test_reply_to_manager_message_keeps_notification_and_task_flow(self):
         now = router._iso()
         before = router._iso(router._now_dt() - timedelta(minutes=1))
@@ -753,7 +796,10 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         original_context = router._notification_context
 
         async def amo_context(_source, _chat_id):
-            return {"platform": "amocrm", "entity_url": "https://example.amocrm.ru/leads/detail/1"}
+            return {
+                "platform": "amocrm", "entity_type": "lead", "entity_id": "1",
+                "entity_url": "https://example.amocrm.ru/leads/detail/1",
+            }
 
         router._notification_context = amo_context
         try:
@@ -761,6 +807,8 @@ class NotificationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         finally:
             router._notification_context = original_context
         self.assertIn("Ответственный: Анна Менеджер", text_value)
+        self.assertEqual(links[0][0], "Открыть переписку")
+        self.assertIn("/api/mobile/lead/1/", links[0][1])
         self.assertIn(("Открыть сделку amoCRM", "https://example.amocrm.ru/leads/detail/1"), links)
 
     async def test_course_notification_uses_real_chat_title_and_link(self):

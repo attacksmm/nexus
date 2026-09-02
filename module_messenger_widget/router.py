@@ -125,6 +125,9 @@ CHANNEL_CHAT_TYPES = {
     "cian": "cian",
 }
 PUBLIC_API_BASE = f"https://junior.sobakovod.pro/nexus/{MODULE_ID}/api"
+PUBLIC_MODULE_BASE = f"https://junior.sobakovod.pro/nexus/{MODULE_ID}"
+AMO_MOBILE_FIELD_NAME = "Переписка"
+AMO_MOBILE_SIGNATURE_BYTES = 18
 VK_API = "https://api.vk.com/method"
 VK_API_VERSION = "5.199"
 VK_TOKEN_ENV_KEY = "NEXUS_MESSENGER_WIDGET_VK_GROUP_TOKEN"
@@ -254,6 +257,8 @@ _identity_cache_owner: Any = None
 _profile_links_cache: dict[tuple[str, ...], tuple[float, list[dict[str, Any]], bool]] = {}
 _profile_links_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _staff_catalog_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
+_amo_mobile_field_cache: tuple[float, int] = (0.0, 0)
+_amo_mobile_sync_cache: dict[str, tuple[float, str]] = {}
 _notification_wakeup = asyncio.Event()
 _outbound_wakeup = asyncio.Event()
 _amo_task_wakeup = asyncio.Event()
@@ -2072,6 +2077,38 @@ async def _set_setting(key: str, value: Any) -> None:
         await db.close()
 
 
+async def _amo_mobile_link(lead_id: Any) -> str:
+    clean_id = _clean(lead_id, 64)
+    if not clean_id.isdigit():
+        raise HTTPException(404, "Страница не найдена")
+    secret = await _setting("webhook_secret")
+    if len(secret) < 32:
+        raise HTTPException(503, "Мобильный доступ временно недоступен")
+    digest = hmac.new(
+        secret.encode("utf-8"), f"amo-mobile-lead-v1:{clean_id}".encode("ascii"), hashlib.sha256,
+    ).digest()[:AMO_MOBILE_SIGNATURE_BYTES]
+    signature = _b64url(digest)
+    return f"{PUBLIC_MODULE_BASE}/api/mobile/lead/{clean_id}/{signature}"
+
+
+async def _valid_amo_mobile_link(lead_id: Any, signature: Any) -> bool:
+    clean_signature = _clean(signature, 200)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24}", clean_signature):
+        return False
+    try:
+        expected = (await _amo_mobile_link(lead_id)).rsplit("/", 1)[-1]
+    except HTTPException:
+        return False
+    return hmac.compare_digest(expected, clean_signature)
+
+
+def _same_origin_mobile_request(request: Request) -> bool:
+    origin = request.headers.get("origin", "").rstrip("/")
+    request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+    fetch_site = _clean(request.headers.get("sec-fetch-site"), 40).lower()
+    return bool(origin) and origin == request_origin and fetch_site in {"", "same-origin", "none"}
+
+
 class NotificationDeliveryError(RuntimeError):
     def __init__(self, message: str, *, permanent: bool = False) -> None:
         super().__init__(message)
@@ -2180,6 +2217,15 @@ def _is_low_information_funnel_ack(text: Any) -> bool:
     value = _clean(text, 1000).casefold().replace("ё", "е")
     if not value:
         return False
+    # VK/SaleBot can return a keyboard choice as plain message text without
+    # the original callback payload.  A bare time is a common funnel button;
+    # it is only suppressed later when the preceding message is proven to be
+    # automation-authored, so a reply to a real manager remains visible.
+    if re.fullmatch(
+        r"(?:в\s*)?(?:[01]?\d|2[0-3])[:.]\d{2}(?:\s*(?:мск|час(?:а|ов)?))?",
+        value,
+    ):
+        return True
     parts = [
         part for part in re.split(r"[\s,.;:!?—–()\[\]{}]+", value)
         if part and not re.fullmatch(r"[+👌👍🙏✅🙂😊😉]+", part)
@@ -2819,6 +2865,16 @@ async def _notification_text(rows: list[dict[str, Any]]) -> tuple[str, list[tupl
         lines.append(f"…ещё сообщений: {len(rows) - 12}")
     links: list[tuple[str, str]] = []
     entity_url = _clean(course_context.get("chat_url"), 2000) or _clean(context.get("entity_url"), 2000)
+    if (
+        not course_chat
+        and _clean(context.get("platform"), 40) == "amocrm"
+        and _clean(context.get("entity_type"), 40) == "lead"
+        and _clean(context.get("entity_id"), 64).isdigit()
+    ):
+        try:
+            links.append(("Открыть переписку", await _amo_mobile_link(context["entity_id"])))
+        except HTTPException as exc:
+            _log("warning", "Protected conversation link unavailable: %s", _clean(exc.detail, 300))
     if entity_url:
         links.append(("Открыть учебный чат" if course_chat else "Открыть сделку amoCRM", entity_url))
     if not course_chat and first["source"] == "vk" and str(first["chat_id"]).isdigit():
@@ -3543,6 +3599,156 @@ async def _amo_task_api_request(
         return response.json()
     except (ValueError, TypeError) as exc:
         raise AmoTaskDeliveryError("amoCRM вернула некорректный ответ") from exc
+
+
+def _amo_credentials() -> tuple[str, str]:
+    values = _read_env_values()
+    base_url = _clean(os.environ.get("AMO_BASE_URL") or values.get("AMO_BASE_URL"), 1000).rstrip("/")
+    token = _clean(os.environ.get("AMO_ACCESS_TOKEN") or values.get("AMO_ACCESS_TOKEN"), 5000)
+    if not base_url.startswith("https://") or not token:
+        raise AmoTaskDeliveryError("AMO_BASE_URL или AMO_ACCESS_TOKEN не заданы")
+    return base_url, token
+
+
+def _amo_mobile_add_fields(
+    target: dict[str, str], rows: Any, namespace: str, *, overwrite: bool,
+) -> None:
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        values = row.get("values") if isinstance(row.get("values"), list) else []
+        first = values[0] if values else ""
+        value = first.get("value") if isinstance(first, dict) else first
+        clean_value = _clean(value, 2000)
+        name = _clean(row.get("field_name") or row.get("name"), 200)
+        if not clean_value or name.casefold() == AMO_MOBILE_FIELD_NAME.casefold():
+            continue
+        keys = [name, _clean(row.get("field_code") or row.get("code"), 100), _clean(row.get("field_id"), 40)]
+        for key in (item for item in keys if item):
+            if overwrite or not target.get(key):
+                target[key] = clean_value
+            target[f"{namespace}.{key}"] = clean_value
+
+
+async def _amo_mobile_live_context(lead_id: str) -> dict[str, Any]:
+    clean_id = _clean(lead_id, 64)
+    if not clean_id.isdigit():
+        raise HTTPException(404, "Сделка не найдена")
+    base_url, token = _amo_credentials()
+    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        try:
+            lead = await _amo_task_api_request(
+                client, "GET", f"{base_url}/api/v4/leads/{clean_id}", token,
+                params={"with": "contacts"},
+            )
+        except AmoTaskDeliveryError as exc:
+            if "HTTP 404" in str(exc):
+                raise HTTPException(404, "Сделка не найдена") from exc
+            raise HTTPException(502, "amoCRM временно не ответила") from exc
+        contacts = lead.get("_embedded", {}).get("contacts", []) if isinstance(lead, dict) else []
+        contact_ref = next((row for row in contacts if isinstance(row, dict) and row.get("is_main")), None)
+        if not contact_ref:
+            contact_ref = next((row for row in contacts if isinstance(row, dict)), {})
+        contact_id = _clean(contact_ref.get("id"), 64) if isinstance(contact_ref, dict) else ""
+        contact: dict[str, Any] = {}
+        if contact_id.isdigit():
+            try:
+                result = await _amo_task_api_request(
+                    client, "GET", f"{base_url}/api/v4/contacts/{contact_id}", token,
+                )
+                if isinstance(result, dict):
+                    contact = result
+            except AmoTaskDeliveryError:
+                contact = {}
+    fields: dict[str, str] = {}
+    _amo_mobile_add_fields(fields, lead.get("custom_fields_values"), "lead", overwrite=True)
+    _amo_mobile_add_fields(fields, contact.get("custom_fields_values"), "contact", overwrite=False)
+    phone = email = ""
+    for row in contact.get("custom_fields_values", []) if isinstance(contact.get("custom_fields_values"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        code = _clean(row.get("field_code"), 40).upper()
+        values = row.get("values") if isinstance(row.get("values"), list) else []
+        first = values[0] if values else ""
+        value = first.get("value") if isinstance(first, dict) else first
+        if code == "PHONE" and not phone:
+            phone = _normalize_phone(value)
+        elif code == "EMAIL" and not email:
+            email = _clean(value, 320).casefold()
+    responsible = _clean(lead.get("responsible_user_id"), 64)
+    fields["responsible_user_id"] = responsible
+    if contact_id:
+        fields["contact_id"] = contact_id
+    return {
+        "platform": "amocrm",
+        "entity_type": "lead",
+        "entity_id": clean_id,
+        "name": _clean(contact.get("name") or contact_ref.get("name") or lead.get("name"), 200),
+        "phone": phone,
+        "email": email,
+        "source_url": f"{base_url}/leads/detail/{clean_id}",
+        "fields": fields,
+        "responsible_user_id": responsible,
+    }
+
+
+async def _amo_mobile_field_id(client: httpx.AsyncClient, base_url: str, token: str) -> int:
+    global _amo_mobile_field_cache
+    cached_at, cached_id = _amo_mobile_field_cache
+    if cached_id and time.monotonic() - cached_at < 3600:
+        return cached_id
+    for page in range(1, 6):
+        body = await _amo_task_api_request(
+            client, "GET", f"{base_url}/api/v4/leads/custom_fields", token,
+            params={"limit": 250, "page": page},
+        )
+        rows = body.get("_embedded", {}).get("custom_fields", []) if isinstance(body, dict) else []
+        match = next((
+            row for row in rows if isinstance(row, dict)
+            and _clean(row.get("name"), 200).casefold() == AMO_MOBILE_FIELD_NAME.casefold()
+            and _clean(row.get("type"), 40).lower() == "url"
+        ), None)
+        if match and str(match.get("id", "")).isdigit():
+            cached_id = int(match["id"])
+            _amo_mobile_field_cache = (time.monotonic(), cached_id)
+            return cached_id
+        if len(rows) < 250 or not body.get("_links", {}).get("next"):
+            break
+    raise AmoTaskDeliveryError(
+        f"Поле amoCRM «{AMO_MOBILE_FIELD_NAME}» типа «Ссылка» не найдено", permanent=True,
+    )
+
+
+async def _sync_amo_mobile_field(lead_id: str, link: str) -> None:
+    now = time.monotonic()
+    cached_at, cached_link = _amo_mobile_sync_cache.get(lead_id, (0.0, ""))
+    if cached_link == link and now - cached_at < 3600:
+        return
+    base_url, token = _amo_credentials()
+    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        field_id = await _amo_mobile_field_id(client, base_url, token)
+        await _amo_task_api_request(
+            client, "PATCH", f"{base_url}/api/v4/leads/{lead_id}", token,
+            payload={"custom_fields_values": [{"field_id": field_id, "values": [{"value": link}]}]},
+        )
+    _amo_mobile_sync_cache[lead_id] = (now, link)
+
+
+async def _amo_mobile_access_allowed(device: dict[str, Any], responsible_user_id: str) -> bool:
+    if _clean(device.get("admin_role"), 20) == "admin":
+        return True
+    if not responsible_user_id:
+        return False
+    db = await _connect()
+    try:
+        row = await (await db.execute(
+            """SELECT 1 FROM manager_bindings WHERE platform='amocrm' AND admin_id=?
+               AND platform_user_id=? LIMIT 1""",
+            (int(device["admin_id"]), responsible_user_id),
+        )).fetchone()
+        return bool(row)
+    finally:
+        await db.close()
 
 
 async def _send_amo_task(job: dict[str, Any]) -> tuple[str, list[str]]:
@@ -8930,6 +9136,147 @@ async def health() -> dict[str, Any]:
         await db.close()
     identity = dict(_identity_index_status) if _identity_index is not None else {"status": "unavailable"}
     return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "counts_approximate": True, "identity": identity}
+
+
+@router.get("/mobile/lead/{lead_id}/{signature}")
+async def amo_mobile_page(lead_id: str, signature: str) -> Response:
+    if not await _valid_amo_mobile_link(lead_id, signature):
+        return PlainTextResponse("Not found", status_code=404, headers={"X-Robots-Tag": "noindex, nofollow"})
+    path = _must_db().parent.parent / "static" / "mobile.html"
+    return FileResponse(
+        path,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store, private",
+            "Content-Security-Policy": (
+                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+                "connect-src 'self'; frame-src 'self'; img-src 'self' data:; "
+                "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            ),
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet",
+        },
+    )
+
+
+@router.post("/widget/mobile-activate")
+async def widget_mobile_activate(request: Request) -> JSONResponse:
+    if not _same_origin_mobile_request(request):
+        return JSONResponse({"ok": False, "error": "Доступ запрещён"}, status_code=403)
+    try:
+        enforce_rate_limit(request, "messenger-mobile-activate", limit=20, window_seconds=3600)
+        data = await _read_json(request)
+        lead_id = _clean(data.get("lead_id"), 64)
+        signature = _clean(data.get("signature"), 200)
+        if not await _valid_amo_mobile_link(lead_id, signature):
+            return JSONResponse({"ok": False, "error": "Страница не найдена"}, status_code=404)
+        code = _normalize_code(data.get("code"))
+        if len(code) != 12:
+            return JSONResponse({"ok": False, "error": "Неверный код активации"}, status_code=400)
+        now = _iso()
+        db = await _connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute(
+                """SELECT c.admin_id,c.expires_at,a.name,a.enabled,b.platform_user_id,b.platform_user_email
+                   FROM activation_codes c JOIN admins a ON a.id=c.admin_id
+                   JOIN manager_bindings b ON b.admin_id=a.id AND b.platform='amocrm'
+                   WHERE c.code_hash=? ORDER BY b.updated_at DESC LIMIT 1""",
+                (_hash(code),),
+            )).fetchone()
+            if not row or row["expires_at"] <= now or not row["enabled"]:
+                await db.rollback()
+                return JSONResponse({"ok": False, "error": "Код недействителен или сотрудник не подключён к amoCRM"}, status_code=401)
+            token = secrets.token_urlsafe(40)
+            expires = _iso(_now_dt() + timedelta(days=DEVICE_TTL_DAYS))
+            cursor = await db.execute(
+                """INSERT INTO devices(admin_id,token_hash,token_hint,created_at,last_used_at,expires_at,
+                       platform,platform_user_id,platform_user_email) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    row["admin_id"], _hash(token), f"••••{token[-4:]}", now, now, expires,
+                    "amocrm", _clean(row["platform_user_id"], 200),
+                    _clean(row["platform_user_email"], 320).casefold(),
+                ),
+            )
+            device_id = int(cursor.lastrowid)
+            await db.commit()
+        finally:
+            await db.close()
+        await _audit("mobile_activate", "ok", admin_id=row["admin_id"], device_id=device_id, page_kind="lead", entity_id=lead_id)
+        return JSONResponse({
+            "ok": True, "device_token": token, "platform_user_id": row["platform_user_id"],
+            "admin_name": row["name"], "expires_at": expires,
+        })
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+    except Exception:
+        _log("exception", "Messenger mobile activation failed")
+        return JSONResponse({"ok": False, "error": "Не удалось активировать устройство"}, status_code=500)
+
+
+@router.post("/widget/mobile-context")
+async def widget_mobile_context(request: Request) -> JSONResponse:
+    if not _same_origin_mobile_request(request):
+        return JSONResponse({"ok": False, "error": "Доступ запрещён"}, status_code=403)
+    try:
+        device = await _device(request)
+        if not device or _device_platform(device) != "amocrm":
+            return JSONResponse({"ok": False, "error": "Требуется вход сотрудника", "reauth": True}, status_code=401)
+        enforce_rate_limit(request, "messenger-mobile-context", limit=300, window_seconds=3600, subject=str(device["id"]))
+        data = await _read_json(request)
+        lead_id = _clean(data.get("lead_id"), 64)
+        signature = _clean(data.get("signature"), 200)
+        if not await _valid_amo_mobile_link(lead_id, signature):
+            return JSONResponse({"ok": False, "error": "Страница не найдена"}, status_code=404)
+        context = await _amo_mobile_live_context(lead_id)
+        if not await _amo_mobile_access_allowed(device, context["responsible_user_id"]):
+            await _audit("mobile_open", "denied", admin_id=device["admin_id"], device_id=device["id"], page_kind="lead", entity_id=lead_id)
+            return JSONResponse({"ok": False, "error": "Эта сделка назначена другому сотруднику"}, status_code=403)
+        context.update({
+            "platform_user_id": _clean(device.get("platform_user_id"), 200),
+            "platform_user_email": _clean(device.get("platform_user_email"), 320),
+            "manager_name": _clean(device.get("admin_name"), 200),
+        })
+        await _audit("mobile_open", "ok", admin_id=device["admin_id"], device_id=device["id"], page_kind="lead", entity_id=lead_id)
+        return JSONResponse({"ok": True, "context": context, "admin_name": device["admin_name"]})
+    except HTTPException as exc:
+        return JSONResponse({"ok": False, "error": str(exc.detail)}, status_code=exc.status_code)
+    except AmoTaskDeliveryError:
+        return JSONResponse({"ok": False, "error": "amoCRM временно не ответила"}, status_code=502)
+    except Exception:
+        _log("exception", "Messenger mobile context failed")
+        return JSONResponse({"ok": False, "error": "Не удалось открыть переписку"}, status_code=500)
+
+
+@router.post("/widget/mobile-link")
+async def widget_mobile_link(request: Request) -> JSONResponse:
+    mode = await _widget_request_mode(request)
+    if mode != "amocrm":
+        return _widget_response(request, {"ok": False, "error": "Доступ запрещён"}, 403)
+    try:
+        device = await _device(request)
+        if not device:
+            return _widget_response(request, {"ok": False, "error": "Требуется повторная активация", "reauth": True}, 401)
+        enforce_rate_limit(request, "messenger-mobile-link", limit=300, window_seconds=3600, subject=str(device["id"]))
+        data = await _read_json(request)
+        _validate_device_context(device, data, mode)
+        lead_id = _clean(data.get("entity_id"), 64)
+        if _clean(data.get("entity_type"), 40) != "lead" or not lead_id.isdigit():
+            return _widget_response(request, {"ok": False, "error": "Откройте сделку amoCRM"}, 400)
+        link = await _amo_mobile_link(lead_id)
+        await _sync_amo_mobile_field(lead_id, link)
+        return _widget_response(request, {"ok": True, "field": AMO_MOBILE_FIELD_NAME, "url": link})
+    except HTTPException as exc:
+        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+    except AmoTaskDeliveryError as exc:
+        _log("warning", "amoCRM mobile field sync failed lead=%s error=%s", _clean(locals().get("lead_id"), 64), exc)
+        return _widget_response(request, {"ok": False, "error": "Не удалось заполнить поле «Переписка»"}, 502)
+    except Exception:
+        _log("exception", "amoCRM mobile link failed")
+        return _widget_response(request, {"ok": False, "error": "Не удалось подготовить мобильную ссылку"}, 500)
 
 
 @router.get("/guide", response_class=HTMLResponse)

@@ -64,6 +64,8 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         router._wazzup_history_inflight.clear()
         router._telegram_auth_pending.clear()
         router._card_link_cache.clear()
+        router._amo_mobile_field_cache = (0.0, 0)
+        router._amo_mobile_sync_cache.clear()
         await router._init_db()
         now = router._iso()
         async with aiosqlite.connect(router._must_db()) as db:
@@ -246,6 +248,91 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[-1], ("open_iframe", "ok", "+79*****4013", ""))
         self.assertNotIn("temporary-secret", dump)
         self.assertNotIn("+79114474013", dump)
+
+    async def test_signed_mobile_link_requires_bound_amo_employee_and_own_lead(self):
+        code = await self._code()
+        now = router._iso()
+        async with aiosqlite.connect(router._must_db()) as db:
+            await db.execute(
+                """INSERT INTO manager_bindings(platform,platform_user_id,platform_user_email,admin_id,created_at,updated_at)
+                   VALUES('amocrm','6269974','manager@example.test',?,?,?)""",
+                (self.admin_id, now, now),
+            )
+            await db.commit()
+        link = await router._amo_mobile_link("17696535")
+        lead_id, signature = link.rstrip("/").split("/")[-2:]
+        self.assertEqual(lead_id, "17696535")
+        self.assertTrue(await router._valid_amo_mobile_link(lead_id, signature))
+        self.assertFalse(await router._valid_amo_mobile_link("17696536", signature))
+
+        origin = "https://junior.sobakovod.pro"
+        activated = await router.widget_mobile_activate(request_for(
+            "/widget/mobile-activate",
+            {"lead_id": lead_id, "signature": signature, "code": code},
+            origin=origin,
+        ))
+        payload = json.loads(activated.body)
+        self.assertEqual(activated.status_code, 200)
+        self.assertEqual(payload["platform_user_id"], "6269974")
+
+        live = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": lead_id,
+            "name": "Клиент", "phone": "+79009992233", "email": "client@example.test",
+            "source_url": f"https://sobakovodpro.amocrm.ru/leads/detail/{lead_id}",
+            "fields": {"responsible_user_id": "6269974"}, "responsible_user_id": "6269974",
+        }
+        with patch.object(router, "_amo_mobile_live_context", new=AsyncMock(return_value=live)):
+            opened = await router.widget_mobile_context(request_for(
+                "/widget/mobile-context", {"lead_id": lead_id, "signature": signature},
+                origin=origin, token=payload["device_token"],
+            ))
+        result = json.loads(opened.body)
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(result["context"]["name"], "Клиент")
+        self.assertEqual(result["context"]["platform_user_id"], "6269974")
+
+        foreign = {**live, "responsible_user_id": "999", "fields": {"responsible_user_id": "999"}}
+        with patch.object(router, "_amo_mobile_live_context", new=AsyncMock(return_value=foreign)):
+            denied = await router.widget_mobile_context(request_for(
+                "/widget/mobile-context", {"lead_id": lead_id, "signature": signature},
+                origin=origin, token=payload["device_token"],
+            ))
+        self.assertEqual(denied.status_code, 403)
+        self.assertNotIn("Клиент", denied.body.decode())
+
+    async def test_mobile_activation_rejects_staff_without_amo_binding(self):
+        code = await self._code()
+        link = await router._amo_mobile_link("17696535")
+        lead_id, signature = link.rstrip("/").split("/")[-2:]
+        response = await router.widget_mobile_activate(request_for(
+            "/widget/mobile-activate",
+            {"lead_id": lead_id, "signature": signature, "code": code},
+            origin="https://junior.sobakovod.pro",
+        ))
+        self.assertEqual(response.status_code, 401)
+
+    async def test_mobile_link_field_is_cached_after_successful_amo_patch(self):
+        calls = []
+
+        async def fake_request(_client, method, url, _token, *, payload=None, params=None):
+            calls.append((method, url, payload, params))
+            if method == "GET":
+                return {"_embedded": {"custom_fields": [
+                    {"id": 776, "name": "Переписка", "type": "text"},
+                    {"id": 777, "name": "Переписка", "type": "url"},
+                ]}}
+            return {}
+
+        with (
+            patch.object(router, "_amo_credentials", return_value=("https://example.amocrm.ru", "token")),
+            patch.object(router, "_amo_task_api_request", new=fake_request),
+        ):
+            await router._sync_amo_mobile_field("17696535", "https://example.test/signed")
+            await router._sync_amo_mobile_field("17696535", "https://example.test/signed")
+        self.assertEqual([call[0] for call in calls], ["GET", "PATCH"])
+        self.assertEqual(calls[-1][2], {
+            "custom_fields_values": [{"field_id": 777, "values": [{"value": "https://example.test/signed"}]}],
+        })
 
     async def test_reissue_revokes_every_active_device(self):
         code = await self._code()

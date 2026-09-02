@@ -1,6 +1,15 @@
-# Messenger Widget 5.19.1
+# Messenger Widget 5.19.2
 
 Release candidate for the week-long production observation period.
+
+## 5.19.2 — protected full-screen amoCRM conversations on Android
+
+- Every opened amoCRM lead receives a stable signed URL in the custom field `Переписка`; the remote interface updates it without another amoCRM ZIP upload.
+- The URL serves no client data before authentication, is excluded from indexing and caching, and rejects modified or enumerated lead IDs.
+- A new Android device requires the employee's persistent Nexus activation code and an active amoCRM staff binding.
+- The live lead and contact context is loaded server-side from amoCRM. Administrators may open any lead; employees may open only leads currently assigned to their own bound amoCRM user.
+- The full-screen workspace reuses the same channels, history, Email guardrails, templates, drafts and delivery behavior as the desktop amoCRM widget.
+- Real manager notifications include a protected `Открыть переписку` action; bare time-button answers after a proven automation-authored funnel message stay silent, while the same answer to a manager remains actionable.
 
 ## 5.19.1 — exact reopen and composer alignment
 

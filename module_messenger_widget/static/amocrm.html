@@ -44,7 +44,7 @@
 <script>
 (()=>{'use strict';
   const API=location.pathname.replace(/\/static\/amocrm\.html$/,'/api/widget'),GUIDE=API.replace(/\/widget$/,'/guide'),$=id=>document.getElementById(id),PAGE=12,REQUEST_TIMEOUT=15000,CARD_CACHE_TTL=30*60*1000,CARD_RESUME_TTL=5*60*1000,CARD_CACHE_MAX=8,PARENT_ORIGIN=(()=>{try{return new URL(document.referrer).origin}catch(_){return''}})();
-  let context=null,token='',cardChannels=[],active=null,activeThread=null,nextOffset=0,hasMore=false,loadingOlder=false,templates=[],templateVariables=[],templateListMeta={},templatesLoadedAt=0,templateListPromise=null,messageSignature='',polling=false,widgetVisible=true,contextReady=false,contextBootTimer=0,channelGeneration=0,channelRefreshTimer=0,channelRefreshAttempts=0,profileRefreshTimer=0,bootGeneration=0,gcTrialPollTimer=0,gcAccessPollTimer=0,gcNoticeTimer=0,draftTimer=0;
+  let context=null,token='',cardChannels=[],active=null,activeThread=null,nextOffset=0,hasMore=false,loadingOlder=false,templates=[],templateVariables=[],templateListMeta={},templatesLoadedAt=0,templateListPromise=null,messageSignature='',polling=false,widgetVisible=true,contextReady=false,contextBootTimer=0,channelGeneration=0,channelRefreshTimer=0,channelRefreshAttempts=0,profileRefreshTimer=0,bootGeneration=0,gcTrialPollTimer=0,gcAccessPollTimer=0,gcNoticeTimer=0,draftTimer=0,mobileLinkSyncKey='';
   const conversationCache=new Map(),refreshTasks=new Map();
   const storageKey=()=>`nexus:messenger-widget:amocrm:${context.platform_user_id}:token`,prefsKey=()=>`nexus:messenger-widget:amocrm:${context.platform_user_id}:prefs`,cardCacheStoreKey=()=>`nexus:messenger-widget:amocrm:${context.platform_user_id}:cards:v2`,templateCacheKey=()=>`nexus:messenger-widget:amocrm:${context.platform_user_id}:templates:v1`;
   const cardCacheId=()=>[context.platform||'amocrm',context.platform_account_id||'',context.entity_type||'',context.entity_id||''].map(value=>String(value)).join(':');
@@ -111,10 +111,11 @@
   function wheelX(node){node.addEventListener('wheel',event=>{if(Math.abs(event.deltaY)<=Math.abs(event.deltaX))return;node.scrollLeft+=event.deltaY;event.preventDefault()},{passive:false})}
   function wheelY(node){node.addEventListener('wheel',event=>{if(!event.deltaY||Math.abs(event.deltaX)>Math.abs(event.deltaY))return;const next=Math.max(0,Math.min(node.scrollHeight-node.clientHeight,node.scrollTop+event.deltaY));if(next===node.scrollTop)return;node.scrollTop=next;event.preventDefault()},{passive:false})}
   function showWidgetRetry(attempt,error){const text=attempt<3?`Проверяем каналы · попытка ${attempt}…`:`Каналы отвечают дольше обычного · попытка ${attempt}. Nexus продолжает загрузку…`;showLoading($('feed'),text);const state=$('feed').firstElementChild;if(error&&state){const detail=document.createElement('small');detail.className='loading-detail';detail.textContent=error;state.append(detail)}}
+  function syncMobileLink(){if(context?.platform!=='amocrm'||context?.entity_type!=='lead'||!context.entity_id)return;const key=String(context.entity_id);if(mobileLinkSyncKey===key)return;mobileLinkSyncKey=key;request('/mobile-link').catch(()=>{if(mobileLinkSyncKey===key)mobileLinkSyncKey=''})}
   async function boot(){
     const expectedGeneration=++bootGeneration;
     clearTimeout(channelRefreshTimer);channelRefreshTimer=0;channelRefreshAttempts=0;clearTimeout(profileRefreshTimer);profileRefreshTimer=0;
-    token=localStorage.getItem(storageKey())||'';applyPrefs();restoreTemplateCache();if(token&&!templateListPromise)loadTemplates(true).catch(()=>{});
+    token=localStorage.getItem(storageKey())||'';applyPrefs();restoreTemplateCache();if(token){syncMobileLink();if(!templateListPromise)loadTemplates(true).catch(()=>{})}
     const composer=$('message').closest('.composer');
     if(!token){$('auth').hidden=false;$('app').hidden=true;parent.postMessage({type:'nexus-messenger-painted'},'*');return}
     $('auth').hidden=true;$('app').hidden=false;composer.hidden=true;active=null;activeThread=null;cardChannels=[];messageSignature='';conversationCache.clear();refreshTasks.clear();showError('');$('channels').replaceChildren();

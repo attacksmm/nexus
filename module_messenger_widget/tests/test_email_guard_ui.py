@@ -73,6 +73,19 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("normalizeChannels(data.channels)", self.amocrm)
         self.assertIn("channelIdentity(channel) === channelIdentity(selected)", self.getcourse)
 
+    def test_protected_mobile_workspace_has_explicit_auth_and_loading_states(self):
+        module = Path(__file__).resolve().parents[1]
+        page = (module / "static" / "mobile.html").read_text(encoding="utf-8")
+        script = (module / "static" / "mobile.js").read_text(encoding="utf-8")
+        self.assertIn('name="robots" content="noindex,nofollow,noarchive,nosnippet"', page)
+        self.assertIn("Проверяем безопасный доступ…", page)
+        self.assertIn("Доступ разрешён только сотрудникам отдела продаж", page)
+        self.assertIn('autocomplete="one-time-code"', page)
+        self.assertIn("/mobile-context", script)
+        self.assertIn("Authorization':'Bearer '+token", script)
+        self.assertNotIn("innerHTML", script)
+        self.assertIn("syncMobileLink()", self.amocrm)
+
 
 if __name__ == "__main__":
     unittest.main()

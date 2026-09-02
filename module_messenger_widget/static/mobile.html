@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+  <title>Переписка · Современный собаковод</title>
+  <style>
+    :root{font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;color:#f2f2f2;background:#101820;color-scheme:dark}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}button,input{font:inherit}
+    [hidden]{display:none!important}.app{height:100%;height:100dvh;background:#101820}.state{height:100%;display:grid;place-items:center;padding:24px}.card{width:min(390px,100%);border:1px solid #344553;background:#17212b;padding:22px}.brand{margin:0 0 6px;font-size:18px}.copy{margin:0 0 18px;color:#aebcc5;font-size:14px;line-height:1.45}.loading{display:flex;align-items:center;justify-content:center;gap:10px;color:#c5d0d7}.spinner{width:20px;height:20px;flex:0 0 20px;border:2px solid currentColor;border-right-color:#46b45f;border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+    label{display:grid;gap:6px;color:#d7e0e6;font-size:13px;font-weight:700}.code{width:100%;height:44px;padding:8px 10px;border:1px solid #526675;background:#1f2d38;color:#fff;outline:0;text-transform:uppercase;letter-spacing:.08em}.code:focus{border-color:#80c8ff}.action{width:100%;height:42px;margin-top:10px;border:1px solid #f4f4f4;background:#f4f4f4;color:#080808;font-weight:700;cursor:pointer}.action:disabled{opacity:.55;cursor:default}.action.busy{display:flex;align-items:center;justify-content:center;gap:8px}.action.busy:before{content:"";width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}.error{min-height:18px;margin-top:10px;color:#ffc2ca;font-size:13px;line-height:1.4}.error:empty{display:none}
+    .workspace{height:100%;display:grid;grid-template-rows:44px minmax(0,1fr);background:#101820}.bar{min-width:0;display:flex;align-items:center;gap:8px;padding:0 max(9px,env(safe-area-inset-right)) 0 max(9px,env(safe-area-inset-left));border-bottom:1px solid #344553;background:#17212b}.back,.logout{height:30px;border:1px solid #465968;background:#1f2d38;color:#edf3f7;cursor:pointer}.back{width:34px;font-size:20px}.title{min-width:0;flex:1}.title b,.title span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.title b{font-size:13px}.title span{margin-top:2px;color:#9eacb5;font-size:11px}.logout{padding:0 10px;font-size:12px}.frame{width:100%;height:100%;border:0;background:#101820;opacity:0;transition:opacity .12s}.frame.ready{opacity:1}
+    @media(max-width:520px){.state{padding:14px}.card{padding:19px}.workspace{grid-template-rows:42px minmax(0,1fr)}.logout{padding:0 8px}.title b{font-size:12px}}
+    @media(prefers-reduced-motion:reduce){.spinner{animation-duration:1.4s}.frame{transition:none}}
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section id="loading" class="state"><div class="loading"><span class="spinner" aria-hidden="true"></span><span id="loadingText">Проверяем безопасный доступ…</span></div></section>
+    <section id="login" class="state" hidden><form id="loginForm" class="card"><h1 class="brand">Переписка Nexus</h1><p class="copy">Доступ разрешён только сотрудникам отдела продаж. Введите личный код Nexus один раз на этом устройстве.</p><label>Личный код сотрудника<input id="code" class="code" inputmode="text" autocomplete="one-time-code" maxlength="14" placeholder="XXXX-XXXX-XXXX" required></label><button id="activate" class="action" type="submit">Войти</button><div id="loginError" class="error" role="alert" aria-live="polite"></div></form></section>
+    <section id="failure" class="state" hidden><div class="card"><h1 class="brand">Не удалось открыть переписку</h1><p id="failureText" class="copy"></p><button id="retry" class="action" type="button">Повторить</button></div></section>
+    <section id="workspace" class="workspace" hidden><header class="bar"><button id="back" class="back" type="button" aria-label="Назад">‹</button><div class="title"><b id="clientName">Переписка</b><span id="dealName"></span></div><button id="logout" class="logout" type="button">Выйти</button></header><iframe id="frame" class="frame" title="Переписка с клиентом" referrerpolicy="no-referrer"></iframe></section>
+  </main>
+  <script src="../../../../static/mobile.js"></script>
+</body>
+</html>
