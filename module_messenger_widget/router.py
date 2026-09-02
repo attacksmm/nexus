@@ -9170,12 +9170,7 @@ async def _inbox_items(
                            x.provider AS external_provider,x.getcourse_user_id AS external_getcourse_user_id,
                            x.phone AS external_phone,x.name AS external_name,
                            m.external_id,m.direction,m.status,m.text,m.content_uri,m.author_name,m.sent_at,m.raw_json,
-                           (SELECT mi.raw_json FROM wazzup_messages mi
-                            WHERE mi.channel_id=c.channel_id AND mi.chat_type=c.chat_type AND mi.chat_id=c.chat_id
-                              AND mi.direction='incoming' ORDER BY mi.sent_at DESC,mi.id DESC LIMIT 1) AS incoming_raw_json,
-                           (SELECT mi.author_name FROM wazzup_messages mi
-                            WHERE mi.channel_id=c.channel_id AND mi.chat_type=c.chat_type AND mi.chat_id=c.chat_id
-                              AND mi.direction='incoming' ORDER BY mi.sent_at DESC,mi.id DESC LIMIT 1) AS incoming_author
+                           m.raw_json AS incoming_raw_json,m.author_name AS incoming_author
                     FROM wazzup_chats c
                     JOIN wazzup_messages m ON m.id=(
                         SELECT lm.id FROM wazzup_messages lm
