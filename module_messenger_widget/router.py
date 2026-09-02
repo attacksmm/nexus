@@ -9083,6 +9083,15 @@ def _inbox_preview(message: dict[str, Any]) -> str:
     return text or "Сообщение"
 
 
+def _inbox_placeholder_name(value: Any) -> bool:
+    cleaned = _clean(value, 200)
+    return bool(
+        not cleaned
+        or re.fullmatch(r"(?:vk|telegram|salebot|max|whatsapp|viber|клиент)[\s:#_-]*\d*", cleaned, re.I)
+        or re.fullmatch(r"\+?\d[\d\s()_-]{6,}", cleaned)
+    )
+
+
 def _inbox_display_name(*candidates: Any, phone: str = "") -> str:
     """Prefer a real messenger/client name over transport-generated labels."""
     fallback = ""
@@ -9091,9 +9100,7 @@ def _inbox_display_name(*candidates: Any, phone: str = "") -> str:
         if not value:
             continue
         fallback = fallback or value
-        if re.fullmatch(r"(?:vk|telegram|salebot|max|whatsapp|viber|клиент)[\s:#_-]*\d*", value, re.I):
-            continue
-        if re.fullmatch(r"\+?\d[\d\s()_-]{6,}", value):
+        if _inbox_placeholder_name(value):
             continue
         return value
     return _clean(phone, 40) or fallback or "Клиент"
@@ -9186,14 +9193,7 @@ async def _inbox_items(
                            x.provider AS external_provider,x.getcourse_user_id AS external_getcourse_user_id,
                            x.phone AS external_phone,x.name AS external_name,
                            m.external_id,m.direction,m.status,m.text,m.content_uri,m.author_name,m.sent_at,m.raw_json,
-                           (SELECT im.raw_json FROM wazzup_messages im
-                            WHERE im.channel_id=c.channel_id AND im.chat_type=c.chat_type AND im.chat_id=c.chat_id
-                              AND im.direction='incoming'
-                            ORDER BY im.sent_at DESC,im.id DESC LIMIT 1) AS incoming_raw_json,
-                           (SELECT im.author_name FROM wazzup_messages im
-                            WHERE im.channel_id=c.channel_id AND im.chat_type=c.chat_type AND im.chat_id=c.chat_id
-                              AND im.direction='incoming' AND im.author_name<>''
-                            ORDER BY im.sent_at DESC,im.id DESC LIMIT 1) AS incoming_author
+                           m.raw_json AS incoming_raw_json,m.author_name AS incoming_author
                     FROM wazzup_chats c
                     JOIN wazzup_messages m ON m.id=(
                         SELECT lm.id FROM wazzup_messages lm
@@ -9233,6 +9233,24 @@ async def _inbox_items(
             rows.append(item)
             if len(rows) >= INBOX_LIMIT:
                 break
+        # Most chats already carry the real provider name in their identity or
+        # chat row. Only unresolved placeholders need one bounded history
+        # lookup; doing this for every candidate made a cold Inbox unnecessarily
+        # slow on the multi-million-message production database.
+        for item in rows:
+            if not all(_inbox_placeholder_name(item.get(key)) for key in ("external_name", "link_name", "contact_name")):
+                continue
+            incoming = await (
+                await db.execute(
+                    """SELECT author_name,raw_json FROM wazzup_messages INDEXED BY ix_gcw_messages_chat
+                       WHERE channel_id=? AND chat_type=? AND chat_id=? AND direction='incoming'
+                         AND author_name<>'' ORDER BY sent_at DESC,id DESC LIMIT 1""",
+                    (item["channel_id"], item["chat_type"], item["chat_id"]),
+                )
+            ).fetchone()
+            if incoming:
+                item["incoming_author"] = incoming["author_name"]
+                item["incoming_raw_json"] = incoming["raw_json"]
         visible_keys = [(row["channel_id"], row["chat_type"], row["chat_id"]) for row in rows]
         if visible_keys:
             visible_values = ",".join("(?,?,?)" for _ in visible_keys)
