@@ -279,7 +279,7 @@ SECRET_SPECS = {
         "env": "SBKVD_SERVER_PUBLIC_BASE_URL",
         "label": "Публичный base URL",
         "kind": "url",
-        "default": "https://attackpng.sobakovod.pro",
+        "default": "https://junior.sobakovod.pro",
         "visible": False,
     },
 }
@@ -328,6 +328,7 @@ _logger = None
 _runtime: RuntimeManager | None = None
 _prompt_cache: dict[str, Any] = {}
 _openrouter_model_cache: dict[str, Any] = {}
+_vk_staff_registry_cache: dict[str, Any] = {}
 MODERATION_DEGRADED_CATEGORY = "не проверено"
 
 
@@ -356,8 +357,21 @@ async def setup(ctx):
 async def shutdown() -> None:
     global _runtime
     runtime, _runtime = _runtime, None
-    if runtime is not None:
-        await runtime.stop("all")
+    if runtime is None:
+        return
+
+    async def stop_platform(name: str, stop) -> None:
+        try:
+            await asyncio.wait_for(stop(), timeout=2.0)
+        except TimeoutError:
+            _log("warning", "chat-moderator %s shutdown timed out; forcing lifecycle cancellation", name)
+        except Exception as error:
+            _log("warning", "chat-moderator %s shutdown failed: %s", name, error)
+
+    await asyncio.gather(
+        stop_platform("telegram", runtime.telegram.stop),
+        stop_platform("vk", runtime.vk.stop),
+    )
 
 
 async def on_telegram_proxy_changed() -> dict[str, Any]:
@@ -443,6 +457,40 @@ def _openrouter_db_path() -> Path:
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _course_chat_creator_db_path() -> Path:
+    module_dir = _module_dir()
+    candidates = [
+        module_dir.parent / "course-chat-creator" / "data" / "course-chat-creator.db",
+        module_dir.parent / "module_course_chat_creator" / "data" / "course-chat-creator.db",
+        module_dir.parent.parent / "modules" / "course-chat-creator" / "data" / "course-chat-creator.db",
+        module_dir.parent.parent / "module_course_chat_creator" / "data" / "course-chat-creator.db",
+    ]
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+def _trusted_vk_staff_ids() -> set[int]:
+    now = time.monotonic()
+    cached = _vk_staff_registry_cache
+    if cached and now - float(cached.get("checked_at") or 0) < 30:
+        return set(cached.get("user_ids") or set())
+    user_ids: set[int] = set()
+    path = _course_chat_creator_db_path()
+    try:
+        if path.exists():
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as db:
+                row = db.execute("SELECT value FROM meta WHERE key='vk_staff_registry_v1'").fetchone()
+            payload = json.loads(row[0]) if row and row[0] else {}
+            user_ids = {
+                int(value) for value in (payload.get("user_ids") or [])
+                if str(value).isdigit() and int(value) > 0
+            }
+    except Exception as error:
+        _log("warning", "VK staff registry lookup failed: %s", error)
+    _vk_staff_registry_cache.clear()
+    _vk_staff_registry_cache.update({"checked_at": now, "user_ids": user_ids})
+    return set(user_ids)
 
 
 def _openrouter_model_for_prompt(prompt_path: str) -> dict[str, str]:
@@ -1153,6 +1201,30 @@ def _init_db() -> None:
                 meta_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(platform, chat_id, peer_id)
             );
+            CREATE TABLE IF NOT EXISTS vk_member_roster (
+                peer_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                present INTEGER NOT NULL DEFAULT 1,
+                welcome_status TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY(peer_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vk_member_roster_present
+                ON vk_member_roster(peer_id, present);
+            CREATE TABLE IF NOT EXISTS vk_roster_state (
+                peer_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'baseline',
+                initialized_at TEXT NOT NULL DEFAULT '',
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS vk_roster_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS moderation_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts TEXT NOT NULL,
@@ -1598,6 +1670,55 @@ def _upsert_chat(*, platform: str, chat_id: Any = "", peer_id: Any = "", title: 
         )
 
 
+def _prepare_vk_roster_upgrade_baseline(zones: set[str]) -> None:
+    """Mark pre-existing chats before the first roster scan so an upgrade never mass-greets them."""
+    now = _now()
+    with _db() as db:
+        initialized = db.execute(
+            "SELECT value FROM vk_roster_meta WHERE key='upgrade_baseline_prepared'"
+        ).fetchone()
+        if initialized:
+            return
+        placeholders = ",".join("?" for _ in zones)
+        rows = db.execute(
+            f"""SELECT DISTINCT peer_id FROM managed_chats
+                WHERE platform='vk' AND enabled=1 AND peer_id!='' AND zone IN ({placeholders})""",
+            sorted(zones),
+        ).fetchall()
+        for row in rows:
+            db.execute(
+                """INSERT OR IGNORE INTO vk_roster_state(peer_id,mode,initialized_at,last_checked_at,last_error)
+                   VALUES(?, 'baseline', '', '', '')""",
+                (str(row["peer_id"]),),
+            )
+        db.execute(
+            "INSERT INTO vk_roster_meta(key,value,updated_at) VALUES('upgrade_baseline_prepared','1',?)",
+            (now,),
+        )
+
+
+def _managed_vk_roster_chats(zones: set[str]) -> list[tuple[int, str]]:
+    placeholders = ",".join("?" for _ in zones)
+    with _db() as db:
+        rows = db.execute(
+            f"""SELECT mc.peer_id, mc.zone FROM managed_chats mc
+                LEFT JOIN vk_roster_state rs ON rs.peer_id=mc.peer_id
+                WHERE mc.platform='vk' AND mc.enabled=1 AND mc.peer_id!='' AND mc.zone IN ({placeholders})
+                  AND (rs.last_error IS NULL OR rs.last_error='' OR
+                       rs.last_checked_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now','-1 hour'))
+                ORDER BY mc.last_seen_at DESC""",
+            sorted(zones),
+        ).fetchall()
+    result: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for row in rows:
+        peer_id = _safe_int(row["peer_id"], 0)
+        if peer_id > 2000000000 and peer_id not in seen:
+            seen.add(peer_id)
+            result.append((peer_id, str(row["zone"] or "")))
+    return result
+
+
 def _telegram_peer_id_from_chat_id(chat_id: Any) -> str:
     value = str(chat_id or "").strip()
     if value.startswith("-100") and len(value) > 4:
@@ -1672,6 +1793,22 @@ def _telegram_welcome_thread_id(chat_id: Any) -> int | None:
         if topic_id > 0:
             return topic_id
     return None
+
+
+def _telegram_welcome_thread_candidates(chat_id: Any) -> list[int | None]:
+    """Prefer stored metadata, then the course-chat Vizitka convention, then General."""
+    candidates: list[int | None] = []
+    stored = _telegram_welcome_thread_id(chat_id)
+    ordered = ([stored] if stored is not None else []) + [3, None]
+    for thread_id in ordered:
+        if thread_id not in candidates:
+            candidates.append(thread_id)
+    return candidates
+
+
+def _telegram_topic_unavailable(error: Exception) -> bool:
+    value = str(error or "").casefold().replace("_", " ")
+    return "topic closed" in value or "message thread not found" in value
 
 
 def _is_club_chat_title(title: str) -> bool:
@@ -1799,6 +1936,10 @@ def _rule_based_category(text: str) -> str:
     value = str(text or "").strip()
     if not value:
         return ""
+    if REFUND_RE.search(value):
+        return "возврат"
+    if TECH_SUPPORT_RE.search(value):
+        return "техпод"
     if _has_actionable_profanity(value):
         return "негатив"
     if TRAINING_CHAT_TRANSFER_RE.search(value):
@@ -1880,7 +2021,7 @@ class ModerationAnalyzer:
                 temperature=0,
                 max_tokens=10,
             )
-            for category in ("негатив", "скам", "удалить"):
+            for category in ("возврат", "техпод", "негатив", "скам", "удалить"):
                 if category in result:
                     if category == "негатив" and _should_downgrade_tg_negative(text):
                         return "ок"
@@ -1912,7 +2053,7 @@ class ModerationAnalyzer:
                 max_tokens=5,
                 prompt_path=(_settings().get("vk_ai_prompt_path") or "").strip(),
             )
-            for category in ("негатив", "скам", "удалить"):
+            for category in ("возврат", "техпод", "негатив", "скам", "удалить"):
                 if category in result:
                     if category == "негатив" and _should_downgrade_vk_negative(analysis_text):
                         return "нейтрально"
@@ -1928,6 +2069,8 @@ class TelegramModeratorRuntime:
         self.analyzer = analyzer
         self.app: Any | None = None
         self.running = False
+        self.last_polling_error_signature = ""
+        self.last_polling_error_at = 0.0
 
     async def start(self, settings: dict[str, str]) -> None:
         if self.running:
@@ -2073,14 +2216,6 @@ class TelegramModeratorRuntime:
             text = update.message.text
             chat_zone = _telegram_chat_zone(update.effective_chat)
             if not chat_zone:
-                _log(
-                    "info",
-                    "chat-moderator ignored telegram message: chat_id=%s title=%r user_id=%s reason=title_not_matched text=%r",
-                    chat_id,
-                    getattr(update.effective_chat, "title", "") or "",
-                    getattr(user, "id", ""),
-                    _preview_log_text(text),
-                )
                 return
             _upsert_chat(platform="telegram", chat_id=chat_id, title=getattr(update.effective_chat, "title", ""), zone=chat_zone)
             if not _chat_enabled(platform="telegram", chat_id=chat_id):
@@ -2099,7 +2234,15 @@ class TelegramModeratorRuntime:
                 user_name=getattr(user, "full_name", "") or getattr(user, "first_name", ""),
                 text=text,
             )
-            if category not in {"негатив", "скам", "удалить"}:
+            if category == "техпод":
+                await send_log_notification(update, context, category=category, text=text)
+                _record_action(
+                    platform="telegram", action="tech_support_no_delete", category=category,
+                    status="ok", chat_id=chat_id, user_id=getattr(user, "id", ""),
+                    user_name=getattr(user, "full_name", "") or getattr(user, "first_name", ""), text=text,
+                )
+                return
+            if category not in {"негатив", "скам", "удалить", "возврат"}:
                 return
             user_name = getattr(user, "full_name", "") or getattr(user, "first_name", "") or "Участник"
             user_id = getattr(user, "id", "")
@@ -2219,7 +2362,6 @@ class TelegramModeratorRuntime:
                 _record_action(platform="telegram", action="skip_template_disabled", status="ok", chat_id=chat_id, request_json={"template": "tg_welcome", "event": "new_chat_members"})
                 return
             bot_id = getattr(context.bot, "id", None)
-            welcome_thread_id = _telegram_welcome_thread_id(chat_id)
             for member in getattr(message, "new_chat_members", []) or []:
                 user_id = getattr(member, "id", "")
                 if bot_id and user_id == bot_id:
@@ -2240,21 +2382,31 @@ class TelegramModeratorRuntime:
                 if dry_run:
                     _record_action(platform="telegram", action="would_send_welcome", status="dry_run", chat_id=chat_id, user_id=user_id, user_name=user_name, text=text)
                     continue
-                try:
-                    thread_kwargs = {"message_thread_id": welcome_thread_id} if welcome_thread_id else {}
-                    sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", **thread_kwargs)
-                    _record_action(
-                        platform="telegram",
-                        action="send_welcome",
-                        status="ok",
-                        chat_id=chat_id,
-                        message_id=getattr(sent, "message_id", ""),
-                        user_id=user_id,
-                        user_name=user_name,
-                        text=text,
-                        request_json={"message_thread_id": welcome_thread_id},
-                    )
-                except Exception as error:
+                attempted_threads: list[int | None] = []
+                last_error: Exception | None = None
+                for welcome_thread_id in _telegram_welcome_thread_candidates(chat_id):
+                    attempted_threads.append(welcome_thread_id)
+                    try:
+                        thread_kwargs = {"message_thread_id": welcome_thread_id} if welcome_thread_id else {}
+                        sent = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", **thread_kwargs)
+                        _record_action(
+                            platform="telegram",
+                            action="send_welcome",
+                            status="ok",
+                            chat_id=chat_id,
+                            message_id=getattr(sent, "message_id", ""),
+                            user_id=user_id,
+                            user_name=user_name,
+                            text=text,
+                            request_json={"message_thread_id": welcome_thread_id, "attempted_threads": attempted_threads},
+                        )
+                        last_error = None
+                        break
+                    except Exception as error:
+                        last_error = error
+                        if not _telegram_topic_unavailable(error):
+                            break
+                if last_error is not None:
                     _record_action(
                         platform="telegram",
                         action="send_welcome",
@@ -2262,9 +2414,9 @@ class TelegramModeratorRuntime:
                         chat_id=chat_id,
                         user_id=user_id,
                         user_name=user_name,
-                        error=str(error),
+                        error=str(last_error),
                         text=text,
-                        request_json={"message_thread_id": welcome_thread_id},
+                        request_json={"attempted_threads": attempted_threads},
                     )
 
         async def on_added_to_chat(update: Any, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2329,7 +2481,25 @@ class TelegramModeratorRuntime:
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(drop_pending_updates=True)
+        def polling_error_callback(error: Exception) -> None:
+            signature = f"{type(error).__name__}: {error}"
+            now = time.monotonic()
+            if signature == self.last_polling_error_signature and now - self.last_polling_error_at < 60.0:
+                return
+            self.last_polling_error_signature = signature
+            self.last_polling_error_at = now
+            _record_action(
+                platform="telegram",
+                action="polling_error",
+                status="error",
+                error=signature,
+                request_json={"module": MODULE_ID},
+            )
+
+        await self.app.updater.start_polling(
+            drop_pending_updates=False,
+            error_callback=polling_error_callback,
+        )
         self.running = True
 
     async def stop(self) -> None:
@@ -2355,11 +2525,16 @@ class VKModeratorRuntime:
         self.analyzer = analyzer
         self.vk: Any | None = None
         self.own_id = 0
+        self.group_id = 0
         self.subscription: VkGroupPollSubscription | None = None
         self.log_chat_id = _safe_int(_secret_value("vk_log_chat_id"), 2000000041)
         self.chat_title_cache: dict[int, dict[str, Any]] = {}
         self.user_admin_cache: dict[tuple[int, int], dict[str, Any]] = {}
+        self.community_owner_cache: dict[int, dict[str, Any]] = {}
         self.join_greeting_cache: dict[tuple[int, int], float] = {}
+        self.roster_reconcile_lock = asyncio.Lock()
+        self.roster_last_checked: dict[int, float] = {}
+        self.roster_task: asyncio.Task[Any] | None = None
         self.settings: dict[str, str] = {}
         self.getcourse_service = NexusGetCourseAccessService()
         self.getcourse_pending: dict[tuple[int, int], dict[str, Any]] = {}
@@ -2385,7 +2560,12 @@ class VKModeratorRuntime:
         )
         self.vk = self.subscription.vk
         self.own_id = self.subscription.own_id
+        self.group_id = group_id
         self.subscription.activate()
+        _prepare_vk_roster_upgrade_baseline({"club"})
+        self.roster_task = asyncio.create_task(
+            self._roster_reconcile_loop(), name=f"{MODULE_ID}-vk-roster"
+        )
         _record_action(
             platform="vk",
             action="runtime_token_selected",
@@ -2400,24 +2580,238 @@ class VKModeratorRuntime:
         )
 
     async def stop(self) -> None:
+        roster_task, self.roster_task = self.roster_task, None
+        if roster_task is not None:
+            roster_task.cancel()
+            await asyncio.gather(roster_task, return_exceptions=True)
         subscription, self.subscription = self.subscription, None
         if subscription is not None:
             await subscription.close()
         self.vk = None
         self.own_id = 0
+        self.group_id = 0
 
     async def _handle_shared_event(self, event: Any) -> None:
         try:
             message_event = adapt_group_message_event(event)
-            if message_event is not None and not bool(getattr(message_event, "from_me", False)):
+            payload = getattr(message_event, "message_payload", {}) if message_event is not None else {}
+            has_chat_action = isinstance(payload, dict) and isinstance(payload.get("action"), dict)
+            peer_id = int(getattr(message_event, "peer_id", 0) or 0) if message_event is not None else 0
+            if peer_id > 2000000000:
+                await self._maybe_reconcile_chat_members(peer_id, trigger="long_poll_event")
+            if message_event is not None and (
+                not bool(getattr(message_event, "from_me", False)) or has_chat_action
+            ):
                 await self.process_message(message_event)
         except Exception as error:
             _record_action(platform="vk", action="runtime_event_error", status="error", error=str(error))
             _log("error", "Shared VK event handler failed: %s", error, exc_info=True)
 
+    async def _roster_reconcile_loop(self) -> None:
+        try:
+            while self.subscription is not None and self.subscription.running:
+                for peer_id, zone in _managed_vk_roster_chats({"club"}):
+                    if self.subscription is None or not self.subscription.running:
+                        return
+                    await self._maybe_reconcile_chat_members(
+                        peer_id, zone=zone, trigger="periodic", force=True
+                    )
+                    await asyncio.sleep(0.75)
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _record_action(platform="vk", action="roster_loop_error", status="error", error=str(error))
+            _log("warning", "VK roster reconciliation loop failed: %s", error)
+
+    async def _maybe_reconcile_chat_members(
+        self,
+        peer_id: int,
+        *,
+        zone: str = "",
+        trigger: str,
+        force: bool = False,
+    ) -> None:
+        peer_id = int(peer_id or 0)
+        if peer_id <= 2000000000 or self.vk is None:
+            return
+        now_monotonic = time.monotonic()
+        if not force and now_monotonic - self.roster_last_checked.get(peer_id, 0.0) < 15.0:
+            return
+        async with self.roster_reconcile_lock:
+            now_monotonic = time.monotonic()
+            if not force and now_monotonic - self.roster_last_checked.get(peer_id, 0.0) < 15.0:
+                return
+            self.roster_last_checked[peer_id] = now_monotonic
+            title = self._get_chat_title(peer_id)
+            zone = zone or self.get_chat_zone(peer_id) or ""
+            if zone != "club":
+                return
+            if trigger != "periodic" and title:
+                _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
+            if not _chat_enabled(platform="vk", peer_id=peer_id):
+                return
+            peer_key = str(peer_id)
+            with _db() as db:
+                state = db.execute(
+                    "SELECT mode,initialized_at FROM vk_roster_state WHERE peer_id=?", (peer_key,)
+                ).fetchone()
+            if state is None:
+                owner_id = 0
+                try:
+                    response = self._vk_for_peer(peer_id).messages.getConversationsById(peer_ids=[peer_id])
+                    item = (response.get("items") or [{}])[0]
+                    conversation = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+                    owner_id = _safe_int((conversation.get("chat_settings") or {}).get("owner_id"), 0)
+                except Exception as error:
+                    _record_action(
+                        platform="vk", zone=zone, action="roster_owner_lookup", status="error",
+                        peer_id=peer_id, error=str(error), request_json={"trigger": trigger},
+                    )
+                mode = "active" if owner_id == -abs(int(self.group_id or 0)) and self.group_id else "baseline"
+                with _db() as db:
+                    db.execute(
+                        """INSERT OR IGNORE INTO vk_roster_state(peer_id,mode,initialized_at,last_checked_at,last_error)
+                           VALUES(?,?, '', '', '')""",
+                        (peer_key, mode),
+                    )
+                initialized_at = ""
+            else:
+                mode = str(state["mode"] or "baseline")
+                initialized_at = str(state["initialized_at"] or "")
+            try:
+                response = self._vk_for_peer(peer_id).messages.getConversationMembers(peer_id=peer_id)
+                members = [
+                    {
+                        "user_id": int(item.get("member_id") or 0),
+                        "is_admin": _vk_member_is_admin(item),
+                    }
+                    for item in (response.get("items") or [])
+                    if int(item.get("member_id") or 0) > 0
+                ]
+            except Exception as error:
+                missing_chat = "[927]" in str(error) or "chat does not exist" in str(error).casefold()
+                with _db() as db:
+                    db.execute(
+                        "UPDATE vk_roster_state SET last_checked_at=?,last_error=? WHERE peer_id=?",
+                        (_now(), _clean(error, 1000), peer_key),
+                    )
+                    if missing_chat:
+                        db.execute(
+                            "UPDATE managed_chats SET enabled=0 WHERE platform='vk' AND peer_id=?",
+                            (peer_key,),
+                        )
+                _record_action(
+                    platform="vk", zone=zone, action="roster_reconcile", status="error",
+                    peer_id=peer_id, error=str(error),
+                    request_json={"trigger": trigger, "stale_chat_disabled": missing_chat},
+                )
+                return
+            trusted_staff = _trusted_vk_staff_ids()
+            can_grant_staff_admin = self._community_owns_chat(peer_id)
+            for member in members:
+                user_id = int(member["user_id"])
+                if user_id not in trusted_staff or member["is_admin"] or not can_grant_staff_admin:
+                    continue
+                try:
+                    self._vk_for_peer(peer_id).messages.setMemberRole(
+                        peer_id=peer_id, member_id=user_id, role="admin"
+                    )
+                    member["is_admin"] = True
+                    self.user_admin_cache[(peer_id, user_id)] = {"is_admin": True, "ts": time.time()}
+                    _record_action(
+                        platform="vk", zone=zone, action="grant_staff_admin", status="ok",
+                        peer_id=peer_id, user_id=user_id, request_json={"trigger": trigger},
+                    )
+                except Exception as error:
+                    _record_action(
+                        platform="vk", zone=zone, action="grant_staff_admin", status="error",
+                        peer_id=peer_id, user_id=user_id, error=str(error), request_json={"trigger": trigger},
+                    )
+            now = _now()
+            baseline_scan = mode == "baseline" and not initialized_at
+            candidates: list[int] = []
+            with _db() as db:
+                previous = {
+                    int(row["user_id"]): dict(row)
+                    for row in db.execute(
+                        "SELECT user_id,present,welcome_status FROM vk_member_roster WHERE peer_id=?",
+                        (peer_key,),
+                    ).fetchall()
+                }
+                db.execute("UPDATE vk_member_roster SET present=0 WHERE peer_id=?", (peer_key,))
+                for member in members:
+                    user_id = member["user_id"]
+                    is_admin = bool(member["is_admin"])
+                    prior = previous.get(user_id)
+                    rejoined = prior is None or not bool(prior.get("present"))
+                    prior_status = str((prior or {}).get("welcome_status") or "")
+                    if baseline_scan:
+                        welcome_status = "admin" if is_admin else "baseline"
+                    elif is_admin:
+                        welcome_status = "admin"
+                    else:
+                        welcome_status = prior_status
+                        if rejoined or prior_status == "error":
+                            candidates.append(user_id)
+                            welcome_status = "pending"
+                    db.execute(
+                        """INSERT INTO vk_member_roster(
+                               peer_id,user_id,is_admin,present,welcome_status,first_seen_at,last_seen_at
+                           ) VALUES(?,?,?,?,?,?,?)
+                           ON CONFLICT(peer_id,user_id) DO UPDATE SET
+                             is_admin=excluded.is_admin,present=1,welcome_status=excluded.welcome_status,
+                             last_seen_at=excluded.last_seen_at""",
+                        (peer_key, str(user_id), int(is_admin), 1, welcome_status, now, now),
+                    )
+                db.execute(
+                    """UPDATE vk_roster_state SET mode='active',initialized_at=CASE WHEN initialized_at='' THEN ? ELSE initialized_at END,
+                       last_checked_at=?,last_error='' WHERE peer_id=?""",
+                    (now, now, peer_key),
+                )
+            candidates = [user_id for user_id in candidates if user_id not in trusted_staff]
+            for user_id in candidates:
+                if not _template_enabled("vk_welcome"):
+                    welcome_status = "disabled"
+                else:
+                    sent = await self._send_welcome_message(peer_id, user_id, zone)
+                    welcome_status = "sent" if sent else "error"
+                with _db() as db:
+                    db.execute(
+                        "UPDATE vk_member_roster SET welcome_status=?,last_seen_at=? WHERE peer_id=? AND user_id=?",
+                        (welcome_status, _now(), peer_key, str(user_id)),
+                    )
+            if candidates or baseline_scan:
+                _record_action(
+                    platform="vk", zone=zone, action="roster_reconcile", status="ok", peer_id=peer_id,
+                    request_json={"trigger": trigger, "baseline": baseline_scan},
+                    response_json={"members": len(members), "welcome_candidates": len(candidates)},
+                )
+
     async def _handle_shared_error(self, error: Exception) -> None:
         _record_action(platform="vk", action="runtime_loop_error", status="error", error=str(error))
         _log("warning", "Shared VK Bots Long Poll error: %s", error)
+
+    def _vk_for_peer(self, peer_id: int) -> Any:
+        if self.vk is None:
+            raise RuntimeError("VK API client is not running")
+        return self.vk
+
+    def _community_owns_chat(self, peer_id: int) -> bool:
+        now = time.time()
+        cached = self.community_owner_cache.get(int(peer_id))
+        if cached and now - float(cached["ts"]) < 600:
+            return bool(cached["is_owner"])
+        try:
+            response = self._vk_for_peer(peer_id).messages.getConversationsById(peer_ids=[int(peer_id)])
+            item = (response.get("items") or [{}])[0]
+            conversation = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+            owner_id = _safe_int((conversation.get("chat_settings") or {}).get("owner_id"), 0)
+            is_owner = bool(self.group_id and owner_id == -abs(int(self.group_id)))
+            self.community_owner_cache[int(peer_id)] = {"is_owner": is_owner, "ts": now}
+            return is_owner
+        except Exception:
+            return False
 
     def _vk_event_type(self, name: str) -> Any:
         try:
@@ -2488,7 +2882,7 @@ class VKModeratorRuntime:
         return None
 
     async def is_chat_admin(self, peer_id: int, user_id: int) -> bool:
-        if int(user_id) in _int_set_csv(self.settings.get("vk_allowed_admins")):
+        if int(user_id) in (_int_set_csv(self.settings.get("vk_allowed_admins")) | _trusted_vk_staff_ids()):
             return True
         if int(peer_id) < 2000000000 or int(user_id) <= 0:
             return False
@@ -2628,23 +3022,25 @@ class VKModeratorRuntime:
             return
         self.vk.messages.sendReaction(peer_id=int(peer_id), cmid=int(cmid), reaction_id=int(reaction_id))
 
-    async def _send_welcome_message(self, peer_id: int, user_id: int, zone: str) -> None:
+    async def _send_welcome_message(self, peer_id: int, user_id: int, zone: str) -> bool:
         if int(user_id) <= 0:
-            return
+            return False
         if not _template_enabled("vk_welcome"):
             _record_action(platform="vk", zone=zone, action="skip_template_disabled", status="ok", peer_id=peer_id, user_id=user_id, request_json={"template": "vk_welcome"})
-            return
+            return False
         user_name = self._get_user_name(int(user_id))
         user_mention = f"[id{int(user_id)}|{user_name}]"
         message = _template_value("vk_welcome").format(user_mention=user_mention)
         if _truthy(self.settings.get("dry_run")):
             _record_action(platform="vk", zone=zone, action="would_send_welcome", status="dry_run", peer_id=peer_id, user_id=user_id, user_name=user_name, text=message)
-            return
+            return False
         try:
             self.vk.messages.send(peer_id=int(peer_id), message=message, random_id=0)
             _record_action(platform="vk", zone=zone, action="send_welcome", status="ok", peer_id=peer_id, user_id=user_id, user_name=user_name, text=message)
+            return True
         except Exception as error:
             _record_action(platform="vk", zone=zone, action="send_welcome", status="error", peer_id=peer_id, user_id=user_id, user_name=user_name, error=str(error), text=message)
+            return False
 
     async def forward_to_log(
         self, user_id: int, peer_id: int, category: str, message_id: Any, *, cmid: Any = None
@@ -2679,7 +3075,26 @@ class VKModeratorRuntime:
             self.vk.messages.send(**params)
             _record_action(platform="vk", action="forward_to_log", category=category, status="ok", peer_id=peer_id, user_id=user_id, user_name=name, text=log_text)
         except Exception as error:
-            _record_action(platform="vk", action="forward_to_log", category=category, status="error", peer_id=peer_id, user_id=user_id, error=str(error))
+            primary_error = str(error)
+            try:
+                fallback_text = locals().get("log_text") or (
+                    f"🚨 [VK MODERATOR]\nType: {category.upper()}\nUser: id{user_id}\n"
+                    f"Chat: {peer_id}\nCMID: {cmid or '—'}"
+                )
+                self._vk_for_peer(peer_id).messages.send(
+                    peer_id=int(self.log_chat_id), message=fallback_text, random_id=0
+                )
+                _record_action(
+                    platform="vk", action="forward_to_log", category=category, status="ok",
+                    peer_id=peer_id, user_id=user_id, text=fallback_text,
+                    response_json={"fallback_without_forward": True, "forward_error": primary_error},
+                )
+            except Exception as fallback_error:
+                _record_action(
+                    platform="vk", action="forward_to_log", category=category, status="error",
+                    peer_id=peer_id, user_id=user_id,
+                    error=f"forward={primary_error}; fallback={fallback_error}",
+                )
 
     async def process_chat_update(self, event: Any) -> None:
         if getattr(event, "type", None) != self._vk_event_type("CHAT_UPDATE"):
@@ -2711,10 +3126,9 @@ class VKModeratorRuntime:
         if not _chat_enabled(platform="vk", peer_id=peer_id):
             _record_action(platform="vk", zone=zone, action="skip_chat_disabled", status="ok", peer_id=peer_id, user_id=user_id)
             return
-        if not self._should_send_join_greeting(peer_id, user_id):
-            _record_action(platform="vk", zone=zone, action="skip_duplicate_welcome", status="ok", peer_id=peer_id, user_id=user_id)
-            return
-        await self._send_welcome_message(peer_id, user_id, zone)
+        await self._maybe_reconcile_chat_members(
+            peer_id, zone=zone, trigger="chat_update_user_joined", force=True
+        )
 
     async def process_message(self, event: Any) -> None:
         peer_id = int(getattr(event, "peer_id", 0) or 0)
@@ -2727,15 +3141,6 @@ class VKModeratorRuntime:
         zone = self.get_chat_zone(peer_id)
         title = self._get_chat_title(peer_id)
         if zone != "club":
-            if zone != "logs":
-                _log(
-                    "info",
-                    "chat-moderator ignored vk message: peer_id=%s title=%r user_id=%s reason=title_not_matched text=%r",
-                    peer_id,
-                    title,
-                    self._extract_from_id(event),
-                    _preview_log_text(getattr(event, "text", "") or ""),
-                )
             return
         _record_action(
             platform="vk",
@@ -2751,21 +3156,9 @@ class VKModeratorRuntime:
         _upsert_chat(platform="vk", peer_id=peer_id, title=title, zone=zone)
         if isinstance(full_msg.get("action"), dict):
             action = full_msg.get("action") or {}
-            if action.get("type") == "chat_invite_user_by_link":
-                user_id = int(action.get("member_id") or self._extract_from_id(event) or 0)
-                if user_id > 0:
-                    if not _template_enabled("vk_welcome"):
-                        _record_action(platform="vk", zone=zone, action="skip_template_disabled", status="ok", peer_id=peer_id, user_id=user_id, request_json={"template": "vk_welcome"})
-                    elif self._should_send_join_greeting(peer_id, user_id):
-                        await self._send_welcome_message(peer_id, user_id, zone)
-            elif action.get("type") == "chat_invite_user":
-                _record_action(
-                    platform="vk",
-                    zone=zone,
-                    action="skip_initial_member_welcome",
-                    status="ok",
-                    peer_id=peer_id,
-                    user_id=int(action.get("member_id") or 0),
+            if action.get("type") in {"chat_invite_user_by_link", "chat_invite_user"}:
+                await self._maybe_reconcile_chat_members(
+                    peer_id, zone=zone, trigger=str(action.get("type")), force=True
                 )
             return
         text = str(getattr(event, "text", "") or "").strip()
@@ -2945,13 +3338,19 @@ class VKModeratorRuntime:
         except Exception:
             user_name = "Участник"
             user_mention = "Участник"
-        if category in {"негатив", "скам", "удалить"}:
+        if category in {"негатив", "скам", "удалить", "возврат"}:
             await self.forward_to_log(from_id, peer_id, category, message_id, cmid=cmid)
             try:
                 self._delete_chat_message(peer_id=peer_id, message_id=message_id, cmid=cmid)
                 _record_action(platform="vk", zone=zone, action="delete", category=category, status="ok" if not _truthy(self.settings.get("dry_run")) else "dry_run", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, text=text)
             except Exception as error:
                 _record_action(platform="vk", zone=zone, action="delete", category=category, status="error", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, error=str(error), text=text)
+            if category == "возврат" and _truthy(self.settings.get("vk_send_responses")) and _template_enabled("vk_refund"):
+                self._send_message(peer_id, _template_value("vk_refund").format(user_mention=user_mention))
+            return
+        if category == "техпод":
+            await self.forward_to_log(from_id, peer_id, category, message_id, cmid=cmid)
+            _record_action(platform="vk", zone=zone, action="tech_support_forward_only", category=category, status="ok", peer_id=peer_id, message_id=message_id, cmid=cmid, user_id=from_id, user_name=user_name, text=text)
             return
         if category in {"ок", "нейтрально", ""}:
             return

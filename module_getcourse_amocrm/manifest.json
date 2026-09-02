@@ -1,8 +1,8 @@
 {
   "id": "getcourse-amocrm",
   "name": "GetCourse -> amoCRM",
-  "version": "1.5.6",
-  "description": "Синхронизирует автооплаты, доплаты до VIP и оплаченные мини-курсы GetCourse с amoCRM.",
+  "version": "1.7.23",
+  "description": "Синхронизирует заказы GetCourse и связывает профиль со сделкой по приоритетному utm_term или точному телефону.",
   "env_vars": {
     "AMO_BASE_URL": "URL аккаунта amoCRM, например https://sobakovodpro.amocrm.ru",
     "AMO_ACCESS_TOKEN": "Long-lived access token amoCRM с доступом к сделкам, контактам, полям и воронкам",

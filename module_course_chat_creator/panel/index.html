@@ -20,7 +20,7 @@
     .form{display:grid;gap:10px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
     label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,textarea{width:100%;min-height:34px;border:1px solid #424242;background:#080808;color:var(--text);padding:7px 9px;min-width:0}
     textarea{min-height:260px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.45}
-    .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{min-height:34px;border:1px solid #555;background:#f2f2f2;color:#080808;padding:7px 12px;font-weight:650}.ghost{background:transparent;color:var(--text)}.danger{background:#2a1114;color:var(--bad);border-color:#67343a}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.btn{min-height:34px;border:1px solid #555;background:#f2f2f2;color:#080808;padding:7px 12px;font-weight:650}.btn:disabled{cursor:wait;opacity:.6}.btn.busy::before{content:"";display:inline-block;width:11px;height:11px;margin-right:7px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-2px;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.ghost{background:transparent;color:var(--text)}.danger{background:#2a1114;color:var(--bad);border-color:#67343a}
     .surface{border:1px solid var(--line);background:var(--panel);padding:12px;display:grid;gap:10px;min-width:0}.surface--plain{border:0;background:transparent;padding:0}
     .auth-grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:14px;align-items:start}.auth-shot{width:100%;min-height:320px;max-height:620px;object-fit:contain;background:#050505;border:1px solid var(--line);cursor:crosshair}.auth-tools{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end}
     pre{margin:0;border:1px solid var(--line);background:#050505;color:#d8d8d8;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;scrollbar-color:#555 #090909}
@@ -262,7 +262,6 @@ let people = [], courses = [], templates = [], broadcastChats = [], broadcastHis
 const roleLabels = {admin:"Админ", author:"Автор курса", kurator:"Куратор", tech:"Техподдержка"};
 const parityLabels = {any:"Все", even:"Четные", odd:"Нечетные"};
 const enabledLabel = value => value ? "Да" : "Нет";
-const defaultCurator = () => people.find(p => p.kind === "kurator" && p.enabled && String(p.name || "").trim().toLowerCase() === "ирина") || people.find(p => p.kind === "kurator" && p.enabled);
 function vkHandle(person) {
   const mention = String(person.vk_mention || "");
   const mentionMatch = mention.match(/\|(@?[^|\]]+)\]/);
@@ -340,14 +339,12 @@ async function loadPeople() {
 function renderCurators() {
   const active = people.filter(p => p.kind === "kurator" && p.enabled);
   const current = $("curator").value;
-  $("curator").innerHTML = active.map(p => `<option value="${p.id}">${esc(curatorLabel(p))}</option>`).join("");
-  if (active.length) {
-    const fallback = defaultCurator();
-    $("curator").value = active.some(p => String(p.id) === current) ? current : String(fallback.id);
-  }
+  $("curator").innerHTML = `<option value="">Выберите куратора</option>` + active.map(p => `<option value="${p.id}">${esc(curatorLabel(p))}</option>`).join("");
+  $("curator").value = active.some(p => String(p.id) === current) ? current : "";
 }
 function editPerson(p) {
   editPersonId = p.id; $("pKind").value = p.kind; $("pName").value = p.name; $("pVkId").value = p.vk_id; $("pTgRef").value = p.tg_ref; $("pOfferId").value = p.offer_id || ""; $("pParity").value = p.parity; $("pEnabled").value = String(p.enabled);
+  const form = $("pName").closest(".surface"); form?.scrollIntoView({block:"start",behavior:"smooth"}); $("pName").focus(); show($("peopleStatus"), `Редактируется: ${p.name}`);
 }
 $("personClear").onclick = () => { editPersonId = null; ["pName","pVkId","pTgRef","pOfferId"].forEach(id => $(id).value = ""); $("pParity").value = "any"; $("pEnabled").value = "1"; };
 $("personSave").onclick = async () => {
@@ -619,13 +616,18 @@ function runDestination(link) {
   return /^https:\/\//i.test(value) ? value : "";
 }
 $("previewBtn").onclick = async () => {
+  const btn = $("previewBtn");
+  if (!$("curator").value) { show($("previewResult"), "Сначала выберите куратора."); $("curator").focus(); return; }
+  btn.disabled = true; btn.classList.add("busy"); show($("previewResult"), "Готовим предпросмотр…");
   try { show($("previewResult"), await getJson(`/preview?stream_number=${encodeURIComponent($("stream").value)}&start_date=${encodeURIComponent($("date").value)}&course=${encodeURIComponent($("course").value)}&curator_id=${encodeURIComponent($("curator").value)}&test_mode=${encodeURIComponent($("testMode").value)}`)); }
   catch(e) { show($("previewResult"), e); }
+  finally { btn.disabled = false; btn.classList.remove("busy"); }
 };
 $("createBtn").onclick = async () => {
   const btn = $("createBtn");
+  if (!$("curator").value) { show($("createResult"), "Сначала выберите куратора."); $("curator").focus(); return; }
   const started = Date.now();
-  btn.disabled = true;
+  btn.disabled = true; btn.classList.add("busy");
   show($("createResult"), `Создание началось: 00:00\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка" : "боевой"}`);
   const timer = setInterval(() => {
     show($("createResult"), `Создание идет: ${formatElapsed(Date.now() - started)}\nПлатформа: ${$("platform").value}\nРежим: ${$("testMode").value === "true" ? "проверка" : "боевой"}`);
@@ -639,7 +641,7 @@ $("createBtn").onclick = async () => {
     await loadRuns();
   } finally {
     clearInterval(timer);
-    btn.disabled = false;
+    btn.disabled = false; btn.classList.remove("busy");
   }
 };
 

@@ -36,6 +36,16 @@ SESSION_TTL_DAYS = 30
 PASSWORD_MIN_LENGTH = 8
 ACCESS_VERIFY_DELAY_SECONDS = 20
 TEST_PERIOD_MAX_DAYS = 90
+PACKAGE_CHANGE_ADMIN_URL = "https://vk.me/tehpod_sobakovodpro"
+PROTECTED_PACKAGE_KEYS = {"standard", "premium", "vip"}
+STUDENT_ENRICHMENT_TTL_SECONDS = 300
+STUDENT_ENRICHMENT_NEGATIVE_TTL_SECONDS = 30
+STUDENT_ENRICHMENT_STALE_SECONDS = 3600
+STUDENT_ENRICHMENT_WAIT_SECONDS = 1.25
+STUDENT_ENRICHMENT_CACHE_LIMIT = 4096
+STUDENT_CARD_IDENTITY_TIMEOUT_SECONDS = 8.0
+STUDENT_CARD_EXTERNAL_TIMEOUT_SECONDS = 8.0
+STUDENT_CARD_MANAGER_FALLBACK_TIMEOUT_SECONDS = 2.0
 CURATOR_OFFERS = {
     "Куратор 1": 8593080,
     "Куратор 2": 8593081,
@@ -62,6 +72,8 @@ _db_path: Path | None = None
 _module_dir: Path | None = None
 _logger = None
 _worker_task: asyncio.Task | None = None
+_sheet_worker_task: asyncio.Task | None = None
+_refund_sync_task: asyncio.Task | None = None
 _access_sync_task: asyncio.Task | None = None
 _access_queue_task: asyncio.Task | None = None
 _access_browser_cache_task: asyncio.Task | None = None
@@ -71,21 +83,37 @@ _chat_delivery_lock = asyncio.Lock()
 _registry_lock = asyncio.Lock()
 _snapshot_lock = asyncio.Lock()
 _flow_creation_lock = asyncio.Lock()
+_refund_sync_lock = asyncio.Lock()
 _access_apply_locks: dict[str, asyncio.Lock] = {}
 _snapshot_refresh_task: asyncio.Task | None = None
 _registry_sync_task: asyncio.Task | None = None
 _last_registry_sync = 0.0
+_last_roster_sync = 0.0
 _registry_retry_at = 0.0
 _snapshot_cache: dict[str, Any] = {"expires_at": 0.0, "data": None}
+_student_list_index_cache: dict[str, Any] = {
+    "source": None, "all": [], "by_course": {}, "by_stream": {}, "by_flow": {},
+}
+_student_enrichment_caches: dict[str, dict[str, dict[str, Any]]] = {
+    "identity": {},
+    "manager": {},
+}
+_student_enrichment_locks: dict[str, asyncio.Lock] = {
+    "identity": asyncio.Lock(),
+    "manager": asyncio.Lock(),
+}
+_student_enrichment_tasks: dict[str, asyncio.Task] = {}
+_session_revoke_tasks: set[asyncio.Task] = set()
+_revoked_session_tokens: set[str] = set()
 _password_ctx = CryptContext(schemes=["argon2"], deprecated="auto")
 _dummy_password_hash = _password_ctx.hash("streams-dummy-password")
 
 
 @asynccontextmanager
-async def _connect():
-    db = await aiosqlite.connect(_must_db(), timeout=30)
+async def _connect(timeout: float = 30):
+    db = await aiosqlite.connect(_must_db(), timeout=timeout)
     try:
-        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
         await db.execute("PRAGMA foreign_keys=ON")
         db.row_factory = aiosqlite.Row
         yield db
@@ -111,6 +139,7 @@ class OperatorIn(StrictInput):
 
 
 class TransferRef(StrictInput):
+    preview_id: str = Field(default="", max_length=64)
     enrollment_id: str = Field(default="", max_length=100)
     email: str = Field(max_length=320)
     source_course_key: str = Field(max_length=50)
@@ -119,6 +148,10 @@ class TransferRef(StrictInput):
     target_course_key: str = Field(max_length=50)
     target_stream: str = Field(max_length=50)
     move_sheet_row: bool = True
+    chat_only: bool = False
+    chat_source_stream: str = Field(default="", max_length=50)
+    vk_target: str = Field(default="", max_length=500)
+    delivery_already_sent: bool = False
 
 
 class CuratorChangeRef(StrictInput):
@@ -192,12 +225,24 @@ class StudentNoteIn(StrictInput):
     note: str = Field(default="", max_length=2000)
 
 
+class ChatRemovalIn(StrictInput):
+    preview_id: str = Field(min_length=20, max_length=100)
+
+
+class RefundStatusIn(StrictInput):
+    refunded: bool
+    expected_refunded: bool
+    reason: str = Field(default="", max_length=500)
+
+
 class MessengerSendIn(StrictInput):
+    request_id: str = Field(default="", max_length=64)
     channel_id: str = Field(max_length=200)
     transport: str = Field(max_length=40)
     provider: str = Field(max_length=40)
     chat_id: str = Field(default="", max_length=250)
     text: str = Field(default="", max_length=4000)
+    subject: str = Field(default="", max_length=300)
     attachment_url: str = Field(default="", max_length=4000)
     attachment_type: str = Field(default="", max_length=100)
 
@@ -212,46 +257,43 @@ class MessengerTemplateFavoriteIn(StrictInput):
     favorite: bool
 
 
-def setup(ctx):
-    global _db_path, _module_dir, _logger, _worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task
+async def setup(ctx):
+    global _db_path, _module_dir, _logger, _worker_task, _sheet_worker_task, _refund_sync_task, _access_sync_task, _access_queue_task, _access_browser_cache_task
     _db_path = ctx.db_path
     _module_dir = ctx.module_dir
     _logger = getattr(ctx, "logger", None)
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        loop.create_task(_init_db())
-        lifecycle = getattr(ctx, "lifecycle", None)
-        if lifecycle is not None:
-            _worker_task = lifecycle.create_task(_worker_loop(), name="student-transfer-worker")
-            _access_sync_task = lifecycle.create_task(_access_sync_loop(), name="student-transfer-access-sync")
-            _access_queue_task = lifecycle.create_task(_access_queue_loop(), name="student-transfer-access-queue")
-            _access_browser_cache_task = lifecycle.create_task(
-                _access_browser_cache_loop(), name="student-transfer-access-browser-cache"
-            )
-        else:
-            _worker_task = loop.create_task(_worker_loop(), name="student-transfer-worker")
-            _access_sync_task = loop.create_task(_access_sync_loop(), name="student-transfer-access-sync")
-            _access_queue_task = loop.create_task(_access_queue_loop(), name="student-transfer-access-queue")
-            _access_browser_cache_task = loop.create_task(
-                _access_browser_cache_loop(), name="student-transfer-access-browser-cache"
-            )
-    else:
-        loop.run_until_complete(_init_db())
+    await _init_db()
+    lifecycle = getattr(ctx, "lifecycle", None)
+    create_task = lifecycle.create_task if lifecycle is not None else asyncio.create_task
+    _worker_task = create_task(_worker_loop(), name="student-transfer-worker")
+    _sheet_worker_task = create_task(_sheet_operation_loop(), name="student-transfer-sheet-operations")
+    _refund_sync_task = create_task(_refund_sync_loop(), name="student-transfer-refund-sync")
+    _access_sync_task = create_task(_access_sync_loop(), name="student-transfer-access-sync")
+    _access_queue_task = create_task(_access_queue_loop(), name="student-transfer-access-queue")
+    _access_browser_cache_task = create_task(
+        _access_browser_cache_loop(), name="student-transfer-access-browser-cache"
+    )
 
 
 async def shutdown():
-    global _worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task
-    tasks = [task for task in (_worker_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task) if task and not task.done()]
+    global _worker_task, _sheet_worker_task, _refund_sync_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task
+    tasks = [task for task in (_worker_task, _sheet_worker_task, _refund_sync_task, _access_sync_task, _access_queue_task, _access_browser_cache_task, _snapshot_refresh_task, _registry_sync_task) if task and not task.done()]
+    tasks.extend(task for task in _student_enrichment_tasks.values() if not task.done())
+    tasks.extend(task for task in _session_revoke_tasks if not task.done())
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _worker_task = None
+    _sheet_worker_task = None
+    _refund_sync_task = None
     _access_sync_task = None
     _access_queue_task = None
     _access_browser_cache_task = None
     _snapshot_refresh_task = None
     _registry_sync_task = None
+    _student_enrichment_tasks.clear()
+    _session_revoke_tasks.clear()
 
 
 def _must_db() -> Path:
@@ -283,6 +325,17 @@ def _norm(value: Any) -> str:
     return " ".join(raw.split())
 
 
+def _sheet_date_value(value: Any) -> str:
+    text = _clean(value, 100)
+    try:
+        serial = float(text.replace(",", "."))
+    except ValueError:
+        return text
+    if not (1 <= serial <= 100000):
+        return text
+    return (datetime(1899, 12, 30) + timedelta(days=serial)).strftime("%Y-%m-%d")
+
+
 def _tariff_key(value: Any) -> str:
     return {
         "standard": "standard",
@@ -301,6 +354,27 @@ def _phone_search_key(value: Any) -> str:
     elif len(digits) == 11 and digits.startswith("8"):
         digits = "7" + digits[1:]
     return digits
+
+
+def _is_phone_search(value: Any) -> bool:
+    raw = _clean(value, 1000).strip()
+    return bool(raw and re.fullmatch(r"[+\d\s().-]+", raw) and len(_phone_search_key(raw)) >= 10)
+
+
+def _vk_target_id(value: Any) -> str:
+    """Normalize an explicit VK profile ID without accepting chat URLs."""
+
+    raw = _clean(value, 500)
+    if re.fullmatch(r"\d{3,20}", raw):
+        return raw
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+    except ValueError:
+        return ""
+    if (parsed.hostname or "").casefold() not in {"vk.com", "www.vk.com", "vk.ru", "www.vk.ru"}:
+        return ""
+    match = re.fullmatch(r"/id(\d{3,20})/?", parsed.path)
+    return match.group(1) if match else ""
 
 
 def _cookie_path(request: Request) -> str:
@@ -384,6 +458,30 @@ def _backup_auth_migration_db() -> None:
             backup.chmod(0o600)
     except Exception as exc:
         raise RuntimeError(f"student-transfer auth migration backup failed: {exc}") from exc
+
+
+def _backup_refund_migration_db() -> None:
+    """Create one recoverable copy before the first refund status migration."""
+    db_path = _must_db()
+    if not db_path.exists():
+        return
+    backup = (
+        _must_module_dir().parents[1]
+        / "backups/student-transfer-pre-refunds-1.4.88/student-transfer.db"
+    )
+    if backup.exists():
+        return
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60) as source:
+            with sqlite3.connect(backup) as target:
+                source.backup(target)
+                if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise RuntimeError("student-transfer refund backup quick_check failed")
+        backup.chmod(0o600)
+    except Exception:
+        backup.unlink(missing_ok=True)
+        raise
 
 
 def _backup_password_migration_db() -> None:
@@ -570,6 +668,18 @@ async def _init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_student_notes_updated_at ON student_notes(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS enrollment_status_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                enrollment_id TEXT NOT NULL,
+                target_status TEXT NOT NULL CHECK(target_status IN ('active','refunded')),
+                previous_status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                operator_id INTEGER NOT NULL,
+                operator_name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_enrollment_status_overrides_latest
+                ON enrollment_status_overrides(enrollment_id,id DESC);
             CREATE TABLE IF NOT EXISTS registry_sync_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 status TEXT NOT NULL,
@@ -694,6 +804,14 @@ async def _init_db() -> None:
         await db.execute("UPDATE transfers SET status='queued',updated_at=? WHERE status='running'", (now,))
         await db.execute("UPDATE flow_jobs SET status='queued',updated_at=? WHERE status='running'", (now,))
         await db.execute(
+            """UPDATE registry_sync_runs
+               SET status='failed',
+                   error='Синхронизация была прервана перезапуском модуля; следующий запуск выполняется автоматически.',
+                   finished_at=?
+               WHERE status='running'""",
+            (now,),
+        )
+        await db.execute(
             "UPDATE test_periods SET status='queued_grant',next_attempt_at=?,updated_at=? "
             "WHERE status='preparing'",
             (now, now),
@@ -704,7 +822,7 @@ async def _init_db() -> None:
 async def _require_operator(request: Request) -> dict[str, Any]:
     _require_same_origin(request)
     token = request.cookies.get(SESSION_COOKIE)
-    if token:
+    if token and token not in _revoked_session_tokens:
         async with _connect() as db:
             db.row_factory = aiosqlite.Row
             row = await (
@@ -719,6 +837,49 @@ async def _require_operator(request: Request) -> dict[str, Any]:
         if row:
             return dict(row)
     raise HTTPException(401, "Войдите в управление потоками")
+
+
+async def _create_session(token: str, operator_id: str) -> None:
+    for attempt in range(6):
+        try:
+            async with _connect(timeout=0.5) as db:
+                await db.execute("DELETE FROM sessions WHERE expires_at<=?", (_now(),))
+                await db.execute(
+                    "INSERT INTO sessions(token,operator_id,expires_at,created_at) VALUES(?,?,?,?)",
+                    (token, operator_id, _session_expires(), _now()),
+                )
+                await db.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).casefold() or attempt == 5:
+                raise
+            await asyncio.sleep(0.1 * (attempt + 1))
+
+
+async def _revoke_session(token: str) -> None:
+    try:
+        for attempt in range(30):
+            try:
+                async with _connect(timeout=0.25) as db:
+                    await db.execute("DELETE FROM sessions WHERE token=?", (token,))
+                    await db.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold():
+                    raise
+                await asyncio.sleep(min(2.0, 0.1 * (attempt + 1)))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if _logger:
+            _logger.warning("Streams session revocation deferred until restart cleanup: %s", exc)
+
+
+def _schedule_session_revocation(token: str) -> None:
+    _revoked_session_tokens.add(token)
+    task = asyncio.create_task(_revoke_session(token), name="student-transfer-session-revoke")
+    _session_revoke_tasks.add(task)
+    task.add_done_callback(_session_revoke_tasks.discard)
 
 
 def _require_same_origin(request: Request) -> None:
@@ -810,6 +971,9 @@ async def _snapshot(refresh: bool = False) -> dict[str, Any]:
 
 def _clear_snapshot_cache() -> None:
     _snapshot_cache.update(data=None, expires_at=0.0)
+    _student_list_index_cache.update(
+        source=None, all=[], by_course={}, by_stream={}, by_flow={},
+    )
 
 
 def _teacher_code(name: Any) -> str:
@@ -846,6 +1010,115 @@ async def _meta_set(key: str, value: Any) -> None:
         await db.commit()
 
 
+async def _sync_refunds() -> dict[str, Any]:
+    async with _refund_sync_lock:
+        return await _sync_refunds_unlocked()
+
+
+async def _sync_refunds_unlocked() -> dict[str, Any]:
+    """Move refunded orders out of the active roster using the webhook ledger."""
+    # v4 deliberately replays the immutable ledger once after the business
+    # rule was clarified: more than 15,000 RUB remaining keeps the student;
+    # 15,000 or less moves the student to Refunds.
+    cursor = int(await _meta_get("refund_event_cursor_v4", "0") or 0)
+    try:
+        pending_raw = json.loads(await _meta_get("refund_pending_json_v4", "[]") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pending_raw = []
+    pending = [item for item in pending_raw if isinstance(item, dict)]
+    try:
+        orders = _module("getcourse-orders", "service_refund_events")
+        result = await orders.service_refund_events(after_event_id=cursor, limit=1000)
+    except Exception as exc:
+        if _logger:
+            _logger.warning("Refund synchronization deferred: %s", exc)
+        return {"moved": 0, "pending": len(pending), "deferred": True}
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "Возвраты GetCourse недоступны")
+    if result.get("items") or pending:
+        await asyncio.to_thread(_backup_refund_migration_db)
+    by_event: dict[int, dict[str, Any]] = {}
+    for event in [*pending, *(result.get("items") or [])]:
+        event_id = int(event.get("event_id") or 0)
+        if event_id:
+            by_event[event_id] = event
+    unmatched: list[dict[str, Any]] = []
+    moved = 0
+    now = _now()
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        for event_index, event_id in enumerate(sorted(by_event), start=1):
+            event = by_event[event_id]
+            keys = list(dict.fromkeys(
+                value for value in (
+                    _clean(event.get("order_id"), 100),
+                    _clean(event.get("platform_id"), 100),
+                ) if value
+            ))
+            if not keys:
+                continue
+            placeholders = ",".join("?" for _ in keys)
+            row = await (
+                await db.execute(
+                    f"""SELECT id,source_json,status,stream FROM enrollments
+                        WHERE order_id IN ({placeholders}) OR deal_number IN ({placeholders})
+                           OR CAST(source_record_id AS TEXT) IN ({placeholders})
+                        ORDER BY updated_at DESC LIMIT 1""",
+                    (*keys, *keys, *keys),
+                )
+            ).fetchone()
+            if not row:
+                unmatched.append(event)
+                continue
+            try:
+                source = json.loads(row["source_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                source = {}
+            if not isinstance(source, dict):
+                source = {}
+            source["refund"] = {
+                "event_id": event_id,
+                "received_at": _clean(event.get("received_at"), 100),
+                "status": _clean(event.get("status"), 300),
+                "payment_state": _clean(event.get("payment_state"), 40),
+                "kind": _clean(event.get("refund_kind"), 20) or "full",
+                "total_amount": float(event.get("total_amount") or 0),
+                "remaining_amount": float(event.get("remaining_amount") or 0),
+                "refund_amount": float(event.get("refund_amount") or 0),
+            }
+            is_partial = source["refund"]["kind"] == "partial"
+            target_status = ("assigned" if _clean(source.get("stream") or "", 50) else "pending") if is_partial else "refunded"
+            # The persisted columns are authoritative for assignment; source
+            # snapshots from older releases may not carry stream.
+            if is_partial:
+                target_status = "assigned" if _clean(row["stream"], 50) else "pending"
+            override = await (
+                await db.execute(
+                    """SELECT target_status FROM enrollment_status_overrides
+                       WHERE enrollment_id=? ORDER BY id DESC LIMIT 1""",
+                    (row["id"],),
+                )
+            ).fetchone()
+            is_canceled = source["refund"]["payment_state"] == "canceled"
+            if override and not is_canceled:
+                target_status = (
+                    "refunded" if override[0] == "refunded"
+                    else ("assigned" if _clean(row["stream"], 50) else "pending")
+                )
+            if row["status"] != target_status:
+                moved += 1
+            await db.execute(
+                "UPDATE enrollments SET status=?,source_json=?,updated_at=? WHERE id=?",
+                (target_status, json.dumps(source, ensure_ascii=False), now, row["id"]),
+            )
+            if event_index % 50 == 0:
+                await db.commit()
+        await db.commit()
+    await _meta_set("refund_event_cursor_v4", int(result.get("cursor") or cursor))
+    await _meta_set("refund_pending_json_v4", json.dumps(unmatched[-1000:], ensure_ascii=False))
+    return {"moved": moved, "pending": len(unmatched), "cursor": int(result.get("cursor") or cursor)}
+
+
 async def _flow_rows() -> list[dict[str, Any]]:
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
@@ -862,11 +1135,40 @@ async def _enrollment_rows() -> list[dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         rows = await (
             await db.execute(
-                "SELECT * FROM enrollments WHERE status<>'removed' ORDER BY CASE course_key WHEN 'puppy' THEN 0 ELSE 1 END,CAST(stream AS INTEGER) DESC,name,email"
+                "SELECT * FROM enrollments WHERE status NOT IN ('removed','refunded') ORDER BY CASE course_key WHEN 'puppy' THEN 0 ELSE 1 END,CAST(stream AS INTEGER) DESC,name,email"
             )
         ).fetchall()
         lesson_rows = await (
             await db.execute("SELECT * FROM lesson_progress ORDER BY length(lesson_key),lesson_key")
+        ).fetchall()
+    lessons: dict[str, list[dict[str, Any]]] = {}
+    for row in lesson_rows:
+        item = dict(row)
+        lessons.setdefault(item["enrollment_id"], []).append(
+            {"key": item["lesson_key"], "label": item["label"], "value": bool(item["value"])}
+        )
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["lessons"] = lessons.get(item["id"], [])
+        result.append(item)
+    return result
+
+
+async def _refund_enrollment_rows() -> list[dict[str, Any]]:
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                "SELECT * FROM enrollments WHERE status='refunded' ORDER BY updated_at DESC,name,email"
+            )
+        ).fetchall()
+        lesson_rows = await (
+            await db.execute(
+                """SELECT p.* FROM lesson_progress p
+                   JOIN enrollments e ON e.id=p.enrollment_id
+                   WHERE e.status='refunded' ORDER BY length(p.lesson_key),p.lesson_key"""
+            )
         ).fetchall()
     lessons: dict[str, list[dict[str, Any]]] = {}
     for row in lesson_rows:
@@ -1088,11 +1390,18 @@ async def _apply_sheet_curators(
             changed_flow_keys.add(key)
             flow_changes += 1
 
+        # Do not keep the writer lock while walking every student in the sheet.
+        await db.commit()
+
+        scanned_students = 0
         for flow in snapshot.get("items") or []:
             key = (_clean(flow.get("course_key"), 50), _clean(flow.get("stream"), 50))
             if key in skip_student_keys or key in changed_flow_keys:
                 continue
             for student in flow.get("students") or []:
+                scanned_students += 1
+                if scanned_students % 10 == 0:
+                    await db.commit()
                 curator = _clean(student.get("responsible_curator"), 100)
                 if curator not in CURATOR_NAMES:
                     continue
@@ -1116,11 +1425,15 @@ async def _seed_from_legacy(snapshot: dict[str, Any], flows: list[dict[str, Any]
     now = _now()
     inserted = 0
     async with _connect() as db:
+        scanned_students = 0
         for flow in snapshot.get("items") or []:
             course_key = _clean(flow.get("course_key"), 50)
             stream = _clean(flow.get("stream"), 50)
             registry_flow = flow_map.get((course_key, stream)) or {}
             for student in flow.get("students") or []:
+                scanned_students += 1
+                if scanned_students % 10 == 0:
+                    await db.commit()
                 email = _clean(student.get("email"), 300)
                 if not email:
                     continue
@@ -1180,7 +1493,12 @@ async def _reconcile_sheet_assignments(snapshot: dict[str, Any], flows: list[dic
     async with _connect() as db:
         existing_emails = {
             _norm(row[0])
-            for row in await (await db.execute("SELECT email FROM enrollments WHERE status<>'removed'")).fetchall()
+            for row in await (await db.execute("SELECT email FROM enrollments WHERE status NOT IN ('removed','refunded')")).fetchall()
+            if row and _norm(row[0])
+        }
+        refunded_emails = {
+            _norm(row[0])
+            for row in await (await db.execute("SELECT email FROM enrollments WHERE status='refunded'")).fetchall()
             if row and _norm(row[0])
         }
     missing_emails = [email for email in candidates if email not in existing_emails]
@@ -1200,12 +1518,40 @@ async def _reconcile_sheet_assignments(snapshot: dict[str, Any], flows: list[dic
     changed = 0
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
-        for email, matches in candidates.items():
+        for index, (email, matches) in enumerate(candidates.items(), start=1):
+            if email in refunded_emails:
+                continue
+            if index % 10 == 0:
+                await db.commit()
             rows = await (await db.execute(
-                "SELECT id,course_key,course,stream,tariff,teacher,teacher_code,source_json "
-                "FROM enrollments WHERE lower(email)=? AND status<>'removed'",
+                "SELECT id,course_key,course,stream,name,email,tg_account,date,tariff,teacher,teacher_code,source_json "
+                "FROM enrollments WHERE lower(email)=? AND status NOT IN ('removed','refunded')",
                 (email,),
             )).fetchall()
+            if not rows:
+                # Email is editable by staff.  A unique existing binding to the
+                # same flow + row is the stable identity for importing that edit.
+                bound_rows: dict[str, aiosqlite.Row] = {}
+                for _priority, match_flow, match_student in matches:
+                    bound = await (
+                        await db.execute(
+                            """
+                            SELECT id,course_key,course,stream,name,email,tg_account,date,tariff,teacher,teacher_code,source_json
+                            FROM enrollments
+                            WHERE course_key=? AND stream=? AND status NOT IN ('removed','refunded')
+                              AND CAST(json_extract(source_json,'$.row') AS INTEGER)=?
+                            """,
+                            (
+                                _clean(match_flow.get("course_key"), 50),
+                                _clean(match_flow.get("stream"), 50),
+                                int(match_student.get("row") or 0),
+                            ),
+                        )
+                    ).fetchone()
+                    if bound:
+                        bound_rows[str(bound["id"])] = bound
+                if len(bound_rows) == 1:
+                    rows = list(bound_rows.values())
             if not rows:
                 identity = identities.get(email) or {}
                 if not int(identity.get("source_record_id") or 0) or not _clean(identity.get("gc_user_id"), 100):
@@ -1297,12 +1643,16 @@ async def _reconcile_sheet_assignments(snapshot: dict[str, Any], flows: list[dic
             assignment_changed = (row["course_key"], row["stream"]) != (course_key, stream)
             await db.execute(
                 """
-                UPDATE enrollments SET course_key=?,course=?,stream=?,tariff=?,teacher=?,teacher_code=?,
+                UPDATE enrollments SET course_key=?,course=?,stream=?,name=?,email=?,tg_account=?,date=?,tariff=?,teacher=?,teacher_code=?,
                     source_json=?,status='assigned',updated_at=? WHERE id=?
                 """,
                 (
                     course_key, _clean(flow.get("course") or registry_flow.get("course") or row["course"], 100), stream,
-                    _clean(student.get("tariff") or row["tariff"], 100),
+                    _clean(student.get("name") if "name" in student else row["name"], 300),
+                    _clean(student.get("email") if "email" in student else row["email"], 320),
+                    _clean(student.get("tg_account") if "tg_account" in student else row["tg_account"], 500),
+                    _sheet_date_value(student.get("date") if "date" in student else row["date"]),
+                    _clean(student.get("tariff") if "tariff" in student else row["tariff"], 100),
                     _clean(registry_flow.get("teacher") or row["teacher"], 200),
                     _clean(registry_flow.get("teacher_code") or row["teacher_code"], 100),
                     json.dumps(source, ensure_ascii=False),
@@ -1318,6 +1668,8 @@ async def _reconcile_sheet_assignments(snapshot: dict[str, Any], flows: list[dic
 
 async def _import_sheet_lessons(snapshot: dict[str, Any]) -> int:
     changed = 0
+    pending_students = 0
+    scanned_students = 0
     async with _connect() as db:
         db.row_factory = aiosqlite.Row
         for flow in snapshot.get("items") or []:
@@ -1328,6 +1680,8 @@ async def _import_sheet_lessons(snapshot: dict[str, Any]) -> int:
             for student in flow.get("students") or []:
                 students_by_email.setdefault(_norm(student.get("email")), []).append(student)
             for email, students in students_by_email.items():
+                scanned_students += 1
+                changed_before_student = changed
                 rows = await (
                     await db.execute(
                         "SELECT id,source_json FROM enrollments WHERE course_key=? AND stream=? AND lower(email)=lower(?) AND status<>'removed'",
@@ -1385,21 +1739,83 @@ async def _import_sheet_lessons(snapshot: dict[str, Any]) -> int:
                             (numeric, numeric, labels.get(key, key), _now(), enrollment_id, key),
                         )
                         changed += 1
+                if changed > changed_before_student:
+                    pending_students += 1
+                if pending_students and (pending_students >= 10 or scanned_students % 25 == 0):
+                    await db.commit()
+                    pending_students = 0
         await db.commit()
     return changed
 
 
-async def _student_by_id(enrollment_id: str) -> dict[str, Any]:
-    snapshot = await _snapshot()
-    for flow in snapshot.get("items") or []:
-        for student in flow.get("students") or []:
-            if _clean(student.get("enrollment_id"), 100) == _clean(enrollment_id, 100):
-                item = _student_result(flow, student)
-                await _enrich_order_identities([item])
-                await _enrich_successful_managers([item])
-                await _enrich_student_notes([item])
-                return item
-    raise HTTPException(404, "Ученик не найден")
+async def _student_by_id(enrollment_id: str, *, resolve_external: bool = False) -> dict[str, Any]:
+    key = _clean(enrollment_id, 100)
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                """SELECT e.*,f.date_start AS flow_date_start,f.vk_link,f.tg_link,
+                          f.teacher AS flow_teacher,f.teacher_code AS flow_teacher_code
+                   FROM enrollments e
+                   LEFT JOIN flow_registry f ON f.course_key=e.course_key AND f.stream=e.stream
+                   WHERE e.id=? AND e.status<>'removed' LIMIT 1""",
+                (key,),
+            )
+        ).fetchone()
+        lesson_rows = await (
+            await db.execute(
+                """SELECT lesson_key,label,value FROM lesson_progress
+                   WHERE enrollment_id=? ORDER BY length(lesson_key),lesson_key""",
+                (key,),
+            )
+        ).fetchall() if row else []
+    if not row:
+        raise HTTPException(404, "Ученик не найден")
+    stored = dict(row)
+    try:
+        source = json.loads(stored.get("source_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source = {}
+    if not isinstance(source, dict):
+        source = {}
+    student = {
+        **source,
+        **stored,
+        "enrollment_id": stored["id"],
+        "phone": _clean(source.get("phone") or source.get("user_phone"), 100),
+        "course_assignments": source.get("course_assignments") or [],
+        "lessons": [
+            {"key": lesson["lesson_key"], "label": lesson["label"], "value": bool(lesson["value"])}
+            for lesson in lesson_rows
+        ],
+    }
+    item = _student_result(
+        {
+            "course_key": stored["course_key"],
+            "course": stored["course"],
+            "stream": stored["stream"],
+            "curator_value": stored.get("teacher_code") or stored.get("flow_teacher_code"),
+            "teacher": stored.get("teacher") or stored.get("flow_teacher"),
+            "sheet_title": stored.get("sheet_title"),
+        },
+        student,
+    )
+    item["refunded"] = stored.get("status") == "refunded"
+    refund = source.get("refund") if isinstance(source.get("refund"), dict) else {}
+    item["refunded_at"] = _clean(refund.get("received_at"), 100)
+    await asyncio.gather(_enrich_student_notes([item]), _enrich_student_financials([item]))
+    if not resolve_external:
+        return item
+    try:
+        await asyncio.wait_for(
+            _enrich_order_identities([item]),
+            timeout=STUDENT_CARD_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        if _logger:
+            _logger.warning("Opened student identity lookup timed out enrollment_id=%s", key)
+    await _enrich_opened_student_external(item)
+    return item
 
 
 async def _widget_student_base(enrollment_id: str) -> dict[str, Any]:
@@ -1658,14 +2074,15 @@ async def _preview_access_change(
     *, enrollment_id: str, changes: list[dict[str, Any]], requester_user_id: str,
 ) -> dict[str, Any]:
     identity = await _access_identity(enrollment_id)
+    current = await _get_access_view(identity, live=False, allow_stale=True)
+    if not current.get("ok"):
+        raise RuntimeError("Не удалось проверить текущие доступы. Попробуйте ещё раз через минуту")
+    _guard_protected_package_changes(current, changes)
     fields = _module("getcourse-chat-fields", "service_getcourse_access_budget")
     budget = await fields.service_getcourse_access_budget()
     verification_delayed = (
         int(budget.get("requests_left_2h") or 0) < int(budget.get("needed_for_verification") or 6)
     )
-    current = await _get_access_view(identity, live=False, allow_stale=True)
-    if not current.get("ok"):
-        raise RuntimeError("Не удалось проверить текущие доступы. Попробуйте ещё раз через минуту")
     verification_delayed = True
     access = _module("chat-moderators", "service_prepare_access_change")
     prepared = await asyncio.to_thread(
@@ -1686,6 +2103,41 @@ async def _preview_access_change(
         "verification_delayed": verification_delayed,
         "next_check_at": budget.get("next_at") or "",
     }
+
+
+def _guard_protected_package_changes(
+    current: dict[str, Any], changes: list[dict[str, Any]],
+) -> None:
+    items = [item for item in current.get("items") or [] if isinstance(item, dict)]
+    by_id = {str(item.get("group_id") or ""): item for item in items}
+    current_packages: dict[str, set[str]] = {}
+    for item in items:
+        package_key = _clean(item.get("package_key"), 50)
+        course_key = _clean(item.get("course_key"), 50)
+        if (
+            item.get("group_kind") == "package"
+            and package_key in PROTECTED_PACKAGE_KEYS
+            and bool(item.get("enabled"))
+            and course_key
+        ):
+            current_packages.setdefault(course_key, set()).add(package_key)
+    if not current_packages:
+        return
+    for change in changes:
+        group = by_id.get(_clean(change.get("group_id"), 30))
+        if not group or group.get("group_kind") != "package":
+            continue
+        course_key = _clean(group.get("course_key"), 50)
+        selected = current_packages.get(course_key)
+        if not selected:
+            continue
+        package_key = _clean(group.get("package_key"), 50)
+        if bool(change.get("enabled")) and package_key in selected:
+            continue
+        raise RuntimeError(
+            "Пакет ученика нельзя менять через обычное сохранение доступов. "
+            f"Обратитесь к администратору: {PACKAGE_CHANGE_ADMIN_URL}"
+        )
 
 
 async def _apply_access_change(
@@ -1974,6 +2426,240 @@ async def _bind_sheet_row(enrollment_id: str, row: int, lesson_columns: list[dic
     _clear_snapshot_cache()
 
 
+def _sheet_operation_time(seconds: int = 120) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(0, seconds))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _insert_sheet_operation(
+    db: aiosqlite.Connection,
+    *,
+    student: dict[str, Any],
+    action: str,
+    operator_id: int = 0,
+    operator_name: str = "Streams",
+    lesson: dict[str, Any] | None = None,
+    value: bool | None = None,
+    expected_value: bool | None = None,
+) -> dict[str, Any]:
+    """Insert an idempotent Google write into the existing durable operation journal."""
+    enrollment_id = _clean(student.get("enrollment_id") or student.get("id"), 100)
+    lesson_key = _clean((lesson or {}).get("key"), 5).upper()
+    active = await (
+        await db.execute(
+            """
+            SELECT id,status,steps_json FROM transfers
+            WHERE enrollment_id=? AND status IN ('queued','running','waiting')
+              AND json_extract(steps_json,'$.preview.action')=?
+              AND (?='' OR json_extract(steps_json,'$.preview.lesson.key')=?)
+            ORDER BY created_at DESC,id DESC LIMIT 1
+            """,
+            (enrollment_id, action, lesson_key, lesson_key),
+        )
+    ).fetchone()
+    if active:
+        active_steps = _load_steps(active["steps_json"])
+        requested = ((active_steps.get("preview") or {}).get("lesson") or {}).get("value")
+        if action == "lesson_update" and bool(requested) != bool(value):
+            raise HTTPException(409, "Предыдущая отметка ещё выполняется. Дождитесь её завершения")
+        preview = active_steps.get("preview") or {}
+        return {
+            "ok": True,
+            "accepted": True,
+            "existing": True,
+            "id": active["id"],
+            "status": active["status"],
+            "scheduled_at": preview.get("scheduled_at") or _sheet_operation_time(),
+            "value": value,
+        }
+    operation_id = uuid.uuid4().hex
+    now = _now()
+    # User-facing completion deadline. A Google request can itself take tens
+    # of seconds, so the former "+2 seconds" was a false promise.
+    scheduled_at = _sheet_operation_time(120 if action == "lesson_update" else 300)
+    preview: dict[str, Any] = {
+        "action": action,
+        "scheduled_at": scheduled_at,
+        "source": {
+            "course_key": _clean(student.get("course_key"), 50),
+            "stream": _clean(student.get("stream"), 50),
+            "row": int(student.get("row") or 0),
+            "email": _clean(student.get("email"), 320),
+        },
+        "target": {},
+    }
+    if action == "lesson_update":
+        preview["lesson"] = {
+            "key": lesson_key,
+            "label": _clean((lesson or {}).get("label") or lesson_key, 200),
+            "value": bool(value),
+            "expected_value": bool(expected_value),
+        }
+    await db.execute(
+        """
+        INSERT INTO transfers(
+            id,enrollment_id,status,email,gc_user_id,student_name,source_course_key,source_stream,source_row,
+            target_course_key,target_stream,curator,offer_id,operator_id,operator_name,
+            student_json,steps_json,error,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            operation_id, enrollment_id, "queued", _clean(student.get("email"), 320),
+            _clean(student.get("gc_user_id"), 100), _clean(student.get("name"), 300),
+            _clean(student.get("course_key"), 50), _clean(student.get("stream"), 50), int(student.get("row") or 0),
+            _clean(student.get("course_key"), 50), _clean(student.get("stream"), 50), "", 0,
+            int(operator_id or 0), _clean(operator_name, 200) or "Streams",
+            json.dumps(student, ensure_ascii=False), json.dumps({"preview": preview}, ensure_ascii=False),
+            "", now, now,
+        ),
+    )
+    return {
+        "ok": True, "accepted": True, "id": operation_id, "status": "queued",
+        "scheduled_at": scheduled_at, "value": value,
+    }
+
+
+async def _queue_sheet_operation(**kwargs: Any) -> dict[str, Any]:
+    async with _operation_queue_lock, _connect() as db:
+        result = await _insert_sheet_operation(db, **kwargs)
+        await db.commit()
+        return result
+
+
+async def _queue_lesson_update(
+    *, enrollment_id: str, lesson_key: str, data: LessonUpdateIn,
+    operator_id: int, operator_name: str,
+) -> dict[str, Any]:
+    """Accept a lesson command from local durable state without provider calls."""
+
+    clean_enrollment_id = _clean(enrollment_id, 100)
+    clean_lesson_key = _clean(lesson_key, 5).upper()
+    async with _operation_queue_lock, _connect(timeout=2) as db:
+        row = await (
+            await db.execute(
+                """SELECT e.*,p.lesson_key,p.label AS lesson_label,p.value AS lesson_value
+                   FROM enrollments e
+                   LEFT JOIN lesson_progress p
+                     ON p.enrollment_id=e.id AND upper(p.lesson_key)=?
+                   WHERE e.id=? AND e.status<>'removed' LIMIT 1""",
+                (clean_lesson_key, clean_enrollment_id),
+            )
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Ученик не найден")
+        stored = dict(row)
+        if not stored.get("lesson_key"):
+            raise HTTPException(404, "Отметка не найдена")
+        try:
+            source = json.loads(stored.get("source_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = {}
+        if not isinstance(source, dict):
+            source = {}
+        student = {
+            **source,
+            "enrollment_id": clean_enrollment_id,
+            "email": _clean(stored.get("email"), 320),
+            "gc_user_id": _clean(stored.get("gc_user_id"), 100),
+            "name": _clean(stored.get("name"), 300),
+            "course_key": _clean(stored.get("course_key"), 50),
+            "course": _clean(stored.get("course"), 100),
+            "stream": _clean(stored.get("stream"), 50),
+            "row": int(source.get("row") or 0),
+        }
+        if not student["row"]:
+            raise HTTPException(409, "Ученик ещё не добавлен в таблицу")
+        current_value = bool(stored.get("lesson_value"))
+        if current_value != bool(data.expected_value):
+            raise HTTPException(409, "Отметка уже изменилась. Обновите данные")
+        result = await _insert_sheet_operation(
+            db,
+            student=student,
+            action="lesson_update",
+            operator_id=operator_id,
+            operator_name=operator_name,
+            lesson={
+                "key": _clean(stored.get("lesson_key"), 5).upper(),
+                "label": _clean(stored.get("lesson_label") or clean_lesson_key, 200),
+                "value": current_value,
+            },
+            value=bool(data.value),
+            expected_value=bool(data.expected_value),
+        )
+        await db.commit()
+        return result
+
+
+async def _queue_card_command(
+    *, student: dict[str, Any], action: str, operator: dict[str, Any],
+    payload: dict[str, Any] | None = None, request_id: str = "",
+) -> dict[str, Any]:
+    """Persist a rate-limited card command before touching its provider."""
+
+    if action not in {"chat_delivery", "messenger_send"}:
+        raise RuntimeError("Неизвестная команда карточки")
+    clean_request_id = _clean(request_id, 64)
+    async with _operation_queue_lock, _connect() as db:
+        if clean_request_id:
+            active = await (
+                await db.execute(
+                    """
+                    SELECT id,status,steps_json FROM transfers
+                    WHERE enrollment_id=?
+                      AND json_extract(steps_json,'$.preview.action')=?
+                      AND json_extract(steps_json,'$.preview.request_id')=?
+                    ORDER BY created_at DESC,id DESC LIMIT 1
+                    """,
+                    (student["enrollment_id"], action, clean_request_id),
+                )
+            ).fetchone()
+            if active:
+                preview = (_load_steps(active["steps_json"]).get("preview") or {})
+                return {
+                    "ok": True, "accepted": True, "existing": True,
+                    "id": active["id"], "status": active["status"],
+                    "scheduled_at": preview.get("scheduled_at") or _sheet_operation_time(120),
+                }
+        operation_id = uuid.uuid4().hex
+        now = _now()
+        scheduled_at = _sheet_operation_time(120)
+        preview = {
+            "action": action,
+            "request_id": clean_request_id,
+            "scheduled_at": scheduled_at,
+            "payload": payload or {},
+            "source": {
+                "course_key": _clean(student.get("course_key"), 50),
+                "stream": _clean(student.get("stream"), 50),
+                "row": int(student.get("row") or 0),
+                "email": _clean(student.get("email"), 320),
+            },
+            "target": {},
+        }
+        await db.execute(
+            """
+            INSERT INTO transfers(
+                id,enrollment_id,status,email,gc_user_id,student_name,source_course_key,source_stream,source_row,
+                target_course_key,target_stream,curator,offer_id,operator_id,operator_name,
+                student_json,steps_json,error,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                operation_id, student["enrollment_id"], "queued", _clean(student.get("email"), 320),
+                _clean(student.get("gc_user_id"), 100), _clean(student.get("name"), 300),
+                _clean(student.get("course_key"), 50), _clean(student.get("stream"), 50), int(student.get("row") or 0),
+                _clean(student.get("course_key"), 50), _clean(student.get("stream"), 50), "", 0,
+                int(operator.get("id") or 0), _clean(operator.get("display_name") or operator.get("login"), 200),
+                json.dumps(student, ensure_ascii=False), json.dumps({"preview": preview}, ensure_ascii=False),
+                "", now, now,
+            ),
+        )
+        await db.commit()
+    return {
+        "ok": True, "accepted": True, "id": operation_id, "status": "queued",
+        "scheduled_at": scheduled_at,
+    }
+
+
 async def _mirror_payload() -> list[dict[str, Any]]:
     flows = await _flow_rows()
     enrollments = await _enrollment_rows()
@@ -1990,6 +2676,26 @@ async def _mirror_payload() -> list[dict[str, Any]]:
     return [{**flow, "students": grouped.get((flow["course_key"], flow["stream"]), [])} for flow in flows]
 
 
+def _order_event_at(order: dict[str, Any]) -> datetime | None:
+    for key in (
+        "first_payment_at", "paid_at", "payed_at", "payment_date", "received_at",
+        "date_creation", "created_at", "updated_at", "date",
+    ):
+        value = _clean(order.get(key), 100)
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            sheet_date = _sheet_date_value(value)
+            try:
+                parsed = datetime.fromisoformat(sheet_date)
+            except ValueError:
+                continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
 async def _assign_new_orders(orders: dict[str, Any], flows: list[dict[str, Any]]) -> int:
     ready: dict[str, list[tuple[datetime, dict[str, Any]]]] = {}
     for flow in flows:
@@ -2000,17 +2706,133 @@ async def _assign_new_orders(orders: dict[str, Any], flows: list[dict[str, Any]]
         except ValueError:
             continue
         ready.setdefault(flow["course_key"], []).append((start, flow))
+    activation_times: dict[tuple[str, str], datetime] = {}
+    managed_flows: set[tuple[str, str]] = set()
+    async with _connect() as db:
+        rows = await (
+            await db.execute(
+                """SELECT course_key,stream,status,updated_at FROM flow_jobs
+                   ORDER BY created_at,id"""
+            )
+        ).fetchall()
+    for course_key, stream, status, updated_at in rows:
+        key = (_clean(course_key, 50), _clean(stream, 50))
+        managed_flows.add(key)
+        if status != "completed" or not _clean(updated_at, 100):
+            activation_times.pop(key, None)
+            continue
+        try:
+            activated = datetime.fromisoformat(_clean(updated_at, 100).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        activation_times[key] = activated if activated.tzinfo else activated.replace(tzinfo=timezone.utc)
     now = _now()
     inserted = 0
     async with _connect() as db:
+        db.row_factory = aiosqlite.Row
         for order in orders.get("items") or []:
             source_record_id = int(order.get("source_record_id") or 0)
-            try:
-                order_date = datetime.fromisoformat(_clean(order.get("date"), 100).replace("Z", "+00:00"))
-            except ValueError:
-                order_date = None
-            candidates = [item for item in ready.get(_clean(order.get("course_key"), 50), []) if order_date and item[0].date() <= order_date.date()]
+            order_date = _order_event_at(order)
+            course_key = _clean(order.get("course_key"), 50)
+            candidates = [
+                item for item in ready.get(course_key, [])
+                if order_date
+                and item[0].date() <= order_date.date()
+                and (
+                    (course_key, _clean(item[1].get("stream"), 50)) not in managed_flows
+                    or (
+                        activation_times.get((course_key, _clean(item[1].get("stream"), 50)))
+                        and order_date >= activation_times[(course_key, _clean(item[1].get("stream"), 50))]
+                    )
+                )
+            ]
             flow = max(candidates, key=lambda item: (item[0], int(item[1]["stream"])))[1] if candidates else None
+            gc_user_id = _clean(order.get("gc_user_id"), 100)
+            email = _clean(order.get("email"), 300)
+            logical_matches: list[aiosqlite.Row] = []
+            if gc_user_id:
+                logical_matches = await (
+                    await db.execute(
+                        "SELECT * FROM enrollments WHERE course_key=? AND gc_user_id=? AND status<>'removed' "
+                        "ORDER BY created_at,id LIMIT 3",
+                        (course_key, gc_user_id),
+                    )
+                ).fetchall()
+            if not logical_matches and email:
+                logical_matches = await (
+                    await db.execute(
+                        "SELECT * FROM enrollments WHERE course_key=? AND lower(email)=lower(?) AND status<>'removed' "
+                        "ORDER BY created_at,id LIMIT 3",
+                        (course_key, email),
+                    )
+                ).fetchall()
+            existing = logical_matches[0] if len(logical_matches) == 1 else None
+            if existing and int(existing["source_record_id"] or 0) != source_record_id:
+                try:
+                    previous_source = json.loads(existing["source_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    previous_source = {}
+                if not isinstance(previous_source, dict):
+                    previous_source = {}
+                preserved_sheet = {
+                    key: previous_source[key]
+                    for key in ("row", "sheet_id", "sheet_title", "course_assignments")
+                    if key in previous_source
+                }
+                merged_source = {**previous_source, **order, **preserved_sheet}
+                previous_sheet_email = _clean(
+                    previous_source.get("sheet_email") or existing["email"], 320
+                )
+                if int(merged_source.get("row") or 0) and previous_sheet_email:
+                    merged_source["sheet_email"] = previous_sheet_email
+                existing_stream = _clean(existing["stream"], 50)
+                existing_flow = next((
+                    item for item in flows
+                    if _clean(item.get("course_key"), 50) == course_key
+                    and _clean(item.get("stream"), 50) == existing_stream
+                ), None)
+                target_flow = existing_flow or flow
+                stream = existing_stream or _clean((target_flow or {}).get("stream"), 50)
+                status = "assigned" if stream else "pending"
+                tg_account = _clean(order.get("tg_account") or existing["tg_account"], 500)
+                await db.execute(
+                    """
+                    UPDATE enrollments SET
+                        source_record_id=?,order_id=?,deal_number=?,gc_user_id=?,name=?,email=?,tg_account=?,date=?,
+                        course_key=?,course=?,stream=?,tariff=?,teacher=?,teacher_code=?,status=?,source_json=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        source_record_id, _clean(order.get("order_id"), 100),
+                        _clean(order.get("deal_number") or order.get("order_id"), 100), gc_user_id,
+                        _clean(order.get("name") or existing["name"], 300), email or _clean(existing["email"], 300),
+                        tg_account, _clean(order.get("date") or existing["date"], 100), course_key,
+                        _clean(order.get("course") or existing["course"], 100), stream,
+                        _clean(order.get("tariff") or existing["tariff"], 100),
+                        _clean((target_flow or {}).get("teacher") or existing["teacher"], 200),
+                        _clean((target_flow or {}).get("teacher_code") or existing["teacher_code"], 100),
+                        status, json.dumps(merged_source, ensure_ascii=False), now, existing["id"],
+                    ),
+                )
+                if status == "assigned":
+                    await _insert_sheet_operation(
+                        db,
+                        student={
+                            **merged_source,
+                            "enrollment_id": existing["id"],
+                            "course_key": course_key,
+                            "course": _clean(order.get("course") or existing["course"], 100),
+                            "stream": stream,
+                            "email": email or _clean(existing["email"], 300),
+                            "name": _clean(order.get("name") or existing["name"], 300),
+                            "tg_account": tg_account,
+                            "teacher": _clean((target_flow or {}).get("teacher") or existing["teacher"], 200),
+                            "teacher_code": _clean((target_flow or {}).get("teacher_code") or existing["teacher_code"], 100),
+                        },
+                        action="sheet_row",
+                    )
+                inserted += 1
+                continue
             status = "assigned" if flow else "pending"
             stream = _clean((flow or {}).get("stream"), 50)
             enrollment_id = _enrollment_id(source_record_id, order.get("course_key"), stream, order.get("email"))
@@ -2032,9 +2854,104 @@ async def _assign_new_orders(orders: dict[str, Any], flows: list[dict[str, Any]]
                     json.dumps(order, ensure_ascii=False), now, now,
                 ),
             )
-            inserted += max(0, int(cur.rowcount or 0))
+            was_inserted = max(0, int(cur.rowcount or 0))
+            inserted += was_inserted
+            if was_inserted and flow:
+                await _insert_sheet_operation(
+                    db,
+                    student={
+                        **order,
+                        "enrollment_id": enrollment_id,
+                        "course_key": _clean(order.get("course_key"), 50),
+                        "course": _clean(order.get("course"), 100),
+                        "stream": stream,
+                        "teacher": _clean(flow.get("teacher"), 200),
+                        "teacher_code": _clean(flow.get("teacher_code"), 100),
+                        "row": 0,
+                    },
+                    action="sheet_row",
+                )
         await db.commit()
     return inserted
+
+
+async def _queue_missing_sheet_rows(limit: int = 5) -> int:
+    """Gradually repair assigned students that predate automatic row creation."""
+    queued = 0
+    async with _operation_queue_lock, _connect() as db:
+        rows = await (
+            await db.execute(
+                """
+                SELECT * FROM enrollments e
+                WHERE e.status='assigned' AND e.stream<>''
+                  AND COALESCE(CAST(json_extract(e.source_json,'$.row') AS INTEGER),0)=0
+                  AND NOT EXISTS (
+                    SELECT 1 FROM transfers t
+                    WHERE t.enrollment_id=e.id AND t.status IN ('queued','running','waiting')
+                      AND json_extract(t.steps_json,'$.preview.action')='sheet_row'
+                  )
+                ORDER BY e.created_at,e.id LIMIT ?
+                """,
+                (max(1, min(100, int(limit))),),
+            )
+        ).fetchall()
+        for row in rows:
+            student = dict(row)
+            student["enrollment_id"] = student["id"]
+            try:
+                source = json.loads(student.get("source_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                source = {}
+            if isinstance(source, dict):
+                student = {**source, **student}
+            await _insert_sheet_operation(db, student=student, action="sheet_row")
+            queued += 1
+        await db.commit()
+    return queued
+
+
+async def _sync_roster_delta() -> dict[str, Any]:
+    """Refresh new orders and refunds without the expensive Google sheet scan."""
+    global _last_roster_sync
+    now_monotonic = time.monotonic()
+    if now_monotonic - _last_roster_sync < 115:
+        return {"ok": True, "status": "recent"}
+    if _registry_lock.locked():
+        return {"ok": True, "status": "full_sync_running"}
+    async with _registry_lock:
+        if time.monotonic() - _last_roster_sync < 115:
+            return {"ok": True, "status": "recent"}
+        if await _meta_get("initialized") != "1":
+            return {"ok": True, "status": "awaiting_initial_sync"}
+        cursor = int(await _meta_get("orders_cursor", "0") or 0)
+        cursor_updated_at = await _meta_get("orders_cursor_updated_at")
+        if not cursor_updated_at:
+            return {"ok": True, "status": "awaiting_initial_sync"}
+        fields = _module("getcourse-chat-fields", "service_entitled_orders")
+        orders = await fields.service_entitled_orders(
+            after_source_record_id=cursor,
+            after_updated_at=cursor_updated_at,
+            limit=1000,
+        )
+        if not orders.get("ok"):
+            raise RuntimeError(orders.get("error") or "Заказы GetCourse недоступны")
+        flows = await _flow_rows()
+        added = await _assign_new_orders(orders, flows)
+        await _meta_set("orders_cursor", int(orders.get("cursor") or cursor))
+        await _meta_set("orders_cursor_updated_at", orders.get("cursor_updated_at") or cursor_updated_at)
+        refunds = await _sync_refunds()
+        managers_warmed = await _warm_recent_manager_cache(limit=1) if added else 0
+        _last_roster_sync = time.monotonic()
+        if added or int(refunds.get("moved") or 0):
+            _clear_snapshot_cache()
+        await _meta_set("last_roster_sync_at", _now())
+        return {
+            "ok": True,
+            "status": "completed",
+            "new_enrollments": added,
+            "refunds": refunds,
+            "managers_warmed": managers_warmed,
+        }
 
 
 async def _sync_registry(*, force: bool = False) -> dict[str, Any]:
@@ -2121,6 +3038,10 @@ async def _sync_registry(*, force: bool = False) -> dict[str, Any]:
             details["sheet_assignments"] = await _reconcile_sheet_assignments(sheet_snapshot, flows)
             details["curator_changes"] = await _apply_sheet_curators(sheet_snapshot, creator_keys, creator_changed)
             details["lesson_changes"] = await _import_sheet_lessons(sheet_snapshot)
+            details["refunds"] = await _sync_refunds()
+            # Keep legacy repair deliberately bounded: new enrollments are queued
+            # immediately above, while older rowless records are healed gradually.
+            details["sheet_rows_queued"] = await _queue_missing_sheet_rows(limit=5)
             mirror_payload = await _mirror_payload()
             details["mirror"] = {"ok": True, "paused": True, "reason": "google_is_source"}
             details["getcourse_curators"] = await fields.service_reconcile_registry_curators(flows=mirror_payload)
@@ -2136,6 +3057,18 @@ async def _sync_registry(*, force: bool = False) -> dict[str, Any]:
                 )
                 await db.commit()
             return {"ok": True, "status": "completed", "updated_at": await _meta_get("last_sync_at"), **details}
+        except asyncio.CancelledError:
+            async with _connect() as db:
+                await db.execute(
+                    """UPDATE registry_sync_runs
+                       SET status='failed',
+                           error='Синхронизация была прервана перезапуском модуля; следующий запуск выполняется автоматически.',
+                           finished_at=?
+                       WHERE id=? AND status='running'""",
+                    (_now(), run_id),
+                )
+                await db.commit()
+            raise
         except Exception as exc:
             _registry_retry_at = time.monotonic() + (90 if "429" in str(exc) or "Too Many Requests" in str(exc) else 20)
             async with _connect() as db:
@@ -2160,6 +3093,7 @@ async def _registry_snapshot(*, refresh: bool = False) -> dict[str, Any]:
             source = json.loads(item.get("source_json") or "{}")
         except Exception:
             source = {}
+        amo_manager = source.get("amo_manager") if isinstance(source.get("amo_manager"), dict) else {}
         by_flow.setdefault((item["course_key"], item["stream"]), []).append(
             {
                 "row": int(source.get("row") or 0),
@@ -2177,6 +3111,20 @@ async def _registry_snapshot(*, refresh: bool = False) -> dict[str, Any]:
                 "source_record_id": item["source_record_id"],
                 "enrollment_id": item["id"],
                 "phone": _clean(source.get("phone") or source.get("user_phone"), 100),
+                "utm_term": _clean(source.get("utm_term"), 1000),
+                "manager_name": _clean(amo_manager.get("name") or source.get("manager_name"), 300),
+                "manager_id": _clean(amo_manager.get("id") or source.get("manager_id"), 64),
+                "amo_deal_id": _clean(amo_manager.get("deal_id") or source.get("amo_deal_id"), 64),
+                "amo_deal_url": _clean(amo_manager.get("deal_url") or source.get("amo_deal_url"), 1000),
+                "product_kind": _clean(
+                    source.get("product_kind")
+                    or (
+                        (source.get("entitlement") or {}).get("product_kind")
+                        if isinstance(source.get("entitlement"), dict)
+                        else ""
+                    ),
+                    50,
+                ),
                 "course_assignments": source.get("course_assignments") if isinstance(source.get("course_assignments"), list) else [],
                 "lessons": item.get("lessons") or [],
             }
@@ -2217,11 +3165,27 @@ def _student_result(flow: dict[str, Any], student: dict[str, Any]) -> dict[str, 
     lessons = student.get("lessons") if isinstance(student.get("lessons"), list) else []
     assignments = student.get("course_assignments") if isinstance(student.get("course_assignments"), list) else []
     assignments = [item for item in assignments if isinstance(item, dict) and _clean(item.get("stream"), 50)]
+    primary_course = _clean(flow.get("course_key"), 50)
+    display_by_course = {
+        primary_course: {"course_key": primary_course, "stream": _clean(flow.get("stream"), 50)}
+    }
+    for item in assignments:
+        course_key = _clean(item.get("course_key"), 50)
+        if not course_key or course_key in display_by_course:
+            continue
+        display_by_course[course_key] = item
+    display_assignments = sorted(
+        display_by_course.values(),
+        key=lambda item: ({"puppy": 0, "dog": 1}.get(_clean(item.get("course_key"), 50), 2)),
+    )
     stream_display = " / ".join(
         _course_stream_label(item.get("course_key"), item.get("stream"))
-        for item in assignments
+        for item in display_assignments if _clean(item.get("stream"), 50)
     )
     assigned_courses = {_clean(item.get("course_key"), 50) for item in assignments}
+    product_kind = _clean(student.get("product_kind"), 50)
+    refund = student.get("refund") if isinstance(student.get("refund"), dict) else {}
+    amo_manager = student.get("amo_manager") if isinstance(student.get("amo_manager"), dict) else {}
 
     def lesson_order(item: dict[str, Any]) -> int:
         value = 0
@@ -2244,11 +3208,20 @@ def _student_result(flow: dict[str, Any], student: dict[str, Any]) -> dict[str, 
         "course_key": _clean(flow.get("course_key"), 50),
         "course": _clean(flow.get("course"), 100),
         "stream": _clean(flow.get("stream"), 50),
-        "course_display": "Щенок + Собака" if assigned_courses == {"puppy", "dog"} else _clean(flow.get("course"), 100),
+        "course_display": "Щенок + Собака" if product_kind == "combo" or assigned_courses == {"puppy", "dog"} else _clean(flow.get("course"), 100),
         "stream_display": stream_display or _course_stream_label(flow.get("course_key"), flow.get("stream")),
         "course_assignments": assignments,
         "tariff": _clean(student.get("tariff"), 100),
+        "manager_name": _clean(amo_manager.get("name") or student.get("manager_name"), 300),
+        "manager_id": _clean(amo_manager.get("id") or student.get("manager_id"), 64),
+        "amo_deal_id": _clean(amo_manager.get("deal_id") or student.get("amo_deal_id"), 64),
+        "amo_deal_url": _clean(amo_manager.get("deal_url") or student.get("amo_deal_url"), 1000),
         "phone": _clean(student.get("phone"), 100),
+        "utm_term": _clean(student.get("utm_term"), 1000),
+        "product_kind": product_kind,
+        "total_amount": float(student.get("total_amount") or refund.get("total_amount") or 0),
+        "remaining_amount": float(student.get("remaining_amount") or refund.get("remaining_amount") or 0),
+        "refund_amount": float(student.get("refund_amount") or refund.get("refund_amount") or 0),
         "curator": curator,
         "curator_name": CURATOR_NAMES.get(curator, ""),
         "sheet_title": _clean(flow.get("sheet_title") or student.get("sheet_title"), 300),
@@ -2261,9 +3234,9 @@ def _student_result(flow: dict[str, Any], student: dict[str, Any]) -> dict[str, 
     }
 
 
-async def _enrich_successful_managers(items: list[dict[str, Any]]) -> None:
+async def _enrich_successful_managers(items: list[dict[str, Any]]) -> bool:
     if not items:
-        return
+        return True
     try:
         amo = _module("amocrm-db", "service_successful_managers")
         result = await amo.service_successful_managers(
@@ -2281,14 +3254,228 @@ async def _enrich_successful_managers(items: list[dict[str, Any]]) -> None:
     except Exception as exc:
         if _logger:
             _logger.warning("amoCRM manager lookup skipped: %s", exc)
-        return
+        return False
     matches = {str(item.get("key") or ""): item for item in result.get("items") or []}
     for item in items:
         match = matches.get(item["enrollment_id"]) or {}
-        item["manager_name"] = _clean(match.get("manager_name"), 300)
-        item["manager_id"] = _clean(match.get("manager_id"), 64)
-        item["amo_deal_id"] = _clean(match.get("deal_id"), 64)
-        item["amo_deal_url"] = _clean(match.get("deal_url"), 1000)
+        item["manager_name"] = _clean(match.get("manager_name") or item.get("manager_name"), 300)
+        item["manager_id"] = _clean(match.get("manager_id") or item.get("manager_id"), 64)
+        item["amo_deal_id"] = _clean(match.get("deal_id") or item.get("amo_deal_id"), 64)
+        item["amo_deal_url"] = _clean(match.get("deal_url") or item.get("amo_deal_url"), 1000)
+    return True
+
+
+async def _enrich_live_amo_manager(item: dict[str, Any]) -> bool:
+    """Resolve the current amoCRM lead only for an explicitly opened card."""
+    if item.get("amo_deal_id"):
+        return True
+    try:
+        amo = _module("getcourse-amocrm", "service_resolve_onboarding_manager")
+        utm_term = _clean(item.get("utm_term"), 1000)
+        if utm_term:
+            # The order UTM is the strongest and cheapest exact key.  Looking
+            # up phone and email first can consume several full amoCRM request
+            # timeouts before the known deal is checked.
+            result = await amo.service_resolve_onboarding_manager(
+                phone="", email="", utm_term=utm_term,
+            )
+        else:
+            result = {"ok": True, "found": False}
+        if result.get("ok") and not result.get("found"):
+            result = await amo.service_resolve_onboarding_manager(
+                phone=_clean(item.get("phone"), 100),
+                email=_clean(item.get("email"), 320),
+                utm_term="",
+            )
+    except Exception as exc:
+        if _logger:
+            _logger.warning("Live amoCRM manager lookup skipped: %s", exc)
+        return False
+    if not result.get("ok") or not result.get("found"):
+        return bool(result.get("ok"))
+    item["manager_name"] = _clean(result.get("manager_name"), 300)
+    item["manager_id"] = _clean(result.get("manager_user_id"), 64)
+    item["amo_deal_id"] = _clean(result.get("deal_id"), 64)
+    item["amo_deal_url"] = _clean(result.get("deal_url"), 1000)
+    item["amo_match_source"] = _clean(result.get("source"), 50)
+    return True
+
+
+async def _persist_manager_enrichment(item: dict[str, Any], *, checked: bool = True) -> bool:
+    """Keep a verified manager/deal in the local roster for subsequent fast list reads."""
+    enrollment_id = _clean(item.get("enrollment_id"), 100)
+    if not enrollment_id:
+        return False
+    fields = {
+        "name": _clean(item.get("manager_name"), 300),
+        "id": _clean(item.get("manager_id"), 64),
+        "deal_id": _clean(item.get("amo_deal_id"), 64),
+        "deal_url": _clean(item.get("amo_deal_url"), 1000),
+        "match_source": _clean(item.get("amo_match_source"), 50),
+    }
+    changed = False
+    async with _connect() as db:
+        row = await (
+            await db.execute("SELECT source_json FROM enrollments WHERE id=?", (enrollment_id,))
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            source = json.loads(row[0] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = {}
+        if not isinstance(source, dict):
+            source = {}
+        manager = source.get("amo_manager") if isinstance(source.get("amo_manager"), dict) else {}
+        for key, value in fields.items():
+            if value and _clean(manager.get(key), 1000) != value:
+                manager[key] = value
+                changed = True
+        if fields["name"] or fields["deal_id"]:
+            resolved_at = _now()
+            manager["resolved_at"] = resolved_at
+            source["amo_manager"] = manager
+            changed = True
+        if checked:
+            checked_at = _now()
+            lookup = source.get("amo_manager_lookup") if isinstance(source.get("amo_manager_lookup"), dict) else {}
+            if lookup.get("checked_at") != checked_at:
+                lookup["checked_at"] = checked_at
+                source["amo_manager_lookup"] = lookup
+                changed = True
+        if changed:
+            await db.execute(
+                "UPDATE enrollments SET source_json=? WHERE id=?",
+                (json.dumps(source, ensure_ascii=False), enrollment_id),
+            )
+            await db.commit()
+    if changed:
+        _student_enrichment_caches["manager"].clear()
+        _clear_snapshot_cache()
+    return changed
+
+
+async def _warm_recent_manager_cache(limit: int = 1) -> int:
+    """Resolve a few recent orders in the background without slowing list requests."""
+    count = 1
+    async with _connect() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                """
+                SELECT * FROM enrollments
+                WHERE status IN ('assigned','pending')
+                  AND julianday(created_at)>=julianday('now','-7 days')
+                  AND COALESCE(json_extract(source_json,'$.amo_manager.name'),json_extract(source_json,'$.manager_name'),'')=''
+                  AND (
+                    julianday(json_extract(source_json,'$.amo_manager_lookup.checked_at')) IS NULL
+                    OR julianday(json_extract(source_json,'$.amo_manager_lookup.checked_at'))<julianday('now','-15 minutes')
+                  )
+                ORDER BY created_at DESC,id DESC LIMIT ?
+                """,
+                (count,),
+            )
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        stored = dict(row)
+        try:
+            source = json.loads(stored.get("source_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = {}
+        if not isinstance(source, dict):
+            source = {}
+        items.append(_student_result(
+            {
+                "course_key": stored.get("course_key"),
+                "course": stored.get("course"),
+                "stream": stored.get("stream"),
+                "curator_value": stored.get("teacher_code"),
+                "teacher": stored.get("teacher"),
+            },
+            {
+                **source,
+                **stored,
+                "enrollment_id": stored.get("id"),
+                "phone": _clean(source.get("phone") or source.get("user_phone"), 100),
+            },
+        ))
+    if not items:
+        return 0
+    await _enrich_order_identities(items)
+
+    async def resolve(item: dict[str, Any]) -> bool:
+        try:
+            await asyncio.wait_for(
+                _enrich_live_amo_manager(item),
+                timeout=STUDENT_CARD_EXTERNAL_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            if _logger:
+                _logger.warning(
+                    "Background amoCRM lookup timed out enrollment_id=%s",
+                    _clean(item.get("enrollment_id"), 100),
+                )
+        await _persist_manager_enrichment(item, checked=True)
+        return bool(item.get("manager_name") or item.get("amo_deal_id"))
+
+    results = await asyncio.gather(*(resolve(item) for item in items), return_exceptions=True)
+    return sum(result is True for result in results)
+
+
+async def _enrich_opened_student_external(item: dict[str, Any]) -> None:
+    """Load independent card links in parallel without blocking the whole UI."""
+
+    async def live_manager() -> bool:
+        try:
+            return await asyncio.wait_for(
+                _enrich_live_amo_manager(item),
+                timeout=STUDENT_CARD_EXTERNAL_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            if _logger:
+                _logger.warning(
+                    "Opened student amoCRM lookup timed out enrollment_id=%s",
+                    _clean(item.get("enrollment_id"), 100),
+                )
+            return False
+
+    async def profile_link() -> str:
+        try:
+            return await asyncio.wait_for(
+                _resolve_student_profile_link(item),
+                timeout=STUDENT_CARD_EXTERNAL_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            if _logger:
+                _logger.warning(
+                    "Opened student profile lookup timed out enrollment_id=%s",
+                    _clean(item.get("enrollment_id"), 100),
+                )
+            return ""
+
+    manager_ok, profile_url, _ = await asyncio.gather(
+        live_manager(),
+        profile_link(),
+        _enrich_student_notes([item]),
+    )
+    item["social_profile_url"] = profile_url
+    if manager_ok and item.get("amo_deal_id"):
+        await _persist_manager_enrichment(item)
+        return
+    try:
+        await asyncio.wait_for(
+            _enrich_successful_managers([item]),
+            timeout=STUDENT_CARD_MANAGER_FALLBACK_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        if _logger:
+            _logger.warning(
+                "Opened student local manager fallback timed out enrollment_id=%s",
+                _clean(item.get("enrollment_id"), 100),
+            )
+    if item.get("manager_name") or item.get("amo_deal_id"):
+        await _persist_manager_enrichment(item)
 
 
 async def _enrich_student_notes(items: list[dict[str, Any]]) -> None:
@@ -2312,9 +3499,35 @@ async def _enrich_student_notes(items: list[dict[str, Any]]) -> None:
         item["student_note_updated_at"] = _clean(row[3], 100) if row else ""
 
 
-async def _enrich_order_identities(items: list[dict[str, Any]]) -> None:
-    if not items:
+async def _enrich_student_financials(items: list[dict[str, Any]]) -> None:
+    source_ids = [int(item.get("source_record_id") or 0) for item in items]
+    source_ids = [value for value in dict.fromkeys(source_ids) if value > 0]
+    if not source_ids:
         return
+    try:
+        fields = _module("getcourse-chat-fields", "service_order_financials")
+        result = await fields.service_order_financials(source_record_ids=source_ids)
+    except Exception as exc:
+        if _logger:
+            _logger.warning("GetCourse financial lookup skipped: %s", exc)
+        return
+    by_id = {int(row.get("source_record_id") or 0): row for row in result.get("items") or []}
+    for item in items:
+        # Refund rows already carry the ledger-classified remainder. Some
+        # legacy GetCourse callbacks report payed_money above cost_money;
+        # never let that current snapshot overwrite the verified refund event.
+        if item.get("refunded") and float(item.get("total_amount") or 0) > 0:
+            continue
+        match = by_id.get(int(item.get("source_record_id") or 0)) or {}
+        for key in ("total_amount", "remaining_amount", "refund_amount"):
+            if match.get(key) is not None:
+                item[key] = float(match.get(key) or 0)
+        item["payment_state"] = _clean(match.get("payment_state") or item.get("payment_state"), 50)
+
+
+async def _enrich_order_identities(items: list[dict[str, Any]]) -> bool:
+    if not items:
+        return True
     try:
         fields = _module("getcourse-chat-fields", "service_order_identities")
         matches: dict[str, dict[str, Any]] = {}
@@ -2335,16 +3548,207 @@ async def _enrich_order_identities(items: list[dict[str, Any]]) -> None:
     except Exception as exc:
         if _logger:
             _logger.warning("GetCourse identity lookup skipped: %s", exc)
-        return
+        return False
     for item in items:
         match = matches.get(item["enrollment_id"]) or {}
         item["phone"] = _clean(item.get("phone") or match.get("phone"), 100)
         item["tariff"] = _clean(item.get("tariff") or match.get("tariff"), 100)
-        item["utm_term"] = _clean(match.get("utm_term"), 1000)
-        item["product_kind"] = _clean(match.get("product_kind"), 50)
+        item["utm_term"] = _clean(item.get("utm_term") or match.get("utm_term"), 1000)
+        item["product_kind"] = _clean(item.get("product_kind") or match.get("product_kind"), 50)
+        if item["product_kind"] == "combo":
+            item["course_display"] = "Щенок + Собака"
         assignment = match.get("assignment")
         if isinstance(assignment, dict):
             item["getcourse_assignment"] = assignment
+    return True
+
+
+def _student_enrichment_fingerprint(provider: str, item: dict[str, Any]) -> str:
+    common = [
+        _clean(item.get("enrollment_id"), 100),
+        _clean(item.get("email"), 320).casefold(),
+        _clean(item.get("order_id"), 100),
+    ]
+    if provider == "identity":
+        common.extend([
+            _clean(item.get("phone"), 100),
+            int(item.get("source_record_id") or 0),
+            _clean(item.get("gc_user_id"), 100),
+            _clean(item.get("tariff"), 100),
+        ])
+    else:
+        common.append(_clean(item.get("deal_number"), 100))
+    raw = json.dumps(common, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _student_enrichment_overlay(provider: str, item: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        ("phone", "tariff", "utm_term", "product_kind", "getcourse_assignment")
+        if provider == "identity"
+        else ("manager_name", "manager_id", "amo_deal_id", "amo_deal_url")
+    )
+    return {
+        field: (dict(item[field]) if field == "getcourse_assignment" and isinstance(item.get(field), dict) else item.get(field, ""))
+        for field in fields
+    }
+
+
+def _student_enrichment_has_signal(provider: str, overlay: dict[str, Any]) -> bool:
+    if provider == "manager":
+        return bool(overlay.get("manager_name") or overlay.get("manager_id") or overlay.get("amo_deal_id"))
+    return bool(
+        overlay.get("phone")
+        or overlay.get("utm_term")
+        or overlay.get("product_kind")
+        or overlay.get("getcourse_assignment")
+    )
+
+
+def _prune_student_enrichment_cache(provider: str) -> None:
+    cache = _student_enrichment_caches[provider]
+    if len(cache) <= STUDENT_ENRICHMENT_CACHE_LIMIT:
+        return
+    excess = len(cache) - STUDENT_ENRICHMENT_CACHE_LIMIT
+    oldest = sorted(cache, key=lambda key: float(cache[key].get("stored_at") or 0.0))[:excess]
+    for key in oldest:
+        cache.pop(key, None)
+
+
+def _apply_student_enrichment_cache(
+    provider: str, items: list[dict[str, Any]], fingerprints: list[str] | None = None,
+) -> tuple[bool, int]:
+    now = time.monotonic()
+    fresh = True
+    available = 0
+    cache = _student_enrichment_caches[provider]
+    keys = fingerprints or [_student_enrichment_fingerprint(provider, item) for item in items]
+    for fingerprint, item in zip(keys, items):
+        entry = cache.get(fingerprint)
+        if not entry or now >= float(entry.get("stale_until") or 0.0):
+            fresh = False
+            continue
+        overlay = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        for field, value in overlay.items():
+            if provider == "manager" and not value and item.get(field):
+                # A short-lived negative cache entry must never erase a manager
+                # that an exact card lookup has already persisted.
+                continue
+            item[field] = dict(value) if field == "getcourse_assignment" and isinstance(value, dict) else value
+        available += 1
+        if now >= float(entry.get("expires_at") or 0.0):
+            fresh = False
+    return fresh, available
+
+
+async def _refresh_student_enrichment(
+    provider: str, items: list[dict[str, Any]], fingerprints: list[str],
+) -> bool:
+    async with _student_enrichment_locks[provider]:
+        now = time.monotonic()
+        cache = _student_enrichment_caches[provider]
+        missing = [
+            (fingerprint, dict(item))
+            for fingerprint, item in zip(fingerprints, items)
+            if now >= float((cache.get(fingerprint) or {}).get("expires_at") or 0.0)
+        ]
+        if not missing:
+            return True
+        stored_at = time.monotonic()
+        unresolved: list[tuple[str, dict[str, Any]]] = []
+        for fingerprint, item in missing:
+            overlay = _student_enrichment_overlay(provider, item)
+            if _student_enrichment_has_signal(provider, overlay):
+                cache[fingerprint] = {
+                    "data": overlay,
+                    "stored_at": stored_at,
+                    "expires_at": stored_at + STUDENT_ENRICHMENT_TTL_SECONDS,
+                    "stale_until": stored_at + STUDENT_ENRICHMENT_STALE_SECONDS,
+                }
+            else:
+                unresolved.append((fingerprint, item))
+        if not unresolved:
+            _prune_student_enrichment_cache(provider)
+            return True
+        working = [item for _fingerprint, item in unresolved]
+        ok = (
+            await _enrich_order_identities(working)
+            if provider == "identity"
+            else await _enrich_successful_managers(working)
+        )
+        if not ok:
+            return False
+        stored_at = time.monotonic()
+        for fingerprint, item in unresolved:
+            overlay = _student_enrichment_overlay(provider, item)
+            ttl = (
+                STUDENT_ENRICHMENT_TTL_SECONDS
+                if _student_enrichment_has_signal(provider, overlay)
+                else STUDENT_ENRICHMENT_NEGATIVE_TTL_SECONDS
+            )
+            cache[fingerprint] = {
+                "data": overlay,
+                "stored_at": stored_at,
+                "expires_at": stored_at + ttl,
+                "stale_until": stored_at + STUDENT_ENRICHMENT_STALE_SECONDS,
+            }
+        _prune_student_enrichment_cache(provider)
+        return True
+
+
+def _schedule_student_enrichment(
+    provider: str, items: list[dict[str, Any]], fingerprints: list[str],
+) -> asyncio.Task:
+    job_key = provider + ":" + hashlib.sha256("|".join(sorted(fingerprints)).encode("ascii")).hexdigest()
+    task = _student_enrichment_tasks.get(job_key)
+    if task and not task.done():
+        return task
+    task = asyncio.create_task(
+        _refresh_student_enrichment(provider, [dict(item) for item in items], list(fingerprints)),
+        name=f"student-transfer-{provider}-enrichment",
+    )
+    _student_enrichment_tasks[job_key] = task
+
+    def release(completed: asyncio.Task) -> None:
+        if _student_enrichment_tasks.get(job_key) is completed:
+            _student_enrichment_tasks.pop(job_key, None)
+
+    task.add_done_callback(release)
+    return task
+
+
+async def _enrich_student_page(items: list[dict[str, Any]]) -> dict[str, bool]:
+    if not items:
+        return {"pending": False, "incomplete": False}
+    jobs: list[asyncio.Task] = []
+    wait_for_cold = False
+    fingerprints = {
+        provider: [_student_enrichment_fingerprint(provider, item) for item in items]
+        for provider in ("identity", "manager")
+    }
+    for provider in ("identity", "manager"):
+        fresh, available = _apply_student_enrichment_cache(provider, items, fingerprints[provider])
+        if fresh:
+            continue
+        jobs.append(_schedule_student_enrichment(provider, items, fingerprints[provider]))
+        wait_for_cold = wait_for_cold or available == 0
+    if jobs and wait_for_cold:
+        combined = asyncio.gather(*jobs, return_exceptions=True)
+        try:
+            await asyncio.wait_for(asyncio.shield(combined), timeout=STUDENT_ENRICHMENT_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+    states = [
+        _apply_student_enrichment_cache(provider, items, fingerprints[provider])[0]
+        for provider in ("identity", "manager")
+    ]
+    pending = any(not task.done() for task in jobs)
+    return {"pending": pending, "incomplete": not all(states) and not pending}
+
+
+def _clear_student_enrichment_cache() -> None:
+    for cache in _student_enrichment_caches.values():
+        cache.clear()
 
 
 def _direct_profile_url(value: Any) -> str:
@@ -2355,11 +3759,16 @@ def _direct_profile_url(value: Any) -> str:
     except ValueError:
         return ""
     host = (parsed.hostname or "").casefold()
-    if parsed.scheme != "https" or not parsed.path or host not in {
-        "vk.com", "www.vk.com", "m.vk.com", "t.me", "www.t.me",
-    }:
+    if parsed.scheme != "https" or not parsed.path:
         return ""
-    return raw
+    path = parsed.path
+    if host in {"t.me", "www.t.me"}:
+        # ``t.me/+...`` is an invite/phone deep link, not a stable public
+        # profile page.  It must not outrank an identity verified by UTM.
+        return raw if re.fullmatch(r"/[A-Za-z0-9_]{5,32}/?", path) else ""
+    if host in {"vk.com", "www.vk.com", "m.vk.com", "vk.ru", "www.vk.ru", "m.vk.ru"}:
+        return raw if re.fullmatch(r"/(?:id\d{3,20}|[A-Za-z][A-Za-z0-9_.]{2,63})/?", path) else ""
+    return ""
 
 
 def _telegram_profile_url(username: Any) -> str:
@@ -2372,10 +3781,33 @@ def _vk_profile_url(platform_id: Any) -> str:
     return f"https://vk.com/id{value}" if re.fullmatch(r"\d{3,20}", value) else ""
 
 
+def _salebot_profile_url(platform_id: Any) -> str:
+    value = _clean(platform_id, 100)
+    return f"https://salebot.pro/projects/397724/clients/{value}" if re.fullmatch(r"\d{3,24}", value) else ""
+
+
 async def _resolve_student_profile_link(student: dict[str, Any]) -> str:
     """Resolve one trustworthy public account URL for the combined TG/VK sheet column."""
     if current := _direct_profile_url(student.get("tg_account")):
         return current
+    if utm_term := _clean(student.get("utm_term"), 1000):
+        try:
+            messenger = _module("messenger-widget", "service_transfer_delivery_target")
+            target = await messenger.service_transfer_delivery_target(
+                email=_clean(student.get("email"), 320),
+                gc_user_id=_clean(student.get("gc_user_id"), 100),
+                phone=_clean(student.get("phone"), 100),
+                utm_term=utm_term,
+            )
+            if target.get("provider") == "vk":
+                if profile := _vk_profile_url(target.get("recipient_id")):
+                    return profile
+            if target.get("provider") == "salebot":
+                if profile := _salebot_profile_url(target.get("recipient_id")):
+                    return profile
+        except Exception as exc:
+            if _logger:
+                _logger.warning("Student delivery profile resolution skipped: %s", exc)
     try:
         messenger = _module("messenger-widget", "service_transfer_recipients")
         recipient = await messenger.service_transfer_recipients(
@@ -2391,10 +3823,11 @@ async def _resolve_student_profile_link(student: dict[str, Any]) -> str:
     return (
         _telegram_profile_url(recipient.get("telegram_username"))
         or _vk_profile_url(recipient.get("vk"))
+        or _salebot_profile_url(recipient.get("salebot"))
     )
 
 
-async def _chat_delivery_view(item: dict[str, Any]) -> dict[str, Any]:
+async def _chat_delivery_view(item: dict[str, Any], *, resolve_target: bool = True) -> dict[str, Any]:
     snapshot = await _snapshot()
     catalog = {_flow_key(value): value for value in snapshot.get("items") or []}
     assignments = [value for value in item.get("course_assignments") or [] if isinstance(value, dict)]
@@ -2428,15 +3861,21 @@ async def _chat_delivery_view(item: dict[str, Any]) -> dict[str, Any]:
         for flow in flow_links
     ):
         reason = "Для потока не сохранена пара ссылок"
-    messenger = _module("messenger-widget", "service_transfer_delivery_target")
-    target = await messenger.service_transfer_delivery_target(
-        email=_clean(item.get("email"), 320), gc_user_id=_clean(item.get("gc_user_id"), 100),
-        phone=_clean(item.get("phone"), 100), utm_term=_clean(item.get("utm_term"), 1000),
-    )
-    if not reason and not target.get("ok"):
-        reason = _clean(target.get("reason") or "Доставка недоступна", 500)
+    target: dict[str, Any] = {}
+    if resolve_target and not reason:
+        messenger = _module("messenger-widget", "service_transfer_delivery_target")
+        target = await messenger.service_transfer_delivery_target(
+            email=_clean(item.get("email"), 320), gc_user_id=_clean(item.get("gc_user_id"), 100),
+            phone=_clean(item.get("phone"), 100), utm_term=_clean(item.get("utm_term"), 1000),
+        )
+        if not target.get("ok"):
+            reason = _clean(target.get("reason") or "Доставка недоступна", 500)
     course = "Щ+С" if item.get("product_kind") == "combo" else _clean(item.get("course"), 100)
-    channel = "VK" if target.get("provider") == "vk" else "TG" if target.get("provider") == "salebot" else ""
+    channel = (
+        "VK" if target.get("provider") == "vk"
+        else "TG" if target.get("provider") == "salebot"
+        else "подходящий канал" if not resolve_target and not reason else ""
+    )
     content_lines = [f"Ссылки на учебные чаты курса «{course}»:"]
     for flow in flow_links:
         content_lines.extend((
@@ -2970,6 +4409,29 @@ def _retry_transfer_steps(steps: dict[str, Any]) -> tuple[dict[str, Any], str]:
     next_at = datetime.now(timezone.utc) + timedelta(seconds=_retry_delay(attempts - 1))
     steps["retry"] = {"attempts": attempts, "next_retry_at": next_at.strftime("%Y-%m-%dT%H:%M:%SZ"), "reason": "google_429"}
     return steps, f"Google Sheets: запрос поставлен в очередь. Повтор в {next_at.astimezone(MOSCOW_TZ).strftime('%H:%M')} МСК"
+
+
+def _schedule_target_join_check(
+    steps: dict[str, Any], *, delivery_already_sent: bool = False
+) -> tuple[dict[str, Any], str]:
+    previous = steps.get("join_wait") if isinstance(steps.get("join_wait"), dict) else {}
+    attempts = int(previous.get("attempts") or 0) + 1
+    delay = (60, 120, 300, 600, 900)[min(attempts - 1, 4)]
+    next_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+    steps["join_wait"] = {
+        "attempts": attempts,
+        "next_retry_at": next_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reason": "target_vk_join",
+    }
+    delivery_note = (
+        "Повторная отправка отключена: ссылки уже были доставлены. "
+        if delivery_already_sent
+        else "Ссылка на новый VK-чат отправлена от сообщества. "
+    )
+    return steps, delivery_note + (
+        f"Старый чат сохранён; вступление проверим в "
+        f"{next_at.astimezone(MOSCOW_TZ).strftime('%H:%M')} МСК"
+    )
 
 
 async def _verify_pending_access() -> None:
@@ -3620,11 +5082,16 @@ def _find_target(snapshot: dict[str, Any], ref: TransferRef) -> dict[str, Any]:
 
 
 async def _preview(ref: TransferRef, *, refresh: bool = False) -> dict[str, Any]:
-    if (
+    same_flow = (
         _clean(ref.source_course_key, 50) == _clean(ref.target_course_key, 50)
         and _clean(ref.source_stream, 50) == _clean(ref.target_stream, 50)
-    ):
+    )
+    chat_source_stream = _clean(ref.chat_source_stream, 50)
+    vk_target = _vk_target_id(ref.vk_target)
+    if same_flow and not ref.chat_only:
         raise HTTPException(400, "Выберите другой поток")
+    if ref.chat_only and (not same_flow or not chat_source_stream or chat_source_stream == _clean(ref.target_stream, 50)):
+        raise HTTPException(400, "Для исправления чатов укажите другой ошибочный поток")
     snapshot = await _snapshot(refresh=refresh)
     source_flow, student = _find_source(snapshot, ref)
     target = _find_target(snapshot, ref)
@@ -3634,7 +5101,7 @@ async def _preview(ref: TransferRef, *, refresh: bool = False) -> dict[str, Any]
     await _enrich_order_identities([source])
     await _enrich_successful_managers([source])
     assignment = source.get("getcourse_assignment") or {}
-    registry_repair = all((
+    registry_repair = not ref.chat_only and all((
         _clean(assignment.get("course_key"), 50) == _clean(target.get("course_key"), 50),
         _clean(assignment.get("stream"), 50) == _clean(target.get("stream"), 50),
         _clean(assignment.get("vk_link"), 2000) == _clean(target.get("vk_link"), 2000),
@@ -3642,13 +5109,27 @@ async def _preview(ref: TransferRef, *, refresh: bool = False) -> dict[str, Any]
         _clean(assignment.get("curator"), 100) == curator,
     ))
     chat_readiness: dict[str, Any] = {}
-    if not registry_repair:
+    if ref.chat_only:
+        chat_service = _module("course-chat-creator", "service_transfer_chat_readiness")
+        chat_readiness = chat_service.service_transfer_chat_readiness(
+            _clean(source_flow.get("course_key"), 50), chat_source_stream
+        )
+    elif not registry_repair:
         chat_service = _module("course-chat-creator", "service_transfer_chat_readiness")
         chat_readiness = chat_service.service_transfer_chat_readiness(
             _clean(source_flow.get("course_key"), 50), _clean(source_flow.get("stream"), 50)
         )
     warnings: list[str] = []
-    if registry_repair:
+    if ref.chat_only:
+        warnings.append(
+            f"Данные ученика не меняются: ссылки будут отправлены повторно, удаление выполняется из чата потока {chat_source_stream}"
+        )
+        if ref.delivery_already_sent:
+            warnings[-1] = (
+                f"Сообщения повторно не отправляются: Nexus ждёт вступления в новый VK-чат и только затем "
+                f"удаляет ученика из чата потока {chat_source_stream}"
+            )
+    elif registry_repair:
         warnings.append("GetCourse и чаты не изменяются")
     elif source_flow.get("course_key") != target.get("course_key"):
         warnings.append("Меняется курс; доступ к обучению должен уже существовать в GetCourse")
@@ -3658,10 +5139,19 @@ async def _preview(ref: TransferRef, *, refresh: bool = False) -> dict[str, Any]
     blockers: list[str] = []
     if not _clean(student.get("gc_user_id"), 100):
         blockers.append("У ученика не найден ID GetCourse")
-    if not offer_id and not registry_repair:
+    if not offer_id and not registry_repair and not ref.chat_only:
         blockers.append("Для куратора целевого потока не задано предложение")
+    if ref.chat_only and chat_readiness.get("vk", {}).get("status") == "not_recorded":
+        blockers.append("Ошибочный VK-чат не найден")
+    if ref.vk_target and not vk_target:
+        blockers.append("Укажите числовой VK ID или ссылку вида https://vk.com/id123")
+    if ref.delivery_already_sent and (not ref.chat_only or not vk_target):
+        blockers.append("Для контроля без повторной отправки укажите VK ID ученика")
     return {
-        "action": "registry_repair" if registry_repair else "transfer",
+        "action": "chat_repair" if ref.chat_only else ("registry_repair" if registry_repair else "transfer"),
+        "chat_source_stream": chat_source_stream,
+        "vk_target": vk_target,
+        "delivery_already_sent": bool(ref.delivery_already_sent),
         "can_transfer": not blockers,
         "source": source,
         "target": {
@@ -3678,12 +5168,51 @@ async def _preview(ref: TransferRef, *, refresh: bool = False) -> dict[str, Any]
             "found": int(source.get("row") or 0) > 0,
             "title": source.get("sheet_title") or "",
             "row": int(source.get("row") or 0),
-            "move": bool(ref.move_sheet_row),
+            "move": False if ref.chat_only else bool(ref.move_sheet_row),
         },
         "chat_readiness": chat_readiness,
         "warnings": warnings,
         "blockers": blockers,
     }
+
+
+def _transfer_ref_payload(ref: TransferRef) -> dict[str, Any]:
+    # The operator may intentionally toggle "delete old row" after seeing the
+    # preview; every identity/flow field must still match exactly.
+    return ref.model_dump(exclude={"preview_id", "move_sheet_row"})
+
+
+async def _remember_transfer_preview(ref: TransferRef, preview_data: dict[str, Any]) -> dict[str, Any]:
+    preview_id = uuid.uuid4().hex
+    await _meta_set(f"transfer_preview:{preview_id}", json.dumps({
+        "expires_at": time.time() + 10 * 60,
+        "request": _transfer_ref_payload(ref),
+        "preview": preview_data,
+    }, ensure_ascii=False))
+    return {**preview_data, "preview_id": preview_id}
+
+
+async def _saved_transfer_preview(ref: TransferRef) -> dict[str, Any]:
+    preview_id = _clean(ref.preview_id, 64)
+    if not preview_id:
+        raise HTTPException(409, "Сначала проверьте перенос")
+    raw = await _meta_get(f"transfer_preview:{preview_id}")
+    try:
+        saved = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        saved = {}
+    if float(saved.get("expires_at") or 0) < time.time():
+        raise HTTPException(409, "Проверка переноса устарела. Проверьте ещё раз")
+    if saved.get("request") != _transfer_ref_payload(ref):
+        raise HTTPException(409, "Параметры переноса изменились. Проверьте ещё раз")
+    preview_data = saved.get("preview")
+    if not isinstance(preview_data, dict):
+        raise HTTPException(409, "Проверка переноса не найдена. Проверьте ещё раз")
+    preview_data = json.loads(json.dumps(preview_data, ensure_ascii=False))
+    sheet = preview_data.get("sheet") if isinstance(preview_data.get("sheet"), dict) else {}
+    sheet["move"] = False if ref.chat_only else bool(ref.move_sheet_row)
+    preview_data["sheet"] = sheet
+    return preview_data
 
 
 async def _preview_curator_change(ref: CuratorChangeRef, *, refresh: bool = False) -> dict[str, Any]:
@@ -3726,6 +5255,7 @@ def _flow_job_ui_result(result: dict[str, Any], course_key: str, stream: str) ->
     vk = create.get("vk") if isinstance(create.get("vk"), dict) else {}
     telegram = create.get("telegram") if isinstance(create.get("telegram"), dict) else {}
     catalog = create.get("catalog") if isinstance(create.get("catalog"), dict) else {}
+    sheet = result.get("sheet") if isinstance(result.get("sheet"), dict) else {}
     catalog_flow = next(
         (
             item for item in catalog.get("items") or []
@@ -3737,6 +5267,14 @@ def _flow_job_ui_result(result: dict[str, Any], course_key: str, stream: str) ->
     return {
         "stages": result.get("stages") if isinstance(result.get("stages"), dict) else {},
         "manual": result.get("manual") if isinstance(result.get("manual"), dict) else {},
+        "sheet": {
+            key: sheet.get(key)
+            for key in (
+                "ok", "status", "sheet_id", "sheet_title", "sheet_url",
+                "sheet_index", "verified", "hidden", "error",
+            )
+            if sheet.get(key) not in (None, "")
+        },
         "create": {
             "vk": {
                 key: vk.get(key)
@@ -3881,6 +5419,32 @@ async def _commit_registry_transfer(
     return {"ok": True, "status": "mirrored", "sync": sync_result}
 
 
+async def _assert_transfer_source_current(transfer: dict[str, Any]) -> None:
+    enrollment_id = _clean(transfer.get("enrollment_id"), 100)
+    if not enrollment_id:
+        return
+    async with _connect() as db:
+        row = await (
+            await db.execute(
+                "SELECT course_key,stream,status,source_json FROM enrollments WHERE id=?",
+                (enrollment_id,),
+            )
+        ).fetchone()
+    if not row or row[2] == "removed":
+        raise RuntimeError("Назначение ученика изменилось; обновите список")
+    try:
+        source = json.loads(row[3] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source = {}
+    current_row = int(source.get("row") or 0) if isinstance(source, dict) else 0
+    if (
+        _clean(row[0], 50) != _clean(transfer.get("source_course_key"), 50)
+        or _clean(row[1], 50) != _clean(transfer.get("source_stream"), 50)
+        or (int(transfer.get("source_row") or 0) and current_row != int(transfer.get("source_row") or 0))
+    ):
+        raise RuntimeError("Назначение ученика изменилось; обновите список")
+
+
 async def _run_transfer(transfer_id: str) -> None:
     async with _transfer_lock:
         async with _connect() as db:
@@ -3893,13 +5457,60 @@ async def _run_transfer(transfer_id: str) -> None:
         await _save_transfer(transfer_id, status="running", steps=steps)
         student = _load_steps(transfer.get("student_json"))
         retry_state: dict[str, Any] | None = None
+        action = _clean((steps.get("preview") or {}).get("action"), 50) or "transfer"
         try:
             fields_service = _module("getcourse-chat-fields", "service_transfer_write_getcourse")
-            action = _clean((steps.get("preview") or {}).get("action"), 50) or "transfer"
+            chat_repair = action == "chat_repair"
+            chat_source_stream = _clean(
+                (steps.get("preview") or {}).get("chat_source_stream") or transfer["source_stream"], 50
+            )
             move_sheet_row = bool(((steps.get("preview") or {}).get("sheet") or {}).get("move", True))
             steps.pop("curator_order", None)
             steps.pop("delivery", None)
             retry_state = steps.pop("retry", None)
+            if action in {"transfer", "registry_repair", "chat_repair", "curator_change"}:
+                await _assert_transfer_source_current(transfer)
+            if action == "chat_delivery":
+                delivery = await _chat_delivery_view(student)
+                if not delivery.get("can_send"):
+                    raise RuntimeError(delivery.get("reason") or "Доставка чатов недоступна")
+                messenger = _module("messenger-widget", "service_send_transfer_message")
+                result = await messenger.service_send_transfer_message(
+                    provider=delivery["provider"], recipient_id=delivery["recipient_id"],
+                    content=delivery["content"], operation_id=f"streams:{transfer_id}:chats",
+                )
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("error") or "Ссылки на чаты не отправлены")
+                steps["delivery"] = result
+                await _save_transfer(transfer_id, status="completed", steps=steps)
+                return
+            if action == "messenger_send":
+                payload = (steps.get("preview") or {}).get("payload") or {}
+                messenger = _module("messenger-widget", "service_streams_send")
+                result = await messenger.service_streams_send(
+                    channel_id=_clean(payload.get("channel_id"), 200),
+                    transport=_clean(payload.get("transport"), 40),
+                    provider=_clean(payload.get("provider"), 40),
+                    chat_id=_clean(payload.get("chat_id"), 250),
+                    phone=_clean(student.get("phone"), 100),
+                    text=_clean(payload.get("text"), 4000),
+                    subject=_clean(payload.get("subject"), 300),
+                    operator_name=_clean(transfer.get("operator_name"), 200),
+                    email=_clean(student.get("email"), 320),
+                    gc_user_id=_clean(student.get("gc_user_id"), 100),
+                    name=_clean(student.get("name"), 300),
+                    attachment_url=_clean(payload.get("attachment_url"), 4000),
+                    attachment_type=_clean(payload.get("attachment_type"), 100),
+                    idempotency_key=f"streams:{transfer_id}",
+                )
+                if not result.get("ok"):
+                    raise RuntimeError(result.get("error") or "Сообщение не отправлено")
+                steps["delivery"] = {
+                    "ok": True, "status": "sent",
+                    "channel": _clean((result.get("channel") or {}).get("label"), 200),
+                }
+                await _save_transfer(transfer_id, status="completed", steps=steps)
+                return
             if action == "curator_change":
                 if not (steps.get("getcourse") or {}).get("ok"):
                     result = await fields_service.service_transfer_write_curator(
@@ -3955,12 +5566,38 @@ async def _run_transfer(transfer_id: str) -> None:
                     await _save_transfer(transfer_id, status="running", steps=steps)
                 await _save_transfer(transfer_id, status="completed", steps=steps)
                 return
+            if chat_repair:
+                target_flow = (steps.get("preview") or {}).get("target") or {}
+                if not (steps.get("email") or {}).get("ok"):
+                    if (steps.get("preview") or {}).get("delivery_already_sent"):
+                        steps["email"] = {"ok": True, "status": "preserved_already_sent"}
+                    else:
+                        try:
+                            onboarding = _module("getcourse-onboarding", "service_queue_flow_email")
+                            steps["email"] = await onboarding.service_queue_flow_email(
+                                gc_user_id=transfer["gc_user_id"],
+                                email=transfer["email"],
+                                order_id=_clean(student.get("order_id"), 100),
+                                course_key=transfer["target_course_key"],
+                                course=_clean(target_flow.get("course"), 100),
+                                source_stream=chat_source_stream,
+                                stream=transfer["target_stream"],
+                                vk_link=_clean(target_flow.get("vk_link"), 2000),
+                                tg_link=_clean(target_flow.get("tg_link"), 2000),
+                            )
+                        except Exception as exc:
+                            steps["email"] = {"ok": False, "status": "failed", "error": _clean(exc, 1000)}
+                steps["getcourse"] = {"ok": True, "status": "preserved"}
+                steps["sheet"] = {"ok": True, "status": "preserved"}
+                steps["registry"] = {"ok": True, "status": "preserved"}
+                await _save_transfer(transfer_id, status="running", steps=steps)
             if not (steps.get("getcourse") or {}).get("ok"):
                 result = await fields_service.service_transfer_write_getcourse(
                     email=transfer["email"],
                     gc_user_id=transfer["gc_user_id"],
                     order_id=_clean(student.get("order_id"), 100),
                     deal_number=_clean(student.get("deal_number") or student.get("order_id"), 100),
+                    source_stream=transfer["source_stream"],
                     target_course_key=transfer["target_course_key"],
                     target_stream=transfer["target_stream"],
                     target_flow=(steps.get("preview") or {}).get("target") or {},
@@ -3991,48 +5628,115 @@ async def _run_transfer(transfer_id: str) -> None:
                     source_row_deleted=bool((steps.get("sheet") or {}).get("source_row_deleted")),
                 )
                 await _save_transfer(transfer_id, status="running", steps=steps)
-            if not move_sheet_row:
+            if not move_sheet_row and not chat_repair:
                 steps["chat_removal"] = {"ok": True, "status": "preserved", "items": {}}
                 await _save_transfer(transfer_id, status="completed", steps=steps)
                 return
-            if not steps.get("chat_removal"):
+            preview_data = steps.get("preview") or {}
+            vk_target = _clean(preview_data.get("vk_target"), 200)
+            if not vk_target:
                 identity_service = _module("messenger-widget", "service_transfer_recipients")
                 recipients = await identity_service.service_transfer_recipients(
                     email=transfer["email"], gc_user_id=transfer["gc_user_id"], name=transfer["student_name"]
                 )
-                chat_service = _module("course-chat-creator", "service_remove_transfer_member")
-                removals = {}
-                readiness = (steps.get("preview") or {}).get("chat_readiness") or {}
-                for channel in ("telegram", "vk"):
-                    channel_readiness = readiness.get(channel) or {}
-                    if not channel_readiness.get("manageable"):
-                        removals[channel] = {"ok": True, "status": "manual", "reason": channel_readiness.get("status") or "not_manageable"}
-                        continue
-                    recipient_id = _clean(recipients.get(channel), 200)
-                    if not recipient_id:
-                        removals[channel] = {"ok": False, "status": "no_identity"}
-                        continue
-                    removals[channel] = await chat_service.service_remove_transfer_member(
-                        platform=channel,
-                        target=recipient_id,
-                        course_key=transfer["source_course_key"],
-                        stream_number=transfer["source_stream"],
-                        dry_run=False,
-                    )
-                removal_ok = all(item.get("ok") for item in removals.values())
-                manual = any(item.get("status") == "manual" for item in removals.values())
-                steps["chat_removal"] = {"ok": removal_ok, "items": removals}
+                vk_target = _clean(recipients.get("vk"), 200)
+            if not vk_target:
+                steps["target_delivery"] = {"ok": False, "status": "no_vk_identity"}
+                steps["chat_removal"] = {
+                    "ok": False, "status": "preserved", "items": {
+                        "vk": {"ok": False, "status": "preserved_no_identity"},
+                        "telegram": {"ok": True, "status": "preserved"},
+                    },
+                }
                 await _save_transfer(
-                    transfer_id,
-                    status="warning" if manual or not removal_ok else "completed",
-                    steps=steps,
-                    error="Ученик перенесён. Из старого VK-чата его нужно удалить вручную." if manual else ("" if removal_ok else "Не из всех старых чатов удалось удалить ученика"),
+                    transfer_id, status="warning", steps=steps,
+                    error="VK-профиль не найден. Ученик оставлен в старом чате; ссылки отправляются по email.",
                 )
-            else:
-                removal_ok = bool((steps.get("chat_removal") or {}).get("ok"))
-                await _save_transfer(transfer_id, status="completed" if removal_ok else "warning", steps=steps)
+                return
+            chat_service = _module("course-chat-creator", "service_prepare_transfer_vk_member")
+            target_delivery = steps.get("target_delivery") if isinstance(steps.get("target_delivery"), dict) else {}
+            if not target_delivery:
+                target_flow = (steps.get("preview") or {}).get("target") or {}
+                if preview_data.get("delivery_already_sent"):
+                    target_delivery = {
+                        "ok": True,
+                        "status": "invite_sent",
+                        "delivery": "preserved_already_sent",
+                        "target": vk_target,
+                    }
+                else:
+                    target_delivery = await chat_service.service_prepare_transfer_vk_member(
+                        target=vk_target,
+                        student_name=transfer["student_name"],
+                        source_stream=chat_source_stream,
+                        target_course_key=transfer["target_course_key"],
+                        target_stream=transfer["target_stream"],
+                        idempotency_key=f"student-transfer:{transfer_id}:vk-target",
+                        vk_link=_clean(target_flow.get("vk_link"), 2000),
+                        tg_link=_clean(target_flow.get("tg_link"), 2000),
+                    )
+                steps["target_delivery"] = target_delivery
+                await _save_transfer(transfer_id, status="running", steps=steps)
+            joined = target_delivery.get("status") == "joined"
+            if not joined and target_delivery.get("status") == "invite_sent":
+                membership_service = _module("course-chat-creator", "service_transfer_target_membership")
+                membership = await membership_service.service_transfer_target_membership(
+                    platform="vk", target=vk_target,
+                    course_key=transfer["target_course_key"], stream_number=transfer["target_stream"],
+                )
+                steps["target_membership"] = membership
+                joined = bool(membership.get("ok") and membership.get("present"))
+                if joined:
+                    steps["target_delivery"] = {**target_delivery, "status": "joined", "joined_at": _now()}
+            if not joined:
+                if target_delivery.get("status") == "invite_sent":
+                    steps, message = _schedule_target_join_check(
+                        steps, delivery_already_sent=bool(preview_data.get("delivery_already_sent"))
+                    )
+                    steps["chat_removal"] = {
+                        "ok": False, "status": "waiting_target_join", "items": {
+                            "vk": {"ok": False, "status": "preserved_waiting_target_join"},
+                            "telegram": {"ok": True, "status": "preserved"},
+                        },
+                    }
+                    await _save_transfer(transfer_id, status="waiting", steps=steps, error=message)
+                else:
+                    steps["chat_removal"] = {
+                        "ok": False, "status": "preserved", "items": {
+                            "vk": {"ok": False, "status": "preserved_delivery_failed"},
+                            "telegram": {"ok": True, "status": "preserved"},
+                        },
+                    }
+                    await _save_transfer(
+                        transfer_id, status="warning", steps=steps,
+                        error="Не удалось добавить в новый VK-чат или доставить ссылку. Ученик оставлен в старом чате.",
+                    )
+                return
+            steps.pop("join_wait", None)
+            removal_service = _module("course-chat-creator", "service_remove_transfer_member")
+            vk_removal = await removal_service.service_remove_transfer_member(
+                platform="vk", target=vk_target,
+                course_key=transfer["source_course_key"], stream_number=chat_source_stream,
+                dry_run=False,
+            )
+            steps["chat_removal"] = {
+                "ok": bool(vk_removal.get("ok")),
+                "status": "completed" if vk_removal.get("ok") else "preserved",
+                "items": {
+                    "vk": vk_removal,
+                    "telegram": {"ok": True, "status": "preserved"},
+                },
+            }
+            await _save_transfer(
+                transfer_id,
+                status="completed" if vk_removal.get("ok") else "warning",
+                steps=steps,
+                error="" if vk_removal.get("ok") else "Вступление в новый VK-чат подтверждено, но старый чат удалить не удалось.",
+            )
         except Exception as exc:
-            if _is_google_rate_limit(exc):
+            if _is_google_rate_limit(exc) or (
+                action in {"chat_delivery", "messenger_send"} and _is_transient_sheet_error(exc)
+            ):
                 if retry_state:
                     steps["retry"] = retry_state
                 steps, message = _retry_transfer_steps(steps)
@@ -4082,16 +5786,27 @@ async def _run_flow_job(job_id: str) -> None:
         if not curator_code:
             raise RuntimeError("Для куратора не найден код GetCourse")
 
+        fields = _module("getcourse-chat-fields", "service_create_registry_flow_sheet")
+        sheet_result = result.get("sheet") if isinstance(result.get("sheet"), dict) else {}
         if stages.get("sheet") != "completed":
             await save_stage("sheet", "running")
-            fields = _module("getcourse-chat-fields", "service_create_registry_flow_sheet")
             sheet_result = await fields.service_create_registry_flow_sheet(
                 course_key=job["course_key"],
                 stream=job["stream"],
                 date_start=job["date_start"],
                 curator=curator_code,
             )
-            await save_stage("sheet", "completed", sheet_result)
+        sheet_status = await fields.service_registry_flow_sheet_status(
+            course_key=job["course_key"],
+            stream=job["stream"],
+            date_start=job["date_start"],
+            expected_sheet_id=int(sheet_result.get("sheet_id") or 0),
+        )
+        if not sheet_status.get("ok"):
+            await save_stage("sheet", "failed", {**sheet_result, **sheet_status, "verified": False})
+            raise RuntimeError(sheet_status.get("error") or "Лист потока не прошёл проверку")
+        sheet_result = {**sheet_result, **sheet_status, "verified": True}
+        await save_stage("sheet", "completed", sheet_result)
 
         await save_stage("chats", "running")
         creator = _module("course-chat-creator", "service_create_flow_pair")
@@ -4169,6 +5884,168 @@ async def _complete_ready_manual_flow_jobs() -> int:
     return changed
 
 
+def _is_transient_sheet_error(value: Any) -> bool:
+    return bool(re.search(
+        r"(?:\b429\b|too many requests|resource_exhausted|quota|timeout|timed out|temporar|временно|connection|502|503|504)",
+        str(value or ""),
+        re.I,
+    ))
+
+
+async def _claim_sheet_operation() -> str:
+    async with _connect() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                """
+                SELECT id FROM transfers
+                WHERE json_extract(steps_json,'$.preview.action') IN ('lesson_update','sheet_row')
+                  AND (status='queued' OR (
+                    status='waiting' AND COALESCE(
+                      NULLIF(json_extract(steps_json,'$.retry.next_retry_at'),''),'')<=?
+                  ))
+                ORDER BY
+                  CASE json_extract(steps_json,'$.preview.action') WHEN 'lesson_update' THEN 0 ELSE 1 END,
+                  CASE status WHEN 'queued' THEN 0 ELSE 1 END,created_at,id LIMIT 1
+                """,
+                (_now(),),
+            )
+        ).fetchone()
+        if not row:
+            await db.commit()
+            return ""
+        operation_id = str(row["id"])
+        cur = await db.execute(
+            "UPDATE transfers SET status='running',error='',updated_at=? WHERE id=? AND status IN ('queued','waiting')",
+            (_now(), operation_id),
+        )
+        await db.commit()
+        return operation_id if int(cur.rowcount or 0) == 1 else ""
+
+
+async def _run_sheet_operation(operation_id: str) -> None:
+    async with _connect() as db:
+        row = await (await db.execute("SELECT * FROM transfers WHERE id=?", (operation_id,))).fetchone()
+    if not row or row["status"] != "running":
+        return
+    operation = dict(row)
+    steps = _load_steps(operation.get("steps_json"))
+    preview = steps.get("preview") if isinstance(steps.get("preview"), dict) else {}
+    action = _clean(preview.get("action"), 50)
+    retry_state = steps.pop("retry", None)
+    try:
+        if action == "sheet_row":
+            student = await _widget_student_base(operation["enrollment_id"])
+            operation_student = _load_steps(operation.get("student_json"))
+            sheet_email = _clean(operation_student.get("sheet_email"), 320)
+            if sheet_email:
+                student["sheet_email"] = sheet_email
+            try:
+                student["tg_account"] = await _resolve_student_profile_link(student)
+            except Exception as exc:
+                if _logger:
+                    _logger.info("Streams profile link enrichment skipped for %s: %s", operation_id, exc)
+            fields = _module("getcourse-chat-fields", "service_registry_ensure_student")
+            result = await fields.service_registry_ensure_student(
+                course_key=student["course_key"], stream=student["stream"], student=student,
+            )
+            await _bind_sheet_row(
+                operation["enrollment_id"], int(result.get("row") or 0), result.get("lesson_columns") or [],
+            )
+            steps["sheet"] = {
+                "ok": True,
+                "status": result.get("status") or "created",
+                "row": int(result.get("row") or 0),
+                "sheet_title": _clean(result.get("sheet_title"), 300),
+            }
+            steps["streams"] = {"ok": True, "status": "linked"}
+        elif action == "lesson_update":
+            lesson = preview.get("lesson") if isinstance(preview.get("lesson"), dict) else {}
+            student_context = _load_steps(operation.get("student_json"))
+            fields = _module("getcourse-chat-fields", "service_registry_write_lesson")
+            result = await fields.service_registry_write_lesson(
+                course_key=operation["source_course_key"], stream=operation["source_stream"],
+                email=operation["email"], source_row=int(operation["source_row"]),
+                lesson_key=_clean(lesson.get("key"), 5).upper(), value=bool(lesson.get("value")),
+                expected_value=bool(lesson.get("expected_value")),
+                sheet_title=_clean(student_context.get("sheet_title"), 300),
+            )
+            steps["sheet"] = {
+                "ok": True, "status": result.get("status") or "updated",
+                "row": int(result.get("row") or operation["source_row"]),
+            }
+            numeric = 1 if result.get("value") else 0
+            async with _connect() as db:
+                await db.execute(
+                    """
+                    INSERT INTO lesson_progress(enrollment_id,lesson_key,label,value,sheet_value,dirty,updated_at)
+                    VALUES(?,?,?,?,?,0,?)
+                    ON CONFLICT(enrollment_id,lesson_key) DO UPDATE SET
+                      value=excluded.value,sheet_value=excluded.sheet_value,dirty=0,label=excluded.label,updated_at=excluded.updated_at
+                    """,
+                    (
+                        operation["enrollment_id"], _clean(lesson.get("key"), 5).upper(),
+                        _clean(lesson.get("label"), 200), numeric, numeric, _now(),
+                    ),
+                )
+                await db.commit()
+            if int(result.get("row") or 0) != int(operation["source_row"]):
+                await _bind_sheet_row(operation["enrollment_id"], int(result.get("row") or 0), [])
+            steps["streams"] = {"ok": True, "status": "updated", "value": bool(numeric)}
+            _clear_snapshot_cache()
+        else:
+            raise RuntimeError("Неизвестная операция Google-таблицы")
+        await _save_transfer(operation_id, status="completed", steps=steps)
+    except Exception as exc:
+        message = _clean(exc, 2000)
+        if _is_transient_sheet_error(exc):
+            if retry_state:
+                steps["retry"] = retry_state
+            steps, retry_message = _retry_transfer_steps(steps)
+            steps["sheet"] = {"ok": False, "status": "waiting", "error": message}
+            await _save_transfer(operation_id, status="waiting", steps=steps, error=retry_message)
+            return
+        conflict = bool(re.search(r"(?:таблица уже изменена|строка ученика изменилась|обновите данные)", message, re.I))
+        steps["sheet"] = {"ok": False, "status": "conflict" if conflict else "failed", "error": message}
+        await _save_transfer(operation_id, status="warning" if conflict else "failed", steps=steps, error=message)
+        if conflict:
+            _schedule_registry_sync()
+        if _logger:
+            _logger.warning("Streams sheet operation %s failed: %s", operation_id, message)
+
+
+async def _sheet_operation_loop() -> None:
+    await asyncio.sleep(1)
+    while True:
+        try:
+            operation_id = await _claim_sheet_operation()
+            if operation_id:
+                await _run_sheet_operation(operation_id)
+                continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if _logger:
+                _logger.warning("Streams sheet operation worker failed: %s", exc)
+        await asyncio.sleep(1)
+
+
+async def _refund_sync_loop() -> None:
+    """Consume the refund ledger independently from slow sheet synchronization."""
+    await asyncio.sleep(4)
+    while True:
+        try:
+            result = await _sync_refunds()
+            if int(result.get("moved") or 0):
+                _clear_snapshot_cache()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if _logger:
+                _logger.warning("Refund synchronization worker deferred: %s", exc)
+        await asyncio.sleep(10)
+
+
 async def _worker_loop() -> None:
     await asyncio.sleep(2)
     while True:
@@ -4182,9 +6059,14 @@ async def _worker_loop() -> None:
                     await db.execute(
                         """
                         SELECT id FROM transfers
-                        WHERE status='queued' OR (
-                            status='waiting' AND COALESCE(json_extract(steps_json,'$.retry.next_retry_at'),'')<=?
-                        )
+                        WHERE COALESCE(json_extract(steps_json,'$.preview.action'),'transfer') NOT IN ('lesson_update','sheet_row')
+                          AND (status='queued' OR (
+                            status='waiting' AND COALESCE(
+                                NULLIF(json_extract(steps_json,'$.join_wait.next_retry_at'),''),
+                                NULLIF(json_extract(steps_json,'$.retry.next_retry_at'),''),
+                                ''
+                            )<=?
+                        ))
                         ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,created_at,id LIMIT 1
                         """,
                         (_now(),),
@@ -4196,6 +6078,7 @@ async def _worker_loop() -> None:
             if row:
                 await _run_transfer(str(row[0]))
                 continue
+            await _sync_roster_delta()
             sync_result = await _sync_registry()
             if sync_result.get("status") == "completed":
                 await _snapshot()
@@ -4215,7 +6098,13 @@ def _transfer_view(row: dict[str, Any], *, compact: bool = False) -> dict[str, A
     item = dict(row)
     item["student"] = _load_steps(item.pop("student_json", "{}"))
     item["steps"] = _load_steps(item.pop("steps_json", "{}"))
-    item["action"] = _clean((item["steps"].get("preview") or {}).get("action"), 50) or "transfer"
+    preview = item["steps"].get("preview") if isinstance(item["steps"].get("preview"), dict) else {}
+    item["action"] = _clean(preview.get("action"), 50) or "transfer"
+    item["scheduled_at"] = _clean(preview.get("scheduled_at"), 100)
+    lesson = preview.get("lesson") if isinstance(preview.get("lesson"), dict) else {}
+    item["lesson_key"] = _clean(lesson.get("key"), 5)
+    item["lesson_label"] = _clean(lesson.get("label"), 200)
+    item["requested_value"] = bool(lesson.get("value")) if lesson else None
     if compact:
         item.pop("student", None)
         item["steps"] = {
@@ -4231,6 +6120,8 @@ def _transfer_view(row: dict[str, Any], *, compact: bool = False) -> dict[str, A
 
 
 async def _queue_operation(preview_data: dict[str, Any], operator: dict[str, Any]) -> dict[str, Any]:
+    preview_data = {**preview_data}
+    preview_data.setdefault("scheduled_at", _sheet_operation_time(300))
     source = preview_data["source"]
     target = preview_data["target"]
     action = _clean(preview_data.get("action"), 50) or "transfer"
@@ -4244,7 +6135,7 @@ async def _queue_operation(preview_data: dict[str, Any], operator: dict[str, Any
             active = await (
                 await db.execute(
                     """
-                    SELECT id,status FROM transfers
+                    SELECT id,status,steps_json FROM transfers
                     WHERE status IN ('queued','running','waiting') AND lower(email)=lower(?)
                       AND source_course_key=? AND source_stream=?
                       AND target_course_key=? AND target_stream=? AND curator=?
@@ -4257,7 +6148,12 @@ async def _queue_operation(preview_data: dict[str, Any], operator: dict[str, Any
                 )
             ).fetchone()
             if active:
-                return {"ok": True, "id": active["id"], "status": active["status"], "action": action, "existing": True}
+                existing_preview = (_load_steps(active["steps_json"]).get("preview") or {})
+                return {
+                    "ok": True, "id": active["id"], "status": active["status"],
+                    "action": action, "existing": True,
+                    "scheduled_at": existing_preview.get("scheduled_at") or preview_data["scheduled_at"],
+                }
             transfer_id = uuid.uuid4().hex
             now = _now()
             await db.execute(
@@ -4292,7 +6188,10 @@ async def _queue_operation(preview_data: dict[str, Any], operator: dict[str, Any
                 ),
             )
             await db.commit()
-    return {"ok": True, "id": transfer_id, "status": "queued", "action": action}
+    return {
+        "ok": True, "id": transfer_id, "status": "queued", "action": action,
+        "scheduled_at": preview_data["scheduled_at"],
+    }
 
 
 @router.get("/app")
@@ -4311,7 +6210,7 @@ async def fullscreen_app():
         "frame-ancestors 'self'",
         f"script-src 'self' {' '.join(script_hashes)}",
         "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data:",
+        "img-src 'self' data: https://*.userapi.com https://*.vkuserphoto.ru",
         "connect-src 'self'",
         "form-action 'self'",
     ))
@@ -4340,20 +6239,20 @@ async def login(data: LoginIn, request: Request):
         row = await (
             await db.execute("SELECT * FROM operators WHERE login_key=? AND active=1", (login_key,))
         ).fetchone()
-        operator = dict(row) if row else None
-        password_hash = str(operator.get("password_hash") or "") if operator else ""
-        verified = await asyncio.to_thread(
-            _password_matches, password, password_hash or _dummy_password_hash,
-        )
-        if not operator or (password_hash and not verified) or (not password_hash and password):
-            raise HTTPException(401, "Неверное имя или пароль")
-        token = secrets.token_urlsafe(40)
-        await db.execute("DELETE FROM sessions WHERE expires_at<=?", (_now(),))
-        await db.execute(
-            "INSERT INTO sessions(token,operator_id,expires_at,created_at) VALUES(?,?,?,?)",
-            (token, operator["id"], _session_expires(), _now()),
-        )
-        await db.commit()
+    operator = dict(row) if row else None
+    password_hash = str(operator.get("password_hash") or "") if operator else ""
+    verified = await asyncio.to_thread(
+        _password_matches, password, password_hash or _dummy_password_hash,
+    )
+    if not operator or (password_hash and not verified) or (not password_hash and password):
+        raise HTTPException(401, "Неверное имя или пароль")
+    token = secrets.token_urlsafe(40)
+    try:
+        await _create_session(token, operator["id"])
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).casefold():
+            raise HTTPException(503, "Streams синхронизирует данные. Повторите вход через несколько секунд") from exc
+        raise
     response = JSONResponse({"ok": True, "display_name": operator["display_name"] or operator["login"]})
     response.set_cookie(
         SESSION_COOKIE,
@@ -4372,9 +6271,7 @@ async def logout(request: Request):
     _require_same_origin(request)
     token = request.cookies.get(SESSION_COOKIE)
     if token:
-        async with _connect() as db:
-            await db.execute("DELETE FROM sessions WHERE token=?", (token,))
-            await db.commit()
+        _schedule_session_revocation(token)
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path=_cookie_path(request))
     return response
@@ -4401,7 +6298,9 @@ async def me(request: Request):
 @router.get("/catalog")
 async def catalog(request: Request, refresh: str = "0"):
     await _require_operator(request)
-    snapshot = await _snapshot(refresh=refresh == "1")
+    if refresh == "1":
+        _schedule_registry_sync()
+    snapshot = await _snapshot(refresh=False)
     items = []
     for flow in snapshot.get("items") or []:
         course_key, stream = _flow_key(flow)
@@ -4424,7 +6323,53 @@ async def catalog(request: Request, refresh: str = "0"):
                 "vk_admin_url": _clean(flow.get("vk_admin_url"), 2000),
             }
         )
-    return {"items": items, "updated_at": snapshot.get("updated_at") or snapshot.get("cache_updated_at") or ""}
+    return {
+        "items": items,
+        "updated_at": snapshot.get("updated_at") or snapshot.get("cache_updated_at") or "",
+        "refresh_queued": refresh == "1",
+        "scheduled_at": _sheet_operation_time(300) if refresh == "1" else "",
+    }
+
+
+def _student_list_index(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the cached registry once instead of rebuilding it per filter keystroke."""
+    if _student_list_index_cache.get("source") is snapshot:
+        return _student_list_index_cache
+    all_items: list[dict[str, Any]] = []
+    by_course: dict[str, list[dict[str, Any]]] = {}
+    by_stream: dict[str, list[dict[str, Any]]] = {}
+    by_flow: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for flow in snapshot.get("items") or []:
+        flow_course = _clean(flow.get("course_key"), 50)
+        flow_stream = _clean(flow.get("stream"), 50)
+        for student in flow.get("students") or []:
+            item = _student_result(flow, student)
+            all_items.append(item)
+            by_course.setdefault(flow_course, []).append(item)
+            by_stream.setdefault(flow_stream, []).append(item)
+            by_flow.setdefault((flow_course, flow_stream), []).append(item)
+    _student_list_index_cache.update(
+        source=snapshot, all=all_items, by_course=by_course,
+        by_stream=by_stream, by_flow=by_flow,
+    )
+    return _student_list_index_cache
+
+
+def _student_list_sort_value(item: dict[str, Any], key: str) -> Any:
+    if key == "remaining_amount":
+        return float(item.get("remaining_amount") or 0)
+    if key == "stream":
+        value = _clean(item.get("stream_display") or item.get("stream"), 100)
+        match = re.search(r"\d+", value)
+        return (int(match.group()) if match else -1, _norm(value))
+    values = {
+        "name": item.get("name"),
+        "email": item.get("email"),
+        "course": item.get("course_display") or item.get("course"),
+        "curator": item.get("curator_name") or item.get("curator"),
+        "manager": item.get("manager_name"),
+    }
+    return _norm(values.get(key))
 
 
 @router.get("/students")
@@ -4438,29 +6383,42 @@ async def students(
     offset: int = 0,
     limit: int = 100,
     refresh: str = "0",
+    sort: str = "",
+    direction: str = "",
 ):
     await _require_operator(request)
     query = _norm(q)
     query_phone = _phone_search_key(q)
-    phone_lookup = len(query_phone) >= 10
-    snapshot = await _snapshot(refresh=refresh == "1")
-    candidates: list[dict[str, Any]] = []
-    for flow in snapshot.get("items") or []:
-        if course_key and _clean(flow.get("course_key"), 50) != _clean(course_key, 50):
-            continue
-        if stream and _clean(flow.get("stream"), 50) != _clean(stream, 50):
-            continue
-        for student in flow.get("students") or []:
-            item = _student_result(flow, student)
-            candidates.append(item)
-    identities_enriched = bool(query and phone_lookup)
-    if identities_enriched:
+    phone_lookup = _is_phone_search(q)
+    numeric_queries = set(re.findall(r"\d{5,20}", _clean(q, 1000)))
+    if refresh == "1":
+        _clear_student_enrichment_cache()
+        _schedule_registry_sync()
+    snapshot = await _snapshot(refresh=False)
+    index = _student_list_index(snapshot)
+    selected_course = _clean(course_key, 50)
+    selected_stream = _clean(stream, 50)
+    if selected_course and selected_stream:
+        candidates = index["by_flow"].get((selected_course, selected_stream), [])
+    elif selected_course:
+        candidates = index["by_course"].get(selected_course, [])
+    elif selected_stream:
+        candidates = index["by_stream"].get(selected_stream, [])
+    else:
+        candidates = index["all"]
+    # Exact phone search may need the local order identity index because older
+    # sheet rows do not contain a phone. Normal list loading never pays this cost.
+    if query and phone_lookup:
         await _enrich_order_identities(candidates)
     base: list[dict[str, Any]] = []
     for item in candidates:
-        haystack = _norm(" ".join(_clean(item.get(key), 500) for key in ("name", "email", "phone", "gc_user_id", "order_id")))
+        haystack = _norm(" ".join(
+            _clean(item.get(key), 500)
+            for key in ("name", "email", "phone", "gc_user_id", "order_id", "deal_number", "enrollment_id")
+        ))
         phone_match = bool(phone_lookup and query_phone in _phone_search_key(item.get("phone")))
-        if query and query not in haystack and not phone_match:
+        numeric_match = bool(numeric_queries and any(value in haystack for value in numeric_queries))
+        if query and query not in haystack and not phone_match and not numeric_match:
             continue
         base.append(item)
     tariffs = {key: 0 for key in ("standard", "premium", "vip", "other")}
@@ -4477,13 +6435,21 @@ async def students(
         if (not selected_tariff or _tariff_key(item.get("tariff")) == selected_tariff)
         and (not selected_curator or item.get("curator") == selected_curator)
     ]
+    sort_key = _clean(sort, 40)
+    sort_direction = _clean(direction, 10).lower()
+    if sort_key in {"name", "email", "course", "stream", "curator", "manager", "remaining_amount"}:
+        found.sort(
+            key=lambda item: _student_list_sort_value(item, sort_key),
+            reverse=sort_direction == "desc",
+        )
     start = max(0, min(100000, int(offset)))
     page_size = max(1, min(250, int(limit)))
-    page = found[start : start + page_size]
-    enrichers = [_enrich_successful_managers(page), _enrich_student_notes(page)]
-    if not identities_enriched:
-        enrichers.append(_enrich_order_identities(page))
-    await asyncio.gather(*enrichers)
+    page = [dict(item) for item in found[start : start + page_size]]
+    enrichment, _, _ = await asyncio.gather(
+        _enrich_student_page(page),
+        _enrich_student_notes(page),
+        _enrich_student_financials(page),
+    )
     return {
         "items": page,
         "total": len(found),
@@ -4498,7 +6464,11 @@ async def students(
                 for key in CURATOR_NAMES
             ],
         },
+        "enrichment_pending": enrichment["pending"],
+        "enrichment_incomplete": enrichment["incomplete"],
         "updated_at": snapshot.get("updated_at") or snapshot.get("cache_updated_at") or "",
+        "refresh_queued": refresh == "1",
+        "scheduled_at": _sheet_operation_time(300) if refresh == "1" else "",
     }
 
 
@@ -4509,6 +6479,258 @@ async def student(enrollment_id: str, request: Request):
         "item": await _student_by_id(enrollment_id),
         "curators": [{"value": key, "name": CURATOR_NAMES[key], "offer_id": value} for key, value in CURATOR_OFFERS.items()],
     }
+
+
+@router.get("/students/{enrollment_id}/external")
+async def student_external(enrollment_id: str, request: Request):
+    await _require_operator(request)
+    return {"item": await _student_by_id(enrollment_id, resolve_external=True)}
+
+
+@router.get("/refunds")
+async def refunds(request: Request, q: str = "", offset: int = 0, limit: int = 100):
+    await _require_operator(request)
+    query = _norm(q)
+    flows = {(row["course_key"], row["stream"]): row for row in await _flow_rows()}
+    items: list[dict[str, Any]] = []
+    for stored in await _refund_enrollment_rows():
+        try:
+            source = json.loads(stored.get("source_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = {}
+        if not isinstance(source, dict):
+            source = {}
+        flow = flows.get((stored["course_key"], stored["stream"])) or {
+            "course_key": stored["course_key"], "course": stored["course"], "stream": stored["stream"],
+            "teacher": stored["teacher"], "teacher_code": stored["teacher_code"],
+        }
+        item = _student_result(
+            {**flow, "curator_value": stored["teacher_code"] or flow.get("teacher_code")},
+            {
+                **source, **stored, "enrollment_id": stored["id"],
+                "phone": _clean(source.get("phone") or source.get("user_phone"), 100),
+                "course_assignments": source.get("course_assignments") or [],
+            },
+        )
+        refund = source.get("refund") if isinstance(source.get("refund"), dict) else {}
+        item["refunded"] = True
+        item["refunded_at"] = _clean(refund.get("received_at"), 100)
+        item["total_amount"] = float(refund.get("total_amount") or item.get("total_amount") or 0)
+        item["remaining_amount"] = float(refund.get("remaining_amount") or item.get("remaining_amount") or 0)
+        item["refund_amount"] = float(refund.get("refund_amount") or item.get("refund_amount") or 0)
+        haystack = _norm(" ".join(_clean(item.get(key), 500) for key in (
+            "name", "email", "phone", "gc_user_id", "order_id", "deal_number",
+        )))
+        if not query or query in haystack:
+            items.append(item)
+    start = max(0, min(100000, int(offset)))
+    page_size = max(1, min(250, int(limit)))
+    page = items[start:start + page_size]
+    enrichment, _, _ = await asyncio.gather(
+        _enrich_student_page(page),
+        _enrich_student_notes(page),
+        _enrich_student_financials(page),
+    )
+    return {
+        "items": page,
+        "total": len(items),
+        "offset": start,
+        "limit": page_size,
+        "enrichment_pending": enrichment["pending"],
+        "enrichment_incomplete": enrichment["incomplete"],
+    }
+
+
+async def _refund_chat_identities(item: dict[str, Any]) -> dict[str, str]:
+    await _enrich_order_identities([item])
+    messenger = _module("messenger-widget", "service_transfer_recipients")
+    resolved = await messenger.service_transfer_recipients(
+        email=_clean(item.get("email"), 320),
+        gc_user_id=_clean(item.get("gc_user_id"), 100),
+        phone=_clean(item.get("phone"), 100),
+        name=_clean(item.get("name"), 300),
+    )
+    identities = {
+        "vk": _clean(resolved.get("vk"), 30),
+        "telegram": _clean(resolved.get("telegram"), 30),
+    }
+    return {
+        platform: value for platform, value in identities.items()
+        if value.isdigit() and int(value) > 0
+    }
+
+
+@router.get("/students/{enrollment_id}/chat-removal")
+async def preview_refund_chat_removal(enrollment_id: str, request: Request):
+    await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-chat-removal-preview", limit=10, window_seconds=120)
+    item = await _student_by_id(enrollment_id)
+    if not item.get("refunded"):
+        raise HTTPException(409, "Кнопка доступна только для полного возврата")
+    identities = await _refund_chat_identities(item)
+    if not identities:
+        raise HTTPException(409, "Не найден точный числовой ID VK или Telegram. Удаление не запущено")
+    moderator = _module("chat-moderators", "service_refund_chat_membership")
+    platforms = await asyncio.gather(*(
+        moderator.service_refund_chat_membership(platform=platform, user_id=user_id, dry_run=True)
+        for platform, user_id in identities.items()
+    ), return_exceptions=True)
+    results: dict[str, Any] = {}
+    for (platform, _user_id), result in zip(identities.items(), platforms):
+        if isinstance(result, Exception):
+            results[platform] = {"ok": False, "error": str(result), "found": [], "admin_skipped": []}
+        else:
+            results[platform] = result
+    preview_id = secrets.token_urlsafe(32)
+    await _meta_set(f"refund_removal_preview:{preview_id}", json.dumps({
+        "enrollment_id": item["enrollment_id"], "created_at": _now(),
+        "identities": identities, "results": results,
+    }, ensure_ascii=False))
+    return {
+        "ok": True, "preview_id": preview_id, "identities": identities,
+        "platforms": results,
+        "found": sum(len(value.get("found") or []) for value in results.values()),
+        "admin_skipped": sum(len(value.get("admin_skipped") or []) for value in results.values()),
+    }
+
+
+@router.post("/students/{enrollment_id}/chat-removal")
+async def apply_refund_chat_removal(enrollment_id: str, data: ChatRemovalIn, request: Request):
+    operator = await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-chat-removal-apply", limit=5, window_seconds=300)
+    raw = await _meta_get(f"refund_removal_preview:{data.preview_id}")
+    try:
+        preview = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        preview = {}
+    if _clean(preview.get("enrollment_id"), 100) != _clean(enrollment_id, 100):
+        raise HTTPException(409, "Проверка устарела. Нажмите кнопку ещё раз")
+    try:
+        created_at = datetime.fromisoformat(_clean(preview.get("created_at"), 100).replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    except (TypeError, ValueError):
+        age_seconds = 9999
+    if age_seconds > 600:
+        raise HTTPException(409, "Проверка старше 10 минут. Нажмите кнопку ещё раз")
+    item = await _student_by_id(enrollment_id)
+    if not item.get("refunded"):
+        raise HTTPException(409, "Возврат уже не полный. Удаление отменено")
+    identities = await _refund_chat_identities(item)
+    expected = {str(key): str(value) for key, value in (preview.get("identities") or {}).items()}
+    if identities != expected:
+        raise HTTPException(409, "Связанные ID клиента изменились. Удаление отменено; проверьте карточку")
+    moderator = _module("chat-moderators", "service_refund_chat_membership")
+    applied = await asyncio.gather(*(
+        moderator.service_refund_chat_membership(platform=platform, user_id=user_id, dry_run=False)
+        for platform, user_id in identities.items()
+    ), return_exceptions=True)
+    results: dict[str, Any] = {}
+    for (platform, _user_id), result in zip(identities.items(), applied):
+        results[platform] = ({"ok": False, "error": str(result), "removed": []}
+                             if isinstance(result, Exception) else result)
+    await _meta_set(f"refund_removal_preview:{data.preview_id}", "")
+    removed = sum(len(value.get("removed") or []) for value in results.values())
+    errors = [value.get("error") for value in results.values() if value.get("error")]
+    if _logger:
+        _logger.info(
+            "refund chat removal enrollment_id=%s operator=%s identities=%s removed=%s",
+            enrollment_id, _clean(operator.get("display_name") or operator.get("login"), 200),
+            identities, removed,
+        )
+    return {"ok": not errors, "removed": removed, "platforms": results, "errors": errors}
+
+
+@router.post("/students/{enrollment_id}/refund-status")
+async def change_refund_status(
+    enrollment_id: str, data: RefundStatusIn, request: Request,
+):
+    operator = await _require_operator(request)
+    enforce_rate_limit(request, "student-transfer-refund-status", limit=20, window_seconds=120)
+    clean_id = _clean(enrollment_id, 100)
+    now = _now()
+    operator_id = int(operator.get("id") or 0)
+    operator_name = _clean(operator.get("display_name") or operator.get("login"), 200) or "Streams"
+    reason = data.reason.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip()
+    async with _connect(timeout=5) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT * FROM enrollments WHERE id=? AND status<>'removed' LIMIT 1",
+                (clean_id,),
+            )
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Ученик не найден")
+        stored = dict(row)
+        current_refunded = stored.get("status") == "refunded"
+        if current_refunded != bool(data.expected_refunded):
+            raise HTTPException(409, "Статус уже изменился. Обновите карточку")
+        if current_refunded == bool(data.refunded):
+            raise HTTPException(409, "Такой статус уже установлен")
+        target_override = "refunded" if data.refunded else "active"
+        target_status = "refunded" if data.refunded else (
+            "assigned" if _clean(stored.get("stream"), 50) else "pending"
+        )
+        await db.execute(
+            """INSERT INTO enrollment_status_overrides(
+                   enrollment_id,target_status,previous_status,reason,
+                   operator_id,operator_name,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                clean_id, target_override, _clean(stored.get("status"), 30), reason,
+                operator_id, operator_name, now,
+            ),
+        )
+        await db.execute(
+            "UPDATE enrollments SET status=?,updated_at=? WHERE id=?",
+            (target_status, now, clean_id),
+        )
+        try:
+            source = json.loads(stored.get("source_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = {}
+        if not isinstance(source, dict):
+            source = {}
+        operation_id = uuid.uuid4().hex
+        preview = {
+            "action": "refund_status_change",
+            "source": {
+                "course_key": _clean(stored.get("course_key"), 50),
+                "stream": _clean(stored.get("stream"), 50),
+                "row": int(source.get("row") or 0),
+                "email": _clean(stored.get("email"), 320),
+                "refunded": current_refunded,
+            },
+            "target": {"refunded": bool(data.refunded)},
+            "reason": reason,
+        }
+        await db.execute(
+            """INSERT INTO transfers(
+                   id,enrollment_id,status,email,gc_user_id,student_name,
+                   source_course_key,source_stream,source_row,target_course_key,target_stream,
+                   curator,offer_id,operator_id,operator_name,student_json,steps_json,
+                   error,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                operation_id, clean_id, "completed", _clean(stored.get("email"), 320),
+                _clean(stored.get("gc_user_id"), 100), _clean(stored.get("name"), 300),
+                _clean(stored.get("course_key"), 50), _clean(stored.get("stream"), 50),
+                int(source.get("row") or 0), _clean(stored.get("course_key"), 50),
+                _clean(stored.get("stream"), 50), _clean(stored.get("teacher_code"), 100),
+                0, operator_id, operator_name, json.dumps({**source, **stored}, ensure_ascii=False),
+                json.dumps({"preview": preview, "refund_status": {"ok": True}}, ensure_ascii=False),
+                "", now, now,
+            ),
+        )
+        await db.commit()
+    _clear_snapshot_cache()
+    _clear_student_enrichment_cache()
+    if _logger:
+        _logger.info(
+            "manual refund status enrollment_id=%s refunded=%s operator=%s",
+            clean_id, bool(data.refunded), operator_name,
+        )
+    return {"ok": True, "operation_id": operation_id, "item": await _student_by_id(clean_id)}
 
 
 @router.put("/students/{enrollment_id}/note")
@@ -4533,7 +6755,9 @@ async def save_student_note(enrollment_id: str, data: StudentNoteIn, request: Re
 
 
 @router.get("/students/{enrollment_id}/messenger")
-async def student_messenger(enrollment_id: str, request: Request):
+async def student_messenger(
+    enrollment_id: str, request: Request, history: str = "1", channel_id: str = "",
+):
     operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-messenger-read", limit=60, window_seconds=120)
     item = await _student_by_id(enrollment_id)
@@ -4544,6 +6768,8 @@ async def student_messenger(enrollment_id: str, request: Request):
         name=item.get("name") or "",
         phone=item.get("phone") or "",
         operator_name=operator.get("display_name") or operator.get("login") or "",
+        include_history=history != "0",
+        history_channel_id=_clean(channel_id, 200),
     )
 
 
@@ -4552,24 +6778,15 @@ async def student_messenger_send(enrollment_id: str, data: MessengerSendIn, requ
     operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-messenger-send", limit=60, window_seconds=300)
     item = await _student_by_id(enrollment_id)
-    messenger = _module("messenger-widget", "service_streams_send")
-    try:
-        return await messenger.service_streams_send(
-            channel_id=data.channel_id,
-            transport=data.transport,
-            provider=data.provider,
-            chat_id=data.chat_id,
-            phone=item.get("phone") or "",
-            text=data.text,
-            operator_name=operator.get("display_name") or operator.get("login") or "",
-            email=item.get("email") or "",
-            gc_user_id=item.get("gc_user_id") or "",
-            name=item.get("name") or "",
-            attachment_url=data.attachment_url,
-            attachment_type=data.attachment_type,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    if not data.text.strip() and not data.attachment_url.strip():
+        raise HTTPException(400, "Введите сообщение или добавьте вложение")
+    if data.attachment_url and not data.attachment_url.startswith("https://"):
+        raise HTTPException(400, "Вложение должно иметь HTTPS-ссылку")
+    return await _queue_card_command(
+        student=item, action="messenger_send", operator=operator,
+        request_id=data.request_id or uuid.uuid4().hex,
+        payload=data.model_dump(exclude={"request_id"}),
+    )
 
 
 @router.post("/students/{enrollment_id}/messenger/template-preview")
@@ -4612,7 +6829,7 @@ async def student_messenger_template_favorite(
 async def student_chat_delivery(enrollment_id: str, request: Request):
     await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-chat-delivery-read", limit=30, window_seconds=120)
-    result = await _chat_delivery_view(await _student_by_id(enrollment_id))
+    result = await _chat_delivery_view(await _student_by_id(enrollment_id), resolve_target=False)
     result.pop("recipient_id", None)
     result.pop("content", None)
     return result
@@ -4620,27 +6837,25 @@ async def student_chat_delivery(enrollment_id: str, request: Request):
 
 @router.post("/students/{enrollment_id}/chat-delivery")
 async def send_student_chats(enrollment_id: str, request: Request):
-    await _require_operator(request)
+    operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-chat-delivery-send", limit=4, window_seconds=300)
-    async with _chat_delivery_lock:
-        delivery = await _chat_delivery_view(await _student_by_id(enrollment_id))
-        if not delivery.get("can_send"):
-            raise HTTPException(409, delivery.get("reason") or "Доставка недоступна")
-        messenger = _module("messenger-widget", "service_send_transfer_message")
-        result = await messenger.service_send_transfer_message(
-            provider=delivery["provider"], recipient_id=delivery["recipient_id"],
-            content=delivery["content"], operation_id=uuid.uuid4().hex,
-        )
-        if not result.get("ok"):
-            raise HTTPException(502, result.get("error") or "Сообщение не отправлено")
-    return {"ok": True, "status": "sent", "channel": delivery["channel"]}
+    item = await _student_by_id(enrollment_id)
+    return await _queue_card_command(
+        student=item, action="chat_delivery", operator=operator,
+        request_id=f"chats:{item['enrollment_id']}:{int(time.time() // 30)}",
+    )
 
 
 @router.get("/students/{enrollment_id}/access")
 async def student_access(enrollment_id: str, request: Request, live: str = "0"):
     await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-access-read", limit=40, window_seconds=120)
-    return await _student_access_view(enrollment_id, live=live == "1")
+    # A UI refresh is a command to the background worker, never a browser-held
+    # GetCourse request. Return the usable cached view immediately with ETA.
+    current = await _student_access_view(enrollment_id, live=False)
+    if live == "1":
+        current = await _queue_access_refresh(enrollment_id, current)
+    return current
 
 
 TESTDRIVE_PAGE_ORIGIN = "https://club.sobakovod.pro"
@@ -5079,72 +7294,29 @@ async def apply_student_access(enrollment_id: str, data: AccessApplyIn, request:
 
 @router.post("/students/{enrollment_id}/sheet-row")
 async def ensure_student_sheet_row(enrollment_id: str, request: Request):
-    await _require_operator(request)
+    operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-sheet-row", limit=20, window_seconds=120)
-    student = await _student_by_id(enrollment_id)
-    student["tg_account"] = await _resolve_student_profile_link(student)
-    fields = _module("getcourse-chat-fields", "service_registry_ensure_student")
-    try:
-        result = await fields.service_registry_ensure_student(
-            course_key=student["course_key"],
-            stream=student["stream"],
-            student=student,
-        )
-    except Exception as exc:
-        raise HTTPException(409, _clean(exc, 1000)) from exc
-    lesson_columns = result.get("lesson_columns") or []
-    await _bind_sheet_row(enrollment_id, int(result.get("row") or 0), lesson_columns)
-    return {
-        "ok": True,
-        "status": result.get("status"),
-        "row": int(result.get("row") or 0),
-        "sheet_title": _clean(result.get("sheet_title"), 300),
-        "lessons": [
-            {"key": _clean(item.get("key"), 5), "label": _clean(item.get("label"), 200), "value": False}
-            for item in lesson_columns
-        ],
-    }
+    student = await _widget_student_base(enrollment_id)
+    result = await _queue_sheet_operation(
+        student=student,
+        action="sheet_row",
+        operator_id=int(operator["id"]),
+        operator_name=operator["display_name"] or operator["login"],
+    )
+    return {**result, "row": int(student.get("row") or 0), "message": "Добавление в таблицу принято"}
 
 
 @router.put("/students/{enrollment_id}/lessons/{lesson_key}")
 async def update_lesson(enrollment_id: str, lesson_key: str, data: LessonUpdateIn, request: Request):
-    await _require_operator(request)
+    operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-lesson", limit=120, window_seconds=120)
-    student = await _student_by_id(enrollment_id)
-    if not int(student.get("row") or 0):
-        raise HTTPException(409, "Ученик ещё не добавлен в таблицу")
-    lesson = next(
-        (item for item in student.get("lessons") or [] if _clean(item.get("key"), 5).upper() == _clean(lesson_key, 5).upper()),
-        None,
+    return await _queue_lesson_update(
+        enrollment_id=enrollment_id,
+        lesson_key=lesson_key,
+        data=data,
+        operator_id=int(operator["id"]),
+        operator_name=operator["display_name"] or operator["login"],
     )
-    if not lesson:
-        raise HTTPException(404, "Отметка не найдена")
-    fields = _module("getcourse-chat-fields", "service_registry_write_lesson")
-    try:
-        result = await fields.service_registry_write_lesson(
-            course_key=student["course_key"], stream=student["stream"], email=student["email"],
-            source_row=int(student["row"]), lesson_key=_clean(lesson_key, 5).upper(),
-            value=data.value, expected_value=data.expected_value,
-        )
-    except Exception as exc:
-        raise HTTPException(409, _clean(exc, 1000)) from exc
-    now = _now()
-    numeric = 1 if result.get("value") else 0
-    async with _connect() as db:
-        await db.execute(
-            """
-            INSERT INTO lesson_progress(enrollment_id,lesson_key,label,value,sheet_value,dirty,updated_at)
-            VALUES(?,?,?,?,?,0,?)
-            ON CONFLICT(enrollment_id,lesson_key) DO UPDATE SET
-                value=excluded.value,sheet_value=excluded.sheet_value,dirty=0,updated_at=excluded.updated_at
-            """,
-            (enrollment_id, _clean(lesson_key, 5).upper(), _clean(lesson.get("label"), 200), numeric, numeric, now),
-        )
-        await db.commit()
-    _clear_snapshot_cache()
-    if int(result.get("row") or 0) != int(student["row"]):
-        await _bind_sheet_row(enrollment_id, int(result.get("row") or 0), [])
-    return {"ok": True, "value": bool(numeric), "row": int(result.get("row") or student["row"])}
 
 
 @router.get("/flow-setup")
@@ -5299,6 +7471,28 @@ async def complete_flow_job(job_id: str, data: FlowManualCompleteIn, request: Re
         return {"ok": True, "status": "completed", "message": "Поток успешно создан"}
     if job["status"] not in {"attention", "warning"}:
         raise HTTPException(409, "Сначала дождитесь создания чатов")
+    result = _load_steps(job.get("result_json") or "{}")
+    sheet_result = result.get("sheet") if isinstance(result.get("sheet"), dict) else {}
+    fields = _module("getcourse-chat-fields", "service_registry_flow_sheet_status")
+    sheet_status = await fields.service_registry_flow_sheet_status(
+        course_key=job["course_key"],
+        stream=job["stream"],
+        date_start=job["date_start"],
+        expected_sheet_id=int(sheet_result.get("sheet_id") or 0),
+    )
+    if not sheet_status.get("ok"):
+        stages = result.get("stages") if isinstance(result.get("stages"), dict) else {}
+        stages["sheet"] = "failed"
+        result["stages"] = stages
+        result["sheet"] = {**sheet_result, **sheet_status, "verified": False}
+        error = _clean(sheet_status.get("error") or "Лист потока не прошёл проверку", 2000)
+        async with _connect() as db:
+            await db.execute(
+                "UPDATE flow_jobs SET status='attention',result_json=?,error=?,updated_at=? WHERE id=?",
+                (json.dumps(result, ensure_ascii=False), error, _now(), job["id"]),
+            )
+            await db.commit()
+        raise HTTPException(409, error)
     creator = _module("course-chat-creator", "service_set_manual_vk_link")
     try:
         saved = await creator.service_set_manual_vk_link(
@@ -5306,7 +7500,6 @@ async def complete_flow_job(job_id: str, data: FlowManualCompleteIn, request: Re
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    result = _load_steps(job.get("result_json") or "{}")
     create_result = result.get("create") if isinstance(result.get("create"), dict) else {}
     setup = _module("course-chat-creator", "service_flow_setup")
     setup_data = await asyncio.to_thread(setup.service_flow_setup)
@@ -5316,7 +7509,6 @@ async def complete_flow_job(job_id: str, data: FlowManualCompleteIn, request: Re
     )
     persisted = await _persist_created_flow(job, teacher, create_result, final_vk_link=link, ready=True)
     _clear_snapshot_cache()
-    _schedule_registry_sync()
     sync_result = {"ok": True, "status": "scheduled"}
     result["manual"] = {
         "required": False, "opened_as_community": True, "history_250_enabled": True,
@@ -5339,6 +7531,7 @@ async def complete_flow_job(job_id: str, data: FlowManualCompleteIn, request: Re
             (status, json.dumps(result, ensure_ascii=False), error, _now(), job["id"]),
         )
         await db.commit()
+    _schedule_registry_sync()
     return {
         "ok": True,
         "status": status,
@@ -5528,24 +7721,27 @@ async def sync_status(request: Request):
 @router.post("/sync")
 async def run_sync(request: Request):
     await _require_operator(request)
-    result = await _sync_registry(force=True)
-    if not result.get("ok"):
-        detail = "Google занят. Обновление продолжится автоматически" if "429" in str(result.get("error")) or result.get("status") == "deferred" else "Обновление не выполнено"
-        raise HTTPException(503, detail)
-    return result
+    _schedule_registry_sync()
+    return {
+        "ok": True,
+        "accepted": True,
+        "status": "queued",
+        "scheduled_at": _sheet_operation_time(300),
+        "message": "Синхронизация принята",
+    }
 
 
 @router.post("/preview")
 async def preview(data: TransferRef, request: Request):
     await _require_operator(request)
-    return await _preview(data)
+    return await _remember_transfer_preview(data, await _preview(data))
 
 
 @router.post("/transfers")
 async def create_transfer(data: TransferRef, request: Request):
     operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-transfer-create", limit=15, window_seconds=120)
-    preview_data = await _preview(data)
+    preview_data = await _saved_transfer_preview(data)
     if not preview_data["can_transfer"]:
         raise HTTPException(409, "; ".join(preview_data["blockers"]))
     return await _queue_operation(preview_data, operator)
@@ -5561,7 +7757,9 @@ async def curator_preview(data: CuratorChangeRef, request: Request):
 async def create_curator_change(data: CuratorChangeRef, request: Request):
     operator = await _require_operator(request)
     enforce_rate_limit(request, "student-transfer-curator-change", limit=15, window_seconds=120)
-    preview_data = await _preview_curator_change(data, refresh=True)
+    # Queue from the current registry snapshot. The durable worker performs
+    # provider writes and validates the actual assignment before committing.
+    preview_data = await _preview_curator_change(data, refresh=False)
     if not preview_data["can_change"]:
         raise HTTPException(409, "; ".join(preview_data["blockers"]))
     return await _queue_operation(preview_data, operator)
@@ -5614,7 +7812,14 @@ async def retry_transfer(transfer_id: str, request: Request):
     await _require_operator(request)
     async with _connect() as db:
         cur = await db.execute(
-            "UPDATE transfers SET status='queued',error='',updated_at=? WHERE id=? AND status IN ('failed','warning','needs_delivery')",
+            """
+            UPDATE transfers SET status='queued',error='',updated_at=?
+            WHERE id=? AND status IN ('failed','warning','needs_delivery')
+              AND NOT (
+                status='warning'
+                AND json_extract(steps_json,'$.preview.action')='lesson_update'
+              )
+            """,
             (_now(), _clean(transfer_id, 64)),
         )
         await db.commit()

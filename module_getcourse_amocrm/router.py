@@ -8,8 +8,9 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -29,11 +30,32 @@ _module_dir: Path | None = None
 _logger: logging.Logger | None = None
 _field_cache: dict[str, list[dict[str, Any]]] = {}
 _sync_task: asyncio.Task | None = None
+_contact_email_backfill_task: asyncio.Task | None = None
 _sync_lock = asyncio.Lock()
+_user_email_sync_lock = asyncio.Lock()
+_user_email_amo_lock = asyncio.Lock()
+_user_email_amo_last_request = 0.0
+_user_email_source_lock = asyncio.Lock()
+_user_email_source_cache_token: tuple[tuple[int, int], tuple[int, int]] | None = None
+_user_email_source_cache: dict[str, set[str]] = {}
+_profile_order_note_sync_lock = asyncio.Lock()
 _order_process_lock = asyncio.Lock()
 
 MODULE_ID = "getcourse-amocrm"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+GC_PROFILE_LINK_FIELD = "Пользователь в ГК"
+GC_ORDER_FIELD_NAMES = (
+    "№ ГК",
+    "ГК ID Заказа",
+    "Дата создания",
+    "Пользователь в ГК",
+    "Ссылка на оплату",
+    "Заказ в ГК",
+    "Название тарифа",
+    "Оплачено",
+    "Осталось оплатить",
+    "Стоимость тарифа",
+)
 LEGACY_DEFAULT_NOTE_TEMPLATE = (
     "ГЕТКУРС ЗАКАЗ №{payment_number}\n"
     "Название тарифа {positions}\n"
@@ -82,12 +104,41 @@ DEFAULT_SETTINGS = {
     "note_template": DEFAULT_NOTE_TEMPLATE,
     "budget_source": "paid",
     "minicourse_curator_mediums": "irina\nslava\nnastasia",
+    "utm_inheritance_enabled": "1",
+    "utm_inheritance_days": "45",
+    "utm_inheritance_min_fields": "3",
+    "cdb_user_email_sync_enabled": "0",
+    "cdb_user_email_sync_batch": "10",
+    "cdb_user_email_retry_minutes": "60",
+    "cdb_user_email_scan_after_id": "0",
+    "cdb_profile_order_scan_after_id": "0",
+    "cdb_contact_email_backfill_pending": "1",
+    "cdb_contact_email_backfill_status": "pending",
+    "cdb_contact_email_backfill_result": "{}",
+    "cdb_contact_email_backfill_cursor": "0",
 }
 MAX_MANUAL_SYNC_LIMIT = 10
+MAX_USER_EMAIL_SYNC_LIMIT = 100
+CDB_AMO_IGNORED_PAYMENT_STATES = {"refunded", "partial_refund", "canceled"}
+CDB_AMO_PROCESSABLE_PAYMENT_STATES = {
+    "", "created", "unpaid", "new", "partial", "partially_paid", "paid",
+}
+ORDER_EMAIL_TERMINAL_STATUS_BY_RESULT = {
+    "updated": "email_updated",
+    "already_present": "email_already_present",
+    "email_filled_before_update": "email_filled_before_update",
+    "email_conflict": "email_conflict",
+    "source_conflict": "email_source_conflict",
+    "invalid_source": "email_invalid_source",
+}
+ORDER_EMAIL_RESULT_STATUS_BY_STATE = {
+    state: result for result, state in ORDER_EMAIL_TERMINAL_STATUS_BY_RESULT.items()
+}
 
 MINICOURSE_PIPELINE_ID = "8493006"
 MINICOURSE_PAID_STATUS_ID = "69046790"
 MINICOURSE_RESPONSIBLE_USER_ID = "6269974"
+SURCHARGE_PREMIUM_OFFER_IDS = {"5858685", "8623911"}
 
 DEFAULT_BINDINGS = [
     {
@@ -178,33 +229,60 @@ async def _require_panel_user(request: Request) -> dict:
     return user
 
 
-def setup(ctx):
-    global _db_path, _module_dir, _logger, _sync_task
+async def setup(ctx):
+    global _db_path, _module_dir, _logger, _sync_task, _contact_email_backfill_task
     _db_path = Path(ctx.db_path)
     _module_dir = Path(ctx.module_dir)
     _logger = getattr(ctx, "logger", logging.getLogger("nexus.mod.getcourse-amocrm"))
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        loop.create_task(_init_db())
-        if _sync_task is None or _sync_task.done():
-            _sync_task = loop.create_task(_customer_db_sync_loop())
-    else:
-        loop.run_until_complete(_init_db())
+    await _init_db()
+    if _sync_task is None or _sync_task.done():
+        lifecycle = getattr(ctx, "lifecycle", None)
+        if lifecycle is not None:
+            _sync_task = lifecycle.create_task(
+                _customer_db_sync_loop(), name="getcourse-amocrm-customer-db-sync",
+            )
+        else:
+            _sync_task = asyncio.create_task(
+                _customer_db_sync_loop(), name="getcourse-amocrm-customer-db-sync",
+            )
+    if _contact_email_backfill_task is None or _contact_email_backfill_task.done():
+        lifecycle = getattr(ctx, "lifecycle", None)
+        if lifecycle is not None:
+            _contact_email_backfill_task = lifecycle.create_task(
+                _contact_email_backfill_loop(), name="getcourse-amocrm-contact-email-backfill",
+            )
+        else:
+            _contact_email_backfill_task = asyncio.create_task(
+                _contact_email_backfill_loop(), name="getcourse-amocrm-contact-email-backfill",
+            )
 
 
 async def shutdown() -> None:
-    global _sync_task
-    task, _sync_task = _sync_task, None
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    global _sync_task, _contact_email_backfill_task
+    tasks = [task for task in (_sync_task, _contact_email_backfill_task) if task]
+    _sync_task = None
+    _contact_email_backfill_task = None
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    for task in tasks:
+        if not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+def _connect() -> aiosqlite.Connection:
+    """Open the module database with the same bounded busy policy everywhere."""
+
+    return aiosqlite.connect(_db_path, timeout=30)  # type: ignore[arg-type]
 
 
 async def _init_db() -> None:
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with aiosqlite.connect(_db_path, timeout=30) as db:  # type: ignore[arg-type]
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -242,6 +320,51 @@ async def _init_db() -> None:
                 error TEXT NOT NULL DEFAULT '',
                 last_synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
+            CREATE TABLE IF NOT EXISTS cdb_user_email_sync (
+                source_record_id INTEGER PRIMARY KEY,
+                source_updated_at TEXT NOT NULL DEFAULT '',
+                source_hash TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                lead_id TEXT NOT NULL DEFAULT '',
+                contact_id TEXT NOT NULL DEFAULT '',
+                success INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                last_synced_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_cdb_user_email_retry
+                ON cdb_user_email_sync(success,next_retry_at);
+            CREATE TABLE IF NOT EXISTS gc_profile_bindings (
+                source_record_id INTEGER PRIMARY KEY,
+                gc_user_id TEXT NOT NULL UNIQUE,
+                source_hash TEXT NOT NULL DEFAULT '',
+                utm_term TEXT NOT NULL DEFAULT '',
+                match_kind TEXT NOT NULL DEFAULT '',
+                match_value TEXT NOT NULL DEFAULT '',
+                lead_id TEXT NOT NULL DEFAULT '',
+                contact_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                success INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_gc_profile_bindings_target
+                ON gc_profile_bindings(success,lead_id,contact_id);
+            CREATE TABLE IF NOT EXISTS gc_profile_order_notes (
+                source_record_id INTEGER PRIMARY KEY,
+                source_hash TEXT NOT NULL DEFAULT '',
+                gc_user_id TEXT NOT NULL DEFAULT '',
+                lead_id TEXT NOT NULL DEFAULT '',
+                note_hash TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                success INTEGER NOT NULL DEFAULT 0,
+                fields_synced INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_gc_profile_order_notes_retry
+                ON gc_profile_order_notes(success,source_record_id);
             CREATE TABLE IF NOT EXISTS round_robin_cursors (
                 pool_key TEXT PRIMARY KEY,
                 cursor INTEGER NOT NULL DEFAULT 0,
@@ -269,6 +392,8 @@ async def _init_db() -> None:
             """
         )
         await _ensure_binding_columns(db)
+        await _ensure_gc_profile_binding_columns(db)
+        await _ensure_gc_profile_order_note_columns(db)
         for key, value in DEFAULT_SETTINGS.items():
             await db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
         await db.execute(
@@ -378,6 +503,35 @@ async def _ensure_binding_columns(db: aiosqlite.Connection) -> None:
         """,
         (json.dumps(DEFAULT_MOVABLE_STATUS_IDS, ensure_ascii=False),),
     )
+
+
+async def _ensure_gc_profile_binding_columns(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(gc_profile_bindings)")
+    columns = {str(row[1]) for row in await cur.fetchall()}
+    if "match_kind" not in columns:
+        await db.execute(
+            "ALTER TABLE gc_profile_bindings ADD COLUMN match_kind TEXT NOT NULL DEFAULT ''"
+        )
+    if "match_value" not in columns:
+        await db.execute(
+            "ALTER TABLE gc_profile_bindings ADD COLUMN match_value TEXT NOT NULL DEFAULT ''"
+        )
+    await db.execute(
+        """
+        UPDATE gc_profile_bindings
+        SET match_kind='utm_term',match_value=utm_term
+        WHERE success=1 AND match_kind='' AND utm_term!=''
+        """
+    )
+
+
+async def _ensure_gc_profile_order_note_columns(db: aiosqlite.Connection) -> None:
+    cur = await db.execute("PRAGMA table_info(gc_profile_order_notes)")
+    columns = {str(row[1]) for row in await cur.fetchall()}
+    if "fields_synced" not in columns:
+        await db.execute(
+            "ALTER TABLE gc_profile_order_notes ADD COLUMN fields_synced INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _log(level: str, message: str, *args: Any) -> None:
@@ -504,7 +658,7 @@ async def _advance_responsible_cursor(settings: dict[str, str], binding: dict[st
 
 async def _settings_map() -> dict[str, str]:
     data = dict(DEFAULT_SETTINGS)
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _connect() as db:
         cur = await db.execute("SELECT key,value FROM settings")
         rows = await cur.fetchall()
     data.update({str(row[0]): str(row[1] or "") for row in rows})
@@ -531,6 +685,8 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
         "note_template",
         "budget_source",
         "minicourse_curator_mediums",
+        "utm_inheritance_enabled", "utm_inheritance_days", "utm_inheritance_min_fields",
+        "cdb_user_email_sync_enabled", "cdb_user_email_sync_batch", "cdb_user_email_retry_minutes",
     }
     clean: dict[str, str] = {}
     for key in allowed:
@@ -554,7 +710,7 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
             value = str(int(_timeout({"request_timeout": value})))
         elif key == "duplicate_policy":
             value = "create" if value == "create" else "update"
-        elif key == "cdb_sync_enabled":
+        elif key in {"cdb_sync_enabled", "utm_inheritance_enabled", "cdb_user_email_sync_enabled"}:
             value = "1" if str(value).lower() in {"1", "true", "yes", "on", "да"} else "0"
         elif key == "cdb_poll_seconds":
             try:
@@ -565,6 +721,14 @@ async def _save_settings(data: dict[str, Any]) -> dict[str, Any]:
             value = value.rstrip("/") or DEFAULT_SETTINGS[key]
         elif key == "budget_source":
             value = value if value in {"paid", "cost", "none"} else "paid"
+        elif key == "utm_inheritance_days":
+            value = str(max(1, min(180, int(float(value or 45)))))
+        elif key == "utm_inheritance_min_fields":
+            value = str(max(2, min(5, int(float(value or 3)))))
+        elif key == "cdb_user_email_sync_batch":
+            value = str(max(1, min(50, int(float(value or 10)))))
+        elif key == "cdb_user_email_retry_minutes":
+            value = str(max(5, min(1440, int(float(value or 60)))))
         clean[key] = value
     async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
         for key, value in clean.items():
@@ -1051,7 +1215,16 @@ def _minicourse_match(order: dict[str, Any]) -> bool:
 
 
 def _surcharge_match(order: dict[str, Any]) -> bool:
-    return bool(re.search(r"(?iu)\bдоплат\w*\s+до(?:\s+тарифа)?\s+(?:vip|вип)\b", _clean(order.get("title"), 4000)))
+    if SURCHARGE_PREMIUM_OFFER_IDS.intersection(
+        {_clean(item, 100) for item in (order.get("offer_ids") or [])}
+    ):
+        return True
+    return bool(
+        re.search(
+            r"(?iu)\bдоплат\w*\s+до(?:\s+тарифа)?\s+(?:premium|премиум|vip|вип)\b",
+            _clean(order.get("title"), 4000),
+        )
+    )
 
 
 def _medium_fragments(settings: dict[str, str]) -> list[str]:
@@ -1084,6 +1257,10 @@ def _apply_attribution(order: dict[str, Any], settings: dict[str, str]) -> None:
     order_medium = _clean(order.get("order_utm_medium") or (order.get("order_utm") or {}).get("utm_medium"), 500)
     process = _binding_process(order.get("process"))
     selected = dict(profile)
+    # Business invariant for surcharge orders only: medium describes this
+    # exact transition, while the other UTM values stay tied to the user's
+    # original profile attribution.  Never erase markers such as
+    # ``perevodpismo`` with a later profile refresh.
     if process in {"surcharge_created", "surcharge_paid"}:
         selected["utm_medium"] = order_medium or profile.get("utm_medium", "")
     elif process == "minicourse_paid" and _medium_has_curator(order_medium, settings):
@@ -1096,6 +1273,147 @@ def _apply_attribution(order: dict[str, Any], settings: dict[str, str]) -> None:
         f"https://vk.com/gim225075265/convo/{quote(order['utm']['utm_term'])}"
         if order["utm"].get("utm_term") else ""
     )
+
+
+def _lead_utm(lead: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, field_name, code in UTM_SPECS:
+        values = _entity_rule_values(lead, {"field_code": code})
+        if not values:
+            values = _entity_rule_values(lead, {"field": field_name})
+        result[key] = _clean(values[0] if values else "", 500)
+    return result
+
+
+def _attribution_anchor(order: dict[str, Any]) -> datetime:
+    text = _clean(order.get("date_add"), 100)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=MOSCOW_TZ).astimezone(timezone.utc)
+    except ValueError:
+        pass
+    for pattern in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(text, pattern).replace(tzinfo=MOSCOW_TZ)
+            if pattern == "%d.%m.%Y":
+                parsed = parsed.replace(hour=23, minute=59, second=59)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return datetime.now(timezone.utc)
+
+
+async def _mapped_getcourse_lead_ids() -> set[str]:
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        rows = await (await db.execute("SELECT DISTINCT lead_id FROM order_map WHERE lead_id<>''")).fetchall()
+    return {_clean(row[0], 64) for row in rows if _clean(row[0], 64)}
+
+
+async def _attribution_alert(kind: str, message: str) -> None:
+    module = sys.modules.get("_nexus_mod_getcourse-onboarding")
+    sender = getattr(module, "service_system_alert", None) if module else None
+    if sender:
+        try:
+            await sender(kind=f"utm_{_clean(kind, 50)}", message=message)
+            return
+        except Exception as exc:
+            if _logger:
+                _logger.warning("UTM alert delivery failed: %s", exc)
+    if _logger:
+        _logger.warning("%s", message)
+
+
+async def _inherit_missing_attribution(order: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
+    current = dict(order.get("utm") or {})
+    missing = [key for key, _name, _code in UTM_SPECS if not _clean(current.get(key), 500)]
+    if settings.get("utm_inheritance_enabled", "1") != "1" or not missing:
+        return {"status": "not_needed", "filled": [], "source_lead_id": ""}
+    contact, error = await _find_contact_for_order(order, settings, with_leads=True)
+    if error:
+        return {"status": "lookup_error", "error": error, "filled": [], "source_lead_id": ""}
+    if not contact:
+        return {"status": "no_exact_contact", "filled": [], "source_lead_id": ""}
+    contact_id = _clean(contact.get("id"), 64)
+    linked_ids = [
+        _clean(item.get("id"), 64)
+        for item in (((contact.get("_embedded") or {}).get("leads")) or [])
+        if isinstance(item, dict) and _clean(item.get("id"), 64)
+    ]
+    if not linked_ids and contact_id:
+        links, links_error, _ = await _amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}/links?filter[to_entity_type]=leads", settings
+        )
+        if links_error:
+            return {"status": "lookup_error", "error": links_error, "filled": [], "source_lead_id": ""}
+        linked_ids = [
+            _clean(item.get("to_entity_id"), 64)
+            for item in (((links or {}).get("_embedded") or {}).get("links")) or []
+            if isinstance(item, dict) and _clean(item.get("to_entity_id"), 64)
+        ]
+    mapped = await _mapped_getcourse_lead_ids()
+    anchor = _attribution_anchor(order)
+    horizon = timedelta(days=max(1, min(180, int(settings.get("utm_inheritance_days") or 45))))
+    minimum = max(2, min(5, int(settings.get("utm_inheritance_min_fields") or 3)))
+    gc_pipelines = {str(settings.get("pipeline_id") or ""), MINICOURSE_PIPELINE_ID}
+    candidates: list[dict[str, Any]] = []
+    for lead_id in list(dict.fromkeys(linked_ids))[:100]:
+        if lead_id in mapped:
+            continue
+        lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+        if lead_error:
+            return {"status": "lookup_error", "error": lead_error, "filled": [], "source_lead_id": ""}
+        if not isinstance(lead, dict) or _clean(lead.get("pipeline_id"), 64) in gc_pipelines:
+            continue
+        created_at = int(lead.get("created_at") or 0)
+        created = datetime.fromtimestamp(created_at, timezone.utc) if created_at > 0 else anchor
+        if created > anchor or anchor - created > horizon:
+            continue
+        utm = _lead_utm(lead)
+        completeness = sum(bool(value) for value in utm.values())
+        if completeness >= minimum:
+            candidates.append({
+                "lead_id": lead_id, "created_at": created_at, "completeness": completeness,
+                "utm": utm, "pipeline_id": _clean(lead.get("pipeline_id"), 64),
+            })
+    if not candidates:
+        return {"status": "no_source", "filled": [], "source_lead_id": "", "contact_id": contact_id}
+    candidates.sort(key=lambda item: (item["created_at"], item["completeness"], int(item["lead_id"])), reverse=True)
+    best = candidates[0]
+    best_fingerprint = tuple(best["utm"].get(key, "") for key, _name, _code in UTM_SPECS)
+    close_conflicts = [
+        item for item in candidates[1:]
+        if abs(int(best["created_at"]) - int(item["created_at"])) <= 6 * 60 * 60
+        and tuple(item["utm"].get(key, "") for key, _name, _code in UTM_SPECS) != best_fingerprint
+    ]
+    if close_conflicts:
+        message = (
+            "⚠️ Nexus не стал наследовать UTM: найдено несколько близких источников\n"
+            f"Заказ GetCourse: {order.get('number') or order.get('order_id')}\n"
+            f"Контакт amoCRM: {contact_id}\nКандидаты: {best['lead_id']}, {close_conflicts[0]['lead_id']}"
+        )
+        await _attribution_alert("ambiguous", message)
+        return {
+            "status": "ambiguous", "filled": [], "source_lead_id": "", "contact_id": contact_id,
+            "candidate_lead_ids": [item["lead_id"] for item in candidates[:10]],
+        }
+    filled: list[str] = []
+    for key in missing:
+        value = _clean(best["utm"].get(key), 500)
+        if value:
+            current[key] = value
+            filled.append(key)
+    order["utm"] = current
+    order["vk_dialog"] = (
+        f"https://vk.com/gim225075265/convo/{quote(current['utm_term'])}" if current.get("utm_term") else ""
+    )
+    return {
+        "status": "inherited" if filled else "no_missing_values",
+        "filled": filled,
+        "source_lead_id": best["lead_id"],
+        "source_pipeline_id": best["pipeline_id"],
+        "contact_id": contact_id,
+        "preserved_order_values": [key for key, _name, _code in UTM_SPECS if key not in missing],
+    }
 
 
 def _person_for_lead(payload: dict[str, Any]) -> str:
@@ -1244,6 +1562,7 @@ def _normalize_order(payload: dict[str, Any], settings: dict[str, str]) -> dict[
         "profile_utm": profile_utm,
         "order_utm": order_utm,
         "order_utm_medium": order_utm["utm_medium"],
+        "offer_ids": sorted(set(re.findall(r"\b\d{5,}\b", _flatten_text(offers)))),
         "utm": dict(profile_utm),
         "yclid": yclid,
         "ym_uid": ym_uid,
@@ -1424,7 +1743,9 @@ def _contact_field_values(fields: list[dict[str, Any]], order: dict[str, Any]) -
     return values
 
 
-async def _find_contact_for_order(order: dict[str, Any], settings: dict[str, str]) -> tuple[dict[str, Any] | None, str]:
+async def _find_contact_for_order(
+    order: dict[str, Any], settings: dict[str, str], *, with_leads: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
     checks = [
         ("phone", _clean(order.get("phone"), 100), {"field_code": "PHONE"}),
         ("email", _clean(order.get("email"), 500), {"field_code": "EMAIL"}),
@@ -1432,7 +1753,10 @@ async def _find_contact_for_order(order: dict[str, Any], settings: dict[str, str
     for _kind, query, rule in checks:
         if not query:
             continue
-        body, error, _ = await _amo_request("GET", f"/api/v4/contacts?query={quote(query)}&limit=50", settings)
+        suffix = "&with=leads" if with_leads else ""
+        body, error, _ = await _amo_request(
+            "GET", f"/api/v4/contacts?query={quote(query)}&limit=50{suffix}", settings
+        )
         if error:
             return None, error
         for contact in (((body or {}).get("_embedded") or {}).get("contacts") or []):
@@ -1466,6 +1790,1697 @@ async def _fill_empty_contact_fields(
         return {"contact_id": str(contact_id), "updated": False}, ""
     body, error, _ = await _amo_request("PATCH", f"/api/v4/contacts/{contact_id}", settings, payload)
     return {"contact_id": str(contact_id), "updated": not bool(error), "response": body}, error
+
+
+def _valid_email(value: Any) -> str:
+    email = _clean(value, 320).casefold()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        return ""
+    return email
+
+
+def _strict_utm_term(value: Any) -> str:
+    """Normalize UTM only; deliberately never apply phone-like digit matching."""
+    return _clean(value, 1000)
+
+
+async def _user_email_amo_request(
+    method: str, path: str, settings: dict[str, str], payload: Any = None,
+) -> tuple[Any, str, int]:
+    """Keep this background integration safely below amoCRM's per-integration rate limit."""
+    global _user_email_amo_last_request
+    async with _user_email_amo_lock:
+        loop = asyncio.get_running_loop()
+        delay = 0.25 - (loop.time() - _user_email_amo_last_request)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        result = await _amo_request(method, path, settings, payload)
+        _user_email_amo_last_request = loop.time()
+        if result[2] == 429:
+            await asyncio.sleep(2)
+            result = await _amo_request(method, path, settings, payload)
+            _user_email_amo_last_request = loop.time()
+        return result
+
+
+def _lead_utm_term_match(lead: dict[str, Any], wanted: str) -> tuple[bool, str]:
+    system_values: set[str] = set()
+    text_values: set[str] = set()
+    for field in lead.get("custom_fields_values") or []:
+        if not isinstance(field, dict):
+            continue
+        values = {
+            _strict_utm_term(item.get("value"))
+            for item in (field.get("values") or [])
+            if isinstance(item, dict) and _strict_utm_term(item.get("value"))
+        }
+        code = _clean(field.get("field_code") or field.get("code"), 120).upper()
+        name = _clean(field.get("field_name") or field.get("name"), 300).casefold()
+        if code == "UTM_TERM":
+            system_values.update(values)
+        elif name == "utm_term":
+            text_values.update(values)
+    if system_values and text_values and system_values != text_values:
+        return False, "conflicting_utm_fields"
+    selected = system_values or text_values
+    return _strict_utm_term(wanted) in selected, ""
+
+
+async def _exact_utm_leads(utm_term: str, settings: dict[str, str]) -> tuple[list[dict[str, Any]], str]:
+    """Use field-scoped filters first, then post-filter every live amoCRM lead."""
+    wanted = _strict_utm_term(utm_term)
+    if not wanted:
+        return [], ""
+    fields, error = await _amo_fields("leads", settings)
+    if error:
+        return [], error
+    filterable_types = {"text", "url", "textarea", "streetaddress"}
+    field_ids = {
+        int(field["id"])
+        for field in fields
+        if _int_or_none(field.get("id"))
+        and _clean(field.get("type"), 80) in filterable_types
+        and (
+            _clean(field.get("code"), 120).upper() == "UTM_TERM"
+            or _clean(field.get("name"), 300).casefold() == "utm_term"
+        )
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    paths: list[tuple[str, bool]] = [
+        ((
+            "/api/v4/leads?"
+            f"filter[custom_fields_values][{field_id}][]={quote(utm_term, safe='')}"
+            "&with=contacts&limit=100"
+        ), True)
+        for field_id in sorted(field_ids)
+    ]
+    # Always union the broad search: historical deals may contain only the
+    # predefined tracking UTM_TERM and not the parallel text field.
+    paths.append((
+        f"/api/v4/leads?query={quote(utm_term, safe='')}&with=contacts&limit=100", False,
+    ))
+    for path, optional_field_filter in paths:
+        body, search_error, search_status = await _user_email_amo_request("GET", path, settings)
+        if search_error:
+            if (
+                optional_field_filter
+                and search_status == 400
+                and "filter for current account" in search_error.casefold()
+            ):
+                continue
+            return [], search_error
+        found = (((body or {}).get("_embedded") or {}).get("leads") or [])
+        if len(found) >= 100 or ((body or {}).get("_links") or {}).get("next"):
+            return [], "Поиск amoCRM по utm_term достиг безопасного лимита 100 записей"
+        for lead in found:
+            lead_id = _clean((lead or {}).get("id"), 64)
+            if lead_id:
+                candidates[lead_id] = lead
+        if len(candidates) > 100:
+            return [], "Поиск amoCRM по utm_term дал больше 100 кандидатов"
+    exact: list[dict[str, Any]] = []
+    for lead_id, candidate in candidates.items():
+        live, live_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/leads/{lead_id}?with=contacts", settings,
+        )
+        if live_error:
+            return [], live_error
+        if not isinstance(live, dict):
+            continue
+        matches, conflict = _lead_utm_term_match(live, wanted)
+        if conflict:
+            return [], f"Сделка {lead_id}: конфликт системного и текстового utm_term"
+        if matches:
+            exact.append(live)
+    exact.sort(key=lambda item: int(item.get("id") or 0))
+    return exact, ""
+
+
+def _main_contact_id(lead: dict[str, Any]) -> tuple[str, str]:
+    contacts = [
+        item for item in (((lead.get("_embedded") or {}).get("contacts")) or [])
+        if isinstance(item, dict) and _int_or_none(item.get("id"))
+    ]
+    main_ids = {
+        _clean(item.get("id"), 64)
+        for item in contacts
+        if str(item.get("is_main") or "").strip().lower() in {"1", "true"}
+    }
+    if len(main_ids) == 1:
+        return next(iter(main_ids)), ""
+    if len(main_ids) > 1:
+        return "", "несколько основных контактов"
+    unique_ids = {_clean(item.get("id"), 64) for item in contacts}
+    if len(unique_ids) == 1:
+        return next(iter(unique_ids)), ""
+    if not unique_ids:
+        return "", "у сделки нет контакта"
+    return "", "у сделки несколько контактов и не указан основной"
+
+
+def _protected_bizon_window_now() -> bool:
+    now = datetime.now(MOSCOW_TZ)
+    minute = now.hour * 60 + now.minute
+    return 11 * 60 + 45 <= minute < 14 * 60 + 46 or 18 * 60 + 45 <= minute < 21 * 60 + 46
+
+
+def _customer_db_change_token(db_path: Path) -> tuple[tuple[int, int], tuple[int, int]]:
+    def token(path: Path) -> tuple[int, int]:
+        try:
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return 0, 0
+    return token(db_path), token(Path(str(db_path) + "-wal"))
+
+
+async def _customer_db_user_email_map() -> tuple[dict[str, set[str]], str]:
+    """Build the compact UTM/phone -> email map and cache it until DB/WAL changes."""
+    global _user_email_source_cache_token, _user_email_source_cache
+    try:
+        db_path = _customer_db_path()
+    except RuntimeError as exc:
+        return {}, str(exc)
+    if not db_path.exists():
+        return {}, "Customer DB не найдена"
+    async with _user_email_source_lock:
+        current_token = _customer_db_change_token(db_path)
+        if _user_email_source_cache_token == current_token:
+            return _user_email_source_cache, ""
+        for _attempt in range(2):
+            before = _customer_db_change_token(db_path)
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    # WAL readers get a transactionally consistent view even
+                    # while the importer commits newer rows in parallel.
+                    await db.execute("BEGIN")
+                    result: dict[str, set[str]] = {}
+                    cur = await db.execute(
+                        """
+                        SELECT
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.email') END,
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.utm_term') END,
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.phone') END
+                        FROM cdb_getcourse_users
+                        """
+                    )
+                    while True:
+                        user_rows = await cur.fetchmany(500)
+                        if not user_rows:
+                            break
+                        for raw_email, raw_term, raw_phone in user_rows:
+                            email = _clean(raw_email, 320).casefold()
+                            term = _strict_utm_term(raw_term)
+                            phone = _phone_identity(raw_phone)
+                            if term and email:
+                                result.setdefault(f"utm:{term}", set()).add(email)
+                            if phone and email:
+                                result.setdefault(f"phone:{phone}", set()).add(email)
+                    cur = await db.execute(
+                        """
+                        SELECT
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.email') END,
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.utm_term') END,
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.user_term') END,
+                            CASE WHEN json_valid(custom_fields)
+                                THEN json_extract(custom_fields, '$.phone') END
+                        FROM cdb_getcourse_orders
+                        """
+                    )
+                    while True:
+                        order_rows = await cur.fetchmany(500)
+                        if not order_rows:
+                            break
+                        for raw_email, raw_term, raw_user_term, raw_phone in order_rows:
+                            email = _valid_email(raw_email)
+                            term = _strict_utm_term(raw_term or raw_user_term)
+                            phone = _phone_identity(raw_phone)
+                            if term and email:
+                                result.setdefault(f"utm:{term}", set()).add(email)
+                            if phone and email:
+                                result.setdefault(f"phone:{phone}", set()).add(email)
+            except Exception as exc:
+                return {}, f"Проверка GetCourse source map: {exc}"
+            # Mark the cache with the token observed before the snapshot.
+            # If an import overlapped this read, the next lookup sees a newer
+            # token and refreshes instead of serving the older snapshot again.
+            _user_email_source_cache_token = before
+            _user_email_source_cache = result
+            return result, ""
+        return {}, "Построение GetCourse source map не выполнено"
+
+
+async def _customer_db_exact_email_claims(
+    identity_kind: str, identity_value: Any,
+) -> tuple[set[str], str]:
+    """Read exact email claims from one SQLite snapshot when the shared cache is moving."""
+    wanted = (
+        _strict_utm_term(identity_value)
+        if identity_kind == "utm_term" else _phone_identity(identity_value)
+    )
+    if not wanted:
+        return set(), ""
+    claims: set[str] = set()
+    try:
+        async with aiosqlite.connect(_customer_db_path()) as db:
+            await db.execute("BEGIN")
+            for table, query in (
+                (
+                    "users",
+                    """
+                    SELECT
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.email') END,
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.utm_term') END,
+                        NULL,
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.phone') END
+                    FROM cdb_getcourse_users
+                    """,
+                ),
+                (
+                    "orders",
+                    """
+                    SELECT
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.email') END,
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.utm_term') END,
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.user_term') END,
+                        CASE WHEN json_valid(custom_fields)
+                            THEN json_extract(custom_fields, '$.phone') END
+                    FROM cdb_getcourse_orders
+                    """,
+                ),
+            ):
+                _ = table
+                cur = await db.execute(query)
+                while True:
+                    rows = await cur.fetchmany(500)
+                    if not rows:
+                        break
+                    for raw_email, raw_term, raw_user_term, raw_phone in rows:
+                        matches = (
+                            _strict_utm_term(raw_term or raw_user_term) == wanted
+                            if identity_kind == "utm_term"
+                            else _phone_identity(raw_phone) == wanted
+                        )
+                        email = _valid_email(raw_email)
+                        if matches and email:
+                            claims.add(email)
+    except Exception as exc:
+        return set(), f"Проверка GetCourse email snapshot: {exc}"
+    return claims, ""
+
+
+async def _customer_db_emails_for_exact_utm(utm_term: str) -> tuple[set[str], str]:
+    wanted = _strict_utm_term(utm_term)
+    source_map, error = await _customer_db_user_email_map()
+    if not error:
+        return set(source_map.get(f"utm:{wanted}", set())) if wanted else set(), ""
+    return await _customer_db_exact_email_claims("utm_term", wanted)
+
+
+async def _customer_db_emails_for_exact_phone(phone: Any) -> tuple[set[str], str]:
+    wanted = _phone_identity(phone)
+    source_map, error = await _customer_db_user_email_map()
+    if not error:
+        return set(source_map.get(f"phone:{wanted}", set())) if wanted else set(), ""
+    return await _customer_db_exact_email_claims("phone", wanted)
+
+
+def _lead_utm_term_values(lead: dict[str, Any]) -> tuple[set[str], bool]:
+    system_values: set[str] = set()
+    text_values: set[str] = set()
+    for field in lead.get("custom_fields_values") or []:
+        if not isinstance(field, dict):
+            continue
+        values = {
+            _strict_utm_term(item.get("value"))
+            for item in (field.get("values") or [])
+            if isinstance(item, dict) and _strict_utm_term(item.get("value"))
+        }
+        code = _clean(field.get("field_code") or field.get("code"), 120).upper()
+        name = _clean(field.get("field_name") or field.get("name"), 300).casefold()
+        if code == "UTM_TERM":
+            system_values.update(values)
+        elif name == "utm_term":
+            text_values.update(values)
+    conflict = bool(system_values and text_values and system_values != text_values)
+    return (set() if conflict else system_values or text_values), conflict
+
+
+def _unique_source_email(source_map: dict[str, set[str]], key: str) -> str:
+    claims = {_valid_email(item) for item in source_map.get(key, set()) if _valid_email(item)}
+    return next(iter(claims)) if len(claims) == 1 else ""
+
+
+def _plan_contact_email_backfill(
+    leads: list[dict[str, Any]],
+    contacts: list[dict[str, Any]],
+    source_map: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Plan EMAIL-only contact patches from one consistent amoCRM snapshot."""
+    deal_contact_ids: set[str] = set()
+    utm_evidence: dict[str, list[tuple[str, str, str]]] = {}
+    utm_conflicts = _index_leads_for_contact_email_backfill(
+        leads, source_map, deal_contact_ids, utm_evidence,
+    )
+    return _plan_contact_email_page(contacts, source_map, deal_contact_ids, utm_evidence, {
+        "lead_contacts": len(deal_contact_ids),
+        "utm_conflicts": utm_conflicts,
+    })
+
+
+def _index_leads_for_contact_email_backfill(
+    leads: list[dict[str, Any]],
+    source_map: dict[str, set[str]],
+    deal_contact_ids: set[str],
+    utm_evidence: dict[str, list[tuple[str, str, str]]],
+) -> int:
+    utm_conflicts = 0
+    for lead in leads:
+        lead_id = _clean(lead.get("id"), 64)
+        links = [
+            item for item in (((lead.get("_embedded") or {}).get("contacts")) or [])
+            if isinstance(item, dict) and _clean(item.get("id"), 64)
+        ]
+        deal_contact_ids.update(_clean(item.get("id"), 64) for item in links)
+        terms, conflict = _lead_utm_term_values(lead)
+        if conflict:
+            utm_conflicts += 1
+            continue
+        contact_id, contact_error = _main_contact_id(lead)
+        if contact_error:
+            continue
+        for term in terms:
+            email = _unique_source_email(source_map, f"utm:{term}")
+            if email:
+                utm_evidence.setdefault(contact_id, []).append((term, lead_id, email))
+    return utm_conflicts
+
+
+def _plan_contact_email_page(
+    contacts: list[dict[str, Any]],
+    source_map: dict[str, set[str]],
+    deal_contact_ids: set[str],
+    utm_evidence: dict[str, list[tuple[str, str, str]]],
+    base_stats: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    targets: list[dict[str, Any]] = []
+    already_present = 0
+    ambiguous = 0
+    for contact in contacts:
+        contact_id = _clean(contact.get("id"), 64)
+        if not contact_id or contact_id not in deal_contact_ids:
+            continue
+        if _contact_raw_emails(contact):
+            already_present += 1
+            continue
+        evidence: list[tuple[str, str, str]] = []
+        for term, lead_id, email in utm_evidence.get(contact_id, []):
+            evidence.append(("utm_term", f"{lead_id}:{term}", email))
+        for value in _entity_rule_values(contact, {"field_code": "PHONE"}):
+            phone = _phone_identity(value)
+            email = _unique_source_email(source_map, f"phone:{phone}") if phone else ""
+            if email:
+                evidence.append(("phone", phone, email))
+        emails = {item[2] for item in evidence}
+        if len(emails) != 1:
+            ambiguous += int(bool(evidence))
+            continue
+        targets.append({
+            "contact_id": contact_id,
+            "email": next(iter(emails)),
+            "evidence": evidence,
+        })
+    return targets, {
+        **(base_stats or {}),
+        "already_present": already_present,
+        "ambiguous": ambiguous,
+    }
+
+
+async def _amo_entity_page(
+    entity: str, page: int, settings: dict[str, str], *, with_value: str = "",
+) -> tuple[list[dict[str, Any]], bool, str]:
+    suffix = f"&with={quote(with_value, safe='')}" if with_value else ""
+    body, error, status = await _user_email_amo_request(
+        "GET", f"/api/v4/{entity}?limit=250&page={page}{suffix}", settings,
+    )
+    if error:
+        return [], True, error
+    if status == 204 or not body:
+        return [], True, ""
+    page_items = [
+        item for item in ((((body or {}).get("_embedded") or {}).get(entity)) or [])
+        if isinstance(item, dict)
+    ]
+    has_next = bool(((body or {}).get("_links") or {}).get("next"))
+    return page_items, (not has_next and len(page_items) < 250), ""
+
+
+async def _live_backfill_candidates(
+    target: dict[str, Any], source_map: dict[str, set[str]], settings: dict[str, str],
+) -> tuple[set[str], dict[str, Any] | None, str]:
+    contact_id = _clean(target.get("contact_id"), 64)
+    contact, error, _ = await _user_email_amo_request(
+        "GET", f"/api/v4/contacts/{contact_id}?with=leads", settings,
+    )
+    if error or not isinstance(contact, dict) or _clean(contact.get("id"), 64) != contact_id:
+        return set(), None, error or "Контакт amoCRM изменился или недоступен"
+    if _contact_raw_emails(contact):
+        return set(), contact, "already_present"
+    candidates: set[str] = set()
+    for value in _entity_rule_values(contact, {"field_code": "PHONE"}):
+        phone = _phone_identity(value)
+        email = _unique_source_email(source_map, f"phone:{phone}") if phone else ""
+        if email:
+            candidates.add(email)
+    for kind, raw_evidence, _email in target.get("evidence") or []:
+        if kind != "utm_term":
+            continue
+        lead_id, _, term = _clean(raw_evidence, 1200).partition(":")
+        if not lead_id or not term:
+            continue
+        lead, lead_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/leads/{lead_id}?with=contacts", settings,
+        )
+        if lead_error or not isinstance(lead, dict):
+            return set(), contact, lead_error or "Сделка amoCRM недоступна"
+        matches, conflict = _lead_utm_term_match(lead, term)
+        current_contact_id, contact_error = _main_contact_id(lead)
+        if conflict or not matches or contact_error or current_contact_id != contact_id:
+            continue
+        email = _unique_source_email(source_map, f"utm:{term}")
+        if email:
+            candidates.add(email)
+    return candidates, contact, ""
+
+
+async def _patch_backfill_target_email(
+    target: dict[str, Any], source_map: dict[str, set[str]], settings: dict[str, str],
+) -> dict[str, Any]:
+    """Revalidate one planned target and perform the only allowed EMAIL PATCH."""
+    expected = _valid_email(target.get("email"))
+    contact_id = _clean(target.get("contact_id"), 64)
+    if not expected or not contact_id:
+        return {"ok": True, "status": "changed_before_update", "updated_count": 0}
+    contact_fields, fields_error = await _amo_fields("contacts", settings)
+    if fields_error:
+        return {"ok": False, "status": "lookup_error", "updated_count": 0}
+    email_field = next(
+        (field for field in contact_fields if _clean(field.get("code"), 120).upper() == "EMAIL"),
+        None,
+    )
+    if not email_field or not _int_or_none(email_field.get("id")):
+        return {"ok": False, "status": "configuration_error", "updated_count": 0}
+    final_contact, final_error, _ = await _user_email_amo_request(
+        "GET", f"/api/v4/contacts/{contact_id}?with=leads", settings,
+    )
+    if (
+        final_error or not isinstance(final_contact, dict)
+        or _clean(final_contact.get("id"), 64) != contact_id
+    ):
+        return {"ok": False, "status": "lookup_error", "updated_count": 0}
+    if _contact_raw_emails(final_contact):
+        return {"ok": True, "status": "email_filled_before_update", "updated_count": 0}
+    live_lead_ids, links_error = await _contact_lead_ids_for_email_sync(final_contact, settings)
+    if links_error:
+        return {"ok": False, "status": "lookup_error", "updated_count": 0}
+    if not live_lead_ids:
+        return {"ok": True, "status": "changed_before_update", "updated_count": 0}
+    candidates: set[str] = set()
+    valid_identities: list[tuple[str, str]] = []
+    for value in _entity_rule_values(final_contact, {"field_code": "PHONE"}):
+        phone = _phone_identity(value)
+        email = _unique_source_email(source_map, f"phone:{phone}") if phone else ""
+        if email:
+            candidates.add(email)
+            valid_identities.append(("phone", phone))
+    for kind, raw_identity, _email in target.get("evidence") or []:
+        if kind == "utm_term":
+            lead_id, separator, term = _clean(raw_identity, 1200).partition(":")
+            if not separator or lead_id not in live_lead_ids:
+                continue
+            lead, lead_error, _ = await _user_email_amo_request(
+                "GET", f"/api/v4/leads/{lead_id}?with=contacts", settings,
+            )
+            if lead_error or not isinstance(lead, dict):
+                return {"ok": False, "status": "live_lookup_error", "updated_count": 0}
+            matches, conflict = _lead_utm_term_match(lead, term)
+            current_contact_id, contact_error = _main_contact_id(lead)
+            if not conflict and matches and not contact_error and current_contact_id == contact_id:
+                email = _unique_source_email(source_map, f"utm:{term}")
+                if email:
+                    candidates.add(email)
+                    valid_identities.append(("utm_term", term))
+    if candidates != {expected}:
+        return {"ok": True, "status": "changed_before_update", "updated_count": 0}
+    identity_valid = False
+    for kind, value in valid_identities:
+        if kind == "utm_term":
+            source_emails = set(source_map.get(f"utm:{value}", set()))
+        else:
+            source_emails = set(source_map.get(f"phone:{value}", set()))
+        if source_emails == {expected}:
+            identity_valid = True
+            break
+    if not identity_valid:
+        return {"ok": True, "status": "changed_before_update", "updated_count": 0}
+    payload = {
+        "custom_fields_values": [{
+            "field_id": int(email_field["id"]),
+            "values": [{"value": expected, "enum_code": "WORK"}],
+        }]
+    }
+    _body, patch_error, _ = await _user_email_amo_request(
+        "PATCH", f"/api/v4/contacts/{contact_id}", settings, payload,
+    )
+    return {
+        "ok": not bool(patch_error),
+        "status": "update_error" if patch_error else "updated",
+        "updated_count": 0 if patch_error else 1,
+    }
+
+
+async def _backfill_all_contact_emails(settings: dict[str, str]) -> dict[str, Any]:
+    """Scan amoCRM by bounded pages and patch only live, empty contact EMAIL fields."""
+    if _protected_bizon_window_now():
+        return {"ok": False, "protected_window": True, "error": "Защищённое окно Bizon"}
+    source_map, source_error = await _customer_db_user_email_map()
+    if source_error:
+        return {"ok": False, "error": source_error}
+    previous = _jsonish(settings.get("cdb_contact_email_backfill_result") or "{}")
+    historical_updated = int(
+        (previous.get("contacts_updated_total") or previous.get("contacts_updated") or 0)
+        if isinstance(previous, dict) else 0
+    )
+    deal_contact_ids: set[str] = set()
+    utm_evidence: dict[str, list[tuple[str, str, str]]] = {}
+    counters = {
+        "leads_scanned": 0,
+        "contacts_scanned": 0,
+        "lead_contacts": 0,
+        "utm_conflicts": 0,
+        "planned_empty_contacts": 0,
+        "contacts_updated": 0,
+        "already_present": 0,
+        "already_present_live": 0,
+        "ambiguous": 0,
+        "changed_or_conflicting": 0,
+        "errors": 0,
+    }
+    error_status_counts: dict[str, int] = {}
+
+    def snapshot(phase: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "phase": phase,
+            "source_keys": len(source_map),
+            **counters,
+            "contacts_updated_total": historical_updated + counters["contacts_updated"],
+            "error_status_counts": error_status_counts,
+            **extra,
+        }
+
+    async def control_state(phase: str) -> dict[str, Any] | None:
+        live_settings = await _settings_map()
+        if live_settings.get("cdb_contact_email_backfill_pending") != "1":
+            return snapshot(phase, ok=True, halted=True)
+        if _protected_bizon_window_now():
+            return snapshot(phase, ok=True, paused=True)
+        return None
+
+    for page in range(1, 1001):
+        stopped = await control_state("leads")
+        if stopped:
+            await _set_setting(
+                "cdb_contact_email_backfill_result", json.dumps(stopped, ensure_ascii=False),
+            )
+            return stopped
+        leads, done, lead_error = await _amo_entity_page(
+            "leads", page, settings, with_value="contacts",
+        )
+        if lead_error:
+            return snapshot("leads", ok=False, error=lead_error)
+        counters["leads_scanned"] += len(leads)
+        counters["utm_conflicts"] += _index_leads_for_contact_email_backfill(
+            leads, source_map, deal_contact_ids, utm_evidence,
+        )
+        counters["lead_contacts"] = len(deal_contact_ids)
+        if page % 10 == 0 or done:
+            await _set_setting(
+                "cdb_contact_email_backfill_result",
+                json.dumps(snapshot("leads"), ensure_ascii=False),
+            )
+        if done:
+            break
+    else:
+        return snapshot("leads", ok=False, error="Выгрузка amoCRM leads достигла лимита 250000")
+
+    for page in range(1, 1001):
+        stopped = await control_state("contacts")
+        if stopped:
+            await _set_setting(
+                "cdb_contact_email_backfill_result", json.dumps(stopped, ensure_ascii=False),
+            )
+            return stopped
+        contacts, done, contact_error = await _amo_entity_page(
+            "contacts", page, settings, with_value="leads",
+        )
+        if contact_error:
+            return snapshot("contacts", ok=False, error=contact_error)
+        counters["contacts_scanned"] += len(contacts)
+        targets, page_stats = _plan_contact_email_page(
+            contacts, source_map, deal_contact_ids, utm_evidence,
+        )
+        counters["planned_empty_contacts"] += len(targets)
+        counters["already_present"] += page_stats["already_present"]
+        counters["ambiguous"] += page_stats["ambiguous"]
+        for target in targets:
+            result: dict[str, Any] = {}
+            for attempt in range(3):
+                result = await _patch_backfill_target_email(target, source_map, settings)
+                if result.get("ok"):
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(2 + attempt * 3)
+            status = _clean(result.get("status"), 80) or "unknown_error"
+            counters["contacts_updated"] += int(result.get("updated_count") or 0)
+            if status in {"already_present", "email_filled_before_update"}:
+                counters["already_present_live"] += 1
+            elif status in {
+                "source_conflict", "email_conflict", "ambiguous_contact",
+                "changed_before_update", "no_match", "invalid_source",
+            }:
+                counters["changed_or_conflicting"] += 1
+            elif not result.get("ok"):
+                counters["errors"] += 1
+                error_status_counts[status] = error_status_counts.get(status, 0) + 1
+        await _set_setting(
+            "cdb_contact_email_backfill_result",
+            json.dumps(snapshot("contacts"), ensure_ascii=False),
+        )
+        if done:
+            break
+    else:
+        return snapshot(
+            "contacts", ok=False, error="Выгрузка amoCRM contacts достигла лимита 250000",
+        )
+    return snapshot(
+        "completed", ok=counters["errors"] == 0, completed=True,
+    )
+
+
+async def _contact_email_backfill_loop() -> None:
+    while True:
+        try:
+            settings = await _settings_map()
+            if settings.get("cdb_contact_email_backfill_pending") == "1":
+                if _protected_bizon_window_now():
+                    await _set_setting("cdb_contact_email_backfill_status", "waiting_bizon_window")
+                elif _env()["amo_base_url"] and _env()["amo_token"]:
+                    await _set_setting("cdb_contact_email_backfill_status", "running")
+                    result = await _backfill_all_contact_emails(settings)
+                    await _set_setting(
+                        "cdb_contact_email_backfill_result",
+                        json.dumps(result, ensure_ascii=False),
+                    )
+                    await _set_setting(
+                        "cdb_contact_email_backfill_status",
+                        (
+                            "waiting_bizon_window" if result.get("paused")
+                            else "halted" if result.get("halted")
+                            else "completed" if result.get("ok") else "retrying"
+                        ),
+                    )
+                    if result.get("completed") and result.get("ok"):
+                        await _set_setting("cdb_contact_email_backfill_pending", "0")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log("warning", "contact EMAIL backfill failed: %s", exc)
+            try:
+                await _set_setting("cdb_contact_email_backfill_status", "retrying")
+            except Exception:
+                pass
+        await asyncio.sleep(30)
+
+
+async def _customer_db_users_for_exact_utm(utm_term: Any) -> tuple[set[str], str]:
+    return await _customer_db_exact_user_claims("utm_term", utm_term, "gc_user_id")
+
+
+async def _customer_db_users_for_exact_phone(phone: Any) -> tuple[set[str], str]:
+    return await _customer_db_exact_user_claims("phone", phone, "gc_user_id")
+
+
+async def _customer_db_exact_user_claims(
+    identity_kind: str, identity_value: Any, claim_kind: str,
+) -> tuple[set[str], str]:
+    """Read one authoritative cdb_getcourse_users snapshot without global-WAL noise."""
+    wanted = (
+        _strict_utm_term(identity_value)
+        if identity_kind == "utm_term" else _phone_identity(identity_value)
+    )
+    if not wanted:
+        return set(), ""
+    try:
+        async with aiosqlite.connect(_customer_db_path()) as db:
+            if identity_kind == "utm_term":
+                cur = await db.execute(
+                    """
+                    SELECT platform_id,custom_fields
+                    FROM cdb_getcourse_users
+                    WHERE json_extract(custom_fields,'$.utm_term')=?
+                    """,
+                    (wanted,),
+                )
+            else:
+                # Phone formatting is not canonical in historical rows; 5k user
+                # rows are intentionally scanned inside one SQLite snapshot and
+                # normalized in Python before any external mutation.
+                cur = await db.execute(
+                    "SELECT platform_id,custom_fields FROM cdb_getcourse_users"
+                )
+            rows = await cur.fetchall()
+    except Exception as exc:
+        return set(), f"Проверка GetCourse source claims: {exc}"
+    claims: set[str] = set()
+    for platform_id, raw in rows:
+        try:
+            fields = json.loads(raw or "{}")
+        except Exception:
+            continue
+        if not isinstance(fields, dict):
+            continue
+        if identity_kind == "phone" and _phone_identity(fields.get("phone")) != wanted:
+            continue
+        if claim_kind == "email":
+            claim = _clean(fields.get("email"), 320).casefold()
+        else:
+            claim = _clean(platform_id or fields.get("gc_user_id"), 120)
+        if claim:
+            claims.add(claim)
+    return claims, ""
+
+
+def _contact_raw_emails(contact: dict[str, Any]) -> set[str]:
+    return {
+        _clean(value, 500)
+        for value in _entity_rule_values(contact, {"field_code": "EMAIL"})
+        if _clean(value, 500)
+    }
+
+
+async def _contact_lead_ids_for_email_sync(
+    contact: dict[str, Any], settings: dict[str, str],
+) -> tuple[list[str], str]:
+    lead_ids = [
+        _clean(item.get("id"), 64)
+        for item in (((contact.get("_embedded") or {}).get("leads")) or [])
+        if isinstance(item, dict) and _clean(item.get("id"), 64)
+    ]
+    if lead_ids:
+        return list(dict.fromkeys(lead_ids)), ""
+    contact_id = _clean(contact.get("id"), 64)
+    if not contact_id:
+        return [], "Контакт amoCRM найден без ID"
+    body, error, _ = await _user_email_amo_request(
+        "GET", f"/api/v4/contacts/{contact_id}/links?filter[to_entity_type]=leads", settings,
+    )
+    if error:
+        return [], error
+    lead_ids = [
+        _clean(item.get("to_entity_id"), 64)
+        for item in (((body or {}).get("_embedded") or {}).get("links") or [])
+        if isinstance(item, dict)
+        and _clean(item.get("to_entity_type"), 80).casefold() in {"", "leads"}
+        and _clean(item.get("to_entity_id"), 64)
+    ]
+    return list(dict.fromkeys(lead_ids)), ""
+
+
+async def _exact_phone_contacts(
+    phone: Any, settings: dict[str, str],
+) -> tuple[list[tuple[dict[str, Any], list[str]]], str]:
+    """Find only live contacts whose PHONE is exact and which are linked to a deal."""
+    wanted = _phone_identity(phone)
+    if not wanted:
+        return [], ""
+    body, error, _ = await _user_email_amo_request(
+        "GET", f"/api/v4/contacts?query={quote(wanted, safe='')}&with=leads&limit=100", settings,
+    )
+    if error:
+        return [], error
+    found = (((body or {}).get("_embedded") or {}).get("contacts") or [])
+    if len(found) >= 100 or ((body or {}).get("_links") or {}).get("next"):
+        return [], "Поиск amoCRM по телефону достиг безопасного лимита 100 записей"
+    candidate_ids = {
+        _clean((contact or {}).get("id"), 64)
+        for contact in found
+        if isinstance(contact, dict)
+        and _clean(contact.get("id"), 64)
+        and any(
+            _phone_identity(value) == wanted
+            for value in _entity_rule_values(contact, {"field_code": "PHONE"})
+        )
+    }
+    exact: list[tuple[dict[str, Any], list[str]]] = []
+    for contact_id in sorted(candidate_ids, key=lambda value: int(value)):
+        live, live_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}?with=leads", settings,
+        )
+        if live_error:
+            return [], live_error
+        if (
+            not isinstance(live, dict)
+            or _clean(live.get("id"), 64) != contact_id
+            or not any(
+                _phone_identity(value) == wanted
+                for value in _entity_rule_values(live, {"field_code": "PHONE"})
+            )
+        ):
+            continue
+        lead_ids, links_error = await _contact_lead_ids_for_email_sync(live, settings)
+        if links_error:
+            return [], links_error
+        if lead_ids:
+            exact.append((live, lead_ids))
+    return exact, ""
+
+
+async def _sync_user_email_by_phone(
+    email: Any,
+    phone: Any,
+    settings: dict[str, str],
+    *,
+    dry_run: bool = False,
+    expected_contact_id: str = "",
+) -> dict[str, Any]:
+    """Patch only empty EMAIL fields on exact-phone contacts linked to deals."""
+    clean_email = _valid_email(email)
+    clean_phone = _phone_identity(phone)
+    if not clean_email or not clean_phone:
+        return {"ok": True, "status": "invalid_source", "lead_id": "", "contact_id": ""}
+    source_emails, source_error = await _customer_db_emails_for_exact_phone(clean_phone)
+    if source_error:
+        return {
+            "ok": False, "status": "source_lookup_error", "lead_id": "", "contact_id": "",
+            "error": source_error,
+        }
+    if source_emails != {clean_email}:
+        return {
+            "ok": True, "status": "source_conflict", "lead_id": "", "contact_id": "",
+            "error": "Точный телефон не принадлежит одному email GetCourse",
+        }
+    contacts, lookup_error = await _exact_phone_contacts(clean_phone, settings)
+    if lookup_error:
+        return {
+            "ok": False, "status": "lookup_error", "lead_id": "", "contact_id": "",
+            "error": lookup_error,
+        }
+    if not contacts:
+        return {"ok": True, "status": "no_match", "lead_id": "", "contact_id": ""}
+    exact_contact_ids = {_clean(contact.get("id"), 64) for contact, _lead_ids in contacts}
+    if expected_contact_id and exact_contact_ids != {_clean(expected_contact_id, 64)}:
+        return {
+            "ok": True, "status": "changed_before_update", "lead_id": "",
+            "contact_id": ",".join(exact_contact_ids),
+            "error": "Контакт по телефону изменился после предварительной проверки",
+        }
+    contact_fields, fields_error = await _amo_fields("contacts", settings)
+    if fields_error:
+        return {
+            "ok": False, "status": "lookup_error", "lead_id": "", "contact_id": "",
+            "error": fields_error,
+        }
+    email_field = next(
+        (field for field in contact_fields if _clean(field.get("code"), 120).upper() == "EMAIL"),
+        None,
+    )
+    if not email_field or not _int_or_none(email_field.get("id")):
+        return {
+            "ok": False, "status": "configuration_error", "lead_id": "", "contact_id": "",
+            "error": "Поле EMAIL контакта amoCRM не найдено",
+        }
+    results: list[dict[str, Any]] = []
+    for contact, initial_lead_ids in contacts:
+        contact_id = _clean(contact.get("id"), 64)
+        existing_raw = _contact_raw_emails(contact)
+        existing_valid = {_valid_email(value) for value in existing_raw if _valid_email(value)}
+        if existing_raw:
+            results.append({
+                "ok": True,
+                "status": "already_present" if clean_email in existing_valid else "email_conflict",
+                "contact_id": contact_id,
+                "lead_ids": initial_lead_ids,
+            })
+            continue
+        if dry_run:
+            results.append({
+                "ok": True, "status": "would_update", "contact_id": contact_id,
+                "lead_ids": initial_lead_ids,
+            })
+            continue
+        # Repeat all mutable identity checks immediately before the only PATCH.
+        source_emails, source_error = await _customer_db_emails_for_exact_phone(clean_phone)
+        if source_error or source_emails != {clean_email}:
+            results.append({
+                "ok": not bool(source_error),
+                "status": "source_lookup_error" if source_error else "source_conflict",
+                "contact_id": contact_id, "lead_ids": initial_lead_ids,
+                "error": source_error or "Источник GetCourse изменился до записи",
+            })
+            continue
+        live, live_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}?with=leads", settings,
+        )
+        if live_error or not isinstance(live, dict) or _clean(live.get("id"), 64) != contact_id:
+            results.append({
+                "ok": False, "status": "lookup_error", "contact_id": contact_id,
+                "lead_ids": initial_lead_ids,
+                "error": live_error or "Повторная проверка контакта не пройдена",
+            })
+            continue
+        phone_still_exact = any(
+            _phone_identity(value) == clean_phone
+            for value in _entity_rule_values(live, {"field_code": "PHONE"})
+        )
+        live_lead_ids, links_error = await _contact_lead_ids_for_email_sync(live, settings)
+        if links_error:
+            results.append({
+                "ok": False, "status": "lookup_error", "contact_id": contact_id,
+                "lead_ids": initial_lead_ids, "error": links_error,
+            })
+            continue
+        if not phone_still_exact or not live_lead_ids:
+            results.append({
+                "ok": True, "status": "changed_before_update", "contact_id": contact_id,
+                "lead_ids": live_lead_ids,
+                "error": "Телефон или связь контакта со сделкой изменились до записи",
+            })
+            continue
+        final_contact, final_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}", settings,
+        )
+        if (
+            final_error
+            or not isinstance(final_contact, dict)
+            or _clean(final_contact.get("id"), 64) != contact_id
+        ):
+            results.append({
+                "ok": False, "status": "lookup_error", "contact_id": contact_id,
+                "lead_ids": live_lead_ids,
+                "error": final_error or "Финальная проверка контакта не пройдена",
+            })
+            continue
+        if not any(
+            _phone_identity(value) == clean_phone
+            for value in _entity_rule_values(final_contact, {"field_code": "PHONE"})
+        ):
+            results.append({
+                "ok": True, "status": "changed_before_update", "contact_id": contact_id,
+                "lead_ids": live_lead_ids, "error": "Телефон изменился до записи",
+            })
+            continue
+        if _contact_raw_emails(final_contact):
+            results.append({
+                "ok": True, "status": "email_filled_before_update", "contact_id": contact_id,
+                "lead_ids": live_lead_ids,
+            })
+            continue
+        payload = {
+            "custom_fields_values": [{
+                "field_id": int(email_field["id"]),
+                "values": [{"value": clean_email, "enum_code": "WORK"}],
+            }]
+        }
+        _body, patch_error, _ = await _user_email_amo_request(
+            "PATCH", f"/api/v4/contacts/{contact_id}", settings, payload,
+        )
+        results.append({
+            "ok": not bool(patch_error),
+            "status": "update_error" if patch_error else "updated",
+            "contact_id": contact_id, "lead_ids": live_lead_ids, "error": patch_error,
+        })
+    statuses = [str(item["status"]) for item in results]
+    errors = [str(item.get("error") or "") for item in results if item.get("error")]
+    failed = [item for item in results if not item.get("ok")]
+    if failed:
+        status = str(failed[0]["status"]) if len(results) == 1 else "partial_error"
+    else:
+        status = next(
+            (
+                candidate for candidate in (
+                    "updated", "would_update", "email_conflict", "already_present",
+                    "email_filled_before_update", "source_conflict", "changed_before_update",
+                ) if candidate in statuses
+            ),
+            "no_match",
+        )
+    lead_ids = list(dict.fromkeys(
+        lead_id for item in results for lead_id in item.get("lead_ids", []) if lead_id
+    ))
+    contact_ids = list(dict.fromkeys(
+        str(item.get("contact_id") or "") for item in results if item.get("contact_id")
+    ))
+    return {
+        "ok": not failed, "status": status, "lead_id": ",".join(lead_ids),
+        "contact_id": ",".join(contact_ids), "error": "; ".join(errors),
+        "updated_count": statuses.count("updated"),
+    }
+
+
+async def _sync_user_email_by_utm(
+    email: Any,
+    utm_term: Any,
+    settings: dict[str, str],
+    *,
+    dry_run: bool = False,
+    expected_contact_id: str = "",
+) -> dict[str, Any]:
+    """Patch only an empty EMAIL field on one unambiguous main contact."""
+    clean_email = _valid_email(email)
+    clean_utm = _clean(utm_term, 1000)
+    if not clean_email or not _strict_utm_term(clean_utm):
+        return {"ok": True, "status": "invalid_source", "lead_id": "", "contact_id": ""}
+    leads, error = await _exact_utm_leads(clean_utm, settings)
+    if error:
+        return {"ok": False, "status": "lookup_error", "lead_id": "", "contact_id": "", "error": error}
+    if not leads:
+        return {"ok": True, "status": "no_match", "lead_id": "", "contact_id": ""}
+    contact_ids: set[str] = set()
+    lead_contact_ids: dict[str, str] = {}
+    contact_lead_ids: dict[str, list[str]] = {}
+    lead_ids: list[str] = []
+    for lead in leads:
+        lead_id = _clean(lead.get("id"), 64)
+        contact_id, contact_error = _main_contact_id(lead)
+        if contact_error:
+            return {
+                "ok": True, "status": "ambiguous_contact", "lead_id": lead_id,
+                "contact_id": "", "error": contact_error,
+            }
+        lead_ids.append(lead_id)
+        contact_ids.add(contact_id)
+        lead_contact_ids[lead_id] = contact_id
+        contact_lead_ids.setdefault(contact_id, []).append(lead_id)
+    sorted_contact_ids = sorted(contact_ids, key=lambda value: int(value))
+    joined_contact_ids = ",".join(sorted_contact_ids)
+    if expected_contact_id and contact_ids != {_clean(expected_contact_id, 64)}:
+        return {
+            "ok": True, "status": "changed_before_update", "lead_id": ",".join(lead_ids),
+            "contact_id": joined_contact_ids,
+            "error": "Основной контакт по utm_term изменился после предварительной проверки",
+        }
+    contacts: dict[str, dict[str, Any]] = {}
+    has_empty_contact = False
+    for contact_id in sorted_contact_ids:
+        contact, contact_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}", settings,
+        )
+        if contact_error:
+            return {
+                "ok": False, "status": "lookup_error", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id, "error": contact_error,
+            }
+        if not isinstance(contact, dict) or _clean(contact.get("id"), 64) != contact_id:
+            return {
+                "ok": False, "status": "lookup_error", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id, "error": "amoCRM вернула не тот контакт или ответ без ID",
+            }
+        existing_raw = _contact_raw_emails(contact)
+        existing_valid = {_valid_email(value) for value in existing_raw if _valid_email(value)}
+        if existing_raw and clean_email not in existing_valid:
+            return {
+                "ok": True, "status": "email_conflict", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id,
+            }
+        has_empty_contact = has_empty_contact or not existing_raw
+        contacts[contact_id] = contact
+    source_emails, source_error = await _customer_db_emails_for_exact_utm(clean_utm)
+    if source_error:
+        return {
+            "ok": False, "status": "source_lookup_error", "lead_id": ",".join(lead_ids),
+            "contact_id": contact_id, "error": source_error,
+        }
+    if source_emails != {clean_email}:
+        return {
+            "ok": True, "status": "source_conflict", "lead_id": ",".join(lead_ids),
+            "contact_id": joined_contact_ids,
+            "error": "Точный utm_term не принадлежит одному email GetCourse",
+        }
+    contact_fields, fields_error = await _amo_fields("contacts", settings)
+    if fields_error:
+        return {
+            "ok": False, "status": "lookup_error", "lead_id": ",".join(lead_ids),
+            "contact_id": joined_contact_ids, "error": fields_error,
+        }
+    email_field = next(
+        (field for field in contact_fields if _clean(field.get("code"), 120).upper() == "EMAIL"),
+        None,
+    )
+    if not email_field or not _int_or_none(email_field.get("id")):
+        return {
+            "ok": False, "status": "configuration_error", "lead_id": ",".join(lead_ids),
+            "contact_id": joined_contact_ids, "error": "Поле EMAIL контакта amoCRM не найдено",
+        }
+    if dry_run:
+        return {
+            "ok": True, "status": "would_update" if has_empty_contact else "already_present",
+            "lead_id": ",".join(lead_ids), "contact_id": joined_contact_ids,
+        }
+    # Narrow provider races immediately before the only mutation: the same
+    # exact deals must still point to the same contact, the source claim must
+    # still be unique, and EMAIL must still be empty.
+    for lead_id in lead_ids:
+        live_lead, live_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/leads/{lead_id}?with=contacts", settings,
+        )
+        if live_error or not isinstance(live_lead, dict):
+            return {
+                "ok": False, "status": "lookup_error", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id, "error": live_error or "Сделка amoCRM недоступна",
+            }
+        still_matches, utm_conflict = _lead_utm_term_match(live_lead, clean_utm)
+        current_contact_id, link_error = _main_contact_id(live_lead)
+        if (
+            utm_conflict or not still_matches or link_error
+            or current_contact_id != lead_contact_ids.get(lead_id)
+        ):
+            return {
+                "ok": True, "status": "changed_before_update", "lead_id": ",".join(lead_ids),
+                "contact_id": joined_contact_ids,
+                "error": "UTM или основной контакт изменились до записи",
+            }
+    source_emails, source_error = await _customer_db_emails_for_exact_utm(clean_utm)
+    if source_error or source_emails != {clean_email}:
+        return {
+            "ok": not bool(source_error),
+            "status": "source_lookup_error" if source_error else "source_conflict",
+            "lead_id": ",".join(lead_ids), "contact_id": joined_contact_ids,
+            "error": source_error or "Источник GetCourse изменился до записи",
+        }
+    payload = {
+        "custom_fields_values": [{
+            "field_id": int(email_field["id"]),
+            "values": [{"value": clean_email, "enum_code": "WORK"}],
+        }]
+    }
+    statuses: list[str] = []
+    for contact_id in sorted_contact_ids:
+        if _contact_raw_emails(contacts[contact_id]):
+            statuses.append("already_present")
+            continue
+        final_contact, final_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/contacts/{contact_id}", settings,
+        )
+        if (
+            final_error
+            or not isinstance(final_contact, dict)
+            or _clean(final_contact.get("id"), 64) != contact_id
+        ):
+            return {
+                "ok": False, "status": "lookup_error", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id,
+                "error": final_error or "Повторная проверка контакта не пройдена",
+            }
+        final_raw = _contact_raw_emails(final_contact)
+        final_valid = {_valid_email(value) for value in final_raw if _valid_email(value)}
+        if final_raw:
+            statuses.append("already_present" if clean_email in final_valid else "email_conflict")
+            continue
+        _body, patch_error, _ = await _user_email_amo_request(
+            "PATCH", f"/api/v4/contacts/{contact_id}", settings, payload,
+        )
+        if patch_error:
+            return {
+                "ok": False, "status": "update_error", "lead_id": ",".join(lead_ids),
+                "contact_id": contact_id, "error": patch_error,
+            }
+        statuses.append("updated")
+    return {
+        "ok": True,
+        "status": (
+            "updated" if "updated" in statuses
+            else "email_conflict" if "email_conflict" in statuses
+            else "already_present"
+        ),
+        "lead_id": ",".join(lead_ids), "contact_id": joined_contact_ids,
+        "updated_count": statuses.count("updated"),
+    }
+
+
+def _merge_user_email_sync_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    if not results:
+        return {"ok": True, "status": "invalid_source", "lead_id": "", "contact_id": ""}
+    statuses = [_clean(item.get("status"), 80) for item in results]
+    failures = [item for item in results if not item.get("ok")]
+    contact_ids = list(dict.fromkeys(
+        contact_id
+        for item in results
+        for contact_id in _clean(item.get("contact_id"), 2000).split(",")
+        if contact_id
+    ))
+    pending = {"source_conflict", "ambiguous_contact", "changed_before_update", "no_match"}
+    if failures:
+        status = _clean(failures[0].get("status"), 80) if len(results) == 1 else "partial_error"
+    elif len(contact_ids) > 1 or "ambiguous_contact" in statuses:
+        status = "ambiguous_contact"
+    elif "would_update" in statuses:
+        status = "would_update_partial" if any(item in pending for item in statuses) else "would_update"
+    elif "updated" in statuses:
+        status = "partial_pending" if any(item in pending for item in statuses) else "updated"
+    else:
+        terminal_status = next((
+            candidate for candidate in (
+                "email_conflict", "already_present", "email_filled_before_update",
+            ) if candidate in statuses
+        ), "")
+        if terminal_status and any(item in pending for item in statuses):
+            status = "partial_pending"
+        else:
+            status = terminal_status or next((
+                candidate for candidate in (
+                    "source_conflict", "changed_before_update", "no_match",
+                ) if candidate in statuses
+            ), "invalid_source")
+    lead_ids = list(dict.fromkeys(
+        lead_id
+        for item in results
+        for lead_id in _clean(item.get("lead_id"), 2000).split(",")
+        if lead_id
+    ))
+    errors = [
+        _clean(item.get("error"), 1000) for item in results if _clean(item.get("error"), 1000)
+    ]
+    return {
+        "ok": not failures,
+        "status": status,
+        "lead_id": ",".join(lead_ids),
+        "contact_id": ",".join(contact_ids),
+        "error": "; ".join(errors),
+    }
+
+
+async def _sync_user_email(
+    email: Any,
+    phone: Any,
+    utm_term: Any,
+    settings: dict[str, str],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Prefer exact UTM; fall back to exact phone when UTM has no amoCRM match."""
+    if not _valid_email(email):
+        return {"ok": True, "status": "invalid_source", "lead_id": "", "contact_id": ""}
+    if _strict_utm_term(utm_term):
+        utm_result = await _sync_user_email_by_utm(
+            email, utm_term, settings, dry_run=dry_run,
+        )
+        if utm_result.get("status") not in {"no_match", "invalid_source"}:
+            return utm_result
+    if _phone_identity(phone):
+        return await _sync_user_email_by_phone(email, phone, settings, dry_run=dry_run)
+    return {"ok": True, "status": "no_match", "lead_id": "", "contact_id": ""}
+
+
+def _gc_profile_url(gc_user_id: Any, settings: dict[str, str]) -> str:
+    base = _clean(settings.get("getcourse_base_url"), 500).rstrip("/")
+    user_id = _clean(gc_user_id, 120)
+    return f"{base}/user/control/user/update/id/{quote(user_id)}" if base and user_id else ""
+
+
+def _named_amo_field(
+    fields: list[dict[str, Any]], name: str, field_type: str = "",
+) -> dict[str, Any] | None:
+    return next(
+        (
+            field for field in fields
+            if _clean(field.get("name"), 300).casefold() == name.casefold()
+            and (not field_type or _clean(field.get("type"), 80) == field_type)
+            and _int_or_none(field.get("id"))
+        ),
+        None,
+    )
+
+
+def _missing_named_field_values(
+    entity: dict[str, Any],
+    field_catalog: list[dict[str, Any]],
+    wanted: list[tuple[str, Any]],
+    *,
+    conflict_names: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    conflict_keys = {name.casefold() for name in (conflict_names or set())}
+    values: list[dict[str, Any]] = []
+    for name, value in wanted:
+        if value is None or value == "":
+            continue
+        field = _named_amo_field(field_catalog, name)
+        if not field:
+            return [], f"Поле сделки amoCRM «{name}» не найдено"
+        existing = {
+            _clean(item, 2000)
+            for item in _entity_rule_values(entity, {"field_id": str(field["id"])})
+            if _clean(item, 2000)
+        }
+        clean_value = _clean(value, 2000)
+        if existing and clean_value not in existing and name.casefold() in conflict_keys:
+            return [], f"Поле сделки amoCRM «{name}» уже содержит другого пользователя"
+        if not existing:
+            values.append({"field_id": int(field["id"]), "values": [{"value": value}]})
+    return values, ""
+
+
+async def _ensure_gc_binding_fields(
+    settings: dict[str, str], *, dry_run: bool = True,
+) -> dict[str, Any]:
+    fields, error = await _amo_fields("leads", settings)
+    if error:
+        return {"ok": False, "status": "lookup_error", "error": error, "missing": []}
+    missing = [name for name in GC_ORDER_FIELD_NAMES if not _named_amo_field(fields, name)]
+    return {
+        "ok": not missing,
+        "status": "ready" if not missing else "configuration_error",
+        "missing": [{"entity": "leads", "name": name} for name in missing],
+        "error": "" if not missing else "В amoCRM отсутствуют существующие поля блока ГК",
+        "creates_fields": False,
+    }
+
+
+async def _save_gc_profile_binding(
+    row: dict[str, Any], source_hash: str, gc_user_id: str, utm_term: str,
+    match_kind: str, match_value: str, lead_id: str, contact_id: str,
+    status: str, error: str = "",
+) -> None:
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        await db.execute(
+            """
+            INSERT INTO gc_profile_bindings(
+                source_record_id,gc_user_id,source_hash,utm_term,match_kind,match_value,
+                lead_id,contact_id,status,success,error,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_record_id) DO UPDATE SET
+                gc_user_id=excluded.gc_user_id,
+                source_hash=excluded.source_hash,
+                utm_term=excluded.utm_term,
+                match_kind=excluded.match_kind,
+                match_value=excluded.match_value,
+                lead_id=excluded.lead_id,
+                contact_id=excluded.contact_id,
+                status=excluded.status,
+                success=excluded.success,
+                error=excluded.error,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(row["id"]), gc_user_id, source_hash, utm_term, match_kind, match_value,
+                lead_id, contact_id,
+                status, 1 if status in {"bound", "already_bound"} else 0,
+                _clean(error, 1000), _now(),
+            ),
+        )
+        await db.commit()
+
+
+def _profile_target_result(
+    status: str, *, ok: bool = True, error: str = "", match_kind: str = "",
+    match_value: str = "", lead: dict[str, Any] | None = None,
+    lead_id: str = "", contact_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "ok": ok, "status": status, "error": error,
+        "match_kind": match_kind, "match_value": match_value,
+        "lead": lead or {}, "lead_id": lead_id, "contact_id": contact_id,
+    }
+
+
+async def _profile_target_by_utm(
+    gc_user_id: str, utm_term: str, settings: dict[str, str],
+) -> dict[str, Any]:
+    wanted = _strict_utm_term(utm_term)
+    if not wanted:
+        return _profile_target_result("identifier_missing", match_kind="utm_term")
+    users, error = await _customer_db_users_for_exact_utm(wanted)
+    if error:
+        return _profile_target_result(
+            "source_lookup_error", ok=False, error=error,
+            match_kind="utm_term", match_value=wanted,
+        )
+    if users != {gc_user_id}:
+        return _profile_target_result(
+            "source_conflict", error="utm_term GetCourse не принадлежит одному профилю",
+            match_kind="utm_term", match_value=wanted,
+        )
+    leads, error = await _exact_utm_leads(wanted, settings)
+    if error:
+        return _profile_target_result(
+            "lookup_error", ok=False, error=error,
+            match_kind="utm_term", match_value=wanted,
+        )
+    if len(leads) != 1:
+        return _profile_target_result(
+            "no_match" if not leads else "ambiguous_deal",
+            error="По utm_term нужна ровно одна сделка",
+            match_kind="utm_term", match_value=wanted,
+            lead_id=",".join(_clean(item.get("id"), 64) for item in leads),
+        )
+    lead = leads[0]
+    lead_id = _clean(lead.get("id"), 64)
+    contact_id, link_error = _main_contact_id(lead)
+    if link_error:
+        return _profile_target_result(
+            "ambiguous_contact", error=link_error,
+            match_kind="utm_term", match_value=wanted, lead_id=lead_id,
+        )
+    return _profile_target_result(
+        "matched", match_kind="utm_term", match_value=wanted,
+        lead=lead, lead_id=lead_id, contact_id=contact_id,
+    )
+
+
+async def _profile_target_by_phone(
+    gc_user_id: str, phone: str, settings: dict[str, str],
+) -> dict[str, Any]:
+    wanted = _phone_identity(phone)
+    if not wanted:
+        return _profile_target_result("identifier_missing", match_kind="phone")
+    users, error = await _customer_db_users_for_exact_phone(wanted)
+    if error:
+        return _profile_target_result(
+            "source_lookup_error", ok=False, error=error,
+            match_kind="phone", match_value=wanted,
+        )
+    if users != {gc_user_id}:
+        return _profile_target_result(
+            "source_conflict", error="Телефон GetCourse не принадлежит одному профилю",
+            match_kind="phone", match_value=wanted,
+        )
+    contacts, error = await _exact_phone_contacts(wanted, settings)
+    if error:
+        return _profile_target_result(
+            "lookup_error", ok=False, error=error,
+            match_kind="phone", match_value=wanted,
+        )
+    contact_map: dict[str, set[str]] = {}
+    for contact, lead_ids in contacts:
+        contact_id = _clean(contact.get("id"), 64)
+        if contact_id:
+            contact_map.setdefault(contact_id, set()).update(
+                _clean(lead_id, 64) for lead_id in lead_ids if _clean(lead_id, 64)
+            )
+    if not contact_map:
+        return _profile_target_result(
+            "no_match", match_kind="phone", match_value=wanted,
+        )
+    if len(contact_map) != 1:
+        return _profile_target_result(
+            "ambiguous_contact", error="Точный телефон найден у нескольких контактов сделок",
+            match_kind="phone", match_value=wanted,
+            contact_id=",".join(sorted(contact_map, key=lambda value: int(value))),
+        )
+    contact_id, lead_ids = next(iter(contact_map.items()))
+    if len(lead_ids) != 1:
+        return _profile_target_result(
+            "ambiguous_deal", error="Контакт по телефону связан не с одной сделкой",
+            match_kind="phone", match_value=wanted, contact_id=contact_id,
+            lead_id=",".join(sorted(lead_ids, key=lambda value: int(value))),
+        )
+    lead_id = next(iter(lead_ids))
+    lead, error, _ = await _user_email_amo_request(
+        "GET", f"/api/v4/leads/{lead_id}?with=contacts", settings,
+    )
+    if error or not isinstance(lead, dict) or _clean(lead.get("id"), 64) != lead_id:
+        return _profile_target_result(
+            "lookup_error", ok=False, error=error or "Сделка amoCRM недоступна",
+            match_kind="phone", match_value=wanted, contact_id=contact_id, lead_id=lead_id,
+        )
+    main_contact_id, link_error = _main_contact_id(lead)
+    if link_error or main_contact_id != contact_id:
+        return _profile_target_result(
+            "ambiguous_contact", error="Контакт по телефону не является основным контактом сделки",
+            match_kind="phone", match_value=wanted, contact_id=contact_id, lead_id=lead_id,
+        )
+    return _profile_target_result(
+        "matched", match_kind="phone", match_value=wanted,
+        lead=lead, lead_id=lead_id, contact_id=contact_id,
+    )
+
+
+async def _resolve_gc_profile_target(
+    gc_user_id: str, utm_term: str, phone: str, settings: dict[str, str],
+    *, only_kind: str = "",
+) -> dict[str, Any]:
+    if only_kind == "utm_term":
+        return await _profile_target_by_utm(gc_user_id, utm_term, settings)
+    if only_kind == "phone":
+        return await _profile_target_by_phone(gc_user_id, phone, settings)
+    utm_result = await _profile_target_by_utm(gc_user_id, utm_term, settings)
+    if utm_result.get("status") == "matched" or not utm_result.get("ok"):
+        return utm_result
+    phone_result = await _profile_target_by_phone(gc_user_id, phone, settings)
+    if phone_result.get("status") == "matched" or not phone_result.get("ok"):
+        return phone_result
+    if phone_result.get("status") != "identifier_missing":
+        if utm_result.get("status") != "identifier_missing":
+            phone_result["error"] = "; ".join(filter(None, (
+                _clean(utm_result.get("error"), 500), _clean(phone_result.get("error"), 500),
+            )))
+        return phone_result
+    return utm_result
+
+
+async def _sync_gc_profile_binding(
+    row: dict[str, Any], fields: dict[str, Any], settings: dict[str, str],
+    *, dry_run: bool = False,
+) -> dict[str, Any]:
+    """Prefer exact UTM; otherwise bind by one exact phone contact and one deal."""
+    gc_user_id = _clean(row.get("platform_id") or fields.get("gc_user_id"), 120)
+    utm_term = _strict_utm_term(fields.get("utm_term"))
+    phone = _phone_identity(fields.get("phone"))
+    source_hash = _user_email_source_hash(fields)
+    if not gc_user_id or (not utm_term and not phone):
+        return {
+            "ok": True, "status": "no_identity", "lead_id": "", "contact_id": "",
+            "gc_user_id": gc_user_id,
+        }
+    target = await _resolve_gc_profile_target(gc_user_id, utm_term, phone, settings)
+    if target.get("status") != "matched":
+        return {
+            **{key: target.get(key, "") for key in ("ok", "status", "lead_id", "contact_id", "error")},
+            "gc_user_id": gc_user_id,
+        }
+    lead = target["lead"]
+    lead_id = _clean(target.get("lead_id"), 64)
+    contact_id = _clean(target.get("contact_id"), 64)
+    match_kind = _clean(target.get("match_kind"), 40)
+    match_value = _clean(target.get("match_value"), 1000)
+    lead_fields, lead_fields_error = await _amo_fields("leads", settings)
+    if lead_fields_error:
+        return {"ok": False, "status": "lookup_error", "lead_id": lead_id,
+                "contact_id": contact_id, "gc_user_id": gc_user_id, "error": lead_fields_error}
+    profile_url = _gc_profile_url(gc_user_id, settings)
+    lead_values, lead_value_error = _missing_named_field_values(
+        lead, lead_fields, [(GC_PROFILE_LINK_FIELD, profile_url)],
+        conflict_names={GC_PROFILE_LINK_FIELD},
+    )
+    if lead_value_error:
+        return {
+            "ok": False, "status": "configuration_error", "lead_id": lead_id,
+            "contact_id": contact_id, "gc_user_id": gc_user_id,
+            "error": lead_value_error,
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "status": "would_bind" if lead_values else "already_bound",
+            "lead_id": lead_id, "contact_id": contact_id, "gc_user_id": gc_user_id,
+            "match_kind": match_kind,
+        }
+    live_target = await _resolve_gc_profile_target(
+        gc_user_id, utm_term, phone, settings, only_kind=match_kind,
+    )
+    if (
+        live_target.get("status") != "matched"
+        or _clean(live_target.get("match_value"), 1000) != match_value
+        or _clean(live_target.get("lead_id"), 64) != lead_id
+        or _clean(live_target.get("contact_id"), 64) != contact_id
+    ):
+        return {
+            "ok": bool(live_target.get("ok")), "status": "changed_before_update",
+            "lead_id": lead_id, "contact_id": contact_id, "gc_user_id": gc_user_id,
+            "error": _clean(live_target.get("error"), 1000) or "Источник или сделка изменились до записи",
+        }
+    live_lead = live_target["lead"]
+    lead_values, lead_value_error = _missing_named_field_values(
+        live_lead, lead_fields, [(GC_PROFILE_LINK_FIELD, profile_url)],
+        conflict_names={GC_PROFILE_LINK_FIELD},
+    )
+    if lead_value_error:
+        return {
+            "ok": False, "status": "configuration_error", "lead_id": lead_id,
+            "contact_id": contact_id, "gc_user_id": gc_user_id,
+            "error": lead_value_error,
+        }
+    if lead_values:
+        _body, patch_error, _ = await _user_email_amo_request(
+            "PATCH", f"/api/v4/leads/{lead_id}", settings,
+            {"custom_fields_values": lead_values},
+        )
+        if patch_error:
+            return {
+                "ok": False, "status": "update_error", "lead_id": lead_id,
+                "contact_id": contact_id, "gc_user_id": gc_user_id, "error": patch_error,
+            }
+    status = "bound" if lead_values else "already_bound"
+    await _save_gc_profile_binding(
+        row, source_hash, gc_user_id, utm_term, match_kind, match_value,
+        lead_id, contact_id, status,
+    )
+    return {
+        "ok": True, "status": status, "lead_id": lead_id, "contact_id": contact_id,
+        "gc_user_id": gc_user_id, "match_kind": match_kind,
+    }
+
+
+async def _sync_gc_profile(
+    row: dict[str, Any], fields: dict[str, Any], settings: dict[str, str],
+    *, dry_run: bool = False,
+) -> dict[str, Any]:
+    email_result = await _sync_user_email(
+        fields.get("email"), fields.get("phone"), fields.get("utm_term"),
+        settings, dry_run=dry_run,
+    )
+    binding_result = await _sync_gc_profile_binding(row, fields, settings, dry_run=dry_run)
+    binding_result["email_status"] = _clean(email_result.get("status"), 80)
+    if (
+        not dry_run
+        and _db_path
+        and binding_result.get("status") in {"bound", "already_bound"}
+    ):
+        binding_result["order_backfill"] = await _sync_profile_orders_for_user(
+            binding_result.get("gc_user_id"), settings,
+        )
+    if binding_result.get("status") == "no_identity":
+        return email_result
+    if binding_result.get("status") in {"bound", "already_bound", "would_bind"}:
+        if not email_result.get("ok"):
+            binding_result["ok"] = False
+            binding_result["status"] = "partial_error"
+            binding_result["error"] = _clean(email_result.get("error"), 1000)
+        elif dry_run and email_result.get("status") == "would_update":
+            binding_result["status"] = "would_update"
+    return binding_result
 
 
 def _tags(settings: dict[str, str], order: dict[str, Any] | None = None) -> list[dict[str, str]]:
@@ -2038,9 +4053,272 @@ async def _create_task_for_lead(
     return {"task_id": task_id, "request": task, "response": body}, ""
 
 
+async def service_create_onboarding_support_task(
+    *, source_record_id: int = 0, order_id: str = "", text: str = "", due_minutes: int = 60,
+    test_lead_id: str = "", phone: str = "", email: str = "", utm_term: str = "",
+) -> dict[str, Any]:
+    """Create a care task on an already mapped deal; never create a deal."""
+
+    clean_order_id = _clean(order_id, 100)
+    source_id = max(0, int(source_record_id or 0))
+    explicit_test_lead = _clean(test_lead_id, 64)
+    if explicit_test_lead and not clean_order_id.startswith("onboarding-live-test-"):
+        return {"ok": False, "status": "invalid", "lead_id": "", "task_id": "", "error": "Явная тестовая сделка запрещена"}
+    lead_id = explicit_test_lead
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        if not lead_id and clean_order_id:
+            row = await (
+                await db.execute(
+                    "SELECT lead_id FROM order_map WHERE order_key=? AND lead_id<>'' ORDER BY updated_at DESC LIMIT 1",
+                    (f"order:{clean_order_id}",),
+                )
+            ).fetchone()
+            lead_id = _clean(row[0] if row else "", 64)
+        if not lead_id and source_id:
+            row = await (
+                await db.execute(
+                    "SELECT lead_id FROM cdb_sync WHERE source_record_id=? AND lead_id<>'' LIMIT 1",
+                    (source_id,),
+                )
+            ).fetchone()
+            lead_id = _clean(row[0] if row else "", 64)
+    if not lead_id:
+        resolved = await service_resolve_onboarding_manager(phone=phone, email=email, utm_term=utm_term)
+        if not resolved.get("ok"):
+            return {
+                "ok": False, "status": "failed", "lead_id": "", "task_id": "",
+                "error": _clean(resolved.get("error"), 1000) or "Не удалось найти сделку amoCRM",
+            }
+        if resolved.get("found") and resolved.get("entity") == "lead":
+            lead_id = _clean(resolved.get("entity_id"), 64)
+    if not lead_id:
+        return {"ok": False, "status": "not_found", "lead_id": "", "task_id": "", "error": "Актуальная сделка amoCRM не найдена"}
+
+    settings = await _settings_map()
+    lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+    if lead_error or not isinstance(lead, dict):
+        return {"ok": False, "status": "failed", "lead_id": lead_id, "task_id": "", "error": lead_error or "Сделка amoCRM недоступна"}
+    task_text = _clean(text, 2000) or f"Нужна помощь с доступом GetCourse, заказ {clean_order_id}"
+    binding = {
+        "task_enabled": 1,
+        "task_text": task_text,
+        "task_due_minutes": max(1, min(60 * 24 * 30, int(due_minutes or 60))),
+        "task_type_id": 1,
+        "task_responsible_user_id": "",
+        "responsible_user_id": "",
+    }
+    result, error = await _create_task_for_lead(
+        lead_id,
+        {"order_id": clean_order_id, "number": clean_order_id},
+        settings,
+        binding,
+        _clean(lead.get("responsible_user_id"), 64),
+    )
+    if error:
+        return {"ok": False, "status": "failed", "lead_id": lead_id, "task_id": "", "error": error}
+    return {
+        "ok": True,
+        "status": "existing" if result.get("skipped") else "created",
+        "lead_id": lead_id,
+        "task_id": _clean(result.get("task_id"), 64),
+        "responsible_user_id": _clean(lead.get("responsible_user_id"), 64),
+    }
+
+
+async def service_add_onboarding_confirmation_note(
+    *, source_record_id: int = 0, order_id: str = "", phone: str = "", email: str = "",
+    utm_term: str = "", text: str = "Пользователь подтвердил вход GetCourse",
+) -> dict[str, Any]:
+    """Add one idempotent confirmation note to the newest mapped customer deal; never create a deal."""
+
+    clean_order_id = _clean(order_id, 100)
+    source_id = max(0, int(source_record_id or 0))
+    lead_id = ""
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        if clean_order_id:
+            row = await (
+                await db.execute(
+                    "SELECT lead_id FROM order_map WHERE order_key=? AND lead_id<>'' ORDER BY updated_at DESC LIMIT 1",
+                    (f"order:{clean_order_id}",),
+                )
+            ).fetchone()
+            lead_id = _clean(row[0] if row else "", 64)
+        if not lead_id and source_id:
+            row = await (
+                await db.execute(
+                    "SELECT lead_id FROM cdb_sync WHERE source_record_id=? AND lead_id<>'' LIMIT 1",
+                    (source_id,),
+                )
+            ).fetchone()
+            lead_id = _clean(row[0] if row else "", 64)
+
+    if not lead_id:
+        resolved = await service_resolve_onboarding_manager(phone=phone, email=email, utm_term=utm_term)
+        if not resolved.get("ok"):
+            return {
+                "ok": False, "status": "failed", "lead_id": "", "note_id": "",
+                "error": _clean(resolved.get("error"), 1000) or "Не удалось найти сделку amoCRM",
+            }
+        if resolved.get("found") and resolved.get("entity") == "lead":
+            lead_id = _clean(resolved.get("entity_id"), 64)
+    if not lead_id:
+        return {
+            "ok": False, "status": "not_found", "lead_id": "", "note_id": "",
+            "error": "Актуальная сделка amoCRM не найдена",
+        }
+
+    settings = await _settings_map()
+    note_text = _clean(text, 2000) or "Пользователь подтвердил вход GetCourse"
+    existing, existing_error, _ = await _amo_request(
+        "GET", f"/api/v4/leads/{lead_id}/notes?limit=250", settings,
+    )
+    if not existing_error:
+        for note in (((existing or {}).get("_embedded") or {}).get("notes") or []):
+            if note.get("note_type") == "common" and _clean((note.get("params") or {}).get("text"), 2000) == note_text:
+                return {
+                    "ok": True, "status": "existing", "lead_id": lead_id,
+                    "note_id": _clean(note.get("id"), 64), "error": "",
+                }
+    body, error, _ = await _amo_request(
+        "POST", f"/api/v4/leads/{lead_id}/notes", settings,
+        [{"note_type": "common", "params": {"text": note_text}}],
+    )
+    if error:
+        return {"ok": False, "status": "failed", "lead_id": lead_id, "note_id": "", "error": error}
+    note_id = ""
+    try:
+        note_id = _clean((((body or {}).get("_embedded") or {}).get("notes") or [{}])[0].get("id"), 64)
+    except Exception:
+        note_id = ""
+    return {"ok": True, "status": "created", "lead_id": lead_id, "note_id": note_id, "error": ""}
+
+
+async def service_resolve_onboarding_manager(
+    *, phone: str = "", email: str = "", utm_term: str = "",
+) -> dict[str, Any]:
+    """Resolve an active amoCRM manager by exact customer identity."""
+
+    settings = await _settings_map()
+    candidates: list[dict[str, Any]] = []
+
+    async def contact_candidates(kind: str, query: str, rule: dict[str, str]) -> str:
+        body, error, _ = await _amo_request(
+            "GET", f"/api/v4/contacts?query={quote(query)}&with=leads&limit=50", settings
+        )
+        if error:
+            return error
+        for contact in (((body or {}).get("_embedded") or {}).get("contacts") or []):
+            if not any(_compare_value(value, query) for value in _entity_rule_values(contact, rule)):
+                continue
+            lead_ids = [
+                _clean(item.get("id"), 64)
+                for item in ((contact.get("_embedded") or {}).get("leads") or [])
+                if isinstance(item, dict)
+            ]
+            if not any(lead_ids):
+                contact_id = _clean(contact.get("id"), 64)
+                links, links_error, _ = await _amo_request(
+                    "GET", f"/api/v4/contacts/{contact_id}/links?filter[to_entity_type]=leads", settings
+                )
+                if links_error:
+                    return links_error
+                lead_ids = [
+                    _clean(item.get("to_entity_id"), 64)
+                    for item in (((links or {}).get("_embedded") or {}).get("links") or [])
+                    if isinstance(item, dict)
+                ]
+            for lead_id in [item for item in lead_ids if item]:
+                lead, lead_error, _ = await _amo_request("GET", f"/api/v4/leads/{lead_id}", settings)
+                if lead_error:
+                    return lead_error
+                if isinstance(lead, dict) and _int_or_none(lead.get("responsible_user_id")):
+                    candidates.append({
+                        "source": kind, "entity": "lead", "entity_id": _clean(lead.get("id"), 64),
+                        "responsible_user_id": _clean(lead.get("responsible_user_id"), 64),
+                        "updated_at": int(lead.get("updated_at") or 0),
+                    })
+            if _int_or_none(contact.get("responsible_user_id")):
+                candidates.append({
+                    "source": kind, "entity": "contact", "entity_id": _clean(contact.get("id"), 64),
+                    "responsible_user_id": _clean(contact.get("responsible_user_id"), 64),
+                    "updated_at": int(contact.get("updated_at") or 0),
+                })
+        return ""
+
+    checks = [
+        ("phone", _clean(phone, 100), {"field_code": "PHONE"}),
+        ("email", _clean(email, 500), {"field_code": "EMAIL"}),
+    ]
+    for kind, query, rule in checks:
+        if not query:
+            continue
+        error = await contact_candidates(kind, query, rule)
+        if error:
+            return {"ok": False, "found": False, "error": error}
+        if candidates:
+            break
+
+    clean_utm = _clean(utm_term, 500)
+    if not candidates and clean_utm:
+        body, error, _ = await _amo_request(
+            "GET", f"/api/v4/leads?query={quote(clean_utm)}&limit=50", settings
+        )
+        if error:
+            return {"ok": False, "found": False, "error": error}
+        for lead in (((body or {}).get("_embedded") or {}).get("leads") or []):
+            values = _entity_rule_values(lead, {"field_code": "UTM_TERM"})
+            values.extend(_entity_rule_values(lead, {"field": "utm_term"}))
+            if not any(_compare_value(value, clean_utm) for value in values):
+                continue
+            if _int_or_none(lead.get("responsible_user_id")):
+                candidates.append({
+                    "source": "utm_term", "entity": "lead", "entity_id": _clean(lead.get("id"), 64),
+                    "responsible_user_id": _clean(lead.get("responsible_user_id"), 64),
+                    "updated_at": int(lead.get("updated_at") or 0),
+                })
+
+    if not candidates:
+        return {"ok": True, "found": False, "source": "", "manager_user_id": "", "manager_name": ""}
+    users, users_error, _ = await _amo_request("GET", "/api/v4/users?limit=250", settings)
+    if users_error:
+        return {"ok": False, "found": False, "error": users_error}
+    active_users = {
+        _clean(user.get("id"), 64): _clean(user.get("name"), 300)
+        for user in (((users or {}).get("_embedded") or {}).get("users") or [])
+        if isinstance(user, dict)
+        and _int_or_none(user.get("id"))
+        and (user.get("rights") or {}).get("is_active", user.get("is_active", True))
+    }
+    candidates = [item for item in candidates if item["responsible_user_id"] in active_users]
+    if not candidates:
+        return {"ok": True, "found": False, "source": "", "manager_user_id": "", "manager_name": ""}
+    candidates.sort(
+        key=lambda item: (
+            1 if item["entity"] == "lead" else 0,
+            int(item["updated_at"]),
+            int(item["entity_id"]) if item["entity_id"].isdigit() else 0,
+        ),
+        reverse=True,
+    )
+    selected = candidates[0]
+    deal_id = selected["entity_id"] if selected["entity"] == "lead" else ""
+    amo_base_url = _env()["amo_base_url"]
+    return {
+        "ok": True,
+        "found": True,
+        "source": selected["source"],
+        "entity": selected["entity"],
+        "entity_id": selected["entity_id"],
+        "deal_id": deal_id,
+        "deal_url": f"{amo_base_url}/leads/detail/{deal_id}" if amo_base_url and deal_id else "",
+        "manager_user_id": selected["responsible_user_id"],
+        "manager_name": active_users[selected["responsible_user_id"]],
+    }
+
+
 async def _store_event(data: dict[str, Any]) -> int:
     keys = ["method", "order_id", "number", "lead_id", "contact_id", "action", "success", "ignored", "error", "details", "raw_payload"]
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _connect() as db:
         cur = await db.execute(
             f"INSERT INTO events({','.join(keys)}) VALUES({','.join(['?'] * len(keys))})",
             tuple(data.get(key, "") for key in keys),
@@ -2091,7 +4369,7 @@ async def _process_order_payload_unlocked(
     ignored_special = {
         "ignore_minicourse_unpaid": "мини-курсы выгружаются только после полной оплаты",
         "ignore_surcharge_partial": "для доплаты поддерживаются только создание и полная оплата",
-        "ignore_surcharge_title": "в названии заказа нет «Доплата до VIP»",
+        "ignore_surcharge_title": "в названии заказа нет «Доплата до Premium/VIP»",
     }
     if order["process"] in ignored_special:
         reason = ignored_special[order["process"]]
@@ -2118,6 +4396,24 @@ async def _process_order_payload_unlocked(
             "status_code": 200,
         }
     _apply_attribution(order, settings)
+    try:
+        order["utm_inheritance"] = await _inherit_missing_attribution(order, settings)
+        if order["utm_inheritance"].get("status") == "lookup_error":
+            await _attribution_alert(
+                "lookup_error",
+                "❌ Nexus не смог проверить наследование UTM\n"
+                f"Заказ GetCourse: {order.get('number') or order.get('order_id')}\n"
+                f"{_clean(order['utm_inheritance'].get('error'), 1000)}",
+            )
+    except Exception as exc:
+        order["utm_inheritance"] = {
+            "status": "error", "filled": [], "source_lead_id": "", "error": _clean(exc, 1000),
+        }
+        await _attribution_alert(
+            "exception",
+            "❌ Ошибка автоматического наследования UTM\n"
+            f"Заказ GetCourse: {order.get('number') or order.get('order_id')}\n{_clean(exc, 1000)}",
+        )
     autopayment_ok, autopayment_source = _autopayment_match(payload, order)
     special_order = order["process"] in {"surcharge_created", "surcharge_paid", "minicourse_paid"}
     if not autopayment_ok and not special_order:
@@ -2143,6 +4439,13 @@ async def _process_order_payload_unlocked(
                 "preserved_all_fields": True,
             }
             action, ignored = "noted_non_autopayment_contact_deals", 0
+            if not process_error and result["lead_id"]:
+                # This branch deliberately preserves the existing amoCRM deal,
+                # but the paid GetCourse order still belongs to that deal.  Keep
+                # the same durable order -> lead mapping as the create/update
+                # branches so read-only consumers (Streams, onboarding) can
+                # resolve the exact deal instead of guessing by phone/email.
+                await _remember_lead(order, result["lead_id"])
         base_event = {
             "method": method,
             "order_id": order["order_id"],
@@ -2311,7 +4614,7 @@ async def _process_webhook(request: Request, process: str = "") -> JSONResponse:
 
 
 async def _set_setting(key: str, value: str) -> None:
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _connect() as db:
         await db.execute(
             "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
@@ -2346,6 +4649,661 @@ async def _customer_db_rows(limit: int = CDB_PAGE_SIZE, offset: int = 0) -> list
         return []
 
 
+async def _customer_db_user_rows(after_id: int = 0, limit: int = 10) -> list[dict[str, Any]]:
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return []
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id,platform_id,custom_fields,updated_at
+                FROM cdb_getcourse_users
+                WHERE id>?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (max(0, int(after_id)), max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit)))),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+    except Exception as exc:
+        _log("warning", "customer-db getcourse_users read failed: %s", exc)
+        return []
+
+
+async def _customer_db_profile_order_rows(after_id: int = 0, limit: int = 10) -> list[dict[str, Any]]:
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return []
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id,platform_id,custom_fields,updated_at
+                FROM cdb_getcourse_orders
+                WHERE id>?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (max(0, int(after_id)), max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit)))),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+    except Exception as exc:
+        _log("warning", "customer-db profile order read failed: %s", exc)
+        return []
+
+
+async def _customer_db_profile_order_rows_for_user(
+    gc_user_id: Any, limit: int = 100,
+) -> list[dict[str, Any]]:
+    user_id = _clean(gc_user_id, 120)
+    db_path = _customer_db_path()
+    if not user_id or not db_path.exists():
+        return []
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT id,platform_id,custom_fields,updated_at
+                FROM cdb_getcourse_orders
+                WHERE json_extract(custom_fields,'$.gc_user_id')=?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (user_id, max(1, min(500, int(limit)))),
+            )
+            return [dict(row) for row in await cur.fetchall()]
+    except Exception as exc:
+        _log("warning", "customer-db profile orders for user read failed: %s", exc)
+        return []
+
+
+async def _current_gc_profile(gc_user_id: Any) -> tuple[dict[str, Any], str]:
+    user_id = _clean(gc_user_id, 120)
+    if not user_id:
+        return {}, "gc_user_id пустой"
+    try:
+        async with aiosqlite.connect(_customer_db_path()) as db:
+            cur = await db.execute(
+                """
+                SELECT custom_fields
+                FROM cdb_getcourse_users
+                WHERE platform_id=?
+                ORDER BY id DESC
+                LIMIT 2
+                """,
+                (user_id,),
+            )
+            rows = await cur.fetchall()
+    except Exception as exc:
+        return {}, f"Профиль GetCourse недоступен: {exc}"
+    if len(rows) != 1:
+        return {}, "Профиль GetCourse не найден или продублирован"
+    try:
+        fields = json.loads(rows[0][0] or "{}")
+    except Exception:
+        return {}, "Профиль GetCourse содержит некорректный JSON"
+    return fields if isinstance(fields, dict) else {}, ""
+
+
+async def _gc_profile_binding(gc_user_id: Any) -> dict[str, Any]:
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM gc_profile_bindings WHERE gc_user_id=? AND success=1 LIMIT 2",
+            (_clean(gc_user_id, 120),),
+        )
+        rows = await cur.fetchall()
+    return dict(rows[0]) if len(rows) == 1 else {}
+
+
+async def _profile_order_note_state(source_record_id: int) -> dict[str, Any]:
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        db.row_factory = aiosqlite.Row
+        row = await (
+            await db.execute(
+                "SELECT * FROM gc_profile_order_notes WHERE source_record_id=?",
+                (int(source_record_id),),
+            )
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+async def _save_profile_order_note_state(
+    row: dict[str, Any], source_hash: str, gc_user_id: str, lead_id: str,
+    note_hash: str, status: str, error: str = "", *, fields_synced: bool = False,
+) -> None:
+    success = status in {
+        "noted", "already_noted", *ORDER_EMAIL_RESULT_STATUS_BY_STATE,
+    }
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        await db.execute(
+            """
+            INSERT INTO gc_profile_order_notes(
+                source_record_id,source_hash,gc_user_id,lead_id,note_hash,
+                status,success,fields_synced,error,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_record_id) DO UPDATE SET
+                source_hash=excluded.source_hash,
+                gc_user_id=excluded.gc_user_id,
+                lead_id=excluded.lead_id,
+                note_hash=excluded.note_hash,
+                status=excluded.status,
+                success=excluded.success,
+                fields_synced=excluded.fields_synced,
+                error=excluded.error,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(row["id"]), source_hash, gc_user_id, lead_id, note_hash,
+                status, 1 if success else 0, 1 if fields_synced else 0,
+                _clean(error, 1000), _now(),
+            ),
+        )
+        await db.commit()
+
+
+async def _add_profile_order_note(
+    lead_id: str, text: str, settings: dict[str, str], *,
+    gc_user_id: str, match_kind: str, match_value: str, contact_id: str,
+) -> tuple[str, str]:
+    for page in range(1, 5):
+        existing, existing_error, _ = await _user_email_amo_request(
+            "GET", f"/api/v4/leads/{lead_id}/notes?limit=250&page={page}", settings,
+        )
+        if existing_error:
+            return "", existing_error
+        notes = (((existing or {}).get("_embedded") or {}).get("notes") or [])
+        for note in notes:
+            if (
+                note.get("note_type") == "common"
+                and _clean((note.get("params") or {}).get("text"), 10000) == text
+            ):
+                return "already_noted", ""
+        has_next = bool(((existing or {}).get("_links") or {}).get("next"))
+        if not has_next and len(notes) < 250:
+            break
+        if page == 4:
+            return "", "Проверка примечаний достигла безопасного лимита 1000 записей"
+    valid, validation_error = await _validate_live_gc_binding(
+        gc_user_id, match_kind, match_value, lead_id, contact_id, settings,
+    )
+    if not valid:
+        return "", validation_error or "Привязка изменилась перед записью примечания"
+    _body, error, _ = await _user_email_amo_request(
+        "POST", f"/api/v4/leads/{lead_id}/notes", settings,
+        [{"note_type": "common", "params": {"text": text}}],
+    )
+    return ("noted" if not error else ""), error
+
+
+async def _validate_live_gc_binding(
+    gc_user_id: str, match_kind: str, match_value: str,
+    lead_id: str, contact_id: str,
+    settings: dict[str, str],
+) -> tuple[bool, str]:
+    profile, profile_error = await _current_gc_profile(gc_user_id)
+    if profile_error:
+        return False, profile_error
+    kind = _clean(match_kind, 40) or "utm_term"
+    current_value = (
+        _strict_utm_term(profile.get("utm_term"))
+        if kind == "utm_term" else _phone_identity(profile.get("phone"))
+    )
+    if current_value != _clean(match_value, 1000):
+        return False, f"{kind} профиля изменился"
+    target = await _resolve_gc_profile_target(
+        gc_user_id,
+        current_value if kind == "utm_term" else "",
+        current_value if kind == "phone" else "",
+        settings,
+        only_kind=kind,
+    )
+    if target.get("status") != "matched":
+        return False, _clean(target.get("error"), 1000) or "Связь профиля со сделкой изменилась"
+    if (
+        _clean(target.get("lead_id"), 64) != lead_id
+        or _clean(target.get("contact_id"), 64) != contact_id
+        or _clean(target.get("match_value"), 1000) != _clean(match_value, 1000)
+    ):
+        return False, "Сделка или основной контакт изменились"
+    return True, ""
+
+
+def _gc_order_lead_field_values(
+    lead: dict[str, Any], field_catalog: list[dict[str, Any]], order: dict[str, Any],
+) -> list[dict[str, Any]]:
+    allowed = {name.casefold() for name in GC_ORDER_FIELD_NAMES}
+    allowed_ids = {
+        int(field["id"])
+        for field in field_catalog
+        if _int_or_none(field.get("id"))
+        and _clean(field.get("name"), 300).casefold() in allowed
+    }
+    changes: list[dict[str, Any]] = []
+    for item in _lead_field_values(field_catalog, order):
+        field_id = int(item.get("field_id") or 0)
+        if field_id not in allowed_ids:
+            continue
+        incoming = [
+            value.get("value") for value in (item.get("values") or [])
+            if isinstance(value, dict) and value.get("value") not in (None, "")
+        ]
+        existing = _entity_rule_values(lead, {"field_id": str(field_id)})
+        if incoming and not (
+            len(existing) == len(incoming)
+            and all(any(_compare_value(old, new) for old in existing) for new in incoming)
+        ):
+            changes.append(item)
+    return changes
+
+
+async def _sync_bound_profile_order_note(
+    row: dict[str, Any], settings: dict[str, str], *, dry_run: bool = False,
+) -> dict[str, Any]:
+    try:
+        fields = json.loads(row.get("custom_fields") or "{}")
+    except Exception:
+        fields = {}
+    if not isinstance(fields, dict):
+        fields = {}
+    source_hash = _customer_db_source_hash(row.get("custom_fields"))
+    email_state: dict[str, Any] = {}
+    if _db_path and Path(_db_path).exists() and not dry_run:
+        email_state = await _profile_order_note_state(int(row["id"]))
+    email_result = {"ok": True, "status": "not_checked"}
+    if (
+        int(email_state.get("success") or 0)
+        and email_state.get("source_hash") == source_hash
+        and _clean(email_state.get("status"), 100).startswith("email_")
+    ):
+        email_result = {
+            "ok": True,
+            "status": ORDER_EMAIL_RESULT_STATUS_BY_STATE.get(
+                _clean(email_state.get("status"), 100), "invalid_source",
+            ),
+            "lead_id": _clean(email_state.get("lead_id"), 2000),
+            "contact_id": "",
+            "state_skipped": True,
+        }
+    elif _db_path:
+        email_result = await _sync_user_email(
+            fields.get("email"), fields.get("phone"),
+            fields.get("utm_term") or fields.get("user_term"),
+            settings, dry_run=dry_run,
+        )
+        if not email_result.get("ok"):
+            return {
+                "ok": False, "status": "lookup_error", "lead_id": "",
+                "gc_user_id": _clean(fields.get("gc_user_id"), 120),
+                "error": _clean(email_result.get("error"), 1000)
+                or f"Email sync: {_clean(email_result.get('status'), 80)}",
+            }
+    gc_user_id = _clean(fields.get("gc_user_id"), 120)
+    email_status = _clean(email_result.get("status"), 80)
+    if not gc_user_id:
+        result_status = ORDER_EMAIL_TERMINAL_STATUS_BY_RESULT.get(email_status, "invalid_source")
+        if (
+            not dry_run and _db_path and Path(_db_path).exists()
+            and result_status.startswith("email_") and not email_result.get("state_skipped")
+        ):
+            await _save_profile_order_note_state(
+                row, source_hash, "", _clean(email_result.get("lead_id"), 2000),
+                "", result_status,
+            )
+        return {
+            "ok": True, "status": result_status,
+            "lead_id": _clean(email_result.get("lead_id"), 2000), "gc_user_id": "",
+        }
+    binding = await _gc_profile_binding(gc_user_id)
+    if not binding:
+        result_status = ORDER_EMAIL_TERMINAL_STATUS_BY_RESULT.get(email_status, "no_binding")
+        if (
+            not dry_run and _db_path and Path(_db_path).exists()
+            and result_status.startswith("email_") and not email_result.get("state_skipped")
+        ):
+            await _save_profile_order_note_state(
+                row, source_hash, gc_user_id, _clean(email_result.get("lead_id"), 2000),
+                "", result_status,
+            )
+        return {
+            "ok": True, "status": result_status,
+            "lead_id": _clean(email_result.get("lead_id"), 2000),
+            "gc_user_id": gc_user_id,
+        }
+    lead_id = _clean(binding.get("lead_id"), 64)
+    contact_id = _clean(binding.get("contact_id"), 64)
+    match_kind = _clean(binding.get("match_kind"), 40) or "utm_term"
+    match_value = _clean(
+        binding.get("match_value") or (
+            binding.get("utm_term") if match_kind == "utm_term" else ""
+        ),
+        1000,
+    )
+    profile, profile_error = await _current_gc_profile(gc_user_id)
+    current_value = (
+        _strict_utm_term(profile.get("utm_term"))
+        if match_kind == "utm_term" else _phone_identity(profile.get("phone"))
+    )
+    if profile_error or not current_value or current_value != match_value:
+        return {
+            "ok": not bool(profile_error), "status": "binding_changed", "lead_id": lead_id,
+            "gc_user_id": gc_user_id,
+            "error": profile_error or f"{match_kind} профиля изменился после привязки",
+        }
+    order = _normalize_order(_payload_from_customer_db(fields), settings)
+    requested_process = fields.get("payment_state") or fields.get("status") or ""
+    order["process"] = _route_order(order, requested_process, settings)
+    _apply_attribution(order, settings)
+    note_text = _format_order_template(
+        settings.get("note_template") or DEFAULT_NOTE_TEMPLATE, order, 10000,
+    )
+    note_hash = hashlib.sha256(note_text.encode("utf-8")).hexdigest()
+    state = await _profile_order_note_state(int(row["id"]))
+    if (
+        int(state.get("success") or 0)
+        and state.get("source_hash") == source_hash
+        and _clean(state.get("lead_id"), 64) == lead_id
+        and state.get("note_hash") == note_hash
+        and int(state.get("fields_synced") or 0)
+    ):
+        return {
+            "ok": True, "status": "already_noted", "lead_id": lead_id,
+            "gc_user_id": gc_user_id, "state_skipped": True,
+            "email_status": _clean(email_result.get("status"), 80),
+        }
+    target = await _resolve_gc_profile_target(
+        gc_user_id,
+        current_value if match_kind == "utm_term" else "",
+        current_value if match_kind == "phone" else "",
+        settings,
+        only_kind=match_kind,
+    )
+    if target.get("status") != "matched":
+        return {
+            "ok": bool(target.get("ok")), "status": "binding_changed", "lead_id": lead_id,
+            "gc_user_id": gc_user_id,
+            "error": _clean(target.get("error"), 1000) or "Связь профиля со сделкой изменилась",
+        }
+    if (
+        _clean(target.get("lead_id"), 64) != lead_id
+        or _clean(target.get("contact_id"), 64) != contact_id
+        or _clean(target.get("match_value"), 1000) != match_value
+    ):
+        return {
+            "ok": True, "status": "binding_changed", "lead_id": lead_id,
+            "gc_user_id": gc_user_id,
+            "error": "Сделка или основной контакт изменились после привязки",
+        }
+    lead = target["lead"]
+    lead_fields, fields_error = await _amo_fields("leads", settings)
+    if fields_error:
+        return {
+            "ok": False, "status": "lookup_error", "lead_id": lead_id,
+            "gc_user_id": gc_user_id, "error": fields_error,
+        }
+    field_values = _gc_order_lead_field_values(lead, lead_fields, order)
+    if dry_run:
+        return {
+            "ok": True,
+            "status": "would_note_and_fill_fields" if field_values else "would_note",
+            "gc_user_id": gc_user_id,
+        }
+    if field_values:
+        _body, field_error, _ = await _user_email_amo_request(
+            "PATCH", f"/api/v4/leads/{lead_id}", settings,
+            {"custom_fields_values": field_values},
+        )
+        if field_error:
+            await _save_profile_order_note_state(
+                row, source_hash, gc_user_id, lead_id, note_hash,
+                "field_update_error", field_error, fields_synced=False,
+            )
+            return {
+                "ok": False, "status": "field_update_error", "lead_id": lead_id,
+                "gc_user_id": gc_user_id, "error": field_error,
+            }
+    status, note_error = await _add_profile_order_note(
+        lead_id, note_text, settings,
+        gc_user_id=gc_user_id, match_kind=match_kind,
+        match_value=match_value, contact_id=contact_id,
+    )
+    result_status = status or "note_error"
+    await _save_profile_order_note_state(
+        row, source_hash, gc_user_id, lead_id, note_hash, result_status, note_error,
+        fields_synced=True,
+    )
+    return {
+        "ok": not bool(note_error), "status": result_status, "lead_id": lead_id,
+        "gc_user_id": gc_user_id, "error": note_error,
+        "email_status": _clean(email_result.get("status"), 80),
+    }
+
+
+async def _sync_profile_orders_for_user(
+    gc_user_id: Any, settings: dict[str, str], *, limit: int = 100,
+) -> dict[str, Any]:
+    """Immediately backfill a newly bound profile; the global cursor remains a fallback."""
+    async with _profile_order_note_sync_lock:
+        rows = await _customer_db_profile_order_rows_for_user(gc_user_id, limit=limit)
+        statuses: dict[str, int] = {}
+        errors: list[str] = []
+        for row in rows:
+            result = await _sync_bound_profile_order_note(row, settings)
+            status = _clean(result.get("status"), 80) or "unknown"
+            statuses[status] = statuses.get(status, 0) + 1
+            if not result.get("ok"):
+                errors.append(_clean(result.get("error"), 1000) or status)
+        return {
+            "processed": len(rows), "statuses": statuses,
+            "ok": not errors, "errors": errors[:10],
+        }
+
+
+async def _sync_profile_order_notes_once(
+    *, limit: int = 10, after_id: int | None = None, dry_run: bool = False,
+) -> dict[str, Any]:
+    async with _profile_order_note_sync_lock:
+        return await _sync_profile_order_notes_once_unlocked(
+            limit=limit, after_id=after_id, dry_run=dry_run,
+        )
+
+
+async def _sync_profile_order_notes_once_unlocked(
+    *, limit: int = 10, after_id: int | None = None, dry_run: bool = False,
+) -> dict[str, Any]:
+    if _protected_bizon_window_now():
+        return {
+            "ok": False, "processed": 0, "next_after_id": 0, "protected_window": True,
+            "error": "Примечания заказов отложены до конца защищённого окна Bizon",
+        }
+    settings = await _settings_map()
+    background = after_id is None
+    scan_after = max(
+        0,
+        int(settings.get("cdb_profile_order_scan_after_id") or 0)
+        if background else int(after_id or 0),
+    )
+    batch = max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit)))
+    rows = await _customer_db_profile_order_rows(scan_after, batch)
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        result = await _sync_bound_profile_order_note(row, settings, dry_run=dry_run)
+        results.append({
+            "source_record_id": int(row["id"]),
+            "status": result.get("status"),
+            "lead_id": result.get("lead_id", ""),
+            "error": result.get("error", ""),
+        })
+    next_after_id = int(rows[-1]["id"]) if rows else 0
+    wrapped = bool(background and len(rows) < batch)
+    if background and not dry_run:
+        await _set_setting(
+            "cdb_profile_order_scan_after_id", "0" if wrapped else str(next_after_id),
+        )
+    error_statuses = {"lookup_error", "field_update_error", "note_error", "error"}
+    return {
+        "ok": not any(item.get("status") in error_statuses for item in results),
+        "dry_run": dry_run, "scanned": len(rows), "processed": len(results),
+        "next_after_id": next_after_id, "wrapped": wrapped, "results": results,
+    }
+
+
+def _user_email_source_hash(fields: dict[str, Any]) -> str:
+    value = {
+        "email": _valid_email(fields.get("email")),
+        "phone": _phone_identity(fields.get("phone")),
+        "utm_term": _strict_utm_term(fields.get("utm_term")),
+    }
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "v4:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _user_email_sync_states(record_ids: list[int]) -> dict[int, dict[str, Any]]:
+    if not record_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(record_ids))
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"SELECT * FROM cdb_user_email_sync WHERE source_record_id IN ({placeholders})",
+            tuple(record_ids),
+        )
+        return {int(row["source_record_id"]): dict(row) for row in await cur.fetchall()}
+
+
+async def _mark_user_email_sync(
+    row: dict[str, Any], source_hash: str, result: dict[str, Any], retry_minutes: int,
+) -> None:
+    status = _clean(result.get("status"), 80)
+    terminal = status in {
+        "updated", "already_present", "email_conflict", "email_filled_before_update",
+        "invalid_source", "bound", "already_bound",
+    }
+    retry_at = ""
+    if not terminal:
+        retry_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=max(5, min(1440, retry_minutes)))
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        await db.execute(
+            """
+            INSERT INTO cdb_user_email_sync(
+                source_record_id,source_updated_at,source_hash,status,lead_id,contact_id,
+                success,attempts,error,next_retry_at,last_synced_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_record_id) DO UPDATE SET
+                source_updated_at=excluded.source_updated_at,
+                source_hash=excluded.source_hash,
+                status=excluded.status,
+                lead_id=excluded.lead_id,
+                contact_id=excluded.contact_id,
+                success=excluded.success,
+                attempts=CASE
+                    WHEN cdb_user_email_sync.source_hash=excluded.source_hash
+                    THEN cdb_user_email_sync.attempts+1 ELSE 1 END,
+                error=excluded.error,
+                next_retry_at=excluded.next_retry_at,
+                last_synced_at=excluded.last_synced_at
+            """,
+            (
+                int(row["id"]), _clean(row.get("updated_at"), 80), source_hash, status,
+                _clean(result.get("lead_id"), 500), _clean(result.get("contact_id"), 500),
+                1 if terminal else 0, 1, _clean(result.get("error"), 1000), retry_at, _now(),
+            ),
+        )
+        await db.commit()
+
+
+async def _sync_getcourse_user_emails_once(
+    *, limit: int = 10, after_id: int | None = None, dry_run: bool = False, force: bool = False,
+) -> dict[str, Any]:
+    async with _user_email_sync_lock:
+        settings = await _settings_map()
+        if settings.get("cdb_user_email_sync_enabled") != "1" and not force:
+            return {"ok": True, "enabled": False, "processed": 0, "next_after_id": 0}
+        if _protected_bizon_window_now():
+            return {
+                "ok": False, "enabled": settings.get("cdb_user_email_sync_enabled") == "1",
+                "processed": 0, "next_after_id": 0,
+                "protected_window": True,
+                "error": "Email sync отложен до конца защищённого окна Bizon",
+            }
+        batch = max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit)))
+        background = after_id is None
+        scan_after = max(
+            0,
+            int(settings.get("cdb_user_email_scan_after_id") or 0) if background else int(after_id or 0),
+        )
+        rows = await _customer_db_user_rows(after_id=scan_after, limit=batch)
+        states = await _user_email_sync_states([int(row["id"]) for row in rows]) if not dry_run else {}
+        retry_minutes = max(5, min(1440, int(settings.get("cdb_user_email_retry_minutes") or 60)))
+        now = _now()
+        results: list[dict[str, Any]] = []
+        state_skipped = 0
+        retry_deferred = 0
+        for row in rows:
+            try:
+                fields = json.loads(row.get("custom_fields") or "{}")
+                if not isinstance(fields, dict):
+                    raise ValueError("custom_fields is not an object")
+                source_hash = _user_email_source_hash(fields)
+                state = states.get(int(row["id"]))
+                if state and state.get("source_hash") == source_hash and not force:
+                    if int(state.get("success") or 0):
+                        state_skipped += 1
+                        continue
+                    if _clean(state.get("next_retry_at"), 80) > now:
+                        retry_deferred += 1
+                        continue
+                result = await _sync_gc_profile(row, fields, settings, dry_run=dry_run)
+                results.append({
+                    "source_record_id": int(row["id"]),
+                    "status": result.get("status"),
+                    "lead_id": result.get("lead_id", ""),
+                    "contact_id": result.get("contact_id", ""),
+                    "error": result.get("error", ""),
+                })
+                if not dry_run:
+                    await _mark_user_email_sync(row, source_hash, result, retry_minutes)
+                if result.get("status") not in {"invalid_source", "already_present", "email_conflict"}:
+                    await asyncio.sleep(0.25)
+            except Exception as exc:
+                result = {"ok": False, "status": "error", "error": _clean(exc, 1000)}
+                results.append({
+                    "source_record_id": int(row.get("id") or 0), "status": "error",
+                    "lead_id": "", "contact_id": "", "error": result["error"],
+                })
+                if not dry_run:
+                    try:
+                        fields = fields if isinstance(fields, dict) else {}
+                    except Exception:
+                        fields = {}
+                    await _mark_user_email_sync(row, _user_email_source_hash(fields), result, retry_minutes)
+        next_after_id = int(rows[-1]["id"]) if rows else 0
+        wrapped = bool(background and len(rows) < batch)
+        if background and not dry_run:
+            await _set_setting("cdb_user_email_scan_after_id", "0" if wrapped else str(next_after_id))
+        return {
+            "ok": not any(item.get("status") in {
+                "error", "lookup_error", "source_lookup_error", "update_error", "configuration_error",
+                "partial_error",
+            } for item in results),
+            "enabled": settings.get("cdb_user_email_sync_enabled") == "1",
+            "dry_run": dry_run,
+            "scanned": len(rows),
+            "processed": len(results),
+            "state_skipped": state_skipped,
+            "retry_deferred": retry_deferred,
+            "next_after_id": next_after_id,
+            "wrapped": wrapped,
+            "results": results,
+        }
+
+
 async def _sync_state_for(record_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not record_ids:
         return {}
@@ -2360,7 +5318,7 @@ async def _sync_state_for(record_ids: list[int]) -> dict[int, dict[str, Any]]:
 
 
 async def _mark_cdb_sync(record_id: int, updated_at: str, source_hash: str, result: dict[str, Any]) -> None:
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _connect() as db:
         await db.execute(
             """
             INSERT INTO cdb_sync(source_record_id,source_updated_at,source_hash,lead_id,success,error,last_synced_at)
@@ -2425,7 +5383,7 @@ async def _bootstrap_all_customer_db_rows() -> tuple[int, int]:
 
 
 async def _refresh_cdb_sync_fingerprint(record_id: int, updated_at: str, source_hash: str) -> None:
-    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+    async with _connect() as db:
         await db.execute(
             "UPDATE cdb_sync SET source_updated_at=?,source_hash=? WHERE source_record_id=?",
             (updated_at, source_hash, record_id),
@@ -2450,6 +5408,7 @@ async def _sync_customer_db_once_unlocked(backfill: bool = False, limit: int = 2
     source_rows = 0
     processed = 0
     import_skipped = 0
+    state_skipped = 0
     errors = []
     while processed < process_limit:
         rows = await _customer_db_rows(limit=CDB_PAGE_SIZE, offset=offset)
@@ -2491,6 +5450,24 @@ async def _sync_customer_db_once_unlocked(backfill: bool = False, limit: int = 2
                     processed += 1
                     import_skipped += 1
                     continue
+                payment_state = _clean(fields.get("payment_state"), 80).casefold()
+                if (
+                    payment_state in CDB_AMO_IGNORED_PAYMENT_STATES
+                    or payment_state not in CDB_AMO_PROCESSABLE_PAYMENT_STATES
+                ):
+                    await _mark_cdb_sync(
+                        record_id,
+                        updated_at,
+                        source_hash,
+                        {
+                            "ok": True,
+                            "ignored": True,
+                            "error": f"customer-db state {payment_state} excluded from amo sync",
+                        },
+                    )
+                    processed += 1
+                    state_skipped += 1
+                    continue
                 payload = _payload_from_customer_db(fields)
                 raw_payload = json.dumps({"source": "customer-db", "record_id": record_id, "custom_fields": fields}, ensure_ascii=False)
                 process = _clean(fields.get("payment_state"), 80)
@@ -2511,6 +5488,7 @@ async def _sync_customer_db_once_unlocked(backfill: bool = False, limit: int = 2
         "source_rows": source_rows,
         "processed": processed,
         "import_skipped": import_skipped,
+        "state_skipped": state_skipped,
         "errors": errors[:20],
     }
 
@@ -2528,6 +5506,10 @@ async def _customer_db_sync_loop() -> None:
             env = _env()
             if settings.get("cdb_sync_enabled") == "1" and env["amo_base_url"] and env["amo_token"]:
                 await _sync_customer_db_once()
+            if settings.get("cdb_user_email_sync_enabled") == "1" and env["amo_base_url"] and env["amo_token"]:
+                batch = max(1, min(50, int(settings.get("cdb_user_email_sync_batch") or 10)))
+                await _sync_getcourse_user_emails_once(limit=batch)
+                await _sync_profile_order_notes_once(limit=batch)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2553,6 +5535,7 @@ async def env_status(request: Request):
         "customer_db_path": str(customer_db_path),
         "customer_db_ready": customer_db_path.exists(),
         "customer_db_sync_enabled": settings.get("cdb_sync_enabled") == "1",
+        "getcourse_user_email_sync_enabled": settings.get("cdb_user_email_sync_enabled") == "1",
         "bindings_paused": _bindings_paused(settings),
         "ready": bool(env["amo_base_url"] and env["amo_token"]),
     }
@@ -2607,6 +5590,17 @@ async def amo_catalog(request: Request):
         "lead_fields": lead_fields,
         "contact_fields": contact_fields,
     }
+
+
+@router.post("/amo/ensure-profile-fields")
+async def amo_ensure_profile_fields(request: Request, dry_run: int = 1):
+    await _require_panel_user(request)
+    if _protected_bizon_window_now() and not dry_run:
+        return JSONResponse(
+            {"ok": False, "protected_window": True, "error": "Создание полей отложено до конца окна Bizon"},
+            status_code=409,
+        )
+    return await _ensure_gc_binding_fields(await _settings_map(), dry_run=bool(dry_run))
 
 
 @router.get("/amo/users")
@@ -2724,6 +5718,85 @@ async def customer_db_sync_status(request: Request):
 async def customer_db_sync_run(request: Request, backfill: int = 0, limit: int = MAX_MANUAL_SYNC_LIMIT):
     await _require_panel_user(request)
     return await _sync_customer_db_once(backfill=bool(backfill), limit=max(1, min(MAX_MANUAL_SYNC_LIMIT, int(limit))))
+
+
+@router.get("/sync/getcourse-users-email/status")
+async def getcourse_user_email_sync_status(request: Request):
+    await _require_panel_user(request)
+    settings = await _settings_map()
+    async with aiosqlite.connect(_db_path) as db:  # type: ignore[arg-type]
+        db.row_factory = aiosqlite.Row
+        totals = dict(await (
+            await db.execute(
+                """
+                SELECT COUNT(*) tracked,
+                       SUM(CASE WHEN status='updated' THEN 1 ELSE 0 END) updated,
+                       SUM(CASE WHEN status='already_present' THEN 1 ELSE 0 END) already_present,
+                       SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) retrying,
+                       SUM(CASE WHEN status IN ('email_conflict','ambiguous_contact') THEN 1 ELSE 0 END) conflicts
+                FROM cdb_user_email_sync
+                """
+            )
+        ).fetchone() or {})
+        binding_totals = dict(await (
+            await db.execute(
+                """
+                SELECT COUNT(*) tracked_bindings,
+                       SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) active_bindings
+                FROM gc_profile_bindings
+                """
+            )
+        ).fetchone() or {})
+        note_totals = dict(await (
+            await db.execute(
+                """
+                SELECT COUNT(*) tracked_order_notes,
+                       SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) delivered_order_notes,
+                       SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) pending_order_notes
+                FROM gc_profile_order_notes
+                """
+            )
+        ).fetchone() or {})
+    return {
+        "enabled": settings.get("cdb_user_email_sync_enabled") == "1",
+        "batch": int(settings.get("cdb_user_email_sync_batch") or 10),
+        "scan_after_id": int(settings.get("cdb_user_email_scan_after_id") or 0),
+        "order_scan_after_id": int(settings.get("cdb_profile_order_scan_after_id") or 0),
+        "contact_backfill_pending": settings.get("cdb_contact_email_backfill_pending") == "1",
+        "contact_backfill_status": settings.get("cdb_contact_email_backfill_status") or "",
+        "contact_backfill_result": _jsonish(
+            settings.get("cdb_contact_email_backfill_result") or "{}",
+        ),
+        "protected_window": _protected_bizon_window_now(),
+        **{key: int(value or 0) for key, value in totals.items()},
+        **{key: int(value or 0) for key, value in binding_totals.items()},
+        **{key: int(value or 0) for key, value in note_totals.items()},
+    }
+
+
+@router.post("/sync/getcourse-users-email/run")
+async def getcourse_user_email_sync_run(
+    request: Request, after_id: int = 0, limit: int = 10, dry_run: int = 1,
+):
+    await _require_panel_user(request)
+    return await _sync_getcourse_user_emails_once(
+        limit=max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit))),
+        after_id=max(0, int(after_id)),
+        dry_run=bool(dry_run),
+        force=True,
+    )
+
+
+@router.post("/sync/getcourse-profile-orders/run")
+async def getcourse_profile_order_sync_run(
+    request: Request, after_id: int = 0, limit: int = 10, dry_run: int = 1,
+):
+    await _require_panel_user(request)
+    return await _sync_profile_order_notes_once(
+        limit=max(1, min(MAX_USER_EMAIL_SYNC_LIMIT, int(limit))),
+        after_id=max(0, int(after_id)),
+        dry_run=bool(dry_run),
+    )
 
 
 @router.api_route("/webhook", methods=["GET", "POST"])

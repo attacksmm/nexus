@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -51,8 +52,10 @@ _gc_lookup_lock = asyncio.Lock()
 _gc_write_lock = asyncio.Lock()
 _registry_write_lock = asyncio.Lock()
 _chat_flows_cache: dict[str, Any] = {"key": "", "expires": 0.0, "data": None}
+_flow_catalog_fallback_cache: dict[str, Any] = {"key": "", "expires": 0.0, "data": None}
 _gc_access_groups_cache: dict[str, Any] = {"expires": 0.0, "items": []}
 _gc_pending_exports: dict[str, tuple[str, float]] = {}
+_registry_xlsx_export_cache: dict[str, Any] = {"key": "", "expires": 0.0, "rows": {}}
 
 MACHINE_PREFIX = "chat_fields_"
 CHAT_ENTITLEMENT_VERSION = 2
@@ -463,6 +466,19 @@ def _course_chat_db_path() -> Path:
     return candidates[0]
 
 
+def _student_transfer_db_path() -> Path:
+    module_dir = _module_dir()
+    candidates = [
+        module_dir.parent / "student-transfer" / "data" / "student-transfer.db",
+        module_dir.parent.parent / "modules" / "student-transfer" / "data" / "student-transfer.db",
+        module_dir.parent.parent / "module_student_transfer" / "data" / "student-transfer.db",
+    ]
+    for candidate in candidates:
+        if candidate.exists() or candidate.parent.exists():
+            return candidate
+    return candidates[0]
+
+
 def _json_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -479,6 +495,55 @@ def _compact_text(value: Any) -> str:
 
 def _norm(value: Any) -> str:
     return _compact_text(value).replace("ё", "е").casefold()
+
+
+def _flatten_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return " ".join(_flatten_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_text(item) for item in value)
+    return str(value)
+
+
+def _tag_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, (bool, int, float)) and bool(item):
+                result.append(str(key))
+            else:
+                result.extend(_tag_names(item))
+        return result
+    if isinstance(value, (list, tuple, set)):
+        result = []
+        for item in value:
+            result.extend(_tag_names(item))
+        return result
+    return [item.strip() for item in re.split(r"[|,;\n]+", str(value)) if item.strip()]
+
+
+def _autopayment_match(fields: dict[str, Any]) -> tuple[bool, str]:
+    """Match the GetCourse→amoCRM autopayment contract exactly."""
+
+    keyword = "автооплата"
+    if any(
+        keyword in _flatten_text(fields.get(key)).casefold()
+        for key in ("title", "order_name", "name_order", "positions")
+    ):
+        return True, "title"
+    tag_names: list[str] = []
+    for key in ("tags", "order_tags", "tag_names", "deal_tags", "object.tags"):
+        tag_names.extend(_tag_names(fields.get(key)))
+    if any(name.casefold() == keyword for name in tag_names):
+        return True, "tag"
+    marker = _clean(fields.get("autopayment") or fields.get("is_autopayment"), 40).casefold()
+    if marker in {"1", "true", "yes", "on", "да", keyword}:
+        return True, "tag_condition"
+    return False, ""
 
 
 def _valid_email(value: Any) -> bool:
@@ -554,6 +619,15 @@ def _is_completed_paid(fields: dict[str, Any]) -> bool:
     status = _norm(fields.get("status"))
     payment = _norm(fields.get("payment_state"))
     return status in {"завершен", "завершён"} and payment == "paid"
+
+
+def _is_onboarding_paid(fields: dict[str, Any]) -> bool:
+    """Accept the first partial/full payment without requiring a later GC lifecycle status."""
+
+    status = _norm(fields.get("status"))
+    if any(marker in status for marker in ("возврат", "отмен", "refund", "cancel")):
+        return False
+    return _norm(fields.get("payment_state")) in {"partial", "paid"}
 
 
 def _money_value(value: Any) -> float:
@@ -671,12 +745,12 @@ def _chat_payment_entitlement(fields: dict[str, Any]) -> dict[str, Any]:
     paid_money = _money_value(fields.get("payed_money"))
     if status in {"завершен", "завершён"} and payment == "paid":
         return {"eligible": True, "kind": "paid", "paid_money": paid_money, "reason": "paid"}
-    if payment == "partial" and paid_money > 0:
+    if payment in {"partial", "partial_refund"} and paid_money > 0:
         return {
             "eligible": True,
-            "kind": "partial",
+            "kind": "partial_refund" if payment == "partial_refund" else "partial",
             "paid_money": paid_money,
-            "reason": "positive_partial_payment",
+            "reason": "positive_partial_refund_remainder" if payment == "partial_refund" else "positive_partial_payment",
         }
     return {
         "eligible": False,
@@ -744,7 +818,7 @@ def _date_value(value: Any) -> datetime | None:
 
 
 def _business_order_date_text(fields: dict[str, Any]) -> str:
-    for key in ("paid_at", "payed_at", "payment_date", "received_at", "date_creation"):
+    for key in ("first_payment_at", "paid_at", "payed_at", "payment_date", "received_at", "date_creation"):
         value = _clean(fields.get(key), 100)
         if value:
             return value
@@ -797,7 +871,15 @@ def _dated_flow_for_order(data: dict[str, Any], course_key: str, fields: dict[st
     candidates = []
     for flow in data.get("items") or []:
         start = _date_value(flow.get("date_start"))
-        if _clean(flow.get("course_key"), 50) != course_key or not start or start.date() > order_date.date():
+        if (
+            _clean(flow.get("course_key"), 50) != course_key
+            or flow.get("activation_pending")
+            or not start
+            or start.date() > order_date.date()
+        ):
+            continue
+        activated_at = _date_value(flow.get("activated_at"))
+        if activated_at and order_date < activated_at:
             continue
         if not re.match(r"^https?://", _clean(flow.get("vk_link"), 2000), flags=re.IGNORECASE):
             continue
@@ -805,6 +887,34 @@ def _dated_flow_for_order(data: dict[str, Any], course_key: str, fields: dict[st
             continue
         candidates.append((start, _bounded_int(flow.get("stream"), 0, 100000, 0), flow))
     return max(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
+
+
+def _assigned_flow_for_order(data: dict[str, Any], course_key: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Prefer the exact chat assignment already written for this order."""
+
+    assigned_course = _clean(fields.get("chat_fields_course_key"), 50)
+    stream = _clean(fields.get(DEFAULT_FIELD_NAMES["field_stream"]), 100)
+    if assigned_course != course_key or not stream:
+        return None
+    catalog_flow = next(
+        (
+            item for item in data.get("items") or []
+            if _clean(item.get("course_key"), 50) == course_key
+            and _clean(item.get("stream"), 100) == stream
+        ),
+        {},
+    )
+    return {
+        "course_key": course_key,
+        "stream": stream,
+        "date_start": _clean(catalog_flow.get("date_start"), 50),
+        "vk_link": _clean(
+            fields.get(DEFAULT_FIELD_NAMES["field_vk"]) or catalog_flow.get("vk_link"), 2000
+        ),
+        "tg_link": _clean(
+            fields.get(DEFAULT_FIELD_NAMES["field_tg"]) or catalog_flow.get("tg_link"), 2000
+        ),
+    }
 
 
 def _curator_name_map(settings: dict[str, str] | None = None) -> tuple[tuple[str, str], ...]:
@@ -951,8 +1061,10 @@ def _sheet_student_header(rows: list[list[Any]]) -> tuple[int, dict[str, int]]:
                 if any(name in cell for name in names):
                     mapping[key] = col_idx
                     break
-        best_map.update(mapping)
-        return idx, best_map
+        # A real header is authoritative.  Keeping positional fallback fields
+        # here is dangerous: current staff sheets have no separate "Курс"
+        # column, so the old fallback made both course and tariff point at C.
+        return idx, mapping
     return best_idx, best_map
 
 
@@ -2593,6 +2705,30 @@ async def _save_flow_students_cache(cache_key: str, data: dict[str, Any]) -> Non
         await db.commit()
 
 
+async def _save_flow_students_fallback_cache(
+    cache_key: str, data: dict[str, Any], *, reason: str
+) -> dict[str, Any]:
+    """Keep the last good snapshot fresh enough to avoid retry storms after Google errors."""
+
+    assert _db_path is not None
+    payload = dict(data)
+    refreshed_at = _now()
+    payload["cached"] = True
+    payload["stale_cache"] = True
+    payload["refresh_failed_at"] = refreshed_at
+    payload["stale_due_error"] = _clean(reason, 1000)
+    async with _db_connect(_db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO flow_students_cache(key,value_json,updated_at) VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+            """,
+            (cache_key, json.dumps(payload, ensure_ascii=False), refreshed_at),
+        )
+        await db.commit()
+    return payload
+
+
 async def _flow_students(settings: dict[str, str], refresh: bool = False) -> dict[str, Any]:
     cache_key = _flow_students_cache_key(settings)
     ttl = _bounded_int(settings.get("students_cache_minutes"), 1, 1440, 30)
@@ -2641,19 +2777,34 @@ async def _flow_students(settings: dict[str, str], refresh: bool = False) -> dic
             }
         if not _google_auth_available():
             return {"ok": False, "items": [], "errors": [{"status": "missing_google_auth", "error": "google-auth is not installed"}]}
-        flows = (await _chat_flows_base(settings)).get("items") or []
+        flow_catalog = await _chat_flows_base(settings)
+        flows = flow_catalog.get("items") or []
+        flow_catalog_stale = False
+        if not flows and previous_cache and previous_cache.get("items"):
+            flows = previous_cache["items"]
+            flow_catalog_stale = True
         order_index = await _customer_order_index(settings)
         try:
             data = await asyncio.to_thread(_flow_students_snapshot_sync, spreadsheet_id, credentials_path, flows, settings, order_index)
         except Exception as exc:
             stale = await _load_flow_students_cache(cache_key, ttl, allow_stale=True)
             if stale:
-                stale["stale_due_error"] = _clean(str(exc), 1000)
-                return stale
+                return await _save_flow_students_fallback_cache(cache_key, stale, reason=str(exc))
             return {"ok": False, "items": [], "errors": [{"status": "google_error", "error": str(exc)}]}
         data["cached"] = False
         data["cache_age_seconds"] = 0
         data["cache_minutes"] = ttl
+        if flow_catalog_stale:
+            data["flow_catalog_stale"] = True
+            data["flow_catalog_error"] = "Каталог ссылок вернул пустой список; использован последний рабочий снимок"
+        if data.get("ok") and not data.get("items") and previous_cache and previous_cache.get("items"):
+            stale = dict(previous_cache)
+            stale["empty_refresh_rejected"] = True
+            return await _save_flow_students_fallback_cache(
+                cache_key,
+                stale,
+                reason="Google вернул пустой реестр; сохранён последний рабочий снимок",
+            )
         missing_emails = _missing_student_emails(data)
         lookup = await _load_gc_lookup_cache(missing_emails, settings)
         export_applied = _apply_gc_export_lookup(data, lookup)
@@ -2682,8 +2833,11 @@ async def _flow_students(settings: dict[str, str], refresh: bool = False) -> dic
         else:
             stale = await _load_flow_students_cache(cache_key, ttl, allow_stale=True)
             if stale:
-                stale["stale_due_error"] = "; ".join(_clean(error.get("error"), 300) for error in data.get("errors") or [])[:1000]
-                return stale
+                return await _save_flow_students_fallback_cache(
+                    cache_key,
+                    stale,
+                    reason="; ".join(_clean(error.get("error"), 300) for error in data.get("errors") or [])[:1000],
+                )
         return data
 
 
@@ -2766,6 +2920,12 @@ def _student_flow_match(snapshot: dict[str, Any] | None, row: dict[str, Any], fi
     if not matches:
         return None
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    # The same editable email can remain on an older worksheet after a new
+    # purchase.  An email-only tie is ambiguous and must fall back to the
+    # payment/activation dates instead of silently choosing the higher stream.
+    top_score = matches[0][0]
+    if top_score <= 25 and sum(1 for item in matches if item[0] == top_score) > 1:
+        return None
     return matches[0][2]
 
 
@@ -3009,6 +3169,68 @@ async def _chat_flows_base(settings: dict[str, str]) -> dict[str, Any]:
     return {"items": items, "errors": errors, "ok": not errors}
 
 
+async def _flow_activation_times() -> dict[tuple[str, str], str]:
+    """Return the moment a Streams-created flow became fully usable."""
+
+    result: dict[tuple[str, str], str] = {}
+    streams_db = _student_transfer_db_path()
+    if streams_db.exists():
+        try:
+            async with _db_connect(streams_db) as db:
+                rows = await (
+                    await db.execute(
+                        """SELECT course_key,stream,status,updated_at FROM flow_jobs
+                           ORDER BY created_at,id"""
+                    )
+                ).fetchall()
+            for course_key, stream, status, updated_at in rows:
+                key = (_clean(course_key, 50), _clean(stream, 100))
+                if key[0] in {"puppy", "dog"} and key[1]:
+                    result[key] = _clean(updated_at, 100) if status == "completed" else "pending"
+        except Exception as exc:
+            _log("warning", "Streams flow activation lookup failed: %s", exc)
+
+    # Legacy flows were created before Streams had a completion journal.  Their
+    # chat creation time is a conservative fallback for the activation cutoff.
+    chat_db = _course_chat_db_path()
+    if chat_db.exists():
+        try:
+            async with _db_connect(chat_db) as db:
+                rows = await (
+                    await db.execute(
+                        """SELECT course_key,stream_number,platform,created_at FROM runs
+                           WHERE test_mode=0 AND platform IN ('vk','telegram')
+                             AND COALESCE(link,'')<>'' AND status<>'error'"""
+                    )
+                ).fetchall()
+            grouped: dict[tuple[str, str], dict[str, int]] = {}
+            for course_key, stream, platform, created_at in rows:
+                key = (_clean(course_key, 50), _clean(stream, 100))
+                if key[0] not in {"puppy", "dog"} or not key[1]:
+                    continue
+                grouped.setdefault(key, {})[_clean(platform, 20)] = int(created_at or 0)
+            for key, platforms in grouped.items():
+                if key in result or not platforms.get("vk") or not platforms.get("telegram"):
+                    continue
+                timestamp = max(platforms["vk"], platforms["telegram"])
+                if timestamp > 0:
+                    result[key] = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception as exc:
+            _log("warning", "Course chat activation lookup failed: %s", exc)
+    return result
+
+
+async def _apply_flow_activation_times(data: dict[str, Any]) -> dict[str, Any]:
+    activation_times = await _flow_activation_times()
+    copied = {**data, "items": [dict(item) for item in data.get("items") or []]}
+    for item in copied["items"]:
+        key = (_clean(item.get("course_key"), 50), _clean(item.get("stream"), 100))
+        activation = activation_times.get(key, "")
+        item["activation_pending"] = activation == "pending"
+        item["activated_at"] = "" if activation == "pending" else activation
+    return copied
+
+
 async def _chat_flows(settings: dict[str, str]) -> dict[str, Any]:
     cache_key = json.dumps(
         {
@@ -3026,7 +3248,7 @@ async def _chat_flows(settings: dict[str, str]) -> dict[str, Any]:
     now_monotonic = time.monotonic()
     cached = _chat_flows_cache.get("data")
     if cached and _chat_flows_cache.get("key") == cache_key and float(_chat_flows_cache.get("expires") or 0) > now_monotonic:
-        return cached
+        return await _apply_flow_activation_times(cached)
     base = await _chat_flows_base(settings)
     items = base.get("items") or []
     errors = base.get("errors") or []
@@ -3042,7 +3264,7 @@ async def _chat_flows(settings: dict[str, str]) -> dict[str, Any]:
     data = {"items": items, "errors": errors, "ok": not errors}
     if items:
         _chat_flows_cache.update({"key": cache_key, "expires": time.monotonic() + 600, "data": data})
-    return data
+    return await _apply_flow_activation_times(data)
 
 
 async def _resolve_curator(course_key: str, stream: str, settings: dict[str, str]) -> dict[str, Any]:
@@ -3830,6 +4052,146 @@ async def _write_getcourse_deal(gc_user_id: str, deal_number: str, fields: dict[
     if not deal_number:
         return False, "deal_number отсутствует в заказе", {}
     return await _post_getcourse_import("/pl/api/deals", "add", _getcourse_deal_payload(gc_user_id, deal_number, fields, email, phone), settings, "students-fields:deal")
+
+
+async def service_trigger_onboarding_email(
+    *,
+    gc_user_id: str,
+    email: str = "",
+    phone: str = "",
+    group_name: str,
+    fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically write one Nexus mail package and append its trigger group.
+
+    This intentionally exposes only the narrow GetCourse Import API surface
+    required by getcourse-onboarding.  It cannot remove groups, change an
+    order, or target an arbitrary group/field namespace.
+    """
+
+    gc_user_id = _clean(gc_user_id, 100)
+    email = _clean(email, 300)
+    phone = _clean(phone, 100)
+    group_name = _clean(group_name, 300)
+    if not gc_user_id or not (_valid_email(email) or phone):
+        return {"ok": False, "error": "Для email-пакета нужны gc_user_id и точный email или phone"}
+    if not group_name.startswith("Nexus email "):
+        return {"ok": False, "error": "Разрешены только группы с префиксом «Nexus email »"}
+    safe_fields: dict[str, str] = {}
+    for key, value in list((fields or {}).items())[:20]:
+        field_name = _clean(key, 200)
+        if not field_name.startswith("Nexus email "):
+            return {"ok": False, "error": "Разрешены только поля с префиксом «Nexus email »"}
+        safe_fields[field_name] = _clean(value, 10000)
+    user: dict[str, Any] = {
+        "id": gc_user_id,
+        "group_name": [group_name],
+        "addfields": safe_fields,
+    }
+    if _valid_email(email):
+        user["email"] = email
+    else:
+        user["phone"] = phone
+    settings = await _settings_map()
+    ok, error, details = await _post_getcourse_import(
+        "/pl/api/users",
+        "add",
+        {"user": user, "system": {"refresh_if_exists": 1}},
+        settings,
+        "onboarding-email:user",
+    )
+    return {
+        "ok": bool(ok),
+        "error": _clean(error, 1000),
+        "gc_user_id": gc_user_id,
+        "group_name": group_name,
+        "field_names": sorted(safe_fields),
+        "details": details,
+    }
+
+
+async def service_update_upgrade_order(
+    *,
+    gc_user_id: str,
+    deal_number: str,
+    email: str = "",
+    phone: str = "",
+    deal_status: str = "",
+    offer_id: str = "",
+    deal_cost: float | int | str | None = None,
+    addfields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply one narrow, auditable Standard→Premium order mutation.
+
+    Deliberately forbids ``payed``: GetCourse documents that setting it via
+    Import API may create a payment.  Final completion belongs to a native
+    GetCourse process after the coordinator writes its marker field.
+    """
+
+    gc_user_id = _clean(gc_user_id, 100)
+    deal_number = _clean(deal_number, 100)
+    email = _clean(email, 300)
+    phone = _clean(phone, 100)
+    deal_status = _clean(deal_status, 40).casefold()
+    offer_id = _clean(offer_id, 30)
+    if not deal_number or not gc_user_id:
+        return {"ok": False, "error": "Для изменения нужны gc_user_id и deal_number"}
+    if deal_status and deal_status not in {"new", "in_work"}:
+        return {"ok": False, "error": "Автоматизации доплат разрешены только статусы new и in_work"}
+    if offer_id and not offer_id.isdigit():
+        return {"ok": False, "error": "offer_id должен быть числовым"}
+    if deal_cost is not None:
+        try:
+            normalized_cost = round(float(deal_cost), 2)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Некорректная стоимость заказа"}
+        if normalized_cost < 0 or normalized_cost > 100_000_000:
+            return {"ok": False, "error": "Стоимость заказа вне допустимого диапазона"}
+    else:
+        normalized_cost = None
+    safe_fields: dict[str, str] = {}
+    for key, value in list((addfields or {}).items())[:20]:
+        field_key = _clean(key, 200)
+        if field_key:
+            safe_fields[field_key] = _clean(value, 2000)
+    deal: dict[str, Any] = {"deal_number": deal_number}
+    if deal_status:
+        deal["deal_status"] = deal_status
+    if offer_id:
+        deal["offer_id"] = offer_id
+        deal["quantity"] = 1
+    if normalized_cost is not None:
+        deal["deal_cost"] = f"{normalized_cost:.2f}"
+    if safe_fields:
+        deal["addfields"] = safe_fields
+    if len(deal) == 1:
+        return {"ok": False, "error": "Нет изменений для заказа"}
+    user: dict[str, str] = {"id": gc_user_id}
+    if _valid_email(email):
+        user["email"] = email
+    elif phone:
+        user["phone"] = phone
+    payload = {
+        "user": user,
+        "system": {"refresh_if_exists": 1, "return_deal_number": 1},
+        "deal": deal,
+    }
+    settings = await _settings_map()
+    ok, error, details = await _post_getcourse_import(
+        "/pl/api/deals", "add", payload, settings, "onboarding-upgrade:deal"
+    )
+    return {
+        "ok": bool(ok),
+        "error": _clean(error, 1000),
+        "deal_number": deal_number,
+        "changed": {
+            "deal_status": deal_status,
+            "offer_id": offer_id,
+            "deal_cost": normalized_cost,
+            "field_names": sorted(safe_fields),
+        },
+        "details": details,
+    }
 
 
 async def _resolve_getcourse_email_for_user(
@@ -4666,17 +5028,70 @@ async def service_flow_catalog() -> dict[str, Any]:
     """Return chat-link flows without reading the legacy student registry."""
 
     settings = await _settings_map()
+    cache_key = _flow_students_cache_key(settings)
+    now_monotonic = time.monotonic()
+    fallback = _flow_catalog_fallback_cache.get("data")
+    if (
+        fallback
+        and _flow_catalog_fallback_cache.get("key") == cache_key
+        and float(_flow_catalog_fallback_cache.get("expires") or 0) > now_monotonic
+    ):
+        return dict(fallback)
     data = await _chat_flows(settings)
-    if data.get("ok"):
-        return data
-    cached = await _load_flow_students_cache(_flow_students_cache_key(settings), 1, allow_stale=True)
+    if data.get("ok") and data.get("items"):
+        _flow_catalog_fallback_cache.update({"key": "", "expires": 0.0, "data": None})
+        return {**data, "stale": bool(data.get("stale")), "source": data.get("source") or "google_sheets"}
+    cached = await _load_flow_students_cache(cache_key, 1, allow_stale=True)
     if not cached or not cached.get("items"):
-        return data
-    return {
+        return {**data, "stale": False, "source": "unavailable"}
+    items = [dict(item) for item in cached["items"] if isinstance(item, dict)]
+    for item in items:
+        if not _clean(item.get("curator_sheet"), 300):
+            item["curator_sheet"] = _clean(item.get("sheet_title"), 300)
+    _add_flow_start_dates(items)
+    result = {
         "ok": True,
         "stale": True,
-        "items": cached["items"],
+        "source": "flow_students_cache",
+        "items": items,
         "errors": data.get("errors") or [],
+    }
+    _flow_catalog_fallback_cache.update({
+        "key": cache_key,
+        "expires": now_monotonic + 300,
+        "data": result,
+    })
+    return dict(result)
+
+
+async def service_resolve_onboarding_flow(*, course_key: str, paid_at: str) -> dict[str, Any]:
+    """Resolve one dated onboarding flow with a persistent-cache fallback."""
+
+    normalized_course = _clean(course_key, 50)
+    normalized_paid_at = _clean(paid_at, 100)
+    if normalized_course not in {"puppy", "dog"} or not _business_order_date({"paid_at": normalized_paid_at}):
+        return {
+            "ok": False,
+            "status": "invalid",
+            "flow": {},
+            "stale": False,
+            "source": "",
+            "errors": [],
+        }
+    catalog = await service_flow_catalog()
+    flow = _dated_flow_for_order(catalog, normalized_course, {"paid_at": normalized_paid_at}) or {}
+    return {
+        "ok": bool(flow),
+        "status": "resolved" if flow else "not_found",
+        "flow": {
+            "stream": _clean(flow.get("stream"), 50),
+            "date_start": _clean(flow.get("date_start"), 50),
+            "vk_link": _clean(flow.get("vk_link"), 2000),
+            "tg_link": _clean(flow.get("tg_link"), 2000),
+        } if flow else {},
+        "stale": bool(catalog.get("stale")),
+        "source": _clean(catalog.get("source"), 100),
+        "errors": catalog.get("errors") or [],
     }
 
 
@@ -4732,6 +5147,7 @@ async def service_entitled_orders(
         course_key = _clean(entitlement.get("course_key"), 50)
         tariff = _clean(entitlement.get("tariff"), 100)
         order_id = _clean(fields.get("order_id") or row.get("platform_id"), 100)
+        autopayment, autopayment_source = _autopayment_match(fields)
         items.append(
             {
                 "source_record_id": int(row.get("id") or 0),
@@ -4748,6 +5164,13 @@ async def service_entitled_orders(
                 "tariff": tariff.upper() if tariff == "vip" else tariff.capitalize(),
                 "status": _clean(fields.get("status"), 100),
                 "payment_state": _clean(fields.get("payment_state"), 100),
+                "total_amount": _money_value(fields.get("cost_money") or fields.get("costMoney")),
+                "remaining_amount": _money_value(fields.get("payed_money") or fields.get("payedMoney")),
+                "refund_amount": max(
+                    0.0,
+                    _money_value(fields.get("cost_money") or fields.get("costMoney"))
+                    - _money_value(fields.get("payed_money") or fields.get("payedMoney")),
+                ),
                 "created_at": _clean(row.get("created_at"), 100),
                 "updated_at": _clean(row.get("updated_at") or row.get("created_at"), 100),
                 "entitlement": entitlement,
@@ -4764,6 +5187,456 @@ async def service_entitled_orders(
         "has_more": bool(rows and (
             _clean(rows[-1].get("updated_at") or rows[-1].get("created_at"), 100), int(rows[-1]["id"])
         ) < (_clean((max_row or [0, ""])[1], 100), int((max_row or [0, ""])[0] or 0))),
+    }
+
+
+async def service_paid_course_orders(
+    *, after_source_record_id: int = 0, after_updated_at: str = "", limit: int = 1000
+) -> dict[str, Any]:
+    """Return paid or partially paid core-course orders for onboarding.
+
+    Standard packages are included. A positive partial payment is enough to
+    start onboarding; refunds and cancelled orders remain excluded.
+    """
+
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "items": [],
+            "cursor": int(after_source_record_id),
+            "cursor_updated_at": _clean(after_updated_at, 100),
+            "max_source_record_id": 0,
+            "error": "customer-db not found",
+        }
+    bounded_limit = max(1, min(5000, int(limit)))
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        max_row = await (
+            await db.execute(
+                "SELECT id,COALESCE(updated_at,created_at) FROM cdb_getcourse_orders "
+                "ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC LIMIT 1"
+            )
+        ).fetchone()
+        max_source_record_id = int(
+            (await (await db.execute("SELECT COALESCE(MAX(id),0) FROM cdb_getcourse_orders")).fetchone())[0]
+        )
+        if after_updated_at:
+            where = (
+                "datetime(COALESCE(updated_at,created_at))>datetime(?) OR "
+                "(COALESCE(updated_at,created_at)=? AND id>?)"
+            )
+            params = (
+                _clean(after_updated_at, 100),
+                _clean(after_updated_at, 100),
+                max(0, int(after_source_record_id)),
+                bounded_limit,
+            )
+            order_by = "datetime(COALESCE(updated_at,created_at)),id"
+        else:
+            where = "id>?"
+            params = (max(0, int(after_source_record_id)), bounded_limit)
+            order_by = "id"
+        rows = [
+            dict(row)
+            for row in await (
+                await db.execute(
+                    """
+                    SELECT id,platform_id,custom_fields,created_at,updated_at
+                    FROM cdb_getcourse_orders
+                    WHERE {where}
+                    ORDER BY {order_by}
+                    LIMIT ?
+                    """.format(where=where, order_by=order_by),
+                    params,
+                )
+            ).fetchall()
+        ]
+
+    flow_catalog = await service_flow_catalog()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        fields = _json_dict(row.get("custom_fields"))
+        if not _is_onboarding_paid(fields):
+            continue
+        product = _chat_product_entitlement(fields)
+        tariff = _classify_tariff(fields)
+        course_key = _clean(product.get("course_key"), 50)
+        product_kind = _clean(product.get("product_kind"), 50)
+        if tariff not in {"standard", "premium", "vip"}:
+            continue
+        if course_key not in {"puppy", "dog"} or product_kind in {"excluded", "module", "unknown"}:
+            continue
+        email = _clean(fields.get("email") or fields.get("user_email"), 300)
+        paid_at = _business_order_date_text(fields) or _clean(row.get("updated_at") or row.get("created_at"), 100)
+        exact_flow = _assigned_flow_for_order(flow_catalog, course_key, fields)
+        flow = exact_flow or _dated_flow_for_order(flow_catalog, course_key, {"paid_at": paid_at}) or {}
+        order_id = _clean(fields.get("order_id") or row.get("platform_id"), 100)
+        autopayment, autopayment_source = _autopayment_match(fields)
+        items.append(
+            {
+                "source_record_id": int(row.get("id") or 0),
+                "order_id": order_id,
+                "deal_number": _clean(
+                    fields.get("number") or fields.get("deal_number") or fields.get("order_number") or order_id,
+                    100,
+                ),
+                "gc_user_id": _clean(fields.get("gc_user_id"), 100),
+                "name": _clean(
+                    fields.get("name") or fields.get("user_name") or fields.get("full_name") or fields.get("fio"),
+                    300,
+                ),
+                "email": email,
+                "phone": _clean(fields.get("phone") or fields.get("user_phone"), 100),
+                "paid_at": paid_at,
+                "course_key": course_key,
+                "course": "Щенок" if course_key == "puppy" else "Собака",
+                "tariff": tariff,
+                "product_kind": product_kind,
+                "payment_state": _clean(fields.get("payment_state"), 40),
+                "autopayment": autopayment,
+                "autopayment_source": autopayment_source,
+                "manager_name": _clean(fields.get("manager_name") or fields.get("manager"), 300),
+                "utm_term": _clean(fields.get("utm_term") or fields.get("order_utm_term"), 1000),
+                "flow": {
+                    "stream": _clean(flow.get("stream"), 50),
+                    "date_start": _clean(flow.get("date_start"), 50),
+                    "vk_link": _clean(flow.get("vk_link"), 2000),
+                    "tg_link": _clean(flow.get("tg_link"), 2000),
+                },
+                "flow_source": "exact_order_assignment" if exact_flow else "payment_date",
+                "created_at": _clean(row.get("created_at"), 100),
+                "updated_at": _clean(row.get("updated_at") or row.get("created_at"), 100),
+            }
+        )
+    tail = rows[-1] if rows else {}
+    return {
+        "ok": True,
+        "items": items,
+        "cursor": int(tail.get("id") or after_source_record_id),
+        "cursor_updated_at": _clean(
+            tail.get("updated_at") or tail.get("created_at") or after_updated_at,
+            100,
+        ),
+        "max_source_record_id": max_source_record_id,
+        "max_updated_id": int((max_row or [0, ""])[0] or 0),
+        "max_updated_at": _clean((max_row or [0, ""])[1], 100),
+        "has_more": bool(
+            rows
+            and (
+                _clean(rows[-1].get("updated_at") or rows[-1].get("created_at"), 100),
+                int(rows[-1]["id"]),
+            )
+            < (_clean((max_row or [0, ""])[1], 100), int((max_row or [0, ""])[0] or 0))
+        ),
+        "flow_errors": flow_catalog.get("errors") or [],
+        "flow_stale": bool(flow_catalog.get("stale")),
+        "flow_source": _clean(flow_catalog.get("source"), 100),
+        "flow_items": len(flow_catalog.get("items") or []),
+    }
+
+
+def _upgrade_course_key(fields: dict[str, Any]) -> str:
+    """Classify the three separately sold upgrade families."""
+
+    text = _norm(
+        " ".join(
+            _flatten_text(fields.get(key))
+            for key in ("title", "positions", "offer_tags", "offers", "product_title")
+        )
+    )
+    has_puppy = "первые шаги к воспитанию" in text or "щенок" in text
+    has_dog = "послушная собака" in text or "современный собаковод" in text
+    combo = bool(
+        (has_puppy and has_dog)
+        or re.search(r"(?:^|[|\s])щ\s*\+\s*с(?:$|[|\s])", text)
+        or "щенок + собака" in text
+    )
+    if combo:
+        return "combo"
+    if has_puppy:
+        return "puppy"
+    if has_dog:
+        return "dog"
+    return ""
+
+
+def _upgrade_offer_id(fields: dict[str, Any]) -> str:
+    for key in ("offer_id", "position_offer_id", "deal_offer_id", "offerId"):
+        value = fields.get(key)
+        if isinstance(value, dict):
+            value = value.get("id")
+        text = _clean(value, 100)
+        match = re.search(r"\d+", text)
+        if match:
+            return match.group(0)
+    offers = fields.get("offers")
+    if isinstance(offers, list) and len(offers) == 1 and isinstance(offers[0], dict):
+        return _clean(offers[0].get("id") or offers[0].get("offer_id"), 30)
+    offers_text = _clean(offers, 100)
+    if offers_text.isdigit():
+        return offers_text
+    return ""
+
+
+def _upgrade_order_view(row: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
+    order_id = _clean(fields.get("order_id") or row.get("platform_id"), 100)
+    deal_number = _clean(
+        fields.get("number") or fields.get("deal_number") or fields.get("order_number") or order_id,
+        100,
+    )
+    autopayment, autopayment_source = _autopayment_match(fields)
+    return {
+        "source_record_id": int(row.get("id") or 0),
+        "order_id": order_id,
+        "deal_number": deal_number,
+        "gc_user_id": _clean(fields.get("gc_user_id") or fields.get("user_id"), 100),
+        "name": _clean(fields.get("name") or fields.get("user_name") or fields.get("full_name") or fields.get("fio"), 300),
+        "email": _clean(fields.get("email") or fields.get("user_email"), 300),
+        "phone": _clean(fields.get("phone") or fields.get("user_phone"), 100),
+        "title": _clean(fields.get("title") or fields.get("order_name") or fields.get("positions"), 1000),
+        "offer_id": _upgrade_offer_id(fields),
+        "course_key": _upgrade_course_key(fields),
+        "tariff": _classify_tariff(fields),
+        "status": _clean(fields.get("status"), 100),
+        "payment_state": _clean(fields.get("payment_state"), 40),
+        "cost_money": _money_value(
+            fields.get("cost_money") or fields.get("deal_cost") or fields.get("cost")
+        ),
+        "payed_money": _money_value(fields.get("payed_money") or fields.get("paid_money")),
+        "left_cost_money": _money_value(fields.get("left_cost_money") or fields.get("left_cost")),
+        "paid_at": _business_order_date_text(fields) or _clean(row.get("updated_at") or row.get("created_at"), 100),
+        "autopayment": bool(autopayment),
+        "autopayment_source": autopayment_source,
+        "updated_at": _clean(row.get("updated_at") or row.get("created_at"), 100),
+    }
+
+
+def _upgrade_order_active(fields: dict[str, Any]) -> bool:
+    status = _norm(fields.get("status"))
+    return not any(
+        marker in status
+        for marker in ("возврат", "отмен", "ложн", "refund", "cancel", "false")
+    )
+
+
+def _upgrade_order_fully_paid(fields: dict[str, Any]) -> bool:
+    if _norm(fields.get("payment_state")) != "paid":
+        return False
+    cost = _money_value(fields.get("cost_money") or fields.get("deal_cost") or fields.get("cost"))
+    paid = _money_value(fields.get("payed_money") or fields.get("paid_money"))
+    left = _money_value(fields.get("left_cost_money") or fields.get("left_cost"))
+    return cost > 0 and paid + 0.01 >= cost and left <= 0.01
+
+
+def _upgrade_identity_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_id = _clean(left.get("gc_user_id"), 100)
+    right_id = _clean(right.get("gc_user_id"), 100)
+    if left_id and right_id:
+        return left_id == right_id
+    left_email = _norm(left.get("email"))
+    right_email = _norm(right.get("email"))
+    return bool(left_email and right_email and left_email == right_email)
+
+
+async def service_upgrade_candidates(
+    *, after_source_record_id: int = 0, limit: int = 250
+) -> dict[str, Any]:
+    """Return paid surcharge orders and their possible earlier Standard order.
+
+    This is a local customer-db read. Text matching only discovers candidates;
+    the coordinator decides whether an exact configured surcharge offer may be
+    applied automatically.
+    """
+
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {"ok": False, "items": [], "cursor": int(after_source_record_id), "error": "customer-db not found"}
+    bounded_limit = max(1, min(1000, int(limit or 250)))
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        max_source_record_id = int(
+            (await (await db.execute("SELECT COALESCE(MAX(id),0) FROM cdb_getcourse_orders")).fetchone())[0]
+        )
+        candidate_rows = [
+            dict(row)
+            for row in await (
+                await db.execute(
+                    """SELECT id,platform_id,custom_fields,created_at,updated_at
+                       FROM cdb_getcourse_orders WHERE id>? ORDER BY id LIMIT ?""",
+                    (max(0, int(after_source_record_id)), bounded_limit),
+                )
+            ).fetchall()
+        ]
+        surcharge_views: list[dict[str, Any]] = []
+        for row in candidate_rows:
+            fields = _json_dict(row.get("custom_fields"))
+            text = _norm(" ".join(_flatten_text(fields.get(key)) for key in ("title", "positions", "offers")))
+            if (
+                "доплата" in text
+                and _upgrade_order_fully_paid(fields)
+                and _upgrade_order_active(fields)
+            ):
+                surcharge_views.append(_upgrade_order_view(row, fields))
+        identities = [item for item in surcharge_views if item.get("gc_user_id") or item.get("email")]
+        all_rows: list[dict[str, Any]] = []
+        if identities:
+            clauses: list[str] = []
+            params: list[Any] = []
+            user_ids = sorted({_clean(item.get("gc_user_id"), 100) for item in identities if item.get("gc_user_id")})
+            emails = sorted({_norm(item.get("email")) for item in identities if item.get("email")})
+            if user_ids:
+                clauses.append(
+                    f"CAST(json_extract(custom_fields,'$.gc_user_id') AS TEXT) IN ({','.join('?' for _ in user_ids)})"
+                )
+                params.extend(user_ids)
+            if emails:
+                clauses.append(
+                    f"lower(COALESCE(json_extract(custom_fields,'$.email'),json_extract(custom_fields,'$.user_email'))) IN ({','.join('?' for _ in emails)})"
+                )
+                params.extend(emails)
+            if clauses:
+                all_rows = [
+                    dict(row)
+                    for row in await (
+                        await db.execute(
+                            f"""SELECT id,platform_id,custom_fields,created_at,updated_at
+                                FROM cdb_getcourse_orders
+                                WHERE json_valid(custom_fields) AND ({' OR '.join(clauses)})
+                                ORDER BY id""",
+                            params,
+                        )
+                    ).fetchall()
+                ]
+    origins: list[dict[str, Any]] = []
+    for row in all_rows:
+        fields = _json_dict(row.get("custom_fields"))
+        if (
+            _classify_tariff(fields) == "standard"
+            and _upgrade_order_fully_paid(fields)
+            and _upgrade_order_active(fields)
+        ):
+            origins.append(_upgrade_order_view(row, fields))
+    items: list[dict[str, Any]] = []
+    for surcharge in surcharge_views:
+        paid_at = _date_value(surcharge.get("paid_at"))
+        matches = []
+        for origin in origins:
+            origin_paid_at = _date_value(origin.get("paid_at"))
+            if not _upgrade_identity_matches(surcharge, origin):
+                continue
+            if surcharge.get("course_key") and origin.get("course_key") != surcharge.get("course_key"):
+                continue
+            if paid_at and origin_paid_at and origin_paid_at > paid_at:
+                continue
+            if origin.get("order_id") == surcharge.get("order_id"):
+                continue
+            matches.append(origin)
+        matches.sort(key=lambda item: (item.get("paid_at") or "", int(item.get("source_record_id") or 0)), reverse=True)
+        items.append({**surcharge, "origins": matches, "origin_count": len(matches)})
+    tail = candidate_rows[-1] if candidate_rows else {}
+    cursor = int(tail.get("id") or after_source_record_id)
+    return {
+        "ok": True,
+        "items": items,
+        "cursor": cursor,
+        "max_source_record_id": max_source_record_id,
+        "has_more": bool(candidate_rows and cursor < max_source_record_id),
+    }
+
+
+def _upgrade_export_fields(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "order_id": _deal_id_from_export_row(row),
+        "number": _flat_lookup(row, ("number", "deal_number", "Номер заказа", "Заказ")),
+        "gc_user_id": _deal_user_id_from_export_row(row),
+        "email": _email_from_export_row(row),
+        "offer_id": _flat_lookup(row, ("offer_id", "ID предложения", "Предложение ID")),
+        "title": _flat_lookup(row, ("title", "offer_title", "Предложение", "Состав заказа")),
+        "status": _flat_lookup(row, ("status", "deal_status", "Статус")),
+        "payment_state": _flat_lookup(row, ("payment_state", "Статус оплаты")),
+        "cost_money": _flat_lookup(row, ("cost_money", "deal_cost", "Стоимость", "Сумма заказа")),
+        "payed_money": _flat_lookup(row, ("payed_money", "paid_money", "Оплачено")),
+        "left_cost_money": _flat_lookup(row, ("left_cost_money", "Осталось", "Остаток")),
+        "paid_at": _flat_lookup(row, ("payed_at", "paid_at", "Дата оплаты", "Дата завершения")),
+    }
+
+
+async def service_upgrade_order_snapshots(
+    *, order_ids: list[str], gc_user_id: str = "", live: bool = False
+) -> dict[str, Any]:
+    wanted = {_clean(value, 100) for value in order_ids[:50] if _clean(value, 100)}
+    if not wanted:
+        return {"ok": True, "items": []}
+    db_path = _customer_db_path()
+    if not db_path.exists():
+        return {"ok": False, "items": [], "error": "customer-db not found"}
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                f"""SELECT id,platform_id,custom_fields,created_at,updated_at
+                    FROM cdb_getcourse_orders
+                    WHERE platform_id IN ({','.join('?' for _ in wanted)})
+                    ORDER BY datetime(COALESCE(updated_at,created_at)) DESC,id DESC""",
+                sorted(wanted),
+            )
+        ).fetchall()
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        fields = _json_dict(row["custom_fields"])
+        view = _upgrade_order_view(dict(row), fields)
+        found.setdefault(view["order_id"], view)
+    source = "cache"
+    warning = ""
+    related_items: list[dict[str, Any]] = []
+    if live and _clean(gc_user_id, 100):
+        settings = await _settings_map()
+        if await _gc_export_budget_left(settings) >= 3:
+            rows, error = await _getcourse_export_rows(
+                "/pl/api/account/deals",
+                {"user_id": _clean(gc_user_id, 100)},
+                settings,
+                "onboarding-upgrade-verify",
+            )
+            if not error:
+                for export_row in rows:
+                    fields = _upgrade_export_fields(export_row)
+                    related_items.append(
+                        _upgrade_order_view(
+                            {
+                                "id": 0,
+                                "platform_id": _clean(fields.get("order_id"), 100),
+                                "updated_at": _deal_updated_from_export_row(export_row),
+                                "created_at": "",
+                            },
+                            fields,
+                        )
+                    )
+                    order_id = _clean(fields.get("order_id"), 100)
+                    if order_id not in wanted:
+                        continue
+                    found[order_id] = _upgrade_order_view(
+                        {
+                            "id": 0,
+                            "platform_id": order_id,
+                            "updated_at": _deal_updated_from_export_row(export_row),
+                            "created_at": "",
+                        },
+                        fields,
+                    )
+                source = "live"
+            else:
+                warning = _clean(error, 1000)
+        else:
+            warning = "Лимит GetCourse Export API: live-проверка отложена"
+    return {
+        "ok": True,
+        "items": [found[value] for value in sorted(wanted) if value in found],
+        "source": source,
+        "warning": warning,
+        "related_items": related_items,
+        "requests_left_2h": await _gc_export_budget_left(await _settings_map()),
     }
 
 
@@ -4841,7 +5714,17 @@ async def service_order_identities(*, identities: list[dict[str, Any]]) -> dict[
         entitlement = _chat_entitlement(fields)
         tariff = _clean(entitlement.get("tariff"), 100)
         value = {
+            "source_record_id": int(row["id"]),
+            "order_id": _clean(fields.get("order_id") or row["platform_id"], 100),
+            "deal_number": _clean(
+                fields.get("number") or fields.get("deal_number") or fields.get("order_number")
+                or fields.get("order_id") or row["platform_id"], 100,
+            ),
+            "gc_user_id": _clean(fields.get("gc_user_id"), 100),
+            "name": _clean(fields.get("name") or fields.get("user_name") or fields.get("full_name") or fields.get("fio"), 300),
+            "email": _clean(fields.get("email") or fields.get("user_email"), 300),
             "phone": _clean(fields.get("phone") or fields.get("user_phone"), 100),
+            "date": _business_order_date_text(fields) or _clean(row["updated_at"] or row["created_at"], 100),
             "tariff": tariff.upper() if tariff == "vip" else tariff.capitalize(),
             "utm_term": _clean(fields.get("utm_term"), 1000),
             "product_kind": _clean(entitlement.get("product_kind"), 50),
@@ -4862,6 +5745,31 @@ async def service_order_identities(*, identities: list[dict[str, Any]]) -> dict[
             if score > (found.get(key) or (0, {}))[0]:
                 found[key] = (score, {"key": key, **value})
     return {"ok": True, "items": [item for _, item in found.values()]}
+
+
+async def service_order_financials(*, source_record_ids: list[int]) -> dict[str, Any]:
+    """Return money fields by the indexed local row ID; never call GetCourse."""
+    ids = sorted({int(value) for value in source_record_ids[:250] if int(value or 0) > 0})
+    db_path = _customer_db_path()
+    if not ids or not db_path.exists():
+        return {"ok": bool(not ids), "items": []}
+    async with _db_connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            f"SELECT id,custom_fields FROM cdb_getcourse_orders WHERE id IN ({','.join('?' for _ in ids)})",
+            ids,
+        )).fetchall()
+    items = []
+    for row in rows:
+        fields = _json_dict(row["custom_fields"])
+        total = _money_value(fields.get("cost_money") or fields.get("costMoney"))
+        remaining = _money_value(fields.get("payed_money") or fields.get("payedMoney"))
+        items.append({
+            "source_record_id": int(row["id"]), "total_amount": total,
+            "remaining_amount": remaining, "refund_amount": max(0.0, total - remaining),
+            "payment_state": _clean(fields.get("payment_state"), 50),
+        })
+    return {"ok": True, "items": items}
 
 
 def _access_group_pairs(value: Any) -> list[dict[str, str]]:
@@ -5217,13 +6125,26 @@ def _registry_lesson_columns(rows: list[list[Any]], header_idx: int) -> list[dic
     for col_idx in range(7, min(width, _column_number("AC"))):
         values = [row[col_idx] for row in rows[header_idx + 1 :] if col_idx < len(row)]
         has_checkbox = any(isinstance(value, bool) or _norm(value) in {"true", "false"} for value in values)
-        labels = [
-            _clean(row[col_idx], 200)
-            for row in rows[: header_idx + 1]
-            if col_idx < len(row) and _clean(row[col_idx], 200)
-        ]
+        labels: list[str] = []
+        for row in rows[: header_idx + 1]:
+            if col_idx >= len(row):
+                continue
+            raw_label = row[col_idx]
+            label_text = _clean(
+                str(raw_label) if isinstance(raw_label, (int, float)) else raw_label,
+                200,
+            )
+            if label_text:
+                labels.append(label_text)
         label = labels[-1] if labels else ""
-        if not has_checkbox and not re.search(r"(?:урок|модул|занят|недел)\s*\d*", _norm(label)):
+        normalized_label = _norm(label)
+        looks_like_checkbox = bool(
+            re.search(r"(?:урок|модул|занят|недел|вип|vip|отзыв|купивш|чат)", normalized_label)
+            or bool(re.fullmatch(r"\d+(?:[.,]\d+)?", normalized_label))
+        )
+        # A newly created flow can contain no boolean values yet. Header-based
+        # detection keeps its homework columns visible and writable from day one.
+        if not has_checkbox and not looks_like_checkbox:
             continue
         letters = ""
         number = col_idx + 1
@@ -5232,6 +6153,47 @@ def _registry_lesson_columns(rows: list[list[Any]], header_idx: int) -> list[dic
             letters = chr(65 + remainder) + letters
         result.append({"key": letters, "label": label or letters, "column": col_idx})
     return result
+
+
+def _registry_checkbox_validation_requests(
+    sheet_id: int,
+    row_numbers: list[int],
+    columns: list[int],
+) -> list[dict[str, Any]]:
+    """Build compact Boolean-validation requests for 1-based rows and 0-based columns."""
+
+    rows = sorted({int(value) for value in row_numbers if int(value) > 0})
+    cols = sorted({int(value) for value in columns if int(value) >= 0})
+    if not rows or not cols:
+        return []
+
+    def runs(values: list[int]) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        start = end = values[0]
+        for value in values[1:]:
+            if value == end + 1:
+                end = value
+                continue
+            result.append((start, end))
+            start = end = value
+        result.append((start, end))
+        return result
+
+    rule = {"condition": {"type": "BOOLEAN"}, "strict": True, "showCustomUi": True}
+    return [
+        {"setDataValidation": {
+            "range": {
+                "sheetId": int(sheet_id),
+                "startRowIndex": first_row - 1,
+                "endRowIndex": last_row,
+                "startColumnIndex": first_column,
+                "endColumnIndex": last_column + 1,
+            },
+            "rule": rule,
+        }}
+        for first_row, last_row in runs(rows)
+        for first_column, last_column in runs(cols)
+    ]
 
 
 def _registry_lesson_values(row: list[Any], lesson_columns: list[dict[str, Any]]) -> dict[str, bool]:
@@ -5243,6 +6205,11 @@ def _registry_lesson_values(row: list[Any], lesson_columns: list[dict[str, Any]]
         )
         for lesson in lesson_columns
     }
+
+
+def _registry_service_checkbox(label: Any) -> bool:
+    """Return True for operational checkboxes that are not learning progress."""
+    return bool(re.search(r"(?:купивш|чат)", _norm(label)))
 
 
 def _registry_batch_rows(session: Any, spreadsheet_id: str, titles: list[str]) -> list[list[list[Any]]]:
@@ -5314,6 +6281,166 @@ def _registry_xlsx_rows(content: bytes) -> dict[str, list[list[Any]]]:
                     break
             result[str(sheet.attrib.get("name") or "")[:300]] = rows
     return result
+
+
+def _registry_repair_homework_checkboxes_sync(
+    spreadsheet_id: str,
+    credentials_path: Path,
+    *,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Restore homework checkboxes in populated rows whose progress cells are not Boolean."""
+
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path),
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    ))
+    metadata_response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "properties.title,sheets.properties(sheetId,title,index)"},
+        timeout=30,
+    )
+    metadata_response.raise_for_status()
+    metadata = metadata_response.json() or {}
+    sheets = [
+        sheet.get("properties") or {}
+        for sheet in metadata.get("sheets") or []
+        if re.match(r"^[СCЩ]\s*\d+", _clean((sheet.get("properties") or {}).get("title"), 300), flags=re.IGNORECASE)
+    ]
+    export_response = session.get(
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
+        params={"format": "xlsx"},
+        timeout=120,
+    )
+    export_response.raise_for_status()
+    rows_by_title = _registry_xlsx_rows(export_response.content)
+
+    prepared: list[dict[str, Any]] = []
+    signature_max_boolean: dict[tuple[str, ...], int] = {}
+    for props in sheets:
+        title = str(props.get("title") or "")[:300]
+        rows = rows_by_title.get(title) or []
+        if not rows:
+            continue
+        header_idx, columns = _sheet_student_header(rows)
+        homework_columns = [
+            item for item in _registry_lesson_columns(rows, header_idx)
+            if not _registry_service_checkbox(item.get("label"))
+        ]
+        if not homework_columns:
+            continue
+        name_column = columns.get("name", 0)
+        email_column = columns.get("email", 7)
+        student_rows: list[int] = []
+        for row_number, row in enumerate(rows[header_idx + 1 : 300], start=header_idx + 2):
+            name = _row_value(row, name_column, 300)
+            email = _row_value(row, email_column, 300)
+            other_identity = any(
+                _clean(row[index], 300)
+                for index in range(min(len(row), max(8, email_column + 1)))
+                if index != name_column
+            )
+            if _valid_email(email) or bool(name and other_identity):
+                student_rows.append(row_number)
+        signature = tuple(_norm(item.get("label")) for item in homework_columns)
+        boolean_counts: dict[int, int] = {}
+        for row_number in student_rows:
+            row = rows[row_number - 1] if row_number <= len(rows) else []
+            boolean_counts[row_number] = sum(
+                1
+                for lesson in homework_columns
+                for value in [row[int(lesson["column"])] if int(lesson["column"]) < len(row) else None]
+                if isinstance(value, bool) or _norm(value) in {"true", "false"}
+            )
+        signature_max_boolean[signature] = max(
+            signature_max_boolean.get(signature, 0),
+            max(boolean_counts.values(), default=0),
+        )
+        prepared.append({
+            "props": props,
+            "title": title,
+            "homework_columns": homework_columns,
+            "student_rows": student_rows,
+            "boolean_counts": boolean_counts,
+            "signature": signature,
+        })
+
+    requests: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    for prepared_sheet in prepared:
+        props = prepared_sheet["props"]
+        title = prepared_sheet["title"]
+        homework_columns = prepared_sheet["homework_columns"]
+        student_rows = prepared_sheet["student_rows"]
+        boolean_counts = prepared_sheet["boolean_counts"]
+        signature = prepared_sheet["signature"]
+        # Repair only completely inactive homework rows, and only when an
+        # identical header layout has a fully working row elsewhere. Partial
+        # blanks in legacy/tariff-specific layouts are intentional.
+        if signature_max_boolean.get(signature, 0) < len(homework_columns):
+            continue
+        missing_groups: dict[tuple[int, ...], list[int]] = {}
+        for row_number in student_rows:
+            if int(boolean_counts.get(row_number, 0)) == 0:
+                missing_groups.setdefault(
+                    tuple(int(item["column"]) for item in homework_columns), []
+                ).append(row_number)
+        sheet_requests: list[dict[str, Any]] = []
+        for missing_columns, row_numbers in missing_groups.items():
+            sheet_requests.extend(_registry_checkbox_validation_requests(
+                int(props.get("sheetId") or 0), row_numbers, list(missing_columns)
+            ))
+        requests.extend(sheet_requests)
+        missing_cells = sum(len(columns_) * len(rows_) for columns_, rows_ in missing_groups.items())
+        if missing_cells:
+            items.append({
+                "sheet_id": int(props.get("sheetId") or 0),
+                "sheet_title": _clean(title, 300),
+                "student_rows": student_rows,
+                "rows_to_repair": sorted({row for rows_ in missing_groups.values() for row in rows_}),
+                "missing_cells": missing_cells,
+            })
+    if apply:
+        for offset in range(0, len(requests), 500):
+            update_response = session.post(
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+                json={"requests": requests[offset : offset + 500]},
+                timeout=120,
+            )
+            update_response.raise_for_status()
+    return {
+        "ok": True,
+        "applied": bool(apply),
+        "spreadsheet_title": _clean((metadata.get("properties") or {}).get("title"), 300),
+        "sheets_checked": len(sheets),
+        "sheets_to_repair": len([item for item in items if item["missing_cells"]]),
+        "rows_to_repair": sum(len(item["rows_to_repair"]) for item in items),
+        "missing_cells": sum(int(item["missing_cells"]) for item in items),
+        "requests": len(requests),
+        "repair_rule": "completely_inactive_homework_rows",
+        "items": items,
+    }
+
+
+async def service_repair_registry_homework_checkboxes(*, apply: bool = False) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Google Sheets не настроен")
+    async with _registry_write_lock:
+        return await asyncio.to_thread(
+            _registry_repair_homework_checkboxes_sync,
+            spreadsheet_id,
+            credentials_path,
+            apply=bool(apply),
+        )
 
 
 def _registry_sheet_snapshot_sync(
@@ -5410,7 +6537,15 @@ def _registry_sheet_snapshot_sync(
             raw_responsible_curator = _row_value(row, columns.get("responsible_curator"), 200)
             students.append({
                 "row": row_number,
+                "name": _row_value(row, columns.get("name"), 300),
+                "date": _row_value(row, columns.get("date"), 100),
+                "course": _row_value(row, columns.get("course"), 100),
+                "tariff": _row_value(row, columns.get("tariff"), 100),
+                "enrollment": _row_value(row, columns.get("enrollment"), 100),
+                "manager_name": _row_value(row, columns.get("manager"), 200),
+                "tg_account": _row_value(row, columns.get("tg_account"), 500),
                 "email": email,
+                "buyers": _row_value(row, columns.get("buyers"), 100),
                 "responsible_curator": _map_curator(raw_responsible_curator, curator_map),
                 "responsible_curator_raw": raw_responsible_curator,
                 "lessons": lessons,
@@ -5538,8 +6673,9 @@ async def service_reconcile_registry_curators(*, flows: list[dict[str, Any]], li
                 (by_identity.get(_clean(student.get(key), 100)) for key in ("source_record_id", "order_id") if _clean(student.get(key), 100)),
                 None,
             )
-            if not processed:
-                continue
+            # New students can reach the registry after their order has fallen
+            # outside the scanner window. Registry identities are sufficient.
+            processed = processed or {}
             current = _json_dict(_json_dict(processed.get("details_json")).get("output_fields"))
             if _clean(current.get(settings["field_curator"]), 100) == curator:
                 continue
@@ -5775,7 +6911,10 @@ def _registry_tariff_format_plan(
         course_column = columns.get("course")
         first_data_row = header_idx + 2
         row_count = max(first_data_row, int(grid.get("rowCount") or len(rows) or first_data_row))
-        column_count = max(tariff_column + 1, int(grid.get("columnCount") or 29))
+        # Tariff colours are an identity hint, not a progress marker. Keeping
+        # them out of lesson/checkbox columns prevents an entire VIP/Standard
+        # row from looking as if every module had been completed.
+        identity_column_count = tariff_column + 1
         rules = sheet.get("conditionalFormats") if isinstance(sheet.get("conditionalFormats"), list) else []
         removed = [index for index, rule in enumerate(rules) if isinstance(rule, dict) and _is_tariff_conditional_rule(rule)]
         for index in reversed(removed):
@@ -5786,7 +6925,7 @@ def _registry_tariff_format_plan(
             "startRowIndex": header_idx + 1,
             "endRowIndex": row_count,
             "startColumnIndex": 0,
-            "endColumnIndex": column_count,
+            "endColumnIndex": identity_column_count,
         }
         requests.append({"repeatCell": {
             "range": range_,
@@ -5871,6 +7010,362 @@ async def service_registry_sheet_mirror(
     return {"ok": True, "paused": True, "reason": "legacy sheet recovery"}
 
 
+def _registry_flow_sheet_title(course_key: str, stream: str, date_start: str) -> str:
+    course_key = _clean(course_key, 50)
+    stream = _clean(stream, 50)
+    if course_key not in {"puppy", "dog"} or not stream.isdigit():
+        raise ValueError("Неверно указан курс или номер потока")
+    try:
+        start = datetime.strptime(_clean(date_start, 100), "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Дата старта должна быть в формате ГГГГ-ММ-ДД") from exc
+    return f"{_course_sheet_prefix(course_key)}{stream} ({start:%d.%m})"
+
+
+def _registry_flow_sheet_context(
+    session: Any, spreadsheet_id: str, course_key: str, stream: str, date_start: str,
+) -> dict[str, Any]:
+    target_title = _registry_flow_sheet_title(course_key, stream, date_start)
+    response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "properties.title,sheets.properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount))"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    sheets = [sheet.get("properties") or {} for sheet in payload.get("sheets") or []]
+    existing = next(
+        (item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)),
+        None,
+    )
+    target_stream_number = int(stream)
+    templates = [
+        item for item in sheets
+        if _sheet_title_matches(item.get("title"), course_key, _stream_number(item.get("title")))
+        and _stream_number(item.get("title"))
+        and int(_stream_number(item.get("title")) or 0) < target_stream_number
+    ]
+    template = max(templates, key=lambda item: int(_stream_number(item.get("title")) or 0)) if templates else None
+    return {
+        "spreadsheet_title": _clean((payload.get("properties") or {}).get("title"), 300),
+        "target_title": target_title,
+        "existing": existing,
+        "template": template,
+    }
+
+
+def _registry_flow_sheet_preflight_sync(
+    spreadsheet_id: str, credentials_path: Path, course_key: str, stream: str, date_start: str,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    ))
+    context = _registry_flow_sheet_context(session, spreadsheet_id, course_key, stream, date_start)
+    existing = context["existing"]
+    template = context["template"]
+    if existing:
+        return {
+            "ok": False,
+            "status": "already_exists",
+            "error": f"Лист потока уже существует: {_clean(existing.get('title'), 300)}",
+            "sheet_title": _clean(existing.get("title"), 300),
+            "sheet_id": int(existing.get("sheetId") or 0),
+        }
+    if not template:
+        return {
+            "ok": False,
+            "status": "template_not_found",
+            "error": "Не найден предыдущий лист этого курса, который можно взять за шаблон",
+        }
+    return {
+        "ok": True,
+        "status": "ready",
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_title": context["spreadsheet_title"],
+        "sheet_title": context["target_title"],
+        "template_title": _clean(template.get("title"), 300),
+        "template_sheet_id": int(template.get("sheetId") or 0),
+    }
+
+
+async def service_registry_flow_sheet_preflight(
+    *, course_key: str, stream: str, date_start: str,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        return {"ok": False, "status": "not_configured", "error": "Таблица учеников Google не настроена"}
+    try:
+        return await asyncio.to_thread(
+            _registry_flow_sheet_preflight_sync,
+            spreadsheet_id, credentials_path, course_key, stream, date_start,
+        )
+    except ValueError as exc:
+        return {"ok": False, "status": "invalid", "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "status": "unavailable", "error": f"Google таблица недоступна: {_clean(exc, 500)}"}
+
+
+def _registry_flow_sheet_status_sync(
+    spreadsheet_id: str,
+    credentials_path: Path,
+    course_key: str,
+    stream: str,
+    date_start: str,
+    expected_sheet_id: int = 0,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    ))
+    expected_title = _registry_flow_sheet_title(course_key, stream, date_start)
+    response = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+        params={"fields": "properties.title,sheets.properties(sheetId,title,index,hidden)"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
+    sheets = [sheet.get("properties") or {} for sheet in payload.get("sheets") or []]
+    target = next(
+        (item for item in sheets if expected_sheet_id and int(item.get("sheetId") or 0) == int(expected_sheet_id)),
+        None,
+    )
+    if target is None:
+        target = next(
+            (item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)),
+            None,
+        )
+    if not target:
+        return {
+            "ok": False,
+            "status": "missing",
+            "error": f"Лист потока не найден: {expected_title}",
+            "spreadsheet_id": spreadsheet_id,
+            "sheet_title": expected_title,
+            "sheet_id": int(expected_sheet_id or 0),
+        }
+    sheet_id = int(target.get("sheetId") or 0)
+    title = _clean(target.get("title"), 300)
+    hidden = bool(target.get("hidden"))
+    exact_id = not expected_sheet_id or sheet_id == int(expected_sheet_id)
+    exact_title = title == expected_title
+    ok = bool(sheet_id and exact_id and exact_title and not hidden)
+    error = ""
+    if not exact_id:
+        error = "Google вернул другой идентификатор листа потока"
+    elif not exact_title:
+        error = f"Лист потока переименован: ожидался {expected_title}, найден {title}"
+    elif hidden:
+        error = f"Лист потока скрыт: {title}"
+    return {
+        "ok": ok,
+        "status": "ready" if ok else "invalid",
+        "error": error,
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_title": _clean((payload.get("properties") or {}).get("title"), 300),
+        "sheet_title": title,
+        "sheet_id": sheet_id,
+        "sheet_index": int(target.get("index") or 0),
+        "hidden": hidden,
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={sheet_id}",
+    }
+
+
+async def service_registry_flow_sheet_status(
+    *, course_key: str, stream: str, date_start: str, expected_sheet_id: int = 0,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        return {"ok": False, "status": "not_configured", "error": "Таблица учеников Google не настроена"}
+    try:
+        return await asyncio.to_thread(
+            _registry_flow_sheet_status_sync,
+            spreadsheet_id,
+            credentials_path,
+            course_key,
+            stream,
+            date_start,
+            int(expected_sheet_id or 0),
+        )
+    except ValueError as exc:
+        return {"ok": False, "status": "invalid", "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "status": "unavailable", "error": f"Google таблица недоступна: {_clean(exc, 500)}"}
+
+
+def _create_registry_flow_sheet_sync(
+    spreadsheet_id: str,
+    credentials_path: Path,
+    course_key: str,
+    stream: str,
+    date_start: str,
+    curator_raw: str,
+    curator_cell: str,
+) -> dict[str, Any]:
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.service_account import Credentials
+
+    session = AuthorizedSession(Credentials.from_service_account_file(
+        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    ))
+    context = _registry_flow_sheet_context(session, spreadsheet_id, course_key, stream, date_start)
+    existing = context["existing"]
+    template = context["template"]
+    if existing:
+        # This service is called only by an already accepted, idempotent flow job.
+        # Reusing the conventional target title lets a job continue after a process
+        # restart between duplicateSheet and the cleanup request.
+        target = existing
+        created = False
+    else:
+        if not template:
+            raise RuntimeError("Не найден лист-шаблон этого курса")
+        duplicate = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [{"duplicateSheet": {
+                "sourceSheetId": int(template.get("sheetId") or 0),
+                "newSheetName": context["target_title"],
+                "insertSheetIndex": int(template.get("index") or 0) + 1,
+            }}]},
+            timeout=45,
+        )
+        duplicate.raise_for_status()
+        replies = (duplicate.json() or {}).get("replies") or []
+        target = ((replies[0] or {}).get("duplicateSheet") or {}).get("properties") if replies else None
+        if not target or not int(target.get("sheetId") or 0):
+            raise RuntimeError("Google не вернул данные созданного листа")
+        created = True
+
+    visible = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+        json={"requests": [{"updateSheetProperties": {
+            "properties": {"sheetId": int(target.get("sheetId") or 0), "hidden": False},
+            "fields": "hidden",
+        }}]},
+        timeout=30,
+    )
+    visible.raise_for_status()
+
+    title = _clean(target.get("title") or context["target_title"], 300)
+    values = session.get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, 'A1:AC300')}",
+        params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"},
+        timeout=30,
+    )
+    values.raise_for_status()
+    rows = (values.json() or {}).get("values") or []
+    header_idx, _columns = _sheet_student_header(rows)
+    target_grid = target.get("gridProperties") if isinstance(target.get("gridProperties"), dict) else {}
+    template_grid = (
+        template.get("gridProperties")
+        if isinstance((template or {}).get("gridProperties"), dict)
+        else {}
+    )
+    grid = target_grid or template_grid
+    end_row = max(300, int(grid.get("rowCount") or 300))
+    end_column = _sheet_column_name(max(_column_number("AC"), int(grid.get("columnCount") or 0)) - 1)
+    clear_range = f"'{title.replace(chr(39), chr(39) * 2)}'!A{header_idx + 2}:{end_column}{end_row}"
+    cleared = session.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchClear",
+        json={"ranges": [clear_range]},
+        timeout=45,
+    )
+    cleared.raise_for_status()
+    validation_end_row = min(end_row, 300)
+    if template and validation_end_row >= header_idx + 2:
+        validation_copy = session.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            json={"requests": [{"copyPaste": {
+                "source": {
+                    "sheetId": int(template.get("sheetId") or 0),
+                    "startRowIndex": header_idx + 1,
+                    "endRowIndex": validation_end_row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": max(_column_number("AC"), int(grid.get("columnCount") or 0)),
+                },
+                "destination": {
+                    "sheetId": int(target.get("sheetId") or 0),
+                    "startRowIndex": header_idx + 1,
+                    "endRowIndex": validation_end_row,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": max(_column_number("AC"), int(grid.get("columnCount") or 0)),
+                },
+                "pasteType": "PASTE_DATA_VALIDATION",
+            }}]},
+            timeout=45,
+        )
+        validation_copy.raise_for_status()
+    curator_write = session.put(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, curator_cell)}",
+        params={"valueInputOption": "RAW"},
+        json={"majorDimension": "ROWS", "values": [[curator_raw]]},
+        timeout=30,
+    )
+    curator_write.raise_for_status()
+    verified = _registry_flow_sheet_status_sync(
+        spreadsheet_id,
+        credentials_path,
+        course_key,
+        stream,
+        date_start,
+        int(target.get("sheetId") or 0),
+    )
+    if not verified.get("ok"):
+        raise RuntimeError(verified.get("error") or "Созданный лист потока не прошёл проверку")
+    return {
+        "ok": True,
+        "status": "created" if created else "continued",
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": int(target.get("sheetId") or 0),
+        "sheet_title": title,
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={int(target.get('sheetId') or 0)}",
+        "template_title": _clean((template or {}).get("title"), 300),
+        "header_row": header_idx + 1,
+        "students_cleared_from_row": header_idx + 2,
+        "students_cleared_through_column": end_column,
+        "checkboxes_cleared": True,
+        "data_validation_restored": bool(template),
+        "curator": curator_raw,
+        "verified": True,
+        "hidden": False,
+        "sheet_index": int(verified.get("sheet_index") or 0),
+    }
+
+
+async def service_create_registry_flow_sheet(
+    *, course_key: str, stream: str, date_start: str, curator: str,
+) -> dict[str, Any]:
+    settings = await _settings_map()
+    spreadsheet_id = _curator_spreadsheet_id(settings)
+    credentials_path = _curator_credentials_path(settings)
+    curator_raw = _transfer_curator_raw(settings, curator)
+    if not curator_raw:
+        raise ValueError("Куратор не поддерживается")
+    if not spreadsheet_id or not credentials_path or not credentials_path.exists():
+        raise RuntimeError("Таблица учеников Google не настроена")
+    result = await asyncio.to_thread(
+        _create_registry_flow_sheet_sync,
+        spreadsheet_id,
+        credentials_path,
+        course_key,
+        stream,
+        date_start,
+        curator_raw,
+        _clean(settings.get("curator_cell") or "K2", 20).upper(),
+    )
+    _chat_flows_cache.clear()
+    return result
+
+
 def _registry_date(value: Any) -> str:
     text = _clean(value, 100)
     try:
@@ -5896,19 +7391,26 @@ def _registry_manager(value: Any) -> str:
 
 
 def _registry_sheet_context(
-    session: Any, spreadsheet_id: str, course_key: str, stream: str
+    session: Any, spreadsheet_id: str, course_key: str, stream: str, sheet_title: str = "",
 ) -> tuple[dict[str, Any], str, list[list[Any]], int, dict[str, int], list[dict[str, Any]]]:
-    metadata_response = session.get(
-        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
-        params={"fields": "sheets.properties(sheetId,title,index)"},
-        timeout=30,
-    )
-    metadata_response.raise_for_status()
-    sheets = [sheet.get("properties") or {} for sheet in (metadata_response.json() or {}).get("sheets") or []]
-    props = next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None)
-    if not props:
-        raise RuntimeError("Лист потока не найден")
-    title = _clean(props.get("title"), 300)
+    title = _clean(sheet_title, 300)
+    if title:
+        # Streams already resolved the exact sheet while building its local
+        # snapshot. Reusing it removes one metadata request from every lesson
+        # click and materially reduces Google Sheets quota pressure.
+        props = {"sheetId": 0, "title": title}
+    else:
+        metadata_response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            params={"fields": "sheets.properties(sheetId,title,index)"},
+            timeout=30,
+        )
+        metadata_response.raise_for_status()
+        sheets = [sheet.get("properties") or {} for sheet in (metadata_response.json() or {}).get("sheets") or []]
+        props = next((item for item in sheets if _sheet_title_matches(item.get("title"), course_key, stream)), None)
+        if not props:
+            raise RuntimeError("Лист потока не найден")
+        title = _clean(props.get("title"), 300)
     values_response = session.get(
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, 'A1:AC300')}",
         params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"},
@@ -5938,16 +7440,58 @@ def _registry_ensure_student_sync(
     props, title, rows, header_idx, columns, lesson_columns = _registry_sheet_context(
         session, spreadsheet_id, course_key, stream
     )
+    values = {
+        "name": _clean(student.get("name"), 300),
+        "date": _registry_date(student.get("date")),
+        "course": _clean(student.get("course"), 100),
+        "tariff": _registry_tariff(student.get("tariff")),
+        "enrollment": _clean(student.get("enrollment") or "Геткурс", 100),
+        "manager": _registry_manager(student.get("manager_name")),
+        "tg_account": _clean(student.get("tg_account"), 500),
+        "email": email,
+    }
     matches = [
         row_number
         for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2)
         if _norm(_row_value(row, columns["email"], 300)) == _norm(email)
     ]
+    previous_email = _clean(student.get("sheet_email"), 300)
+    if not matches and _valid_email(previous_email):
+        matches = [
+            row_number
+            for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2)
+            if _norm(_row_value(row, columns["email"], 300)) == _norm(previous_email)
+        ]
     if len(matches) > 1:
         raise RuntimeError("В листе найдено несколько строк ученика")
     if matches:
+        target_row = matches[0]
+        current_row = rows[target_row - 1] if target_row <= len(rows) else []
+        writes_by_range = {
+            _a1_range(title, f"{_column_letters(columns[key] + 1)}{target_row}"): value
+            for key, value in values.items()
+            if key in columns and value and _norm(_row_value(current_row, columns[key], 1000)) != _norm(value)
+        }
+        if writes_by_range:
+            write_response = session.post(
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+                json={
+                    "valueInputOption": "USER_ENTERED",
+                    "data": [{"range": cell, "values": [[value]]} for cell, value in writes_by_range.items()],
+                },
+                timeout=45,
+            )
+            write_response.raise_for_status()
+            verify_response = session.get(
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, f'A{target_row}:AC{target_row}')}",
+                params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"}, timeout=30,
+            )
+            verify_response.raise_for_status()
+            verify_row = ((verify_response.json() or {}).get("values") or [[]])[0]
+            if _norm(_row_value(verify_row, columns["email"], 300)) != _norm(email):
+                raise RuntimeError("Google не подтвердил обновление строки")
         return {
-            "ok": True, "status": "already_exists", "row": matches[0],
+            "ok": True, "status": "updated_existing" if writes_by_range else "already_exists", "row": target_row,
             "sheet_id": int(props.get("sheetId") or 0), "sheet_title": title,
             "lesson_columns": [{"key": item["key"], "label": item["label"]} for item in lesson_columns],
         }
@@ -5982,39 +7526,38 @@ def _registry_ensure_student_sync(
             ),
             0,
         )
+    formatting_requests: list[dict[str, Any]] = []
     if template_row:
+        # Empty staff rows are deliberately preformatted.  Copying a filled
+        # student's FORMAT also copies one-off red/blue manual fills.  Preserve
+        # the target row exactly and restore only controls/validation.
+        formatting_requests.append({"copyPaste": {
+            "source": {"sheetId": int(props["sheetId"]), "startRowIndex": template_row - 1, "endRowIndex": template_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
+            "destination": {"sheetId": int(props["sheetId"]), "startRowIndex": target_row - 1, "endRowIndex": target_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
+            "pasteType": "PASTE_DATA_VALIDATION",
+        }})
+    formatting_requests.extend(_registry_checkbox_validation_requests(
+        int(props["sheetId"]),
+        [target_row],
+        [int(item["column"]) for item in lesson_columns],
+    ))
+    if formatting_requests:
         copy_response = session.post(
             f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
-            json={"requests": [
-                {"copyPaste": {
-                    "source": {"sheetId": int(props["sheetId"]), "startRowIndex": template_row - 1, "endRowIndex": template_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
-                    "destination": {"sheetId": int(props["sheetId"]), "startRowIndex": target_row - 1, "endRowIndex": target_row, "startColumnIndex": 0, "endColumnIndex": _column_number("AC")},
-                    "pasteType": paste_type,
-                }}
-                for paste_type in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION")
-            ]},
+            json={"requests": formatting_requests},
             timeout=45,
         )
         copy_response.raise_for_status()
-    values = {
-        "name": _clean(student.get("name"), 300),
-        "date": _registry_date(student.get("date")),
-        "course": _clean(student.get("course"), 100),
-        "tariff": _registry_tariff(student.get("tariff")),
-        "enrollment": _clean(student.get("enrollment") or "Геткурс", 100),
-        "manager": _registry_manager(student.get("manager_name")),
-        "tg_account": _clean(student.get("tg_account"), 500),
-        "email": email,
-    }
-    writes = [
-        {"range": _a1_range(title, f"{_column_letters(columns[key] + 1)}{target_row}"), "values": [[value]]}
+    writes_by_range = {
+        _a1_range(title, f"{_column_letters(columns[key] + 1)}{target_row}"): value
         for key, value in values.items()
         if key in columns and value
-    ]
-    writes.extend(
-        {"range": _a1_range(title, f"{item['key']}{target_row}"), "values": [[False]]}
+    }
+    writes_by_range.update({
+        _a1_range(title, f"{item['key']}{target_row}"): False
         for item in lesson_columns
-    )
+    })
+    writes = [{"range": cell, "values": [[value]]} for cell, value in writes_by_range.items()]
     write_response = session.post(
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
         json={"valueInputOption": "USER_ENTERED", "data": writes},
@@ -6065,16 +7608,55 @@ async def service_registry_ensure_student(
 def _registry_write_lesson_sync(
     *, spreadsheet_id: str, credentials_path: Path, course_key: str, stream: str,
     email: str, source_row: int, lesson_key: str, value: bool, expected_value: bool,
+    sheet_title: str = "",
 ) -> dict[str, Any]:
     from google.auth.transport.requests import AuthorizedSession
     from google.oauth2.service_account import Credentials
 
     session = AuthorizedSession(Credentials.from_service_account_file(
-        str(credentials_path), scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        str(credentials_path), scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
     ))
-    _props, title, rows, header_idx, columns, lesson_columns = _registry_sheet_context(
-        session, spreadsheet_id, course_key, stream
-    )
+    try:
+        _props, title, rows, header_idx, columns, lesson_columns = _registry_sheet_context(
+            session, spreadsheet_id, course_key, stream, sheet_title
+        )
+    except Exception as exc:
+        title = _clean(sheet_title, 300)
+        if not title or not re.search(r"(?:\b429\b|too many requests|resource_exhausted|quota)", str(exc), re.I):
+            raise
+        # The Sheets read quota is shared with background synchronization.
+        # The authenticated XLSX export uses the Drive path, so it can verify
+        # the exact email/row before a write even while Sheets reads are being
+        # throttled. Never fall back to an unchecked direct cell write.
+        now_monotonic = time.monotonic()
+        cached_rows = (
+            _registry_xlsx_export_cache.get("rows")
+            if _registry_xlsx_export_cache.get("key") == spreadsheet_id
+            and float(_registry_xlsx_export_cache.get("expires") or 0) > now_monotonic
+            else {}
+        )
+        if not cached_rows:
+            export_response = session.get(
+                f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export",
+                params={"format": "xlsx"}, timeout=120,
+            )
+            export_response.raise_for_status()
+            cached_rows = _registry_xlsx_rows(export_response.content)
+            _registry_xlsx_export_cache.update({
+                "key": spreadsheet_id,
+                "expires": now_monotonic + 60,
+                "rows": cached_rows,
+            })
+        rows = cached_rows.get(title) or []
+        if not rows:
+            raise RuntimeError("Лист потока не найден в резервной копии таблицы") from exc
+        header_idx, columns = _sheet_student_header(rows)
+        if "email" not in columns or "name" not in columns:
+            raise RuntimeError("В листе не найдены колонки ФИО и почты") from exc
+        lesson_columns = _registry_lesson_columns(rows, header_idx)
     lesson = next((item for item in lesson_columns if item["key"] == _clean(lesson_key, 5).upper()), None)
     if not lesson:
         raise RuntimeError("Колонка прогресса не найдена")
@@ -6090,10 +7672,10 @@ def _registry_write_lesson_sync(
         raise RuntimeError("Строка ученика изменилась; обновите данные")
     row = rows[row_number - 1] if row_number <= len(rows) else []
     current = bool(_registry_lesson_values(row, [lesson])[lesson["key"]])
-    if current != bool(expected_value):
-        raise RuntimeError("Таблица уже изменена; обновите данные")
     if current == bool(value):
         return {"ok": True, "status": "already_updated", "row": row_number, "value": current}
+    if current != bool(expected_value):
+        raise RuntimeError("Таблица уже изменена; обновите данные")
     cell = f"{lesson['key']}{row_number}"
     response = session.put(
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{_a1_range(title, cell)}",
@@ -6113,7 +7695,7 @@ def _registry_write_lesson_sync(
 
 async def service_registry_write_lesson(
     *, course_key: str, stream: str, email: str, source_row: int,
-    lesson_key: str, value: bool, expected_value: bool,
+    lesson_key: str, value: bool, expected_value: bool, sheet_title: str = "",
 ) -> dict[str, Any]:
     settings = await _settings_map()
     spreadsheet_id = _curator_spreadsheet_id(settings)
@@ -6127,6 +7709,7 @@ async def service_registry_write_lesson(
             course_key=_clean(course_key, 50), stream=_clean(stream, 50),
             email=_clean(email, 300), source_row=int(source_row or 0),
             lesson_key=_clean(lesson_key, 5).upper(), value=bool(value), expected_value=bool(expected_value),
+            sheet_title=_clean(sheet_title, 300),
         )
 
 
@@ -6299,10 +7882,17 @@ def _transfer_sheet_move_sync(
             "range": _a1_range(target_sheet_title, f"{_column_letters(columns['buyers'] + 1)}{target_row}"),
             "values": [[value]],
         })
-    for item in _registry_lesson_columns(target_rows, header_idx):
+    target_lesson_columns = _registry_lesson_columns(target_rows, header_idx)
+    for item in target_lesson_columns:
+        # Copying a student without deleting the old row means granting access to
+        # another flow, not transferring completed lessons. Keep operational
+        # marks such as "Чат", but start every learning-progress checkbox empty.
+        lesson_value = source_lessons.get(_norm(item.get("label")), False)
+        if not move and not _registry_service_checkbox(item.get("label")):
+            lesson_value = False
         writes.append({
             "range": _a1_range(target_sheet_title, f"{item['key']}{target_row}"),
-            "values": [[source_lessons.get(_norm(item.get("label")), False)]],
+            "values": [[lesson_value]],
         })
     response = session.post(
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
@@ -6317,6 +7907,15 @@ def _transfer_sheet_move_sync(
     verified = ((verify.json() or {}).get("values") or [[]])[0]
     if _norm(_row_value(verified, email_col, 300)) != _norm(email):
         raise RuntimeError("Google не подтвердил строку в целевом потоке")
+    if not move:
+        verified_lessons = _registry_lesson_values(verified, target_lesson_columns)
+        uncleared = [
+            item["label"]
+            for item in target_lesson_columns
+            if not _registry_service_checkbox(item.get("label")) and verified_lessons.get(item["key"])
+        ]
+        if uncleared:
+            raise RuntimeError("Google не очистил прогресс в новом потоке")
     if move:
         response = session.post(
             f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
@@ -6328,6 +7927,7 @@ def _transfer_sheet_move_sync(
         "status": "moved" if move else "copied",
         "target_row": target_row,
         "source_row_deleted": move,
+        "progress_reset": not move,
     }
 
 
@@ -6340,13 +7940,11 @@ async def service_transfer_move_student(
     snapshot = await _flow_students(settings, refresh=False)
     if not snapshot.get("ok"):
         raise RuntimeError("Не удалось обновить таблицу потоков")
-    matches = _transfer_student_matches(snapshot, email)
-    source = next(
+    source_flow = next(
         (
-            item for item in matches
-            if _clean(item["flow"].get("course_key")) == _clean(source_course_key)
-            and _clean(item["flow"].get("stream")) == _clean(source_stream)
-            and int(item["student"].get("row") or 0) == int(source_row)
+            flow for flow in snapshot.get("items") or []
+            if _clean(flow.get("course_key")) == _clean(source_course_key)
+            and _clean(flow.get("stream")) == _clean(source_stream)
         ),
         None,
     )
@@ -6358,22 +7956,12 @@ async def service_transfer_move_student(
         ),
         None,
     )
-    already_target = next(
-        (
-            item for item in matches
-            if _clean(item["flow"].get("course_key")) == _clean(target_course_key)
-            and _clean(item["flow"].get("stream")) == _clean(target_stream)
-        ),
-        None,
-    )
     if not target:
         raise RuntimeError("Целевой поток не найден")
-    if already_target and not source:
-        return {"ok": True, "status": "already_moved", "target": target, "student": already_target["student"]}
-    if not source:
-        raise RuntimeError("Исходное назначение ученика изменилось")
+    if not source_flow:
+        raise RuntimeError("Исходный поток не найден")
     if source_course_key == target_course_key and str(source_stream) == str(target_stream):
-        return {"ok": True, "status": "already_in_target", "target": target, "student": source["student"]}
+        return {"ok": True, "status": "already_in_target", "target": target, "student": student or {}}
     spreadsheet_id = _curator_spreadsheet_id(settings)
     credentials_path = _curator_credentials_path(settings)
     if not spreadsheet_id or not credentials_path or not credentials_path.exists():
@@ -6383,9 +7971,9 @@ async def service_transfer_move_student(
             _transfer_sheet_move_sync,
             spreadsheet_id=spreadsheet_id,
             credentials_path=credentials_path,
-            source_sheet_id=int(source["flow"].get("sheet_id") or 0),
-            source_sheet_title=_clean(source["flow"].get("sheet_title"), 300),
-            source_row=int(source["student"].get("row") or 0),
+            source_sheet_id=int(source_flow.get("sheet_id") or 0),
+            source_sheet_title=_clean(source_flow.get("sheet_title"), 300),
+            source_row=int(source_row),
             target_sheet_id=int(target.get("sheet_id") or 0),
             target_sheet_title=_clean(target.get("sheet_title"), 300),
             students_range=_students_sheet_range(settings),
@@ -6398,7 +7986,7 @@ async def service_transfer_move_student(
     return {
         **result,
         "target": target,
-        "student": {**source["student"], "row": int(result.get("target_row") or 0)},
+        "student": {**(student or {}), "row": int(result.get("target_row") or 0)},
     }
 
 
@@ -6471,19 +8059,26 @@ async def service_transfer_update_student_curator(
     allowed = {value for _, value in _curator_name_map(settings)}
     if curator not in allowed:
         raise RuntimeError("Куратор не поддерживается")
-    snapshot = await _flow_students(settings, refresh=True)
-    source = next(
+    snapshot = await _flow_students(settings, refresh=False)
+    source_flow = next(
         (
-            item for item in _transfer_student_matches(snapshot, email)
-            if _clean(item["flow"].get("course_key")) == _clean(source_course_key)
-            and _clean(item["flow"].get("stream")) == _clean(source_stream)
-            and int(item["student"].get("row") or 0) == int(source_row)
+            flow for flow in snapshot.get("items") or []
+            if _clean(flow.get("course_key")) == _clean(source_course_key)
+            and _clean(flow.get("stream")) == _clean(source_stream)
         ),
         None,
     )
-    if not source:
-        raise RuntimeError("Исходное назначение ученика изменилось")
-    if _clean(source["student"].get("responsible_curator"), 100) == curator:
+    if not source_flow:
+        raise RuntimeError("Исходный поток не найден")
+    source_student = next(
+        (
+            item for item in source_flow.get("students") or []
+            if _norm(item.get("email")) == _norm(email)
+            and int(item.get("row") or 0) == int(source_row)
+        ),
+        None,
+    )
+    if source_student and _clean(source_student.get("responsible_curator"), 100) == curator:
         return {"ok": True, "status": "already_updated", "row": int(source_row), "curator": curator}
     spreadsheet_id = _curator_spreadsheet_id(settings)
     credentials_path = _curator_credentials_path(settings)
@@ -6494,24 +8089,24 @@ async def service_transfer_update_student_curator(
         _transfer_sheet_curator_sync,
         spreadsheet_id=spreadsheet_id,
         credentials_path=credentials_path,
-        sheet_id=int(source["flow"].get("sheet_id") or 0),
-        sheet_title=_clean(source["flow"].get("sheet_title"), 300),
+        sheet_id=int(source_flow.get("sheet_id") or 0),
+        sheet_title=_clean(source_flow.get("sheet_title"), 300),
         students_range=_students_sheet_range(settings),
         source_row=int(source_row),
         email=_clean(email, 300),
         curator_raw=curator_raw,
     )
-    await _flow_students(settings, refresh=True)
     return {**result, "curator_value": curator}
 
 
 async def service_transfer_write_getcourse(
     *, email: str, gc_user_id: str, order_id: str, deal_number: str,
-    target_course_key: str, target_stream: str,
+    target_course_key: str, target_stream: str, target_flow: dict[str, Any] | None = None,
+    source_stream: str = "",
 ) -> dict[str, Any]:
     settings = await _settings_map()
     snapshot = await _flow_students(settings, refresh=False)
-    target = next(
+    cached_target = next(
         (
             flow for flow in snapshot.get("items") or []
             if _clean(flow.get("course_key")) == _clean(target_course_key)
@@ -6519,6 +8114,23 @@ async def service_transfer_write_getcourse(
         ),
         None,
     )
+    provided = target_flow if isinstance(target_flow, dict) else {}
+    provided_matches = (
+        _clean(provided.get("course_key")) == _clean(target_course_key)
+        and _clean(provided.get("stream")) == _clean(target_stream)
+    )
+    target = dict(cached_target or {})
+    if provided_matches:
+        target.update({
+            "course_key": _clean(target_course_key, 50),
+            "course": _clean(provided.get("course") or target.get("course"), 100),
+            "stream": _clean(target_stream, 50),
+            "vk_link": _clean(provided.get("vk_link") or target.get("vk_link"), 2000),
+            "tg_link": _clean(provided.get("tg_link") or target.get("tg_link"), 2000),
+            "curator_value": _clean(
+                provided.get("curator_value") or provided.get("curator") or target.get("curator_value"), 100
+            ),
+        })
     if not target:
         raise RuntimeError("Целевой поток не найден")
     output_fields = {
@@ -6552,6 +8164,31 @@ async def service_transfer_write_getcourse(
         getcourse_ok=bool(user_ok and deal_ok),
         error=error,
     )
+    onboarding_email: dict[str, Any] = {"ok": False, "status": "not_queued"}
+    if user_ok and deal_ok:
+        onboarding = sys.modules.get("_nexus_mod_getcourse-onboarding")
+        queue_email = getattr(onboarding, "service_queue_flow_email", None) if onboarding else None
+        if queue_email:
+            try:
+                onboarding_email = await queue_email(
+                    gc_user_id=_clean(gc_user_id, 100),
+                    email=_clean(email, 300),
+                    order_id=_clean(order_id, 100),
+                    course_key=_clean(target_course_key, 50),
+                    course=_clean(target.get("course"), 100),
+                    source_stream=_clean(source_stream, 50),
+                    stream=_clean(target_stream, 50),
+                    vk_link=_clean(target.get("vk_link"), 2000),
+                    tg_link=_clean(target.get("tg_link"), 2000),
+                )
+            except Exception as exc:
+                onboarding_email = {"ok": False, "status": "failed", "error": _clean(exc, 1000)}
+                if _logger:
+                    _logger.exception("flow transition email queue failed")
+        else:
+            onboarding_email = {"ok": False, "status": "module_unavailable"}
+            if _logger:
+                _logger.error("getcourse-onboarding unavailable after successful flow transfer")
     return {
         "ok": bool(user_ok and deal_ok),
         "error": error,
@@ -6559,6 +8196,7 @@ async def service_transfer_write_getcourse(
         "user": user_details,
         "deal": deal_details,
         "customer_sync": synced,
+        "onboarding_email": onboarding_email,
         "target": target,
     }
 
@@ -6651,6 +8289,18 @@ async def get_settings_from_map(settings: dict[str, str]):
 async def latest_chats(request: Request):
     await _require_user(request)
     return {"items": await _latest_chats(), "path": str(_course_chat_db_path())}
+
+
+@router.post("/registry/homework-checkboxes/repair")
+async def repair_registry_homework_checkboxes(request: Request):
+    await _require_user(request)
+    data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        return await service_repair_registry_homework_checkboxes(apply=_truthy(data.get("apply")))
+    except Exception as exc:
+        raise HTTPException(502, _clean(exc, 1000)) from exc
 
 
 @router.get("/chat-flows")

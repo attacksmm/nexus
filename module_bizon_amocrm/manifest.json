@@ -1,7 +1,7 @@
 {
   "id": "bizon-amocrm",
   "name": "Bizon365 → amoCRM",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "Конструктор Bizon365 → amoCRM: диапазоны просмотра, маршрутизация, безопасное объединение дублей, поля и round-robin.",
   "env_required": ["AMO_BASE_URL", "AMO_ACCESS_TOKEN"],
   "env_vars": {

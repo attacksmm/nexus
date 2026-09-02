@@ -1572,7 +1572,7 @@ async def _poll_once(limit: int = 200) -> dict[str, Any]:
 
 
 async def _poll_loop() -> None:
-    await asyncio.sleep(5)
+    await asyncio.sleep(20)
     while True:
         wait = 15
         try:

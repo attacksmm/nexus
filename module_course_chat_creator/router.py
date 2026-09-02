@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import mimetypes
@@ -39,6 +40,15 @@ router = APIRouter()
 VK_API_VERSION = "5.199"
 VK_INITIAL_USER_LIMIT = 450
 VK_TEST_STAFF_ID = 1105209997
+VK_STAFF_REGISTRY_META_KEY = "vk_staff_registry_v1"
+VK_STAFF_EXTRA_IDS = {
+    765938,  # Анна Тимофеева — timofeevapodbordog
+}
+VK_STAFF_SOURCE_TITLES = {
+    "тех поддержка || собаковод.про",
+    "оп || собаковод.про",
+}
+VK_STAFF_SOURCE_DISCOVERY_LIMIT = 250
 SENLER_API_BASE = "https://senler.ru/api"
 SENLER_COURSE_CHAT_SUBSCRIPTION_ID = "3801272"
 DEFAULT_MODULE_ID = "course-chat-creator"
@@ -48,7 +58,11 @@ CHAT_LINK_SHEETS = {
     "puppy": {"telegram": "1437498106", "vk": "65520414"},
 }
 TEMPLATE_DEFAULTS_VERSION = "windsurf-2026-06-02-full"
-COURSE_CHAT_TITLE_RE = re.compile(r"^\s*\d+\.\s*\d{2}\.\d{2}\.\d{4}\s*-\s*(Курс Щенок\. Современный Собаковод|Современный Собаковод\b)", re.IGNORECASE)
+COURSE_CHAT_TITLE_RE = re.compile(
+    r"^\s*\d+\.\s*(?:\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})\s*-\s*"
+    r"(Курс Щенок\. Современный Собаковод|Современный Собаковод\b)",
+    re.IGNORECASE,
+)
 
 _ctx = None
 _logger = None
@@ -56,7 +70,11 @@ _db_initialized = False
 _tg_auth_pending: dict[str, dict[str, Any]] = {}
 _vk_bootstrap_subscription: VkGroupPollSubscription | None = None
 _vk_pin_watchdog_task: asyncio.Task[Any] | None = None
-_vk_invite_dispatch_task: asyncio.Task[Any] | None = None
+_manual_vk_sync_tasks: set[asyncio.Task[Any]] = set()
+_chat_links_sync_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
+_vk_staff_reconcile_last = 0.0
+_vk_staff_registry_refresh_last = 0.0
+_vk_staff_registry_discovery_last = 0.0
 _vk_pin_watchdog_state: dict[str, Any] = {
     "interval_seconds": 10,
     "last_check_at": "",
@@ -89,7 +107,8 @@ COURSE_DEFAULTS = [
 PEOPLE_DEFAULTS = [
     {"kind": "author", "name": "Анна", "vk_id": "765938", "vk_mention": "[id765938|@timofeevapodbordog]", "tg_ref": "@Anna_Timofeeva_Podbordog", "enabled": 1},
     {"kind": "admin", "name": "Наталья", "vk_id": "69145639", "vk_mention": "[id69145639|Наталья]", "tg_ref": "", "enabled": 1},
-    {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "", "parity": "any", "enabled": 1},
+    {"kind": "kurator", "name": "Ирина", "vk_id": "413314992", "vk_mention": "[id413314992|@demidovair]", "tg_ref": "@Irina_zuza", "parity": "any", "enabled": 1, "note": "Telegram ID 1063673416 · телефон 79206159472"},
+    {"kind": "kurator", "name": "Настасья", "vk_id": "https://vk.com/nastasyaeggert", "vk_mention": "[id866850402|@nastasyaeggert]", "tg_ref": "@NastasyaEggert", "parity": "any", "enabled": 1},
     {"kind": "admin", "name": "Техническая поддержка", "vk_id": "1105209997", "vk_mention": "[id1105209997|@tehpod_sobakovodpro]", "tg_ref": "@Tech_kurator", "enabled": 1},
     {"kind": "admin", "name": "Никита", "vk_id": "741919467", "vk_mention": "[id741919467|@attackpng]", "tg_ref": "", "enabled": 1},
     {"kind": "admin", "name": "Андрей", "vk_id": "11335495", "vk_mention": "[id11335495|@id11335495]", "tg_ref": "", "enabled": 1},
@@ -97,7 +116,6 @@ PEOPLE_DEFAULTS = [
 
 VK_WELCOME_TEMPLATE = "🐾 Добро пожаловать в закрытый чат курса «{course_full_name}»! 🐾\n\nЯ очень рада, что вы здесь. Вы уже сделали важный шаг на пути к осознанному воспитанию вашей собаки.\n\n🗓 Поток №{stream_number}: Обучение стартует {date_start}\nВпереди у нас 11 недель практического обучения, поддержки и маленьких побед! 💪🏼🐶\n\n📍 ПЕРВЫЙ ШАГ — ЗНАКОМСТВО (ВИЗИТКА)\nПожалуйста, расскажите о себе и своем питомце в ОДНОМ сообщении по форме:\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода/фенотип/дворняжка\n3️⃣ С какими трудностями пришли и какой результат хотите получить (ваша точка В)?\n\n✅ ОБЯЗАТЕЛЬСТВО НА КУРС:\nВ конце своего сообщения обязательно добавьте фразу:\n«Я обязуюсь внимательно изучать материалы курса, если я что-то не понял(а) — посмотреть урок еще раз. Выполнять практику, задавать вопросы Анне и кураторам. Быть терпеливым(ой) к себе и своей любимой собаке и идти к результату шаг за шагом».\n\n🎓 КАК ПРОХОДИТ ОБУЧЕНИЕ:\n• Модули открываются еженедельно в субботу в 12:00 (МСК) на платформе.\n• Все вопросы по урокам, разборы и обратную связь пишем прямо в этот чат.\n• Обязательно отмечайте нас, чтобы мы не пропустили вопрос!\n\n👩‍🏫 Создатель курса: Анна - [id765938|@timofeevapodbordog]\n🛡 Кураторы-кинологи: {kurators_text}\n❤️ Руководитель отдела заботы: Андрей - [id11335495|@id11335495]\n🛠 Техническая поддержка: https://vk.me/ssobakovod\n📢 Наше сообщество: https://vk.com/ssobakovod?utm_source=vk_edu_chat\n\n⚖ ПРАВИЛА ЧАТА:\n— Общаемся культурно, ненормативная лексика и спам запрещены.\n— Аудиосообщения запрещены (их используют только кураторы).\n— Сообщения, нарушающие правила, удаляются автоматически.\n\nНу что, начинаем наше путешествие в новый мир! ❤️"
 VK_TEST_WELCOME_TEMPLATE = "Проверка учебного VK-чата\n\nПроверьте ссылку, закреп, приветствие модератора и права администратора.\n\nСотрудник: [id1105209997|Техническая поддержка]"
-VK_INVITE_FALLBACK_TEMPLATE = "Здравствуйте! Вас не удалось добавить в учебный чат автоматически.\n\nВступите по ссылке: {invite_link}\n\nЕсли войти не получилось, напишите в техническую поддержку: https://vk.me/ssobakovod"
 TG_WELCOME_TEMPLATE = "<b>Всем привет и добро пожаловать в закрытый чат курса «{course_name}»!🐾</b>\n\n<i>Я очень рада, что вы здесь. Вы уже сделали важный шаг, а именно решили осознанно выстраивать жизнь со своей собакой, а не терпеть, надеяться, что перерастёт или бороться в одиночку.\n\nВпереди у нас <b>11 недель практического обучения</b>, поддержки, вопросов, открытий и маленьких (а иногда и очень больших) побед💪🏼🐶\n\nЗдесь находится ваше новое окружение, которые всегда помогут вам, подскажут и поддержат! Этого же они ждут и с вашей стороны. Поэтому открытость и общительность всегда приветствуется🙏🏼</i>\n\n🗓Обучение стартует: {date_start}\n\n<b>А пока несколько ВАЖНЫХ организационных моментов, чтобы ваше пребывание на курсе стало еще удобнее и продуктивнее⤵️</b>\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_info_id}\">Главный чат (вы сейчас здесь)</a></u>\nЭто наш навигатор. Здесь мы с командой будем писать важные объявления, делиться новостями курса, напоминать про эфиры и обновления.\n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_vizitka_id}\">Подчат «🤝 Визитка»</a></u>\nМесто, где мы знакомимся. После прочтения этого сообщения обязательно перейдите в подчат «Визитка» и расскажите о себе по заданной форме. \nТак мы с командой сможем узнать вас и вашего питомца поближе, а соответственно точнее помочь вам с вашей ситуацией. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_obuchenie_id}\">Подчат «🎓 Обучение»</a></u>\nСвоего рода наш рабочий кабинет. Здесь все, что касается самого обучения: вопросы по урокам, разборы, обратная связь. \nЕсли что-то не получается - это сюда. \n\n📌 <u><a href=\"https://t.me/c/{channel_url_id}/{topic_boltalka_id}\">Подчат «💬 Болталка»</a></u>\nПросто по-человечески поделиться радостью, сомнениями, успехами, поддержать друг друга, выдохнуть, обсудить - в общем, все что угодно (в рамках правил, разумеется😁)\n_________________________________\n\n<b>ПРАВИЛА ЗАКРЫТОГО ЧАТА</b>\n\n1️⃣ Вопросы <u>по рассрочкам и оплатам</u> курса адресуются <u>в службу заботы</u> @andrew_karakchiev\n\n2️⃣ Если вы <u>хотите задать вопрос</u> мне или моим кураторам, то <u>обязательно упоминайте нас в сообщении</u>, чтобы мы точно не пропустили ваш вопрос. \n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\n\nКураторы-кинологи в чате: {kurators_list}\n\n❗️Только обязательно делайте это в чате, не пишите нам в личные сообщения❗️\n\n3️⃣ По <u>техническим вопросам или проблемам</u> обращайтесь <u>к тех.поддержке</u> школы @tech_sobakovod_pro\n\n\n<b>В ЧАТЕ ЗАПРЕЩЕНО</b> (сообщения нарушающие правила, будут удалены ботом-модератором автоматически)\n\n• Ненормативная лексика\n• Видео, ссылки НЕ относящиеся к теме обучения\n• Аудио сообщения. Их размещаю я и кураторы\n_________________________________\n\nНу что, начинаем путешествие в новый мир!❤️"
 TG_VIZITKA_TEMPLATE = "<b>Место, где мы начинаем знакомство 💛</b>\n\nЗдесь вы можете чуть больше рассказать о себе и своей собаке, а мы сможем лучше понять вашу ситуацию и помочь максимально точно.\n\nОчень прошу не пропускать этот шаг!\n\n✍️ <u>Пожалуйста, напишите ОДНО сообщение по следующей форме:</u>\n\n1️⃣ Ваше имя и город\n2️⃣ Кличка собаки, возраст, порода / метис / дворняжка\n3️⃣ С какими трудностями вы пришли на курс? Какой результат вы хотите получить к концу обучения? Что должно измениться в жизни с собакой?\n\n И в конце обязательно добавьте фразу:\n\n<blockquote>«Я обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливым(ой) к себе и своей собаке и идти к результату шаг за шагом».\n</blockquote>\n\nЭто не формальность. Это ваш личный путь из точки А в точку Б и настрой на 100% результат 😉\n\n<u>Пример сообщения, которое у вас должно получится:</u>\n\n<i>Меня зовут Ольга, г. Москва. У меня Лабрадор-ретривер, 3 года.\n\nХочу, чтобы моя собака перестала тянуть поводок и слышала меня на прогулке. Очень нервничаю каждый выход на улицу, потому что первая проезжающая машина сводит ее с ума.\n\nЯ обязуюсь внимательно изучать материалы курса, выполнять практику, задавать вопросы Анне и кураторам, быть терпеливой к себе и своей собаке и идти к результату шаг за шагом!</i>\n\n<b>Ждем ваших визиток🙌🏼</b>"
 TG_OBUCHENIE_TEMPLATE = "<b>Наш рабочий кабинет🎓</b>\n\nСамое важное пространство курса. Всё, что касается обучения, живёт здесь.\n\n👩‍🎓 На обучающей платформе уже доступен нулевой модуль в котором есть первые задания.\n\nДоступ должен был прийти вам на почту, если вы не смогли найти письмо с доступом в кабинет, напишите куратору @Tech_kurator\n\n<b>Модули будут открываться еженедельно в субботу в 12:00 по московскому времени</b>. Не забывайте выполнять задания после видеоуроков, я и мои кураторы проверим каждый ответ лично и дадим развернутую обратную связь.\n\nКроме того, за выполнения заданий, вам <b>будут начисляться бонусные баллы</b>. <b>В нулевом модуле об этом рассказано подробнее.</b>\n\n✅ <u>В этом чате вы можете и даже нужно:</u>\n\n• Задавать вопросы по урокам и заданиям\n• Писать, если что-то не получается или вызывает сомнения\n• Делиться наблюдениями и результатами практики\n• Получать обратную связь от меня и кураторов\n• Разбирать конкретные ситуации с вашей собакой\n\n<b>❗️Здесь нет глупых вопросов. </b>\n\nЛучше спросить, чем делать «на авось». Мы рядом, чтобы поддержать вас на каждом этапе🤍\n\n<u>Как задавать вопросы, чтобы помощь была максимально точной</u>👇🏼\n\nПожалуйста, старайтесь сразу прописать:\n- в каком уроке или задании возник вопрос\n- что именно не получается\n- что уже пробовали делать\n- поведение собаки в этот момент (спокойна / возбуждена / отвлекается и т.д.)\n\nИ <b>обязательно отмечайте нас в сообщении</b>, чтобы мы точно не пропустили вопрос🙌🏼\n\nАнна Тимофеева: @Anna_Timofeeva_Podbordog\nКураторы-кинологи: #{kurators_list}\n\nПомните: результат складывается из маленьких шагов!"
@@ -366,8 +384,37 @@ def _db():
         conn.close()
 
 
+def _backup_irina_contact_repair() -> None:
+    path = _db_path()
+    if not path.exists():
+        return
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as source:
+        if not source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='people'").fetchone():
+            return
+        has_meta = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+        if has_meta and source.execute(
+            "SELECT 1 FROM meta WHERE key='irina_contacts_version' AND value='20260813-v1'"
+        ).fetchone():
+            return
+        if _ctx is None:
+            backup = path.parent / "backups/course-chat-creator-pre-irina-contacts-v1/course-chat-creator.db"
+        else:
+            module_dir = Path(__file__).resolve().parent
+            nexus_root = next((item for item in (module_dir, *module_dir.parents) if (item / "main.py").exists()), module_dir.parent)
+            backup = nexus_root / "backups/course-chat-creator-pre-irina-contacts-v1/course-chat-creator.db"
+        if backup.exists():
+            return
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(backup) as target:
+            source.backup(target)
+            if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("course-chat-creator contact repair backup quick_check failed")
+        backup.chmod(0o600)
+
+
 def _init_db() -> None:
     global _db_initialized
+    _backup_irina_contact_repair()
     with _db() as db:
         db.executescript(
             """
@@ -460,6 +507,26 @@ def _init_db() -> None:
             "UPDATE people SET kind='admin',parity='any',updated_at=strftime('%s','now') "
             "WHERE name IN ('Наталья','Андрей','Техническая поддержка','Никита')"
         )
+        irina_data_version = db.execute("SELECT value FROM meta WHERE key='irina_contacts_version'").fetchone()
+        if not irina_data_version or irina_data_version["value"] != "20260813-v1":
+            canonical_irina = db.execute(
+                "SELECT id FROM people WHERE kind='kurator' AND name='Ирина' ORDER BY enabled DESC,id LIMIT 1"
+            ).fetchone()
+            if canonical_irina:
+                db.execute(
+                    """UPDATE people SET vk_id='413314992',vk_mention='[id413314992|@demidovair]',
+                       tg_ref='@Irina_zuza',parity='any',enabled=1,
+                       note='Telegram ID 1063673416 · телефон 79206159472',updated_at=strftime('%s','now')
+                       WHERE id=?""",
+                    (int(canonical_irina["id"]),),
+                )
+                db.execute(
+                    "UPDATE people SET enabled=0,updated_at=strftime('%s','now') WHERE kind='kurator' AND name='Ирина' AND id<>?",
+                    (int(canonical_irina["id"]),),
+                )
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('irina_contacts_version','20260813-v1') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+            )
         for row in PEOPLE_DEFAULTS:
             row = {
                 "kind": row.get("kind", ""),
@@ -471,10 +538,15 @@ def _init_db() -> None:
                 "enabled": row.get("enabled", 1),
                 "note": row.get("note", ""),
             }
-            exists = db.execute(
-                "SELECT 1 FROM people WHERE kind=? AND name=? AND COALESCE(vk_id,'')=? AND COALESCE(tg_ref,'')=?",
-                (row.get("kind", ""), row.get("name", ""), row.get("vk_id", ""), row.get("tg_ref", "")),
-            ).fetchone()
+            if row.get("kind") == "kurator" and row.get("name") == "Ирина":
+                exists = db.execute(
+                    "SELECT 1 FROM people WHERE kind='kurator' AND name='Ирина' LIMIT 1"
+                ).fetchone()
+            else:
+                exists = db.execute(
+                    "SELECT 1 FROM people WHERE kind=? AND name=? AND COALESCE(vk_id,'')=? AND COALESCE(tg_ref,'')=?",
+                    (row.get("kind", ""), row.get("name", ""), row.get("vk_id", ""), row.get("tg_ref", "")),
+                ).fetchone()
             if not exists:
                 db.execute(
                     """INSERT INTO people(kind,name,vk_id,vk_mention,tg_ref,parity,enabled,note)
@@ -486,6 +558,12 @@ def _init_db() -> None:
                 "UPDATE people SET offer_id=? WHERE kind='kurator' AND name=? AND COALESCE(offer_id,0)=0",
                 (offer_id, name),
             )
+        db.execute(
+            """UPDATE people SET tg_ref='@NastasyaEggert',
+               vk_mention=CASE WHEN COALESCE(vk_mention,'')='' THEN '[id866850402|@nastasyaeggert]' ELSE vk_mention END,
+               enabled=1,updated_at=strftime('%s','now')
+               WHERE kind='kurator' AND name='Настасья' AND COALESCE(tg_ref,'')=''"""
+        )
         for row in COURSE_DEFAULTS:
             db.execute(
                 """INSERT INTO courses(key,choice,title,vk_title,tg_title,enabled)
@@ -496,7 +574,6 @@ def _init_db() -> None:
         template_defaults = {
             "vk_welcome": VK_WELCOME_TEMPLATE,
             "vk_test_welcome": VK_TEST_WELCOME_TEMPLATE,
-            "vk_invite_fallback": VK_INVITE_FALLBACK_TEMPLATE,
             "tg_welcome": TG_WELCOME_TEMPLATE,
             "tg_vizitka": TG_VIZITKA_TEMPLATE,
             "tg_obuchenie": TG_OBUCHENIE_TEMPLATE,
@@ -533,10 +610,11 @@ def _ensure_db() -> None:
 
 
 async def setup(ctx: Any) -> None:
-    global _ctx, _logger, _vk_bootstrap_subscription, _vk_pin_watchdog_task, _vk_invite_dispatch_task
+    global _ctx, _logger, _vk_bootstrap_subscription, _vk_pin_watchdog_task
     _ctx = ctx
     _logger = ctx.logger
     _ensure_db()
+    _resume_chat_links_syncs()
     token = _clean(os.environ.get("VK_GROUP_TOKEN"))
     group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
     if not token or group_id <= 0:
@@ -544,10 +622,6 @@ async def setup(ctx: Any) -> None:
     if _vk_pin_watchdog_task is None or _vk_pin_watchdog_task.done():
         _vk_pin_watchdog_task = asyncio.create_task(
             _vk_pin_watchdog_loop(), name=f"{DEFAULT_MODULE_ID}-vk-pin-watchdog"
-        )
-    if _vk_invite_dispatch_task is None or _vk_invite_dispatch_task.done():
-        _vk_invite_dispatch_task = asyncio.create_task(
-            _vk_invite_dispatch_loop(), name=f"{DEFAULT_MODULE_ID}-vk-invite-dispatch"
         )
     if shared_vk_group_poll_hub is None:
         return
@@ -567,26 +641,27 @@ async def setup(ctx: Any) -> None:
 
 
 async def shutdown() -> None:
-    global _vk_bootstrap_subscription, _vk_pin_watchdog_task, _vk_invite_dispatch_task
-    invite_task, _vk_invite_dispatch_task = _vk_invite_dispatch_task, None
-    if invite_task is not None and not invite_task.done():
-        invite_task.cancel()
-    if invite_task is not None:
-        try:
-            await invite_task
-        except asyncio.CancelledError:
-            pass
+    global _vk_bootstrap_subscription, _vk_pin_watchdog_task
     task, _vk_pin_watchdog_task = _vk_pin_watchdog_task, None
-    if task is not None and not task.done():
-        task.cancel()
-    if task is not None:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    pending = [
+        candidate
+        for candidate in (task, *_manual_vk_sync_tasks, *_chat_links_sync_tasks.values())
+        if candidate is not None and not candidate.done()
+    ]
+    for candidate in pending:
+        candidate.cancel()
+    if pending:
+        _, still_pending = await asyncio.wait(pending, timeout=1.0)
+        if still_pending:
+            _log("warning", "course-chat-creator background tasks exceeded shutdown deadline")
+    _manual_vk_sync_tasks.clear()
+    _chat_links_sync_tasks.clear()
     subscription, _vk_bootstrap_subscription = _vk_bootstrap_subscription, None
     if subscription is not None:
-        await subscription.close()
+        try:
+            await asyncio.wait_for(subscription.close(), timeout=1.0)
+        except TimeoutError:
+            _log("warning", "course-chat-creator VK subscription shutdown timed out")
 
 
 async def _require_panel_access(request: Request) -> dict:
@@ -693,6 +768,20 @@ def _default_curator_id() -> int | None:
         if _clean(person.get("name")).lower() == "ирина":
             return int(person["id"])
     return int(kurators[0]["id"]) if kurators else None
+
+
+def _require_explicit_curator(data: dict[str, Any]) -> int:
+    value = data.get("curator_id")
+    if value in (None, ""):
+        raise HTTPException(status_code=400, detail="Выберите куратора перед созданием чата")
+    try:
+        curator_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Некорректно выбран куратор") from exc
+    if curator_id <= 0:
+        raise HTTPException(status_code=400, detail="Некорректно выбран куратор")
+    data["curator_id"] = curator_id
+    return curator_id
 
 
 def _selected_people(stream_number: str, curator_id: Any | None = None) -> dict[str, list[dict[str, Any]]]:
@@ -970,6 +1059,10 @@ def _chat_link_row(rows: list[list[Any]], stream_number: str) -> int | None:
     return None
 
 
+def _chat_link_row_title(course_key: str, stream_number: str) -> str:
+    return f"{'Щенок' if _course_key(course_key) == 'puppy' else 'Собака'} {_clean(stream_number)}"
+
+
 def _sheet_link_write_value(platform: str, existing_link: Any, generated_link: Any) -> tuple[str, str]:
     current = _clean(existing_link)
     if current:
@@ -977,6 +1070,22 @@ def _sheet_link_write_value(platform: str, existing_link: Any, generated_link: A
     if platform == "vk":
         return "", "waiting_manual_link"
     return _clean(generated_link), "filled"
+
+
+def _google_sheet_request(session: Any, method: str, url: str, **kwargs: Any) -> Any:
+    response = None
+    for attempt in range(3):
+        response = getattr(session, method)(url, **kwargs)
+        if response.status_code not in {429, 500, 502, 503, 504}:
+            return response
+        if attempt < 2:
+            retry_after = str(response.headers.get("Retry-After") or "").strip()
+            try:
+                delay = max(1.0, min(15.0, float(retry_after)))
+            except ValueError:
+                delay = 2.0 * (attempt + 1) + random.random()
+            time.sleep(delay)
+    return response
 
 
 def _sync_chat_pair_to_sheet_sync(
@@ -997,7 +1106,9 @@ def _sync_chat_pair_to_sheet_sync(
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     session = AuthorizedSession(credentials)
-    metadata_response = session.get(
+    metadata_response = _google_sheet_request(
+        session,
+        "get",
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
         params={"fields": "sheets.properties(sheetId,title)"},
         timeout=30,
@@ -1007,9 +1118,10 @@ def _sync_chat_pair_to_sheet_sync(
         str((item.get("properties") or {}).get("sheetId")): _clean((item.get("properties") or {}).get("title"))
         for item in (metadata_response.json() or {}).get("sheets") or []
     }
+    platforms = [platform for platform in ("telegram", "vk") if platform in pair]
     platform_titles: dict[str, str] = {}
     ranges: list[tuple[str, str]] = []
-    for platform in ("telegram", "vk"):
+    for platform in platforms:
         gid = _clean(sheet_ids.get(platform))
         title = titles.get(gid, "")
         if not title:
@@ -1017,7 +1129,9 @@ def _sync_chat_pair_to_sheet_sync(
         platform_titles[platform] = title
         escaped = title.replace("'", "''")
         ranges.append((platform, f"'{escaped}'!A:B"))
-    values_response = session.get(
+    values_response = _google_sheet_request(
+        session,
+        "get",
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchGet",
         params=[("ranges", value_range) for _platform, value_range in ranges] + [("majorDimension", "ROWS")],
         timeout=30,
@@ -1027,7 +1141,7 @@ def _sync_chat_pair_to_sheet_sync(
     data: list[dict[str, Any]] = []
     updated: list[dict[str, Any]] = []
     waiting_manual = False
-    for index, platform in enumerate(("telegram", "vk")):
+    for index, platform in enumerate(platforms):
         rows = ((value_ranges[index] or {}).get("values") or []) if index < len(value_ranges) else []
         existing_row = _chat_link_row(rows, stream_number)
         row_number = existing_row or (len(rows) + 1)
@@ -1041,20 +1155,20 @@ def _sync_chat_pair_to_sheet_sync(
         )
         link_value, action = _sheet_link_write_value(platform, existing_link, run.get("link"))
         waiting_manual = waiting_manual or action == "waiting_manual_link"
-        if action != "preserved":
-            values = [[_clean(run.get("title")), link_value]] if platform != "vk" else [[_clean(run.get("title"))]]
-            target_range = (
-                f"'{escaped}'!A{row_number}:B{row_number}"
-                if platform != "vk"
-                else f"'{escaped}'!A{row_number}"
-            )
-            data.append(
-                {
-                    "range": target_range,
-                    "majorDimension": "ROWS",
-                    "values": values,
-                }
-            )
+        row_title = _chat_link_row_title(course_key, stream_number)
+        values = [[row_title, link_value]] if link_value else [[row_title]]
+        target_range = (
+            f"'{escaped}'!A{row_number}:B{row_number}"
+            if link_value
+            else f"'{escaped}'!A{row_number}"
+        )
+        data.append(
+            {
+                "range": target_range,
+                "majorDimension": "ROWS",
+                "values": values,
+            }
+        )
         updated.append(
             {
                 "platform": platform,
@@ -1065,7 +1179,9 @@ def _sync_chat_pair_to_sheet_sync(
             }
         )
     if data:
-        update_response = session.post(
+        update_response = _google_sheet_request(
+            session,
+            "post",
             f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
             json={"valueInputOption": "RAW", "data": data},
             timeout=30,
@@ -1073,7 +1189,7 @@ def _sync_chat_pair_to_sheet_sync(
         update_response.raise_for_status()
     return {
         "ok": True,
-        "status": "waiting_manual_vk_link" if waiting_manual else "synced",
+        "status": "waiting_manual_vk_link" if waiting_manual else ("synced" if len(platforms) == 2 else "partially_synced"),
         "stream_number": stream_number,
         "spreadsheet_id": spreadsheet_id,
         "manual_vk_link_required": waiting_manual,
@@ -1081,12 +1197,111 @@ def _sync_chat_pair_to_sheet_sync(
     }
 
 
-async def _sync_chat_pair_to_sheet(course_key: str, stream_number: str, *, test_mode: bool) -> dict[str, Any]:
+def _save_chat_links_sync_result(course_key: str, stream_number: str, result: dict[str, Any]) -> None:
+    _ensure_db()
+    with _db() as db:
+        rows = db.execute(
+            "SELECT id,response_json FROM runs WHERE course_key=? AND stream_number=? AND test_mode=0",
+            (course_key, stream_number),
+        ).fetchall()
+        for row in rows:
+            response_data = _json_dict(row["response_json"])
+            response_data["link_sync"] = result
+            db.execute(
+                "UPDATE runs SET response_json=? WHERE id=?",
+                (json.dumps(response_data, ensure_ascii=False), int(row["id"])),
+            )
+        db.commit()
+
+
+async def _retry_chat_links_sync(course_key: str, stream_number: str) -> None:
+    result: dict[str, Any] = {"ok": False, "status": "retry_required"}
+    attempt = 0
+    try:
+        while True:
+            attempt += 1
+            await asyncio.sleep(min(30 * (2 ** (attempt - 1)), 900))
+            result = await _sync_chat_pair_to_sheet(
+                course_key, stream_number, test_mode=False, schedule_retry=False,
+            )
+            result = {**result, "background_attempts": attempt}
+            _save_chat_links_sync_result(course_key, stream_number, result)
+            if result.get("sheet_sync_ok"):
+                _log(
+                    "info", "Chat links sheet retry completed course=%s stream=%s attempts=%s",
+                    course_key, stream_number, attempt,
+                )
+                return
+            if not _chat_links_sync_retryable(result):
+                _log(
+                    "error", "Chat links sheet retry stopped course=%s stream=%s warning=%s",
+                    course_key, stream_number, _clean(result.get("warning")),
+                )
+                return
+    except asyncio.CancelledError:
+        raise
+    finally:
+        _chat_links_sync_tasks.pop((course_key, stream_number), None)
+
+
+def _chat_links_sync_retryable(result: dict[str, Any]) -> bool:
+    if result.get("status") == "waiting_pair":
+        return True
+    if result.get("status") != "direct_ready_sheet_error":
+        return False
+    warning = _clean(result.get("warning")).casefold()
+    return any(
+        marker in warning
+        for marker in (
+            "429", "too many requests", "resource_exhausted", "500", "502", "503", "504",
+            "timeout", "timed out", "connection", "temporarily unavailable",
+        )
+    )
+
+
+def _schedule_chat_links_sync_retry(course_key: str, stream_number: str) -> bool:
+    key = (_course_key(course_key), _clean(stream_number))
+    existing = _chat_links_sync_tasks.get(key)
+    if existing is not None and not existing.done():
+        return False
+    task = asyncio.create_task(
+        _retry_chat_links_sync(*key),
+        name=f"course-chat-creator-sheet-{key[0]}-{key[1]}",
+    )
+    _chat_links_sync_tasks[key] = task
+    return True
+
+
+def _resume_chat_links_syncs() -> None:
+    latest_by_course: dict[str, tuple[str, str]] = {}
+    latest_by_flow: dict[tuple[str, str], dict[str, Any]] = {}
+    _ensure_db()
+    with _db() as db:
+        rows = db.execute(
+            """SELECT course_key,stream_number,response_json
+               FROM runs WHERE test_mode=0 ORDER BY id DESC LIMIT 400"""
+        ).fetchall()
+    for row in rows:
+        key = (_course_key(row["course_key"]), _clean(row["stream_number"]))
+        if not key[1]:
+            continue
+        latest_by_course.setdefault(key[0], key)
+        if key not in latest_by_flow:
+            latest_by_flow[key] = _json_dict(row["response_json"]).get("link_sync") or {}
+    keys = set(latest_by_course.values())
+    keys.update(key for key, result in latest_by_flow.items() if _chat_links_sync_retryable(result))
+    for course_key, stream_number in keys:
+        _schedule_chat_links_sync_retry(course_key, stream_number)
+
+
+async def _sync_chat_pair_to_sheet(
+    course_key: str, stream_number: str, *, test_mode: bool, schedule_retry: bool = True,
+) -> dict[str, Any]:
     if test_mode:
         return {"ok": True, "status": "skipped_test_mode"}
     pair = _ready_chat_pair(course_key, stream_number)
     missing = [platform for platform in ("telegram", "vk") if platform not in pair]
-    if missing:
+    if not pair:
         return {"ok": True, "status": "waiting_pair", "missing": missing}
     for run in pair.values():
         run["course_key"] = course_key
@@ -1101,16 +1316,20 @@ async def _sync_chat_pair_to_sheet(course_key: str, stream_number: str, *, test_
         }
     try:
         result = await asyncio.to_thread(_sync_chat_pair_to_sheet_sync, pair, credentials_path)
+        result["missing"] = missing
         result["sheet_sync_ok"] = True
         return result
     except Exception as exc:
         _log("error", "Chat links sheet sync failed course=%s stream=%s: %s", course_key, stream_number, exc)
-        return {
+        result = {
             "ok": True,
             "status": "direct_ready_sheet_error",
             "sheet_sync_ok": False,
             "warning": _exc_text(exc),
         }
+        if schedule_retry:
+            result["retry_scheduled"] = _schedule_chat_links_sync_retry(course_key, stream_number)
+        return result
 
 
 def _vk_admin_run(run_id: int | None = None) -> dict[str, Any] | None:
@@ -1121,6 +1340,24 @@ def _vk_admin_run(run_id: int | None = None) -> dict[str, Any] | None:
         else:
             row = db.execute("SELECT * FROM runs WHERE platform='vk' AND status IN ('needs_admins','needs_members','needs_vk_web_admins') ORDER BY id DESC LIMIT 1").fetchone()
     return dict(row) if row else None
+
+
+def _pending_vk_admin_run_ids(limit: int = 25) -> list[int]:
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    _ensure_db()
+    with _db() as db:
+        rows = db.execute(
+            """SELECT id,response_json FROM runs
+               WHERE platform='vk' AND test_mode=0
+                 AND status IN ('needs_admins','needs_members','needs_vk_web_admins')
+               ORDER BY id DESC LIMIT ?""",
+            (max(1, min(int(limit), 100)),),
+        ).fetchall()
+    return [
+        int(row["id"])
+        for row in rows
+        if int(_json_dict(row["response_json"]).get("owner_group_id") or 0) == group_id
+    ]
 
 
 async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
@@ -1136,6 +1373,134 @@ async def _vk_method(method: str, params: dict[str, Any], token: str) -> Any:
         _log("error", "VK API error in %s: %s", method, data["error"])
         return {"error": data["error"]}
     return data.get("response")
+
+
+def _vk_staff_source_title(title: Any) -> bool:
+    normalized = re.sub(r"\s+", " ", _clean(title).casefold().replace("ё", "е"))
+    return normalized in VK_STAFF_SOURCE_TITLES
+
+
+def _vk_staff_registry() -> dict[str, Any]:
+    _ensure_db()
+    with _db() as db:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (VK_STAFF_REGISTRY_META_KEY,)).fetchone()
+    payload = _json_dict(row["value"] if row else "")
+    payload["source_peer_ids"] = sorted({
+        int(value) for value in (payload.get("source_peer_ids") or [])
+        if str(value).isdigit() and int(value) > 2_000_000_000
+    })
+    payload["user_ids"] = sorted({
+        int(value) for value in (payload.get("user_ids") or [])
+        if str(value).isdigit() and int(value) > 0
+    })
+    return payload
+
+
+def _persist_vk_staff_registry(payload: dict[str, Any]) -> None:
+    with _db() as db:
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (VK_STAFF_REGISTRY_META_KEY, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+        )
+        db.commit()
+
+
+async def _discover_vk_staff_source_peers(token: str) -> list[int]:
+    peers: set[int] = set()
+    for start in range(1, VK_STAFF_SOURCE_DISCOVERY_LIMIT + 1, 25):
+        local_ids = range(start, min(start + 25, VK_STAFF_SOURCE_DISCOVERY_LIMIT + 1))
+        code = "return [" + ",".join(
+            f'API.messages.getConversationsById({{"peer_ids":{2_000_000_000 + local_id}}})'
+            for local_id in local_ids
+        ) + "];"
+        responses = await _vk_method("execute", {"code": code}, token)
+        if not isinstance(responses, list):
+            continue
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            item = ((response.get("items") or [{}])[0])
+            conversation = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+            if not _vk_staff_source_title((conversation.get("chat_settings") or {}).get("title")):
+                continue
+            peer_id = int((conversation.get("peer") or {}).get("id") or 0)
+            if peer_id > 2_000_000_000:
+                peers.add(peer_id)
+    return sorted(peers)
+
+
+async def _refresh_vk_staff_registry(
+    token: str,
+    *,
+    discover: bool = False,
+    extra_peer_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    current = _vk_staff_registry()
+    source_peer_ids = set(int(value) for value in current.get("source_peer_ids") or [])
+    source_peer_ids.update(
+        int(value) for value in (extra_peer_ids or []) if int(value) > 2_000_000_000
+    )
+    if discover or not source_peer_ids:
+        source_peer_ids.update(await _discover_vk_staff_source_peers(token))
+    if not source_peer_ids:
+        return {**current, "ok": False, "reason": "staff_source_chats_not_found"}
+
+    user_ids: set[int] = set(VK_STAFF_EXTRA_IDS)
+    source_chats: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for peer_id in sorted(source_peer_ids):
+        response = await _vk_method("messages.getConversationMembers", {"peer_id": peer_id, "extended": 1}, token)
+        if isinstance(response, dict) and "error" in response:
+            errors.append({"peer_id": peer_id, "error": response.get("error")})
+            continue
+        if not isinstance(response, dict):
+            errors.append({"peer_id": peer_id, "error": "empty VK response"})
+            continue
+        title = ""
+        conversation = await _vk_method("messages.getConversationsById", {"peer_ids": peer_id}, token)
+        if isinstance(conversation, dict) and not conversation.get("error"):
+            item = (conversation.get("items") or [{}])[0]
+            item = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+            title = _clean((item.get("chat_settings") or {}).get("title"))
+        if title and not _vk_staff_source_title(title):
+            errors.append({"peer_id": peer_id, "error": "chat title is no longer a staff source"})
+            continue
+        members = {
+            int(item.get("member_id") or 0)
+            for item in (response.get("items") or [])
+            if int(item.get("member_id") or 0) > 0
+        }
+        user_ids.update(members)
+        source_chats.append({"peer_id": peer_id, "title": title, "members": len(members)})
+    if not source_chats:
+        return {**current, "ok": False, "reason": "staff_source_read_failed", "errors": errors}
+
+    payload = {
+        "version": 2,
+        "source_peer_ids": sorted(int(item["peer_id"]) for item in source_chats),
+        "source_chats": source_chats,
+        "extra_user_ids": sorted(VK_STAFF_EXTRA_IDS),
+        "user_ids": sorted(user_ids),
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    _persist_vk_staff_registry(payload)
+    return {**payload, "ok": not errors, "errors": errors}
+
+
+async def _maybe_refresh_vk_staff_source_event(peer_id: int, token: str) -> bool:
+    current = _vk_staff_registry()
+    if peer_id in set(current.get("source_peer_ids") or []):
+        await _refresh_vk_staff_registry(token, extra_peer_ids=[peer_id])
+        return True
+    conversation = await _vk_method("messages.getConversationsById", {"peer_ids": peer_id}, token)
+    if not isinstance(conversation, dict) or conversation.get("error"):
+        return False
+    item = (conversation.get("items") or [{}])[0]
+    item = item.get("conversation") if isinstance(item.get("conversation"), dict) else item
+    if not _vk_staff_source_title((item.get("chat_settings") or {}).get("title")):
+        return False
+    await _refresh_vk_staff_registry(token, extra_peer_ids=[peer_id])
+    return True
 
 
 def _vk_group_token(*, test_mode: bool = False) -> str:
@@ -1417,7 +1782,8 @@ async def _promote_joined_vk_staff(row: dict[str, Any], message: dict[str, Any])
         expected_ids = set(await _resolve_vk_people_ids(current_staff, token))
     except Exception as exc:
         _log("warning", "VK current staff resolution failed for peer %s: %s", message.get("peer_id"), exc)
-    if member_id not in expected_ids:
+    protected_ids = expected_ids | set(_vk_staff_registry().get("user_ids") or [])
+    if member_id not in protected_ids:
         return
     staff_roles = response.get("staff_roles") if isinstance(response.get("staff_roles"), dict) else {}
     member_state = staff_roles.get(str(member_id)) if isinstance(staff_roles.get(str(member_id)), dict) else {}
@@ -1429,8 +1795,8 @@ async def _promote_joined_vk_staff(row: dict[str, Any], message: dict[str, Any])
         {"peer_id": peer_id, "member_id": member_id, "role": "admin"},
         token,
     )
-    state = await _vk_admin_state(peer_id, sorted(expected_ids), token)
-    promoted_ids = sorted(set(int(value) for value in (state.get("admins") or [])) & expected_ids)
+    state = await _vk_admin_state(peer_id, sorted(protected_ids), token)
+    promoted_ids = sorted(set(int(value) for value in (state.get("admins") or [])) & protected_ids)
     pending_ids = sorted(expected_ids - set(promoted_ids))
     failed = isinstance(api_response, dict) and "error" in api_response
     staff_roles[str(member_id)] = {
@@ -1444,6 +1810,7 @@ async def _promote_joined_vk_staff(row: dict[str, Any], message: dict[str, Any])
         "automatic": True,
         "promoted_ids": promoted_ids,
         "pending_join_ids": pending_ids,
+        "protected_staff_ids": sorted(protected_ids),
     }
     present_ids = {
         int(item.get("id") or 0)
@@ -1709,10 +2076,29 @@ async def _reconcile_vk_course_pins_once() -> dict[str, Any]:
 
 
 async def _vk_pin_watchdog_loop() -> None:
+    global _vk_staff_reconcile_last, _vk_staff_registry_refresh_last, _vk_staff_registry_discovery_last
     await asyncio.sleep(2)
     while True:
         try:
             await _reconcile_vk_course_pins_once()
+            now = time.monotonic()
+            if now - _vk_staff_registry_refresh_last >= 60:
+                token = _vk_group_token()
+                if token:
+                    discover = now - _vk_staff_registry_discovery_last >= 6 * 3600
+                    registry = await _refresh_vk_staff_registry(token, discover=discover)
+                    _vk_staff_registry_refresh_last = now
+                    if discover and registry.get("source_peer_ids"):
+                        _vk_staff_registry_discovery_last = now
+                    if not registry.get("ok", True):
+                        _log("warning", "VK staff registry refresh needs attention: %s", registry.get("reason") or registry.get("errors"))
+            if time.monotonic() - _vk_staff_reconcile_last >= 30:
+                _vk_staff_reconcile_last = time.monotonic()
+                for run_id in _pending_vk_admin_run_ids():
+                    try:
+                        await _retry_vk_admins_from_run(run_id)
+                    except Exception as exc:
+                        _log("warning", "VK staff reconcile failed run_id=%s: %s", run_id, exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1731,9 +2117,20 @@ async def _vk_pin_watchdog_loop() -> None:
 
 async def _handle_vk_bootstrap_event(event: Any) -> None:
     message = _vk_bootstrap_event_message(event)
-    if not message or message["peer_id"] <= 2000000000 or message["from_id"] <= 0:
+    if (
+        not message
+        or message["peer_id"] <= 2000000000
+        or (message["from_id"] <= 0 and message["action_member_id"] <= 0)
+    ):
         return
     owned_row = _vk_owned_run(message["peer_id"])
+    token = _vk_group_token()
+    if token and owned_row is None:
+        try:
+            if await _maybe_refresh_vk_staff_source_event(message["peer_id"], token):
+                return
+        except Exception as exc:
+            _log("warning", "VK staff source refresh failed peer_id=%s: %s", message["peer_id"], exc)
     if owned_row is not None:
         try:
             await _promote_joined_vk_staff(owned_row, message)
@@ -1893,6 +2290,21 @@ async def _send_vk_invite_fallbacks(
     selected: dict[str, list[dict[str, Any]]],
     dedupe_namespace: int = 0,
 ) -> dict[str, Any]:
+    # Customer chat links are delivered by getcourse-onboarding. Keep this
+    # legacy entry point fail-closed so an old task or direct internal call
+    # cannot send a duplicate personal message from the community.
+    return {
+        "candidates": len(user_ids),
+        "sent": 0,
+        "not_allowed": 0,
+        "failed": 0,
+        "errors": [],
+        "sent_user_ids": [],
+        "not_allowed_user_ids": [],
+        "failed_user_ids": [],
+        "disabled": True,
+    }
+
     result: dict[str, Any] = {
         "candidates": len(user_ids),
         "sent": 0,
@@ -2034,6 +2446,16 @@ def _community_owned_vk_invite_runs(rows: list[Any], group_id: int) -> list[dict
 
 
 async def _dispatch_pending_vk_student_invites_once() -> dict[str, int]:
+    # Disabled permanently: onboarding owns customer-facing link delivery.
+    return {
+        "checked": 0,
+        "sent": 0,
+        "waiting_link": 0,
+        "not_allowed": 0,
+        "failed": 0,
+        "disabled": 1,
+    }
+
     token = _vk_group_token(test_mode=False)
     group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
     result = {"checked": 0, "sent": 0, "waiting_link": 0, "not_allowed": 0, "failed": 0}
@@ -2177,18 +2599,6 @@ async def _dispatch_pending_vk_student_invites_once() -> dict[str, int]:
         result["not_allowed"] += delivery["not_allowed"]
         result["failed"] += delivery["failed"]
     return result
-
-
-async def _vk_invite_dispatch_loop() -> None:
-    await asyncio.sleep(5)
-    while True:
-        try:
-            await _dispatch_pending_vk_student_invites_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log("warning", "VK student invite dispatch failed: %s", _exc_text(exc))
-        await asyncio.sleep(60)
 
 
 async def _send_vk_staff_invites(
@@ -2403,8 +2813,8 @@ async def _create_vk_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
         link_sync = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=test_mode)
         prepared["student_invites"] = {
             "initial_added": len(added_student_ids),
-            "delivery": "community_message_and_client_chat_links_page",
-            "community_messages": "waiting_manual_link" if failed_student_ids else "not_needed",
+            "delivery": "onboarding_message",
+            "community_messages": "disabled",
             "pending_vk_ids": failed_student_ids,
             "sent_vk_ids": [],
             "not_allowed_vk_ids": [],
@@ -2480,12 +2890,13 @@ async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]
     selected = _selected_people(stream_number, request_json.get("curator_id"))
     staff_people = _vk_staff_for_mode(selected, test_mode=test_mode)
     target_ids = await _resolve_vk_people_ids(staff_people, token)
-    if not target_ids:
+    protected_ids = sorted(set(target_ids) | set(_vk_staff_registry().get("user_ids") or []))
+    if not protected_ids:
         result = {"ok": True, "skipped": True, "reason": "no_staff_members", "run_id": row["id"], "peer_id": peer_id}
         response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
         _update_run(int(row["id"]), "ok", response_json)
         return result
-    state = await _vk_admin_state(peer_id, target_ids, token)
+    state = await _vk_admin_state(peer_id, protected_ids, token)
     present_ids = {
         int(item.get("id") or 0)
         for item in state.get("members", [])
@@ -2496,35 +2907,35 @@ async def _retry_vk_admins_from_run(run_id: int | None = None) -> dict[str, Any]
         "ok": not missing_members,
         "present": [user_id for user_id in target_ids if user_id in present_ids],
         "missing": missing_members,
+        "staff_present": [user_id for user_id in target_ids if user_id in present_ids],
+        "staff_pending_join": missing_members,
         "join_mode": "invite_link",
         "error": state.get("error"),
     }
-    if missing_members:
-        error = f"VK не подтвердил всех участников перед выдачей админок: missing_members={', '.join(map(str, missing_members))}"
-        result = {"ok": False, "run_id": row["id"], "peer_id": peer_id, "members_result": members_result, "error": error}
-        response_json.update({"members_result": members_result, "admin_result": result, "needs_attention": True, "followup_status": "needs_members", "detail": error})
-        _update_run(int(row["id"]), "needs_members", response_json, error=error)
-        return result
-    missing_admins = list(state.get("missing_admins") or [])
+    missing_admins = [user_id for user_id in (state.get("missing_admins") or []) if user_id in present_ids]
     api_result: dict[str, Any] = {"ok": True, "skipped": True, "reason": "already_admin", "state": state}
     if missing_admins:
         api_result = await _vk_try_api_admins(peer_id, missing_admins, token)
-        missing_admins = list(((api_result.get("state") or {}).get("missing_admins") or []))
-    final_state = api_result.get("state") or state
-    final_missing = list(final_state.get("missing_admins") or [])
+    final_state = await _vk_admin_state(peer_id, protected_ids, token)
+    final_missing = [user_id for user_id in (final_state.get("missing_admins") or []) if user_id in present_ids]
     result = {
-        "ok": not final_missing,
+        "ok": not missing_members and not final_missing,
         "run_id": row["id"],
         "peer_id": peer_id,
         "members_result": members_result,
         "api": api_result,
         "state": final_state,
         "missing_admins": final_missing,
+        "protected_staff_ids": protected_ids,
     }
     if final_missing:
         error = f"VK API не подтвердил роли администраторов: missing_admins={', '.join(map(str, final_missing))}"
         response_json.update({"admin_result": result, "needs_attention": True, "followup_status": "needs_admins", "detail": error})
         _update_run(int(row["id"]), "needs_admins", response_json, error=error)
+    elif missing_members:
+        error = f"Ожидается вход сотрудников: {', '.join(map(str, missing_members))}"
+        response_json.update({"members_result": members_result, "admin_result": result, "needs_attention": True, "followup_status": "needs_members", "detail": error})
+        _update_run(int(row["id"]), "needs_members", response_json, error=error)
     else:
         response_json.update({"admin_result": result, "needs_attention": False, "followup_status": "ok", "detail": ""})
         _update_run(int(row["id"]), "ok", response_json)
@@ -3084,7 +3495,7 @@ def _recorded_vk_course_chats() -> list[dict[str, Any]]:
         rows = [
             dict(row)
             for row in db.execute(
-                "SELECT id,title,chat_id,response_json,test_mode,status,course_key,stream_number FROM runs WHERE platform=? ORDER BY id DESC",
+                "SELECT id,title,chat_id,link,response_json,test_mode,status,course_key,stream_number FROM runs WHERE platform=? ORDER BY id DESC",
                 ("vk",),
             ).fetchall()
         ]
@@ -3113,6 +3524,7 @@ def _recorded_vk_course_chats() -> list[dict[str, Any]]:
                 "run_status": _clean(row.get("status")),
                 "course_key": _clean(row.get("course_key")),
                 "stream_number": _clean(row.get("stream_number")),
+                "link": _clean(row.get("link"))[:2000],
                 "community_owned": int(response.get("owner_group_id") or 0) == group_id,
                 "welcome_cmid": int(response.get("welcome_cmid") or 0),
                 "pin_watchdog_suspended": bool(
@@ -3656,9 +4068,81 @@ def service_flow_catalog() -> dict[str, Any]:
             "chat_id": _clean(row.get("chat_id")),
             "error": _clean(row.get("error")),
         }
+        if row["platform"] == "vk":
+            peer_id = int(response_data.get("peer_id") or 0)
+            owner_group_id = int(response_data.get("owner_group_id") or 0)
+            if peer_id > 2000000000 and owner_group_id:
+                item["vk_admin_url"] = f"https://vk.ru/gim{owner_group_id}?sel=c{peer_id - 2000000000}"
     items = list(grouped.values())
     items.sort(key=lambda item: (0 if item["course_key"] == "puppy" else 1, -int(item["stream"]) if item["stream"].isdigit() else 0))
     return {"ok": True, "items": items, **service_flow_setup()}
+
+
+def service_notification_chat_context(
+    *, platform: str, chat_id: str = "", title: str = "",
+) -> dict[str, Any]:
+    """Resolve one real course chat and its curator for Nexus notifications.
+
+    VK callbacks identify a conversation by peer id while Telegram events are
+    most reliably matched by the title saved when the chat was created.  Only
+    successful, non-test runs are eligible; an arbitrary group conversation
+    must never become a sales notification by accident.
+    """
+    platform = _clean(platform).lower()
+    chat_id = _clean(chat_id)
+    title = _clean(title).rstrip(".").casefold()
+    if platform not in {"vk", "telegram"} or (not chat_id and not title):
+        return {"ok": True, "found": False}
+    _ensure_db()
+    with _db() as db:
+        db.row_factory = sqlite3.Row
+        people = {int(row["id"]): dict(row) for row in db.execute("SELECT * FROM people")}
+        rows = db.execute(
+            """SELECT * FROM runs
+               WHERE platform=? AND test_mode=0
+               ORDER BY created_at DESC,id DESC""",
+            (platform,),
+        ).fetchall()
+    for raw in rows:
+        row = dict(raw)
+        if _clean(row.get("status")) not in {"ok", "needs_members", "needs_vk_web_admins", "attention"}:
+            continue
+        request_data = _json_dict(row.get("request_json"))
+        response_data = _json_dict(row.get("response_json"))
+        stored_title = _clean(row.get("title")).rstrip(".")
+        stored_id = _clean(row.get("chat_id") or response_data.get("chat_id") or response_data.get("channel_id"))
+        ids = {stored_id} if stored_id else set()
+        if platform == "vk":
+            peer_id = int(response_data.get("peer_id") or 0)
+            if peer_id:
+                ids.add(str(peer_id))
+            if stored_id.isdigit():
+                ids.add(str(2_000_000_000 + int(stored_id)))
+        matched = bool(chat_id and chat_id in ids) or bool(title and stored_title.casefold() == title)
+        if not matched:
+            continue
+        curator_id = int(request_data.get("curator_id") or response_data.get("curator_id") or 0)
+        curator = people.get(curator_id) or {}
+        owner_group_id = int(response_data.get("owner_group_id") or _clean(os.environ.get("VK_GROUP_ID")) or 0)
+        chat_url = _clean(row.get("link") or response_data.get("group_link"))
+        if platform == "vk" and stored_id.isdigit() and owner_group_id:
+            chat_url = f"https://vk.com/gim{owner_group_id}?sel=c{stored_id}"
+        return {
+            "ok": True,
+            "found": True,
+            "platform": platform,
+            "chat_id": chat_id or stored_id,
+            "title": stored_title,
+            "chat_url": chat_url,
+            "course_key": _course_key(row.get("course_key")),
+            "stream_number": _clean(row.get("stream_number")),
+            "curator_id": curator_id,
+            "curator_name": _clean(curator.get("name")),
+            "curator_vk_id": re.sub(r"\D+", "", _clean(curator.get("vk_id"))),
+            "curator_vk_ref": _vk_screen_name(curator.get("vk_id") or curator.get("vk_mention")),
+            "curator_telegram": _clean(curator.get("tg_ref")).lstrip("@").casefold(),
+        }
+    return {"ok": True, "found": False}
 
 
 def service_set_flow_curator(*, course_key: str, stream_number: str, teacher_id: int) -> dict[str, Any]:
@@ -3727,12 +4211,52 @@ def _set_manual_vk_link_sync(course_key: str, stream_number: str, link: str, cre
         f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
         json={
             "valueInputOption": "RAW",
-            "data": [{"range": f"'{escaped}'!A{row_number}:B{row_number}", "values": [[f"{'Щенок' if course_key == 'puppy' else 'Собака'} {stream_number}", link]]}],
+            "data": [{"range": f"'{escaped}'!A{row_number}:B{row_number}", "values": [[_chat_link_row_title(course_key, stream_number), link]]}],
         },
         timeout=30,
     )
     response.raise_for_status()
     return {"ok": True, "spreadsheet_id": spreadsheet_id, "gid": gid, "row": row_number, "link": link}
+
+
+async def _sync_manual_vk_link_in_background(
+    *, run_id: int, course_key: str, stream_number: str, link: str, credentials_path: Path,
+) -> None:
+    sync_data: dict[str, Any] = {"ok": False, "status": "retry_required"}
+    for attempt in range(1, 6):
+        try:
+            result = await asyncio.to_thread(
+                _set_manual_vk_link_sync, course_key, stream_number, link, credentials_path,
+            )
+            sync_data = {"ok": True, "status": "completed", "attempts": attempt, **result}
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = _exc_text(exc)
+            retryable = "429" in error or "Too Many Requests" in error or "RESOURCE_EXHAUSTED" in error
+            if retryable and attempt < 5:
+                delay = min(10 * (2 ** (attempt - 1)), 80)
+                _log(
+                    "warning", "Manual VK link sheet sync rate-limited course=%s stream=%s attempt=%s retry_in=%ss",
+                    course_key, stream_number, attempt, delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            _log("error", "Manual VK link sheet sync failed course=%s stream=%s: %s", course_key, stream_number, exc)
+            sync_data = {"ok": False, "status": "retry_required", "attempts": attempt, "error": error}
+            break
+    _ensure_db()
+    with _db() as db:
+        row = db.execute("SELECT response_json FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row:
+            response_data = _json_dict(row["response_json"])
+            response_data["manual_link_sync"] = sync_data
+            db.execute(
+                "UPDATE runs SET response_json=? WHERE id=?",
+                (json.dumps(response_data, ensure_ascii=False), run_id),
+            )
+            db.commit()
 
 
 async def service_set_manual_vk_link(*, course_key: str, stream_number: str, link: str) -> dict[str, Any]:
@@ -3741,25 +4265,41 @@ async def service_set_manual_vk_link(*, course_key: str, stream_number: str, lin
     link = _clean(link)
     if not re.match(r"^https://vk\.me/join/", link, flags=re.IGNORECASE):
         raise ValueError("VK invite link must start with https://vk.me/join/")
-    credentials_path = _chat_links_credentials_path()
-    if not credentials_path or not credentials_path.exists():
-        raise RuntimeError("Google Sheets is not configured")
-    result = await asyncio.to_thread(_set_manual_vk_link_sync, course_key, stream_number, link, credentials_path)
     _ensure_db()
+    run_id = 0
     with _db() as db:
         row = db.execute(
             "SELECT id,response_json FROM runs WHERE platform='vk' AND course_key=? AND stream_number=? AND test_mode=0 ORDER BY id DESC LIMIT 1",
             (course_key, stream_number),
         ).fetchone()
         if row:
+            run_id = int(row["id"])
             response_data = _json_dict(row["response_json"])
             response_data["manual_invite_link"] = link
+            response_data["manual_link_sync"] = {"ok": True, "status": "scheduled"}
             db.execute(
                 "UPDATE runs SET link=?,response_json=? WHERE id=?",
-                (link, json.dumps(response_data, ensure_ascii=False), int(row["id"])),
+                (link, json.dumps(response_data, ensure_ascii=False), run_id),
             )
             db.commit()
-    return result
+    if not run_id:
+        raise ValueError("Созданный VK-чат этого потока не найден")
+    credentials_path = _chat_links_credentials_path()
+    if not credentials_path or not credentials_path.exists():
+        return {
+            "ok": True, "status": "saved_locally", "link": link,
+            "sheet_sync_ok": False, "warning": "Google Sheets не настроен",
+        }
+    task = asyncio.create_task(
+        _sync_manual_vk_link_in_background(
+            run_id=run_id, course_key=course_key, stream_number=stream_number,
+            link=link, credentials_path=credentials_path,
+        ),
+        name=f"course-chat-creator-manual-vk-{course_key}-{stream_number}",
+    )
+    _manual_vk_sync_tasks.add(task)
+    task.add_done_callback(_manual_vk_sync_tasks.discard)
+    return {"ok": True, "status": "saved_locally", "link": link, "sheet_sync": "scheduled"}
 
 
 async def service_create_flow_pair(
@@ -3799,6 +4339,49 @@ async def service_create_flow_pair(
     return result
 
 
+async def service_reapply_flow_vk_avatar(*, course_key: str, stream_number: str) -> dict[str, Any]:
+    """Apply the configured avatar to an existing production VK flow chat.
+
+    Creation can succeed while VK rejects the photo upload transiently.  Reuse
+    the stored run instead of creating a second chat when an operator retries
+    just this recoverable step.
+    """
+    _ensure_db()
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    if not stream_number.isdigit():
+        raise ValueError("stream_number must be numeric")
+    photo = _avatar_path()
+    if not photo:
+        raise RuntimeError("Файл логотипа беседы не найден")
+    with _db() as db:
+        row = db.execute(
+            """SELECT * FROM runs WHERE platform='vk' AND course_key=? AND stream_number=?
+               AND test_mode=0 ORDER BY id DESC LIMIT 1""",
+            (course_key, stream_number),
+        ).fetchone()
+    if not row:
+        raise ValueError("VK-беседа этого потока не найдена")
+    run = dict(row)
+    response = _json_dict(run.get("response_json"))
+    peer_id = int(response.get("peer_id") or 0)
+    if not peer_id:
+        chat_id = _clean(run.get("chat_id"))
+        peer_id = 2000000000 + int(chat_id) if chat_id.isdigit() else 0
+    if not peer_id:
+        raise RuntimeError("У созданной VK-беседы не найден идентификатор")
+    token = _vk_group_token(test_mode=False)
+    if not token:
+        raise RuntimeError("VK_GROUP_TOKEN is not configured")
+    applied = await _upload_vk_chat_photo(peer_id, photo, token)
+    if not applied:
+        raise RuntimeError("VK не подтвердил установку логотипа; повторите попытку позже")
+    response["avatar_ready"] = True
+    response["avatar_reapplied_at"] = datetime.now(ZoneInfo("UTC")).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    _update_run(int(run["id"]), _clean(run.get("status")) or "ok", response, error=_clean(run.get("error")))
+    return {"ok": True, "platform": "vk", "stream": stream_number, "avatar_ready": True}
+
+
 def service_transfer_chat_readiness(course_key: str, stream_number: str) -> dict[str, Any]:
     course_key = _course_key(course_key)
     stream_number = _clean(stream_number)
@@ -3834,6 +4417,160 @@ def service_transfer_chat_readiness(course_key: str, stream_number: str) -> dict
             "status": "ready" if tg_row else "not_recorded",
             "title": _clean(tg_row["title"] if tg_row else ""),
         },
+    }
+
+
+async def _transfer_vk_member_state(*, target: str, course_key: str, stream_number: str) -> dict[str, Any]:
+    token = _vk_group_token()
+    if not token:
+        return {"ok": False, "status": "not_configured", "error": "VK_GROUP_TOKEN is not configured"}
+    user_id = await _resolve_vk_target_id(_clean(target), token)
+    course_key = _course_key(course_key)
+    stream_number = _clean(stream_number)
+    chat = next(
+        (
+            item for item in _recorded_vk_course_chats()
+            if item.get("course_key") == course_key
+            and item.get("stream_number") == stream_number
+            and not item.get("test_mode")
+        ),
+        None,
+    )
+    if not chat:
+        return {"ok": False, "status": "not_recorded", "platform": "vk"}
+    if not chat.get("community_owned"):
+        return {"ok": False, "status": "legacy_inaccessible", "platform": "vk"}
+    response = await _vk_method(
+        "messages.getConversationMembers",
+        {
+            "peer_id": int(chat["peer_id"]),
+            "count": 1000,
+            "group_id": int(_clean(os.environ.get("VK_GROUP_ID")) or 0),
+        },
+        token,
+    )
+    error = _vk_error_summary(response)
+    if error:
+        return {"ok": False, "status": "inaccessible", "platform": "vk", "error": error}
+    members = response.get("items", []) if isinstance(response, dict) else []
+    present = any(int(item.get("member_id") or 0) == user_id for item in members)
+    return {
+        "ok": True,
+        "status": "joined" if present else "not_member",
+        "platform": "vk",
+        "present": present,
+        "user_id": user_id,
+        "chat": chat,
+    }
+
+
+async def service_transfer_target_membership(
+    *, platform: str, target: str, course_key: str, stream_number: str
+) -> dict[str, Any]:
+    """Check the exact destination chat before the source member is removed."""
+
+    if _clean(platform).lower() != "vk":
+        return {"ok": False, "status": "unsupported", "platform": _clean(platform).lower()}
+    state = await _transfer_vk_member_state(
+        target=target, course_key=course_key, stream_number=stream_number,
+    )
+    state.pop("user_id", None)
+    state.pop("chat", None)
+    return state
+
+
+async def service_prepare_transfer_vk_member(
+    *, target: str, student_name: str, source_stream: str, target_course_key: str,
+    target_stream: str, idempotency_key: str, vk_link: str = "", tg_link: str = "",
+) -> dict[str, Any]:
+    """Try direct VK admission, then deliver a corrective community DM.
+
+    This function never removes the member from the source chat.  The caller
+    must wait for ``service_transfer_target_membership`` to confirm the join.
+    """
+
+    token = _vk_group_token()
+    if not token:
+        return {"ok": False, "status": "not_configured", "error": "VK_GROUP_TOKEN is not configured"}
+    state = await _transfer_vk_member_state(
+        target=target, course_key=target_course_key, stream_number=target_stream,
+    )
+    if not state.get("ok"):
+        state.pop("user_id", None)
+        state.pop("chat", None)
+        return state
+    if state.get("present"):
+        state.pop("user_id", None)
+        state.pop("chat", None)
+        return {**state, "status": "joined", "direct_add": "already_member"}
+    user_id = int(state["user_id"])
+    chat = dict(state["chat"])
+    add_response = await _vk_method(
+        "messages.addChatUser",
+        {"chat_id": int(chat["chat_id"]), "user_id": user_id},
+        token,
+    )
+    add_error = _vk_error_summary(add_response)
+    await asyncio.sleep(0.4)
+    verified = await _transfer_vk_member_state(
+        target=str(user_id), course_key=target_course_key, stream_number=target_stream,
+    )
+    if verified.get("present"):
+        return {
+            "ok": True, "status": "joined", "platform": "vk",
+            "direct_add": "added", "notification": "not_needed",
+        }
+    invite_link = _clean(vk_link or chat.get("link"))[:2000]
+    if not invite_link.startswith("https://vk.me/join/"):
+        return {
+            "ok": False, "status": "missing_invite_link", "platform": "vk",
+            "direct_add": "failed", "add_error": add_error,
+        }
+    group_id = int(_clean(os.environ.get("VK_GROUP_ID")) or 0)
+    allowed_response = await _vk_method(
+        "messages.isMessagesFromGroupAllowed",
+        {"group_id": group_id, "user_id": user_id},
+        token,
+    )
+    allowed = bool(
+        allowed_response.get("is_allowed") if isinstance(allowed_response, dict) else allowed_response
+    )
+    if not allowed:
+        return {
+            "ok": False, "status": "messages_not_allowed", "platform": "vk",
+            "direct_add": "failed", "add_error": add_error,
+        }
+    first_name = _clean(student_name)[:200].split(" ", 1)[0]
+    greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
+    links = []
+    telegram_link = _clean(tg_link)[:2000]
+    if telegram_link.startswith(("https://t.me/", "http://t.me/")):
+        links.append(f"Telegram: {telegram_link}")
+    links.append(f"ВКонтакте: {invite_link}")
+    links_text = "\n".join(links)
+    message = (
+        f"{greeting}\n\n"
+        f"Мы перенесли вас из потока {source_stream} в поток {target_stream}.\n\n"
+        f"Актуальные ссылки:\n{links_text}\n\n"
+        f"После вступления в новый чат мы автоматически удалим вас из чата потока {source_stream}."
+    )
+    seed = _clean(idempotency_key)[:200] or f"{user_id}:{target_course_key}:{target_stream}"
+    random_id = int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % (2**31 - 1) or 1
+    send_response = await _vk_method(
+        "messages.send",
+        {"peer_id": user_id, "message": message, "random_id": random_id},
+        token,
+    )
+    send_error = _vk_error_summary(send_response)
+    if send_error:
+        return {
+            "ok": False, "status": "send_failed", "platform": "vk",
+            "direct_add": "failed", "add_error": add_error, "error": send_error,
+        }
+    return {
+        "ok": True, "status": "invite_sent", "platform": "vk",
+        "direct_add": "failed", "add_error": add_error,
+        "notification": "community_dm", "message_id": send_response,
     }
 
 
@@ -3962,6 +4699,218 @@ async def service_remove_transfer_member(
         await client.disconnect()
 
 
+def _telegram_moderator_rights(types: Any) -> Any:
+    return types.ChatAdminRights(
+        change_info=False,
+        post_messages=True,
+        edit_messages=True,
+        delete_messages=True,
+        ban_users=True,
+        invite_users=False,
+        pin_messages=False,
+        add_admins=False,
+        anonymous=False,
+        manage_call=False,
+    )
+
+
+def _telegram_not_modified(exc: Exception) -> bool:
+    return (
+        exc.__class__.__name__ in {"ChatNotModifiedError", "MessageNotModifiedError"}
+        or "NOT_MODIFIED" in _exc_text(exc).upper()
+        or "WASN'T MODIFIED" in _exc_text(exc).upper()
+    )
+
+
+async def _telegram_prepare_flow_chat(client: Any, channel: Any, functions: Any, types: Any) -> dict[str, Any]:
+    """Apply safe member permissions and promote the school moderation bot."""
+    try:
+        await client(functions.messages.EditChatDefaultBannedRightsRequest(
+            peer=channel,
+            banned_rights=types.ChatBannedRights(
+                until_date=None,
+                change_info=True,
+                invite_users=True,
+                pin_messages=True,
+            ),
+        ))
+    except Exception as exc:
+        if not _telegram_not_modified(exc):
+            raise
+    moderator_ref = "@bullterrier_sobakovod_bot"
+    moderator = await client.get_entity(moderator_ref)
+    try:
+        await client(functions.channels.InviteToChannelRequest(channel=channel, users=[moderator]))
+    except Exception as exc:
+        message = _exc_text(exc).lower()
+        if "already" not in message and "participant" not in message:
+            raise
+    try:
+        await client(functions.channels.EditAdminRequest(
+            channel=channel,
+            user_id=moderator,
+            admin_rights=_telegram_moderator_rights(types),
+            rank="Модератор",
+        ))
+    except Exception as exc:
+        if not _telegram_not_modified(exc):
+            raise
+    return {"moderator_ref": moderator_ref, "moderator_user_id": int(getattr(moderator, "id", 0) or 0)}
+
+
+async def _telegram_cleanup_service_messages(client: Any, channel: Any) -> int:
+    """Remove technical action notices without touching forum topic roots or user content."""
+    message_ids: list[int] = []
+    async for message in client.iter_messages(channel, limit=250):
+        action = getattr(message, "action", None)
+        if action is None or action.__class__.__name__ == "MessageActionTopicCreate":
+            continue
+        message_id = int(getattr(message, "id", 0) or 0)
+        if message_id:
+            message_ids.append(message_id)
+    if message_ids:
+        await client.delete_messages(channel, message_ids)
+    return len(message_ids)
+
+
+async def service_repair_telegram_flow_curator(
+    *, course_key: str, stream_number: str, correct_ref: str, old_ref: str = "",
+) -> dict[str, Any]:
+    """Repair one existing flow chat after an incorrect curator contact was configured."""
+    from telethon import functions, types
+
+    _ensure_db()
+    course_key = _clean(course_key)
+    stream_number = _clean(stream_number)
+    correct_ref = _tg_username(correct_ref)
+    old_ref = _tg_username(old_ref)
+    if course_key not in {"puppy", "dog"} or not stream_number or not correct_ref:
+        raise ValueError("Course, stream and correct Telegram username are required")
+    with _db() as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """SELECT * FROM runs WHERE platform='telegram' AND course_key=? AND stream_number=? AND test_mode=0
+               ORDER BY created_at DESC,id DESC LIMIT 1""",
+            (course_key, stream_number),
+        ).fetchone()
+    if not row:
+        return {"ok": False, "status": "not_recorded"}
+    stored = dict(row)
+    response = _json_dict(stored.get("response_json"))
+    request_data = _json_dict(stored.get("request_json"))
+    api_id, api_hash, session_file = _telegram_credentials()
+    client = _telegram_client(api_id, api_hash, session_file)
+    await _telegram_connect(client)
+    try:
+        if not await client.is_user_authorized():
+            return {"ok": False, "status": "not_authorized"}
+        wanted_title = _clean(stored.get("title"))
+        dialog = None
+        async for candidate in client.iter_dialogs(limit=1000):
+            if _clean(candidate.name) == wanted_title:
+                dialog = candidate
+                break
+        if dialog is None:
+            return {"ok": False, "status": "chat_not_found", "title": wanted_title}
+
+        correct_entity = await client.get_entity(correct_ref)
+        try:
+            await client(functions.channels.InviteToChannelRequest(channel=dialog.entity, users=[correct_entity]))
+        except Exception as exc:
+            if "already" not in _exc_text(exc).lower() and "participant" not in _exc_text(exc).lower():
+                raise
+        await client(functions.channels.EditAdminRequest(
+            channel=dialog.entity,
+            user_id=correct_entity,
+            admin_rights=types.ChatAdminRights(
+                change_info=True, post_messages=True, edit_messages=True, delete_messages=True,
+                ban_users=True, invite_users=True, pin_messages=True, add_admins=True,
+                anonymous=False, manage_call=True,
+            ),
+            rank="Куратор школы",
+        ))
+        moderator = await _telegram_prepare_flow_chat(client, dialog.entity, functions, types)
+
+        removed_old = False
+        if old_ref and old_ref.casefold() != correct_ref.casefold():
+            try:
+                old_entity = await client.get_entity(old_ref)
+                if int(getattr(old_entity, "id", 0) or 0) != int(getattr(correct_entity, "id", 0) or 0):
+                    try:
+                        await client.get_permissions(dialog.entity, old_entity)
+                        await client(functions.channels.EditBannedRequest(
+                            channel=dialog.entity,
+                            participant=old_entity,
+                            banned_rights=types.ChatBannedRights(until_date=None, view_messages=True),
+                        ))
+                        await client(functions.channels.EditBannedRequest(
+                            channel=dialog.entity,
+                            participant=old_entity,
+                            banned_rights=types.ChatBannedRights(until_date=None),
+                        ))
+                        removed_old = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        topic_ids = response.get("topic_ids") if isinstance(response.get("topic_ids"), dict) else {}
+        course = _course_by_input(course_key)
+        selected = _selected_people(stream_number, request_data.get("curator_id"))
+        channel_url_id = str(abs(int(getattr(dialog.entity, "id", 0) or 0)))
+        extras = {
+            "date_start": _format_date_russian(stored.get("date_start")),
+            "channel_url_id": channel_url_id,
+            **{f"topic_{key}_id": value or 1 for key, value in topic_ids.items()},
+        }
+        welcome = _render_template(
+            "tg_welcome", course=course, stream_number=stream_number,
+            date_start=stored.get("date_start"), selected=selected, platform="tg", extra=extras,
+        )
+        welcome_updated = False
+        welcome_pinned = False
+        async for message in client.iter_messages(dialog.entity, limit=120):
+            raw = _clean(getattr(message, "raw_text", ""))
+            if "Всем привет и добро пожаловать" in raw or (old_ref and old_ref.casefold() in raw.casefold()):
+                try:
+                    await client.edit_message(dialog.entity, message.id, welcome, parse_mode="html")
+                except Exception as exc:
+                    if not _telegram_not_modified(exc):
+                        raise
+                welcome_updated = True
+                try:
+                    await client(functions.messages.UpdatePinnedMessageRequest(
+                        peer=dialog.entity, id=message.id, silent=True,
+                    ))
+                except Exception as exc:
+                    if not _telegram_not_modified(exc):
+                        raise
+                welcome_pinned = True
+                break
+        info_topic_id = int(topic_ids.get("info") or 1)
+        try:
+            await client(functions.messages.EditForumTopicRequest(
+                peer=dialog.entity, topic_id=info_topic_id, closed=True,
+            ))
+        except Exception as exc:
+            if not _telegram_not_modified(exc):
+                raise
+        service_messages_removed = await _telegram_cleanup_service_messages(client, dialog.entity)
+        repair = {
+            "status": "completed", "correct_ref": correct_ref, "old_ref": old_ref,
+            "correct_user_id": int(getattr(correct_entity, "id", 0) or 0),
+            "removed_old": removed_old, "welcome_updated": welcome_updated,
+            "welcome_pinned": welcome_pinned, "info_topic_closed": True,
+            "service_messages_removed": service_messages_removed, **moderator,
+            "updated_at": int(time.time()),
+        }
+        response["curator_contact_repair"] = repair
+        _update_run(int(stored["id"]), _clean(stored.get("status")) or "ok", response, error=_clean(stored.get("error")))
+        return {"ok": True, "title": wanted_title, **repair}
+    finally:
+        await client.disconnect()
+
+
 async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dict[str, Any]:
     _check_password(data, trusted=trusted)
     try:
@@ -3999,6 +4948,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                     _log("warning", "Telegram user cannot be resolved: %s", user)
         result = await client(functions.channels.CreateChannelRequest(title=title, about="", megagroup=True, forum=True))
         channel = result.chats[0]
+        telegram_chat_setup: dict[str, Any] = {}
         topic_ids = {"info": 1, "vizitka": None, "obuchenie": None, "boltalka": None}
 
         def get_topic_id(updates_obj: Any) -> int | None:
@@ -4071,12 +5021,12 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
             except Exception as exc:
                 _log("warning", "Telegram avatar setup failed: %s", exc)
         if not test_mode:
-            for bot_username in ["bullterrier_sobakovod_bot"]:
-                try:
-                    bot_entity = await client.get_entity(bot_username)
-                    await client(functions.channels.InviteToChannelRequest(channel=channel, users=[bot_entity]))
-                except Exception:
-                    pass
+            try:
+                telegram_chat_setup.update(await _telegram_prepare_flow_chat(client, channel, functions, types))
+                telegram_chat_setup["member_permissions"] = "admins_only_invite_info_and_pin"
+            except Exception as exc:
+                _log("error", "Telegram moderator/permissions setup failed: %s", exc)
+                raise HTTPException(status_code=500, detail=f"Telegram moderator setup failed: {exc}")
 
         async def invite_and_admin(user_refs: list[str], rank: str) -> None:
             for user in user_refs:
@@ -4141,20 +5091,30 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
                         _log("warning", "Telegram info topic close failed: %s", exc)
             except Exception as exc:
                 _log("warning", "Telegram message failed %s: %s", label, exc)
-        await asyncio.sleep(10 if test_mode else 180)
+        await asyncio.sleep(2 if test_mode else 8)
         for msg, topic_id, label in sent:
-            try:
-                await client(functions.messages.UpdatePinnedMessageRequest(peer=bot_channel, id=msg.id, silent=True))
-                await asyncio.sleep(1)
-            except Exception as exc:
-                _log("warning", "Telegram pin failed %s: %s", label, exc)
+            for attempt in range(3):
+                try:
+                    await client(functions.messages.UpdatePinnedMessageRequest(peer=bot_channel, id=msg.id, silent=True))
+                    await asyncio.sleep(1)
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        _log("warning", "Telegram pin failed %s: %s", label, exc)
+                    else:
+                        await asyncio.sleep(2 * (attempt + 1))
+        try:
+            telegram_chat_setup["service_messages_removed"] = await _telegram_cleanup_service_messages(client, channel)
+        except Exception as exc:
+            _log("warning", "Telegram service message cleanup failed: %s", exc)
+            telegram_chat_setup["service_messages_cleanup_error"] = _exc_text(exc)
         try:
             invite = await client(functions.messages.ExportChatInviteRequest(peer=channel))
             invite_link = invite.link
         except Exception as exc:
             _log("warning", "Telegram invite export failed: %s", exc)
             invite_link = ""
-    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids, "curator_id": _selected_curator_id(stream_number, data.get("curator_id"))}
+    response = {"message": "Group created successfully", "group_title": title, "group_link": invite_link, "course_choice": course["choice"], "test_mode": test_mode, "topic_ids": topic_ids, "curator_id": _selected_curator_id(stream_number, data.get("curator_id")), "telegram_chat_setup": telegram_chat_setup}
     run_id = _record_run("telegram", title, stream_number, date_start, course["key"], test_mode, "ok", data, response, link=invite_link, chat_id="")
     link_sync = await _sync_chat_pair_to_sheet(course["key"], stream_number, test_mode=test_mode)
     response["link_sync"] = link_sync
@@ -4171,6 +5131,7 @@ async def _create_tg_chat(data: dict[str, Any], *, trusted: bool = False) -> dic
 @router.post("/process_vk")
 async def process_vk(request: Request):
     data = await request.json()
+    _require_explicit_curator(data)
     try:
         return JSONResponse(await _create_vk_chat(data))
     except Exception as exc:
@@ -4186,6 +5147,7 @@ async def process_vk(request: Request):
 @router.post("/process6")
 async def process6(request: Request):
     data = await request.json()
+    _require_explicit_curator(data)
     try:
         return JSONResponse(await _create_tg_chat(data))
     except Exception as exc:
@@ -4202,6 +5164,7 @@ async def process6(request: Request):
 async def create_from_panel(request: Request):
     await _require_panel_access(request)
     data = await request.json()
+    _require_explicit_curator(data)
     platform = _clean(data.get("platform")).lower()
     try:
         if platform == "vk":
@@ -4445,7 +5408,12 @@ async def list_templates(request: Request):
     await _require_panel_access(request)
     _ensure_db()
     with _db() as db:
-        rows = [dict(row) for row in db.execute("SELECT * FROM templates ORDER BY key").fetchall()]
+        rows = [
+            dict(row)
+            for row in db.execute(
+                "SELECT * FROM templates WHERE key <> 'vk_invite_fallback' ORDER BY key"
+            ).fetchall()
+        ]
     return {"ok": True, "items": rows}
 
 
@@ -4458,6 +5426,8 @@ async def update_template(request: Request):
     body = str(data.get("body") or "")
     if not key:
         raise HTTPException(status_code=400, detail="key is required")
+    if key == "vk_invite_fallback":
+        raise HTTPException(status_code=409, detail="VK personal invite messages are disabled")
     with _db() as db:
         db.execute(
             "INSERT INTO templates(key,body) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET body=excluded.body,updated_at=strftime('%s','now')",
@@ -4469,6 +5439,7 @@ async def update_template(request: Request):
 
 @router.get("/preview")
 async def preview(stream_number: str = "51", start_date: str = "", course: str = "puppy", curator_id: str = "", test_mode: str = "false"):
+    curator_id = str(_require_explicit_curator({"curator_id": curator_id}))
     start_date = _clean(start_date) or _today_moscow()
     course_row = _course_by_input(course)
     selected = _selected_people(stream_number, curator_id)
@@ -4775,6 +5746,23 @@ async def remove_member_from_course_chats(request: Request):
             "telegram": await _remove_tg_from_course_chats(target, dry_run=dry_run),
         }
     raise HTTPException(status_code=400, detail="platform must be vk, telegram or both")
+
+
+@router.post("/telegram/flow-curator/repair")
+async def repair_telegram_flow_curator(request: Request):
+    user = await _require_panel_access(request)
+    if require_admin and not require_admin(user):
+        raise HTTPException(status_code=403, detail="admin required")
+    data = await request.json()
+    try:
+        return await service_repair_telegram_flow_curator(
+            course_key=_clean(data.get("course_key")),
+            stream_number=_clean(data.get("stream")),
+            correct_ref=_clean(data.get("correct_ref")),
+            old_ref=_clean(data.get("old_ref")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/vk-course-chats")
