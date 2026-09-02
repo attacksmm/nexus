@@ -106,6 +106,7 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('data-scale-choice="xlarge"', page)
         self.assertIn("restoreInbox()", script)
         self.assertIn("nexus-messenger-fullscreen-preferences", script)
+        self.assertIn("path==='/inbox'?30000:15000", script)
 
     def test_standalone_mode_does_not_change_embedded_widget_defaults(self):
         self.assertIn("STANDALONE=new URLSearchParams(location.search).get('standalone')==='1'", self.amocrm)
