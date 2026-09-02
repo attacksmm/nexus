@@ -1,6 +1,13 @@
-# Messenger Widget 5.19.2
+# Messenger Widget 5.19.3
 
 Release candidate for the week-long production observation period.
+
+## 5.19.3 — automatic amoCRM conversation links
+
+- New amoCRM leads receive their protected `Переписка` URL in the background within about one minute, without opening the desktop widget.
+- The synchronizer scans by creation time with a five-minute overlap, skips exact existing links, rate-limits writes, and stores a durable cursor only after a complete page range.
+- amoCRM PATCH bodies contain only `custom_fields_values` for the URL field; status, pipeline and responsible user are never submitted.
+- Health now reports the last mobile-link synchronization state and counts for production verification.
 
 ## 5.19.2 — protected full-screen amoCRM conversations on Android
 

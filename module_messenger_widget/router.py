@@ -128,6 +128,10 @@ PUBLIC_API_BASE = f"https://junior.sobakovod.pro/nexus/{MODULE_ID}/api"
 PUBLIC_MODULE_BASE = f"https://junior.sobakovod.pro/nexus/{MODULE_ID}"
 AMO_MOBILE_FIELD_NAME = "Переписка"
 AMO_MOBILE_SIGNATURE_BYTES = 18
+AMO_MOBILE_SYNC_INTERVAL_SECONDS = 60
+AMO_MOBILE_SYNC_INITIAL_DAYS = 7
+AMO_MOBILE_SYNC_OVERLAP_SECONDS = 300
+AMO_MOBILE_SYNC_PAGE_LIMIT = 250
 VK_API = "https://api.vk.com/method"
 VK_API_VERSION = "5.199"
 VK_TOKEN_ENV_KEY = "NEXUS_MESSENGER_WIDGET_VK_GROUP_TOKEN"
@@ -259,6 +263,10 @@ _profile_links_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _staff_catalog_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
 _amo_mobile_field_cache: tuple[float, int] = (0.0, 0)
 _amo_mobile_sync_cache: dict[str, tuple[float, str]] = {}
+_amo_mobile_sync_status: dict[str, Any] = {
+    "state": "waiting", "last_started_at": "", "last_finished_at": "",
+    "cursor": 0, "scanned": 0, "updated": 0, "skipped": 0, "failed": 0, "error": "",
+}
 _notification_wakeup = asyncio.Event()
 _outbound_wakeup = asyncio.Event()
 _amo_task_wakeup = asyncio.Event()
@@ -435,6 +443,7 @@ async def setup(ctx) -> None:
                 outbound_delivery_loop(worker_id), name=f"messenger-widget-outbound-{worker_id}",
             )
         lifecycle.create_task(amo_task_delivery_loop(), name="messenger-widget-amo-tasks")
+        lifecycle.create_task(amo_mobile_link_sync_loop(), name="messenger-widget-amo-mobile-links")
         lifecycle.create_task(widget_operation_loop(), name="messenger-widget-operations")
     else:
         _vk_callback_write_queue = None
@@ -2077,11 +2086,10 @@ async def _set_setting(key: str, value: Any) -> None:
         await db.close()
 
 
-async def _amo_mobile_link(lead_id: Any) -> str:
+def _amo_mobile_link_with_secret(lead_id: Any, secret: str) -> str:
     clean_id = _clean(lead_id, 64)
     if not clean_id.isdigit():
         raise HTTPException(404, "Страница не найдена")
-    secret = await _setting("webhook_secret")
     if len(secret) < 32:
         raise HTTPException(503, "Мобильный доступ временно недоступен")
     digest = hmac.new(
@@ -2089,6 +2097,10 @@ async def _amo_mobile_link(lead_id: Any) -> str:
     ).digest()[:AMO_MOBILE_SIGNATURE_BYTES]
     signature = _b64url(digest)
     return f"{PUBLIC_MODULE_BASE}/api/mobile/lead/{clean_id}/{signature}"
+
+
+async def _amo_mobile_link(lead_id: Any) -> str:
+    return _amo_mobile_link_with_secret(lead_id, await _setting("webhook_secret"))
 
 
 async def _valid_amo_mobile_link(lead_id: Any, signature: Any) -> bool:
@@ -3732,6 +3744,121 @@ async def _sync_amo_mobile_field(lead_id: str, link: str) -> None:
             payload={"custom_fields_values": [{"field_id": field_id, "values": [{"value": link}]}]},
         )
     _amo_mobile_sync_cache[lead_id] = (now, link)
+
+
+def _amo_mobile_saved_link(lead: dict[str, Any], field_id: int) -> str:
+    fields = lead.get("custom_fields_values") if isinstance(lead.get("custom_fields_values"), list) else []
+    field = next((
+        row for row in fields if isinstance(row, dict) and int(row.get("field_id") or 0) == field_id
+    ), None)
+    values = field.get("values") if isinstance(field, dict) and isinstance(field.get("values"), list) else []
+    first = values[0] if values else {}
+    return _clean(first.get("value") if isinstance(first, dict) else first, 4000)
+
+
+async def _amo_mobile_sync_once(
+    *, since: int | None = None, until: int | None = None, max_pages: int = 20,
+) -> dict[str, Any]:
+    """Fill only the protected URL field for newly created amoCRM leads."""
+
+    now_ts = int(time.time())
+    stored_cursor = int(await _setting("amo_mobile_link_sync_cursor") or 0)
+    cursor = max(0, int(since if since is not None else stored_cursor or now_ts - AMO_MOBILE_SYNC_INITIAL_DAYS * 86400))
+    upper = max(cursor, int(until if until is not None else now_ts))
+    lower = max(0, cursor - AMO_MOBILE_SYNC_OVERLAP_SECONDS)
+    secret = await _setting("webhook_secret")
+    if len(secret) < 32:
+        raise AmoTaskDeliveryError("Секрет мобильных ссылок не настроен", permanent=True)
+    base_url, token = _amo_credentials()
+    result: dict[str, Any] = {
+        "from": lower, "to": upper, "cursor": cursor, "scanned": 0,
+        "updated": 0, "skipped": 0, "failed": 0, "failures": [], "complete": True,
+    }
+    last_created_at = cursor
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        field_id = await _amo_mobile_field_id(client, base_url, token)
+        result["field_id"] = field_id
+        for page in range(1, max(1, min(int(max_pages), 100)) + 1):
+            body = await _amo_task_api_request(
+                client, "GET", f"{base_url}/api/v4/leads", token,
+                params={
+                    "limit": AMO_MOBILE_SYNC_PAGE_LIMIT, "page": page,
+                    "filter[created_at][from]": lower, "filter[created_at][to]": upper,
+                    "order[created_at]": "asc",
+                },
+            )
+            rows = body.get("_embedded", {}).get("leads", []) if isinstance(body, dict) else []
+            if not rows:
+                break
+            for lead in rows:
+                if not isinstance(lead, dict):
+                    continue
+                lead_id = _clean(lead.get("id"), 64)
+                if not lead_id.isdigit():
+                    continue
+                last_created_at = max(last_created_at, int(lead.get("created_at") or 0))
+                result["scanned"] += 1
+                expected = _amo_mobile_link_with_secret(lead_id, secret)
+                if _amo_mobile_saved_link(lead, field_id) == expected:
+                    result["skipped"] += 1
+                    continue
+                try:
+                    await _amo_task_api_request(
+                        client, "PATCH", f"{base_url}/api/v4/leads/{lead_id}", token,
+                        payload={
+                            "custom_fields_values": [{
+                                "field_id": field_id, "values": [{"value": expected}],
+                            }],
+                        },
+                    )
+                    result["updated"] += 1
+                    _amo_mobile_sync_cache[lead_id] = (time.monotonic(), expected)
+                    await asyncio.sleep(0.16)
+                except AmoTaskDeliveryError as exc:
+                    result["failed"] += 1
+                    result["failures"].append({"lead_id": lead_id, "error": _clean(exc, 240)})
+                    if not exc.permanent:
+                        result["complete"] = False
+                        raise
+            if not body.get("_links", {}).get("next"):
+                break
+            if page >= max_pages:
+                result["complete"] = False
+        next_cursor = upper if result["complete"] else last_created_at
+        if next_cursor > cursor:
+            await _set_setting("amo_mobile_link_sync_cursor", str(next_cursor))
+            result["cursor"] = next_cursor
+    return result
+
+
+async def amo_mobile_link_sync_loop() -> None:
+    global _amo_mobile_sync_status
+    await asyncio.sleep(15)
+    while True:
+        started = _iso()
+        _amo_mobile_sync_status = {
+            **_amo_mobile_sync_status, "state": "running", "last_started_at": started, "error": "",
+        }
+        try:
+            result = await _amo_mobile_sync_once()
+            _amo_mobile_sync_status = {
+                "state": "ok" if not result["failed"] else "partial",
+                "last_started_at": started, "last_finished_at": _iso(),
+                "cursor": result["cursor"], "scanned": result["scanned"],
+                "updated": result["updated"], "skipped": result["skipped"],
+                "failed": result["failed"], "error": "",
+            }
+            if result["failed"]:
+                _log("warning", "amoCRM mobile link sync partial: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _amo_mobile_sync_status = {
+                **_amo_mobile_sync_status, "state": "error", "last_finished_at": _iso(),
+                "error": _clean(exc, 300),
+            }
+            _log("warning", "amoCRM mobile link sync deferred: %s", exc)
+        await asyncio.sleep(AMO_MOBILE_SYNC_INTERVAL_SECONDS)
 
 
 async def _amo_mobile_access_allowed(device: dict[str, Any], responsible_user_id: str) -> bool:
@@ -9135,7 +9262,7 @@ async def health() -> dict[str, Any]:
     finally:
         await db.close()
     identity = dict(_identity_index_status) if _identity_index is not None else {"status": "unavailable"}
-    return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "counts_approximate": True, "identity": identity}
+    return {"ok": True, "module": MODULE_ID, "api_key_configured": bool(_api_key()), "admins": admins, "devices": devices, "contacts": contacts, "chats": chats, "messages": messages, "counts_approximate": True, "identity": identity, "mobile_link_sync": dict(_amo_mobile_sync_status)}
 
 
 @router.get("/mobile/lead/{lead_id}/{signature}")
