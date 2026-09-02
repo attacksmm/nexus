@@ -129,6 +129,15 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('id="conversationSettings"', page)
         self.assertIn("nexus-messenger-open-settings", script)
 
+    def test_fullscreen_conversation_is_bounded_to_the_visible_viewport(self):
+        module = Path(__file__).resolve().parents[1]
+        page = (module / "static" / "mobile.html").read_text(encoding="utf-8")
+        router = (module / "router.py").read_text(encoding="utf-8")
+        self.assertIn(".workspace{height:100vh!important;height:100dvh!important;overflow:hidden!important}", page)
+        self.assertIn(".frame{position:absolute!important", page)
+        self.assertIn("height:100%!important", page)
+        self.assertIn("ORDER BY sent_at DESC,id DESC LIMIT 200", router)
+
 
 if __name__ == "__main__":
     unittest.main()

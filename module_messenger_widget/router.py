@@ -9242,9 +9242,12 @@ async def _inbox_items(
                 continue
             incoming = await (
                 await db.execute(
-                    """SELECT author_name,raw_json FROM wazzup_messages INDEXED BY ix_gcw_messages_chat
-                       WHERE channel_id=? AND chat_type=? AND chat_id=? AND direction='incoming'
-                         AND author_name<>'' ORDER BY sent_at DESC,id DESC LIMIT 1""",
+                    """SELECT author_name,raw_json FROM (
+                           SELECT author_name,raw_json,direction
+                           FROM wazzup_messages INDEXED BY ix_gcw_messages_chat
+                           WHERE channel_id=? AND chat_type=? AND chat_id=?
+                           ORDER BY sent_at DESC,id DESC LIMIT 200
+                       ) WHERE direction='incoming' AND author_name<>'' LIMIT 1""",
                     (item["channel_id"], item["chat_type"], item["chat_id"]),
                 )
             ).fetchone()
