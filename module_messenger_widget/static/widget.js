@@ -1010,6 +1010,17 @@
     return String(channel.label || channel.name || channel.transport || "Канал").split(" · ")[0];
   }
 
+  function setComposeStatus(node, message, successful) {
+    if (!node) return;
+    node.textContent = message || "";
+    node.classList.toggle("success", Boolean(message) && successful === true);
+    node.style.color = Boolean(message) && successful === true ? "#2f9e55" : "";
+  }
+
+  function sendResultSucceeded(result) {
+    return Boolean(result && !result.failed.length && (result.sent.length || result.queued.length));
+  }
+
   function emailIsAmongSendTargets(channels) {
     var targets = sendTargets(channels);
     return targets.some(function (channel) {
@@ -1843,23 +1854,24 @@
     send.addEventListener("click", async function () {
       var text = input.value.trim();
       var attachment = { attachment_url: input.dataset.attachmentUrl || "", attachment_type: input.dataset.attachmentType || "" };
-      if (input.dataset.attachmentUploading) { errorNode.textContent = "Дождитесь загрузки изображения"; return; }
+      if (input.dataset.attachmentUploading) { setComposeStatus(errorNode, "Дождитесь загрузки изображения", false); return; }
       if (!text && !attachment.attachment_url) return;
       if (emailIsAmongSendTargets([channel]) && !await confirmEmailRecommendations(view.root)) return;
       send.disabled = true;
       send.classList.add("busy");
       send.textContent = "Отправляем…";
-      errorNode.textContent = "";
+      setComposeStatus(errorNode, "", false);
       try {
         var token = localStorage.getItem(STORAGE_KEY) || "";
         var result = await sendComposerText(text, [channel], payloadFor, token, attachment, emailSubject.value);
-        if (result.sent.length || result.queued.length) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
+        var success = sendResultSucceeded(result);
+        if (success) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
         conversationSignature = "";
         send.textContent = "Отправка…";
         await Promise.all([loadInboxConversation(false), loadInbox(true, true)]);
-        errorNode.textContent = result.status;
+        setComposeStatus(errorNode, result.status, success);
       } catch (error) {
-        errorNode.textContent = emailIsAmongSendTargets([channel]) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Ошибка отправки");
+        setComposeStatus(errorNode, emailIsAmongSendTargets([channel]) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Ошибка отправки"), false);
       } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
     });
   }
@@ -1883,7 +1895,7 @@
       if (send && input) {
         send.disabled = data.can_send === false;
         input.disabled = data.can_send === false;
-        errorNode.textContent = data.send_reason || "";
+        setComposeStatus(errorNode, data.send_reason || "", false);
       }
     } catch (error) {
       if (!silent && inbox && inbox.view === "chat" && inbox.conversationKey === key) {
@@ -2585,40 +2597,41 @@
       if (initial.can_send === false || context().read_only) {
         input.disabled = true;
         send.disabled = true;
-        errorNode.textContent = context().read_only ? "Откройте карточку клиента, чтобы ответить." : (initial.send_reason || "Канал недоступен для нового диалога.");
+        setComposeStatus(errorNode, context().read_only ? "Откройте карточку клиента, чтобы ответить." : (initial.send_reason || "Канал недоступен для нового диалога."), false);
       }
       send.addEventListener("click", async function () {
         var text = input.value.trim();
         var attachment = { attachment_url: input.dataset.attachmentUrl || "", attachment_type: input.dataset.attachmentType || "" };
-        if (input.dataset.attachmentUploading) { errorNode.textContent = "Дождитесь загрузки изображения"; return; }
+        if (input.dataset.attachmentUploading) { setComposeStatus(errorNode, "Дождитесь загрузки изображения", false); return; }
         if (!text && !attachment.attachment_url) return;
         var targets = d.sendAll.querySelector("input").checked ? cardChannels : [channel];
         var availableTargets = sendTargets(targets);
         if (emailNeedsSubject(targets) && !subject.value.trim()) {
           subject.hidden = false;
-          errorNode.textContent = "Укажите тему Email — без неё первое письмо не отправится.";
+          setComposeStatus(errorNode, "Укажите тему Email — без неё первое письмо не отправится.", false);
           subject.focus();
           return;
         }
         if (attachment.attachment_url && availableTargets.some(function (item) { return item.provider === "email"; })) {
-          errorNode.textContent = "Email нельзя отправлять с вложением. Уберите изображение или отключите «Отправить везде».";
+          setComposeStatus(errorNode, "Email нельзя отправлять с вложением. Уберите изображение или отключите «Отправить везде».", false);
           return;
         }
         if (emailIsAmongSendTargets(targets) && !await confirmEmailRecommendations(d.root)) return;
         send.disabled = true;
         send.classList.add("busy");
         send.textContent = "Отправляем…";
-        errorNode.textContent = "";
+        setComposeStatus(errorNode, "", false);
         try {
           var token = localStorage.getItem(STORAGE_KEY) || "";
           var result = await sendComposerText(text, targets, conversationPayload, token, attachment, subject.value);
-          if (!result.failed.length && (result.sent.length || result.queued.length)) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
+          var success = sendResultSucceeded(result);
+          if (success) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
           conversationSignature = "";
           send.textContent = "Отправка…";
           await Promise.all([fetchConversation(channel, feed, false), loadInbox(true, true)]);
-          errorNode.textContent = result.status;
+          setComposeStatus(errorNode, result.status, success);
         } catch (error) {
-          errorNode.textContent = emailIsAmongSendTargets(targets) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Не удалось отправить сообщение");
+          setComposeStatus(errorNode, emailIsAmongSendTargets(targets) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Не удалось отправить сообщение"), false);
         } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
       });
       composer.appendChild(subject);

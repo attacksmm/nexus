@@ -53,6 +53,15 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('setAttribute("role", "alert")', self.getcourse)
         self.assertIn('role="alert" aria-live="polite"', self.amocrm)
 
+    def test_send_result_contract_and_status_colors_are_consistent(self):
+        self.assertIn("return{sent,queued,failed,status:", self.amocrm)
+        self.assertIn("function sendResultSucceeded(result)", self.getcourse)
+        self.assertIn('node.classList.toggle("success"', self.getcourse)
+        self.assertIn("node.classList.toggle('success'", self.amocrm)
+        self.assertIn(".error.success{color:#278a45}", self.amocrm)
+        self.assertIn("showError(result.status,success?'success':'error')", self.amocrm)
+        self.assertEqual(self.getcourse.count("setComposeStatus(errorNode, result.status, success)"), 2)
+
     def test_same_card_reopen_preserves_state_and_pauses_polling(self):
         bootstrap = (Path(__file__).resolve().parents[1] / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
         self.assertIn("REMOTE_CACHE_WINDOW_MS", bootstrap)
