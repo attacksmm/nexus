@@ -937,7 +937,7 @@ async def service_channel(*, context: dict[str, Any] | None = None) -> dict[str,
     return {
         "channel_id": "email:info", "transport": "email", "channel_transport": "email", "provider": "email",
         "name": "Email", "label": "Email", "available": ready,
-        "can_send": ready and bool(recipient), "recipient": recipient, "send_all_allowed": False,
+        "can_send": ready and bool(recipient), "recipient": recipient, "send_all_allowed": True,
         "send_reason": "" if ready and recipient else ("Email клиента не найден" if ready else "Email-канал ещё не включён"),
     }
 
@@ -1428,6 +1428,13 @@ async def _store_provider_event(fields: dict[str, str]) -> bool:
                     (next_status, int(opened), int(opened), now, next_status, now, next_status,
                      _clean(fields.get("reason") or fields.get("description"), 1000), now, row["id"]),
                 )
+                if next_status == "failed":
+                    reason = _clean(fields.get("reason") or fields.get("description"), 1000)
+                    await db.execute(
+                        """UPDATE outbound_jobs SET status='failed',next_attempt_at='',error=?,updated_at=?
+                           WHERE message_id=? AND status NOT IN ('failed','cancelled')""",
+                        (reason, now, row["id"]),
+                    )
         if inserted and suppress and address:
             await db.execute(
                 """INSERT INTO suppressions(email,reason,source_event_hash,active,created_at,updated_at) VALUES(?,?,?,1,?,?)

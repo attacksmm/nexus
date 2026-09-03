@@ -224,10 +224,27 @@ def test_bounce_suppresses_future_manual_send(ready):
     async def run():
         context = {"platform":"amocrm","entity_type":"lead","entity_id":"9","email":"bounce@example.com"}
         queued = await _confirmed_send(ready, context=context, text="Тест", subject="Тема", idempotency_key="p")
+        job = await ready._claim_job()
+        await ready._finish_job(job, "accepted", provider_id="tx-bounced")
         assert await ready._store_provider_event({"event":"delivered","message_id":queued["nexus_message_id"],"email":"bounce@example.com"})
         assert await ready._store_provider_event({"event":"bounced","message_id":queued["nexus_message_id"],"email":"bounce@example.com","reason":"hard"})
+        db = await ready._connect()
+        states = await (await db.execute(
+            """SELECT j.status,m.status FROM outbound_jobs j
+               JOIN email_messages m ON m.id=j.message_id WHERE j.idempotency_key='p'"""
+        )).fetchone()
+        await db.close()
+        assert tuple(states) == ("failed", "failed")
         with pytest.raises(ValueError, match="запрещена"):
             await _confirmed_send(ready, context=context, text="Ещё", idempotency_key="p2")
+    asyncio.run(run())
+
+
+def test_ready_email_channel_can_participate_in_send_everywhere(ready):
+    async def run():
+        channel = await ready.service_channel(context={"email": "client@example.com"})
+        assert channel["can_send"] is True
+        assert channel["send_all_allowed"] is True
     asyncio.run(run())
 
 
