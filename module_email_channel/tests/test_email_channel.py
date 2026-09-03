@@ -231,6 +231,74 @@ def test_bounce_suppresses_future_manual_send(ready):
     asyncio.run(run())
 
 
+def test_provider_ip_reputation_bounce_does_not_suppress_recipient(ready):
+    async def run():
+        context = {"platform":"amocrm","entity_type":"lead","entity_id":"ip-block","email":"valid@hotmail.com"}
+        queued = await _confirmed_send(
+            ready, context=context, text="Здравствуйте", subject="Ваша заявка", idempotency_key="ip-block",
+        )
+        reason = "5.7.1 Service unavailable, Client host [194.104.225.188] blocked using Spamhaus"
+        assert await ready._store_provider_event({
+            "event":"bounced", "message_id":queued["nexus_message_id"],
+            "email":"valid@hotmail.com", "reason":reason,
+        })
+        db = await ready._connect()
+        message = await (await db.execute(
+            "SELECT status,error FROM email_messages WHERE nexus_message_id=?",
+            (queued["nexus_message_id"],),
+        )).fetchone()
+        suppression = await (await db.execute(
+            "SELECT reason FROM suppressions WHERE email='valid@hotmail.com' AND active=1",
+        )).fetchone()
+        await db.close()
+        assert message["status"] == "failed"
+        assert "Spamhaus" in message["error"]
+        assert suppression is None
+        retry = await _confirmed_send(
+            ready, context=context, text="Повторная попытка", idempotency_key="ip-block-retry",
+        )
+        assert retry["status"] == "queued"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("event", "fields", "expected"), [
+    ("bounced", {"reason":"550 5.7.1 recipient address rejected: access denied"}, ""),
+    ("bounced", {"reason":"421 4.2.1 mailbox unavailable, try again"}, ""),
+    ("bounced", {"reason":"552 5.2.2 mailbox full"}, ""),
+    ("bounced", {"reason":"550 5.1.1 user unknown"}, "hard"),
+    ("bounced", {"bounce_category":"hard", "reason":"policy did not disclose details"}, "hard"),
+    ("bounced", {"bounce_category":"spam_blocked", "reason":"blocked by policy"}, ""),
+    ("unsub", {}, "unsubscribe"),
+    ("unsubscribed", {}, "unsubscribe"),
+])
+def test_provider_suppression_matrix(event, fields, expected):
+    assert mod._provider_suppression_reason(event, fields) == expected
+
+
+def test_complaint_suppresses_without_rewriting_delivered_status(ready):
+    async def run():
+        context = {"platform":"amocrm","entity_type":"lead","entity_id":"complaint","email":"complaint@example.com"}
+        queued = await _confirmed_send(
+            ready, context=context, text="Здравствуйте", subject="Ваша заявка", idempotency_key="complaint",
+        )
+        base = {"message_id":queued["nexus_message_id"], "email":"complaint@example.com"}
+        assert await ready._store_provider_event({**base, "event":"delivered"})
+        assert await ready._store_provider_event({**base, "event":"spam"})
+        db = await ready._connect()
+        status = await (await db.execute(
+            "SELECT status FROM email_messages WHERE nexus_message_id=?", (queued["nexus_message_id"],),
+        )).fetchone()
+        suppression = await (await db.execute(
+            "SELECT reason FROM suppressions WHERE email='complaint@example.com' AND active=1",
+        )).fetchone()
+        await db.close()
+        assert status["status"] == "delivered"
+        assert suppression["reason"] == "spam"
+
+    asyncio.run(run())
+
+
 def test_guidelines_ack_is_versioned_and_fail_closed(ready):
     async def run():
         context = {"platform":"amocrm","entity_type":"lead","entity_id":"guard-ack","email":"ack@example.com"}
@@ -404,7 +472,7 @@ def test_bounce_without_email_resolves_recipient_and_cancels_queue(ready):
             "SELECT status FROM outbound_jobs WHERE idempotency_key='guard-no-email'",
         )).fetchone()
         await db.close()
-        assert suppression["reason"] == "bounced"
+        assert suppression["reason"] == "hard"
         assert job["status"] == "failed"
     asyncio.run(run())
 
@@ -565,7 +633,7 @@ def test_submit_adds_signature_and_one_click_headers(ready, monkeypatch):
         assert captured["from_name"] == "Татьяна · Современный собаковод"
         assert "Современный собаковод" in str(make_header(decode_header(headers["Reply-To"])))
         assert "case+abc@support.sobakovod.pro" in headers["Reply-To"]
-        assert "С заботой о вас" in captured["message"]
+        assert "С заботой о вас" not in captured["message"]
         assert "Отписаться от писем" in captured["message"]
         assert "Отписаться от писем:" in captured["plain_text"]
     asyncio.run(run())
@@ -627,6 +695,7 @@ def test_panel_keeps_mobile_senders_reachable_and_actions_busy():
     panel = (ROOT / "panel" / "index.html").read_text(encoding="utf-8")
     assert "html{height:auto;min-height:100%;overflow-y:auto}" in panel
     assert "main{overflow:visible}" in panel
-    assert "Загружаем сотрудников и адреса…" in panel
-    assert "busy(button,'Сохраняем…')" in panel
+    assert "Проверяем настройки и очередь…" in panel
+    assert "Загружаем цепочки…" in panel
+    assert "busy(b,'Сохраняем…')" in panel
     assert "Проверить DashaMail" not in panel

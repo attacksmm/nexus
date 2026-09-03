@@ -22,7 +22,9 @@
   [[STORAGE_KEY, "nexus:getcourse-wazzup:device-token:v1"], [PREFS_KEY, "nexus:getcourse-wazzup:prefs:v1"], [AUTO_OPEN_KEY, "nexus:getcourse-wazzup:auto-open:v1"]].forEach(function (keys) {
     if (!localStorage.getItem(keys[0]) && localStorage.getItem(keys[1])) localStorage.setItem(keys[0], localStorage.getItem(keys[1]));
   });
-  if (!API || document.getElementById(INBOX_ID)) return;
+  if (!API) return;
+  var staleInbox = document.getElementById(INBOX_ID);
+  if (staleInbox) staleInbox.remove();
   var forcedContext = null;
 
   function openGuide() {
@@ -1115,9 +1117,6 @@
     try {
       var data = await request("/activate", { body: JSON.stringify({ code: String(code || "").trim() }) });
       localStorage.setItem(STORAGE_KEY, data.device_token);
-      ensureInbox();
-      loadInbox(true);
-      scheduleInboxPoll();
       await showChannelMenu();
     } catch (error) {
       errorNode.textContent = error.message || "Не удалось активировать устройство";
@@ -2628,7 +2627,7 @@
           if (success) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
           conversationSignature = "";
           send.textContent = "Отправка…";
-          await Promise.all([fetchConversation(channel, feed, false), loadInbox(true, true)]);
+          await fetchConversation(channel, feed, false);
           setComposeStatus(errorNode, result.status, success);
         } catch (error) {
           setComposeStatus(errorNode, emailIsAmongSendTargets(targets) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Не удалось отправить сообщение"), false);
@@ -2708,11 +2707,6 @@
 
   function boot() {
     if (!isAdminShell()) return;
-    if (localStorage.getItem(STORAGE_KEY)) {
-      ensureInbox();
-      loadInbox(true);
-      scheduleInboxPoll();
-    }
     if (!CARD_PAGE && !STAFF_PAGE) return;
     if (STAFF_PAGE ? placeStaffButton() : placeButton()) {
       registerCardLink();

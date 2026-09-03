@@ -3,7 +3,7 @@ define(['jquery'], function ($) {
   const Widget = function () {
     const self = this;
     const DEFAULT_URL = 'https://junior.sobakovod.pro/nexus/messenger-widget/static/amocrm.html';
-    const WIDGET_BOOTSTRAP_VERSION = '1.9.4';
+    const WIDGET_BOOTSTRAP_VERSION = '1.9.5';
     const REMOTE_CACHE_WINDOW_MS = 5 * 60 * 1000;
     const AMO_REQUEST_TIMEOUT = 6000;
     const CONTEXT_TIMEOUT = 20000;
@@ -223,9 +223,21 @@ define(['jquery'], function ($) {
       const targetOrigin = new URL(frameUrl).origin;
       let contextDelivered = false;
       let enrichmentPromise = null;
+      let enrichedContext = null;
       let deliveredContextSignature = '';
       let frameDeadline;
       let loadingTheme = 'light';
+      function startEnrichment() {
+        enrichedContext = null;
+        enrichmentPromise = cardContext().then(function (value) {
+          enrichedContext = value;
+          return value;
+        }).catch(function () { return null; });
+      }
+      // Resolve amoCRM's lead/contact data while the remote iframe is loading.
+      // In the usual case the iframe receives the complete context immediately,
+      // avoiding a second channel discovery request after the first paint.
+      startEnrichment();
       function applyLoadingTheme(theme) {
         loadingTheme = ['dark','gray'].indexOf(String(theme || '')) >= 0 ? String(theme) : 'light';
         const palette = loadingTheme === 'dark'
@@ -251,6 +263,7 @@ define(['jquery'], function ($) {
           retry.on('click', function () {
             contextDelivered = false;
             deliveredContextSignature = '';
+            startEnrichment();
             paintLoading('Получаем данные клиента…');
             frame.attr('src', frameUrl);
             armFrameDeadline();
@@ -260,21 +273,22 @@ define(['jquery'], function ($) {
       function contextSignature(value) {
         return JSON.stringify([value.entity_type,value.entity_id,value.phone,value.email,value.name,value.fields]);
       }
-      function postContext(value) {
+      function postContext(value, completeness) {
         if (!frame[0].isConnected || !frame[0].contentWindow) return;
         const signature = contextSignature(value);
         if (contextDelivered && signature === deliveredContextSignature) return;
         contextDelivered = true;
         deliveredContextSignature = signature;
-        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:value}, targetOrigin);
+        frame[0].contentWindow.postMessage({type:'nexus-messenger-context', context:value, completeness:completeness}, targetOrigin);
       }
       function sendContext() {
-        if (!contextDelivered) {
-          postContext(basicContext());
+        if (enrichedContext) {
+          postContext(enrichedContext, 'enriched');
+        } else if (!contextDelivered) {
+          postContext(basicContext(), 'basic');
           setTimeout(paint, 1200);
         }
-        if (!enrichmentPromise) enrichmentPromise = cardContext().catch(function () { return null; });
-        enrichmentPromise.then(function (resolvedContext) { if (resolvedContext) postContext(resolvedContext); });
+        enrichmentPromise.then(function (resolvedContext) { if (resolvedContext) postContext(resolvedContext, 'enriched'); });
       }
       async function ready(event) {
         if (event.source !== frame[0].contentWindow || event.origin !== targetOrigin || !event.data) return;

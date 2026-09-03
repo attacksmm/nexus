@@ -1,7 +1,7 @@
 {
   "id": "email-channel",
   "name": "Email-канал",
-  "version": "0.2.4",
+  "version": "0.2.8",
   "description": "Двусторонняя персональная email-переписка через DashaMail и Даша.Роутер с очередью, цепочками и статусами доставки.",
   "env_vars": {
     "NEXUS_EMAIL_DASHAMAIL_API_KEY": "API-ключ DashaMail с правом transactional.send",

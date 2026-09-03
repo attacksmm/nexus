@@ -106,34 +106,34 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertNotIn("innerHTML", script)
         self.assertIn("syncMobileLink()", self.amocrm)
 
-    def test_fullscreen_messenger_has_inbox_search_and_responsive_sidebar(self):
+    def test_fullscreen_messenger_is_scoped_to_the_linked_deal(self):
         module = Path(__file__).resolve().parents[1]
         page = (module / "static" / "mobile.html").read_text(encoding="utf-8")
         script = (module / "static" / "mobile.js").read_text(encoding="utf-8")
-        self.assertIn('id="sidebar"', page)
-        self.assertIn('id="search"', page)
-        self.assertIn('id="filters"', page)
-        self.assertIn('aria-label="Диалоги"', page)
-        self.assertIn("@media(max-width:760px)", page)
+        self.assertNotIn('id="sidebar"', page)
+        self.assertNotIn('id="search"', page)
+        self.assertNotIn('id="filters"', page)
+        self.assertIn('id="clientName"', page)
+        self.assertIn('id="back"', page)
         self.assertNotIn("maximum-scale", page)
         self.assertNotIn("user-scalable=no", page)
-        self.assertIn("request('/inbox'", script)
-        self.assertIn("request('/inbox/read'", script)
-        self.assertIn("inbox_thread:thread", script)
-        self.assertIn("FRAME+'?standalone=1'", script)
-        self.assertIn('id="sidebarClose"', page)
+        self.assertNotIn("request('/inbox'", script)
+        self.assertNotIn("request('/inbox/read'", script)
+        self.assertIn("request('/mobile-context'", script)
+        self.assertIn("FRAME+'?standalone=1&v=5209'", script)
         self.assertNotIn('id="appearanceButton"', page)
         self.assertNotIn('id="appearanceClose"', page)
         self.assertNotIn('id="refreshInbox"', page)
         self.assertNotIn('Каналы подключены', page)
-        self.assertIn('.threads{height:auto;min-height:0;align-self:stretch;overflow-x:hidden;overflow-y:auto', page)
         self.assertIn('data-theme-choice="light"', page)
         self.assertIn('data-scale-choice="xlarge"', page)
-        self.assertIn("restoreInbox()", script)
-        self.assertIn("scheduleInboxPoll()", script)
-        self.assertIn("},8000)", script)
+        self.assertNotIn("loadInbox", script)
+        self.assertNotIn("scheduleInboxPoll", script)
         self.assertIn("nexus-messenger-fullscreen-preferences", script)
-        self.assertIn("path==='/inbox'?30000:15000", script)
+        self.assertIn("const timeoutMs=15000", script)
+        self.assertIn("lastPostedContext", script)
+        self.assertIn("signature!==lastPostedContext", script)
+        self.assertIn("controller.abort(),5000", script)
 
     def test_standalone_mode_does_not_change_embedded_widget_defaults(self):
         self.assertIn("STANDALONE=new URLSearchParams(location.search).get('standalone')==='1'", self.amocrm)
@@ -144,6 +144,10 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn("context?.inbox_thread||null", self.amocrm)
         self.assertIn("scope:'inbox'", self.amocrm)
         self.assertIn('html[data-standalone="1"] #close{display:none}', self.amocrm)
+        self.assertIn("if(!STANDALONE)loadProfileLinks", self.amocrm)
+        self.assertIn("if(token&&!STANDALONE)syncMobileLink()", self.amocrm)
+        self.assertIn("while(expectedGeneration===bootGeneration&&token&&widgetVisible)", self.amocrm)
+        self.assertIn("if(bootPaused){bootPaused=false;boot();return}", self.amocrm)
 
     def test_fullscreen_layout_is_telegram_like_without_css_zoom(self):
         module = Path(__file__).resolve().parents[1]
@@ -153,12 +157,26 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('id="telegram-standalone-v2"', self.amocrm)
         self.assertIn("zoom:1!important", self.amocrm)
         self.assertIn(".head{display:none!important}", self.amocrm)
-        self.assertIn("request('/channels',{scope:'inbox'})", script)
+        self.assertNotIn("request('/channels'", script)
         self.assertIn('id="conversationSettings"', page)
         self.assertIn("$('conversationSettings').onclick=toggleAppearance", script)
-        self.assertIn("$('sidebarClose').onclick=closeSidebar", script)
         self.assertNotIn("nexus-messenger-open-settings", script)
         self.assertIn("data:image/svg+xml", self.amocrm)
+
+    def test_amocrm_enriched_context_replaces_incomplete_fast_context(self):
+        bootstrap = (Path(__file__).resolve().parents[1] / "amocrm_widget" / "script.js").read_text(encoding="utf-8")
+        self.assertIn("startEnrichment()", bootstrap)
+        self.assertIn("completeness:completeness", bootstrap)
+        self.assertIn("postContext(enrichedContext, 'enriched')", bootstrap)
+        self.assertIn("function mergeContext", self.amocrm)
+        self.assertIn("function contextRoutingSignature", self.amocrm)
+        self.assertIn("if(routingChanged||!snapshotMatches)enrichCardContext(context)", self.amocrm)
+
+    def test_getcourse_does_not_boot_the_global_inbox(self):
+        boot = self.getcourse.split("function boot()", 1)[1].split("if (document.readyState", 1)[0]
+        self.assertNotIn("ensureInbox()", boot)
+        self.assertNotIn("scheduleInboxPoll()", boot)
+        self.assertIn("if (staleInbox) staleInbox.remove()", self.getcourse)
 
     def test_fullscreen_conversation_is_bounded_to_the_visible_viewport(self):
         module = Path(__file__).resolve().parents[1]
