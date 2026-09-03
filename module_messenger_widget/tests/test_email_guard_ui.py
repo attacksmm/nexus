@@ -36,6 +36,17 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertIn('channel.provider === "email" ?', self.getcourse)
         self.assertIn("row.provider==='email'?", self.amocrm)
 
+    def test_send_everywhere_really_includes_email_and_fails_closed(self):
+        legacy_filter = "channels.length === 1 || channel.provider !== \"email\""
+        legacy_compact_filter = "rows.length===1||row.provider!=='email'"
+        self.assertNotIn(legacy_filter, self.getcourse)
+        self.assertNotIn(legacy_compact_filter, self.amocrm)
+        for source in (self.getcourse, self.amocrm):
+            self.assertIn("send_all_allowed", source)
+            self.assertIn("Укажите тему Email", source)
+            self.assertIn("Уберите изображение или отключите", source)
+            self.assertIn("!result.failed.length", source)
+
     def test_send_controls_have_spinner_and_errors_are_live(self):
         self.assertIn(".send.busy:before", self.getcourse)
         self.assertIn(".send.busy::before", self.amocrm)

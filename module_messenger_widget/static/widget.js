@@ -1011,11 +1011,21 @@
   }
 
   function emailIsAmongSendTargets(channels) {
-    var targets = (channels || []).filter(function (channel) {
-      return channel && channel.can_send !== false && (channels.length === 1 || channel.provider !== "email");
-    });
+    var targets = sendTargets(channels);
     return targets.some(function (channel) {
       return channel.provider === "email" && channel.email_guidelines_required !== false;
+    });
+  }
+
+  function sendTargets(channels) {
+    return (channels || []).filter(function (channel) {
+      return channel && channel.can_send !== false && (channels.length === 1 || channel.send_all_allowed !== false);
+    });
+  }
+
+  function emailNeedsSubject(channels) {
+    return sendTargets(channels).some(function (channel) {
+      return channel.provider === "email" && channel.requires_subject !== false && !channel.has_chat;
     });
   }
 
@@ -1047,7 +1057,7 @@
   }
 
   async function sendComposerText(rawText, channels, payloadFor, token, attachment, emailSubject) {
-    var targets = channels.filter(function (channel) { return channel && channel.can_send !== false && (channels.length === 1 || channel.provider !== "email"); });
+    var targets = sendTargets(channels);
     if (!targets.length) throw new Error("Нет доступных каналов");
     var preview = rawText ? await request("/template-preview", {
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
@@ -2543,6 +2553,8 @@
       });
       if (!drawer || activeChannel !== channel || generation !== conversationGeneration) return;
       if (channel.provider === "email") channel.email_guidelines_required = initial.email_guidelines_required !== false;
+      if (channel.provider === "email") channel.requires_subject = initial.requires_subject !== false;
+      if (channel.provider === "email") channel.has_chat = !!initial.has_chat;
       d.body.innerHTML = "";
       var shell = document.createElement("div");
       shell.className = "chat-shell";
@@ -2581,6 +2593,17 @@
         if (input.dataset.attachmentUploading) { errorNode.textContent = "Дождитесь загрузки изображения"; return; }
         if (!text && !attachment.attachment_url) return;
         var targets = d.sendAll.querySelector("input").checked ? cardChannels : [channel];
+        var availableTargets = sendTargets(targets);
+        if (emailNeedsSubject(targets) && !subject.value.trim()) {
+          subject.hidden = false;
+          errorNode.textContent = "Укажите тему Email — без неё первое письмо не отправится.";
+          subject.focus();
+          return;
+        }
+        if (attachment.attachment_url && availableTargets.some(function (item) { return item.provider === "email"; })) {
+          errorNode.textContent = "Email нельзя отправлять с вложением. Уберите изображение или отключите «Отправить везде».";
+          return;
+        }
         if (emailIsAmongSendTargets(targets) && !await confirmEmailRecommendations(d.root)) return;
         send.disabled = true;
         send.classList.add("busy");
@@ -2589,7 +2612,7 @@
         try {
           var token = localStorage.getItem(STORAGE_KEY) || "";
           var result = await sendComposerText(text, targets, conversationPayload, token, attachment, subject.value);
-          if (result.sent.length || result.queued.length) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
+          if (!result.failed.length && (result.sent.length || result.queued.length)) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
           conversationSignature = "";
           send.textContent = "Отправка…";
           await Promise.all([fetchConversation(channel, feed, false), loadInbox(true, true)]);
@@ -2607,6 +2630,11 @@
       shell.appendChild(composer);
       d.body.appendChild(shell);
       d.sendAll.hidden = false;
+      var sendAllInput = d.sendAll.querySelector("input");
+      sendAllInput.onchange = function () {
+        subject.hidden = channel.provider !== "email" && !(sendAllInput.checked && sendTargets(cardChannels).some(function (item) { return item.provider === "email"; }));
+        if (!subject.hidden && emailNeedsSubject(cardChannels)) subject.placeholder = "Тема Email (обязательно)";
+      };
       conversationSignature = "";
       renderMessageFeed(feed, initial);
       scheduleConversationPoll(channel, feed);

@@ -13412,6 +13412,8 @@ async def widget_send(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "origin not allowed"}, 403)
     device: dict[str, Any] | None = None
     phone = ""
+    page_kind = ""
+    entity_id = ""
     outbound_job: dict[str, Any] = {}
     try:
         device = await _device(request)
@@ -13420,6 +13422,7 @@ async def widget_send(request: Request) -> JSONResponse:
         enforce_rate_limit(request, "getcourse-wazzup-send", limit=120, window_seconds=3600, subject=str(device["id"]))
         data = await _read_json(request)
         _validate_device_context(device, data, mode)
+        phone = _normalize_phone(data.get("phone"))
         channel_id = _clean(data.get("channel_id"), 200)
         transport = _clean(data.get("transport"), 40).lower()
         provider = _clean(data.get("provider"), 40).lower() or (
@@ -13595,7 +13598,10 @@ async def widget_send(request: Request) -> JSONResponse:
                     username=data.get("telegram_username"),
                 )
             ):
-                raise HTTPException(404, "Диалог Telegram не найден")
+                raise HTTPException(
+                    404,
+                    "Telegram не нашёл аккаунт по этому номеру. Клиент мог запретить поиск по телефону; попросите его прислать @username.",
+                )
             duplicate = await start_delivery_job(
                 peer_id, _clean(link.get("phone") or data.get("phone"), 40),
                 _clean(link.get("name") or data.get("name"), 200),
@@ -13641,7 +13647,12 @@ async def widget_send(request: Request) -> JSONResponse:
         )
     except HTTPException as exc:
         if device:
-            await _audit("send_message", "error", admin_id=device["admin_id"], device_id=device["id"], phone=phone, error=str(exc.detail))
+            if not page_kind and not entity_id:
+                page_kind, entity_id = _page_context(_clean(locals().get("source_url"), 2000))
+            await _audit(
+                "send_message", "error", admin_id=device["admin_id"], device_id=device["id"],
+                phone=phone, page_kind=page_kind, entity_id=entity_id, error=str(exc.detail),
+            )
         return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
     except Exception:
         _log("exception", "GetCourse Wazzup send failed")
