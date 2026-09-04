@@ -258,6 +258,7 @@ _identity_lookup_loop: asyncio.AbstractEventLoop | None = None
 _identity_lookup_gate: asyncio.Semaphore | None = None
 _identity_resolve_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
 _identity_resolve_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
+IDENTITY_RESOLVE_CACHE_SECONDS = 15 * 60
 _identity_exact_cache: dict[tuple[str, ...], tuple[float, str]] = {}
 _identity_exact_inflight: dict[tuple[str, ...], asyncio.Task[Any]] = {}
 _identity_cache_owner: Any = None
@@ -7071,7 +7072,14 @@ async def _resolve_identity_context(context: dict[str, Any]) -> dict[str, Any]:
         _identity_resolve_inflight[key] = task
     try:
         result = await asyncio.shield(task)
-        _identity_resolve_cache[key] = (time.monotonic() + 30, result)
+        # A manager often spends several minutes composing a message. Reusing
+        # the exact card resolution avoids reopening the large identity index
+        # on Send after the old 30-second entry expired. The cache key includes
+        # the card id and any explicit email/phone/provider identities, so a
+        # changed card payload gets a fresh resolution immediately.
+        _identity_resolve_cache[key] = (
+            time.monotonic() + IDENTITY_RESOLVE_CACHE_SECONDS, result,
+        )
         if len(_identity_resolve_cache) > 256:
             oldest = min(_identity_resolve_cache, key=lambda item: _identity_resolve_cache[item][0])
             _identity_resolve_cache.pop(oldest, None)

@@ -78,7 +78,13 @@ INVALID_RECIPIENT_RE = re.compile(
     r"reason\s*[:=]?\s*hard)",
     re.I,
 )
-ALLOWED_LINK_DOMAIN = "sobakovod.pro"
+SIGNATURE_LINK_DOMAIN = "sobakovod.pro"
+ALLOWED_LINK_DOMAINS = (
+    "sobakovod.pro",
+    "salebot.pro",
+    "getcourse.ru",
+    "vk.ru",
+)
 SHORT_LINK_DOMAINS = {
     "bit.ly", "clck.ru", "cutt.ly", "goo.gl", "is.gd", "lnkd.in", "rebrand.ly",
     "shorturl.at", "t.co", "tiny.cc", "tinyurl.com", "vk.cc",
@@ -180,6 +186,14 @@ def _message_urls(value: Any) -> list[str]:
     return [url for match in URL_RE.finditer(_clean(value, MAX_MESSAGE_CHARS)) if (url := _url_body(match.group(0)))]
 
 
+def _allowed_message_link_host(host: Any) -> bool:
+    normalized = _clean(host, 500).casefold().rstrip(".")
+    return any(
+        normalized == domain or normalized.endswith(f".{domain}")
+        for domain in ALLOWED_LINK_DOMAINS
+    )
+
+
 def _validate_no_bare_links(body: str) -> None:
     # Validate bare domains only outside already parsed absolute URLs. Nested
     # redirect targets are decoded and checked separately below.
@@ -197,7 +211,7 @@ def _validate_no_bare_links(body: str) -> None:
             )
         raise EmailGuardError(
             "email_link_scheme_required",
-            "Ссылка указана без https://. Вставьте полную ссылку на sobakovod.pro.",
+            "Ссылка указана без https://. Вставьте полную разрешённую ссылку.",
             details={"link_number": position, "domain": host},
         )
 
@@ -291,10 +305,10 @@ def _validate_message_links(body: str, context: dict[str, Any]) -> None:
                 "Сокращённые ссылки в email запрещены. Вставьте прямую ссылку на сайт клуба.",
                 details={"link_number": position, "domain": host},
             )
-        if host != ALLOWED_LINK_DOMAIN and not host.endswith(f".{ALLOWED_LINK_DOMAIN}"):
+        if not _allowed_message_link_host(host):
             raise EmailGuardError(
                 "email_link_domain_not_allowed",
-                "В email разрешены только ссылки на sobakovod.pro и его поддомены.",
+                "В email разрешены только ссылки на sobakovod.pro, salebot.pro, getcourse.ru, vk.ru и их поддомены.",
                 details={"link_number": position, "domain": host},
             )
         if parsed.scheme.casefold() != "https":
@@ -304,13 +318,13 @@ def _validate_message_links(body: str, context: dict[str, Any]) -> None:
                 details={"link_number": position, "domain": host},
             )
         nested_host = _nested_link_host(url)
-        if nested_host and nested_host != ALLOWED_LINK_DOMAIN and not nested_host.endswith(f".{ALLOWED_LINK_DOMAIN}"):
+        if nested_host and not _allowed_message_link_host(nested_host):
             if nested_host in SHORT_LINK_DOMAINS:
                 code = "email_short_link_not_allowed"
                 message = "Ссылка содержит скрытый сокращённый адрес. Вставьте прямую ссылку на сайт клуба."
             else:
                 code = "email_nested_link_not_allowed"
-                message = "Ссылка содержит скрытый переход на другой домен. Используйте прямую ссылку на sobakovod.pro."
+                message = "Ссылка содержит скрытый переход на другой домен. Используйте прямую разрешённую ссылку."
             raise EmailGuardError(
                 code, message,
                 details={"link_number": position, "domain": nested_host},
@@ -1195,7 +1209,7 @@ def _safe_signature_url(value: Any) -> str:
         return ""
     host = (parsed.hostname or "").casefold().rstrip(".")
     if parsed.scheme.casefold() != "https" or not (
-        host == ALLOWED_LINK_DOMAIN or host.endswith(f".{ALLOWED_LINK_DOMAIN}")
+        host == SIGNATURE_LINK_DOMAIN or host.endswith(f".{SIGNATURE_LINK_DOMAIN}")
     ):
         return ""
     return candidate

@@ -352,11 +352,34 @@ def test_link_allowlist_preserves_personal_utm_but_blocks_external_short_and_bar
         )
         assert result["queued"] is True
 
+        for index, url in enumerate((
+            "https://salebot.pro/help/article",
+            "https://files.salebot.pro/course/material",
+            "https://getcourse.ru/teach/control",
+            "https://fs.getcourse.ru/fileservice/file/download/a/777064/sc/354/h/6dd25f8ccffe8ff7ce12922c581f570b",
+            "https://vk.ru/ssobakovod",
+            "https://away.vk.ru/community/ssobakovod",
+        )):
+            allowed_external = dict(
+                base, entity_id=f"guard-link-allowed-{index}",
+                email=f"allowed-{index}@example.com",
+            )
+            accepted = await _confirmed_send(
+                ready, context=allowed_external, text=url,
+                subject="Информация", idempotency_key=f"guard-link-allowed-{index}",
+            )
+            assert accepted["queued"] is True
+
         cases = [
             ("external", "https://evil.example/path", "email_link_domain_not_allowed"),
+            ("lookalike", "https://evilgetcourse.ru/path", "email_link_domain_not_allowed"),
+            ("suffix-lookalike", "https://getcourse.ru.evil.example/path", "email_link_domain_not_allowed"),
+            ("http", "http://fs.getcourse.ru/file", "email_link_https_required"),
             ("short", "https://bit.ly/example", "email_short_link_not_allowed"),
             ("bare", "www.evil.example/path", "email_link_scheme_required"),
+            ("allowed-bare", "fs.getcourse.ru/file", "email_link_scheme_required"),
             ("nested", "https://sobakovod.pro/go?next=https%3A%2F%2Fevil.example%2Fx", "email_nested_link_not_allowed"),
+            ("nested-short", "https://sobakovod.pro/go?next=https%3A%2F%2Fbit.ly%2Fx", "email_short_link_not_allowed"),
         ]
         for suffix, text, code in cases:
             with pytest.raises(ready.EmailGuardError) as blocked:
