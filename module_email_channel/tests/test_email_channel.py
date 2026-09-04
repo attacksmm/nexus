@@ -414,13 +414,26 @@ def test_urls_cannot_contain_contact_or_generic_personal_data(ready):
     asyncio.run(run())
 
 
-def test_first_outgoing_rejects_multiple_links_and_any_attachment(ready):
+def test_first_outgoing_allows_three_links_but_rejects_more_and_any_attachment(ready):
     async def run():
         context = {"platform":"amocrm","entity_type":"lead","entity_id":"guard-first","email":"first@example.com"}
+        accepted = await _confirmed_send(
+            ready, context=context,
+            text=" ".join((
+                "https://sobakovod.pro/one",
+                "https://vk.ru/ssobakovod",
+                "https://fs.getcourse.ru/fileservice/file/download/a/1/sc/2/h/example",
+            )),
+            subject="Информация", idempotency_key="guard-first-three-links",
+        )
+        assert accepted["queued"] is True
         with pytest.raises(ready.EmailGuardError) as links:
             await _confirmed_send(
                 ready, context=context,
-                text="https://sobakovod.pro/one https://club.sobakovod.pro/two",
+                text=" ".join((
+                    "https://sobakovod.pro/one", "https://club.sobakovod.pro/two",
+                    "https://vk.ru/ssobakovod", "https://getcourse.ru/four",
+                )),
                 subject="Информация", idempotency_key="guard-first-links",
             )
         assert links.value.code == "email_first_message_too_many_links"
@@ -433,7 +446,10 @@ def test_first_outgoing_rejects_multiple_links_and_any_attachment(ready):
         with pytest.raises(ready.EmailGuardError) as queued_links:
             await _confirmed_send(
                 ready, context=context,
-                text="https://sobakovod.pro/one https://club.sobakovod.pro/two",
+                text=" ".join((
+                    "https://sobakovod.pro/one", "https://club.sobakovod.pro/two",
+                    "https://vk.ru/ssobakovod", "https://getcourse.ru/four",
+                )),
                 subject="Информация", idempotency_key="guard-first-queued-links",
             )
         assert queued_links.value.code == "email_first_message_too_many_links"

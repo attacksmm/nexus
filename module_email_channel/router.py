@@ -108,6 +108,7 @@ EMAIL_GUIDELINES_CHECKLIST = [
     },
 ]
 EMAIL_GUIDELINES_VERSION = "2026-09-01"
+FIRST_MESSAGE_MAX_LINKS = 3
 DEFAULT_SETTINGS = {
     "enabled": "0", "pilot_mode": "1", "from_email": "info@support.sobakovod.pro",
     "reply_domain": "support.sobakovod.pro", "inbound_task_mode": "shadow",
@@ -1066,11 +1067,12 @@ async def service_send(*, context: dict[str, Any], text: str, idempotency_key: s
             first_outgoing = not bool(outgoing_state["has_success"])
         finally:
             await db.close()
-    if first_outgoing and len(_message_urls(body)) > 1:
+    message_link_count = len(_message_urls(body))
+    if first_outgoing and message_link_count > FIRST_MESSAGE_MAX_LINKS:
         raise EmailGuardError(
             "email_first_message_too_many_links",
-            "В первом письме разрешена одна основная ссылка. Уберите лишние ссылки и отправьте снова.",
-            details={"links": len(_message_urls(body)), "maximum": 1},
+            f"В первом письме разрешено не больше {FIRST_MESSAGE_MAX_LINKS} ссылок. Уберите лишние ссылки и отправьте снова.",
+            details={"links": message_link_count, "maximum": FIRST_MESSAGE_MAX_LINKS},
         )
     if has_attachment:
         if first_outgoing:
