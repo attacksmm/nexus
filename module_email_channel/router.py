@@ -579,27 +579,34 @@ async def _cancel_queued_for_suppression(db: aiosqlite.Connection, address: str,
     )
 
 
-async def _suppress_hard_recipient(address: Any, diagnostic: Any) -> None:
+async def _suppress_recipient(address: Any, reason: str, diagnostic: Any) -> None:
     recipient = _email(address)
     if not recipient:
         return
+    clean_reason = _clean(reason, 40).casefold()
+    if clean_reason not in {"hard", "unsubscribe", "spam", "complained"}:
+        return
     now = _iso()
     source_hash = hashlib.sha256(
-        f"provider-api|{recipient}|{_clean(diagnostic, 2000)}".encode(),
+        f"provider-api|{clean_reason}|{recipient}|{_clean(diagnostic, 2000)}".encode(),
     ).hexdigest()
     db = await _connect()
     try:
         await db.execute(
             """INSERT INTO suppressions(email,reason,source_event_hash,active,created_at,updated_at)
-               VALUES(?,'hard',?,1,?,?)
-               ON CONFLICT(email) DO UPDATE SET reason='hard',source_event_hash=excluded.source_event_hash,
+               VALUES(?,?,?,1,?,?)
+               ON CONFLICT(email) DO UPDATE SET reason=excluded.reason,source_event_hash=excluded.source_event_hash,
                  active=1,updated_at=excluded.updated_at""",
-            (recipient, source_hash, now, now),
+            (recipient, clean_reason, source_hash, now, now),
         )
-        await _cancel_queued_for_suppression(db, recipient, "hard", now)
+        await _cancel_queued_for_suppression(db, recipient, clean_reason, now)
         await db.commit()
     finally:
         await db.close()
+
+
+async def _suppress_hard_recipient(address: Any, diagnostic: Any) -> None:
+    await _suppress_recipient(address, "hard", diagnostic)
 
 
 async def _init_db() -> None:
@@ -1306,6 +1313,12 @@ def _is_hard_recipient_failure(error: Any) -> bool:
     )))
 
 
+def _provider_suppression_from_diagnostic(error: Any) -> str:
+    match = re.search(r"dashamail(?: api)? (?:error|code)\s*[:#]?\s*(\d+)", _clean(error, 3000), re.I)
+    code = int(match.group(1)) if match else 0
+    return {43: "unsubscribe", 44: "spam", 45: "hard", 46: "hard"}.get(code, "")
+
+
 async def _claim_job() -> dict[str, Any] | None:
     db = await _connect()
     try:
@@ -1539,7 +1552,10 @@ async def _process_job(job: dict[str, Any]) -> None:
     except Exception as exc:
         diagnostic = _clean(exc, 1000)
         await _finish_job(job, "failed", error=diagnostic)
-        if _is_hard_recipient_failure(diagnostic):
+        provider_suppression = _provider_suppression_from_diagnostic(diagnostic)
+        if provider_suppression:
+            await _suppress_recipient(job.get("to_email"), provider_suppression, diagnostic)
+        elif _is_hard_recipient_failure(diagnostic):
             await _suppress_hard_recipient(job.get("to_email"), diagnostic)
     else:
         await _finish_job(job, "accepted", provider_id=transaction_id, response=response)

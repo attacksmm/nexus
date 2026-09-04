@@ -551,6 +551,9 @@ def test_provider_error_envelopes_and_retry_codes_are_parsed():
     }) == (36, "temporary failure")
     assert isinstance(mod._provider_failure(36, "temporary failure", 503), mod._Retryable)
     assert isinstance(mod._provider_failure(34, "domain is not configured", 503), ValueError)
+    assert mod._provider_suppression_from_diagnostic("DashaMail code 43: unsubscribed") == "unsubscribe"
+    assert mod._provider_suppression_from_diagnostic("DashaMail code 44: spam complaint") == "spam"
+    assert mod._provider_suppression_from_diagnostic("DashaMail code 45: stop list") == "hard"
 
 
 def test_immediate_invalid_mailbox_is_suppressed_and_explained(ready, monkeypatch):
