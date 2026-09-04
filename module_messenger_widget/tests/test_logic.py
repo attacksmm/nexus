@@ -59,6 +59,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn('history_status: "loading"', widget)
         self.assertIn('fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 })', widget)
         self.assertIn("CHANNEL_STORAGE_KEY", widget)
+        self.assertIn('setState("Подключаем каналы"', widget)
+        self.assertIn("if (error.retryable)", widget)
         self.assertNotIn('setState("Повторяем загрузку"', widget)
         self.assertIn("requestWithRetry('/conversation'", amo)
         self.assertIn("Повторяем загрузку", amo)

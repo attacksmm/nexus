@@ -455,6 +455,7 @@
   var conversationTimer = null;
   var drawerContextKey = "";
   var channelMenuGeneration = 0;
+  var channelRetryTimer = null;
   var conversationSignature = "";
   var conversationCache = new Map();
   var channelCache = new Map();
@@ -2341,6 +2342,8 @@
 
   async function showChannelMenu() {
     stopConversationPoll();
+    if (channelRetryTimer) clearTimeout(channelRetryTimer);
+    channelRetryTimer = null;
     var menuGeneration = ++channelMenuGeneration;
     getcourseMiniOpen = false;
     var d = ensureDrawer();
@@ -2384,6 +2387,20 @@
       card.appendChild(list);
     } catch (error) {
       if (!drawer || menuGeneration !== channelMenuGeneration) return;
+      if (error.reauth) {
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(CHANNEL_STORAGE_KEY);
+        activationForm("Срок входа закончился. Введите код сотрудника ещё раз.");
+        return;
+      }
+      if (error.retryable) {
+        setState("Подключаем каналы", "Сервер отвечает медленно. Виджет продолжает подключение автоматически.", '<div class="spinner"></div>');
+        channelRetryTimer = setTimeout(function () {
+          channelRetryTimer = null;
+          if (drawer && drawer.layer.classList.contains("open") && menuGeneration === channelMenuGeneration) showChannelMenu();
+        }, 1800);
+        return;
+      }
       var failure = setState("Не удалось получить каналы", error.message || "Повторите попытку позже.");
       var retry = document.createElement("button");
       retry.className = "submit";
@@ -2753,6 +2770,9 @@
   function closeDrawer() {
     if (!drawer) return;
     pauseConversationPoll();
+    channelMenuGeneration += 1;
+    if (channelRetryTimer) clearTimeout(channelRetryTimer);
+    channelRetryTimer = null;
     drawer.layer.classList.remove("open");
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
