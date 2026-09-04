@@ -1110,10 +1110,6 @@
   async function sendComposerText(rawText, channels, payloadFor, token, attachment, emailSubject) {
     var targets = sendTargets(channels);
     if (!targets.length) throw new Error("Нет доступных каналов");
-    var preview = rawText ? await request("/template-preview", {
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-      body: JSON.stringify(Object.assign({}, payloadFor(targets[0]), { body: rawText }))
-    }) : { text: "" };
     var sent = [];
     var queued = [];
     var failed = [];
@@ -1130,7 +1126,7 @@
         } : {};
         var result = await request("/send", {
           headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-          body: JSON.stringify(Object.assign({}, payloadFor(channel), attachment || {}, emailAcknowledgement, { text: preview.text, subject: channel.provider === "email" ? String(emailSubject || "").trim() : "", request_id: batchId + ":" + index }))
+          body: JSON.stringify(Object.assign({}, payloadFor(channel), attachment || {}, emailAcknowledgement, { text: rawText, subject: channel.provider === "email" ? String(emailSubject || "").trim() : "", request_id: batchId + ":" + index }))
         });
         if (result.queued) queued.push(channelLabel(channel));
         else if (result.sent === false) failed.push(channelLabel(channel) + (result.notice ? ": " + result.notice : ""));
