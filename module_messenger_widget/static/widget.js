@@ -16,8 +16,10 @@
   var DRAWER_ID = "nexus-messenger-widget-drawer";
   var INBOX_ID = "nexus-messenger-widget-inbox";
   var INBOX_CACHE_KEY = "nexus:messenger-widget:inbox-cache:v1";
+  var CHANNEL_STORAGE_KEY = "nexus:messenger-widget:channel-cache:v1";
   var REQUEST_TIMEOUT_MS = 15000;
   var CHANNEL_CACHE_TTL_MS = 45000;
+  var CHANNEL_CACHE_STALE_MS = 6 * 60 * 60 * 1000;
   var PALETTE_COLORS = ["#337ab7", "#46b45f", "#8b5cf6", "#d97706", "#374151"];
   [[STORAGE_KEY, "nexus:getcourse-wazzup:device-token:v1"], [PREFS_KEY, "nexus:getcourse-wazzup:prefs:v1"], [AUTO_OPEN_KEY, "nexus:getcourse-wazzup:auto-open:v1"]].forEach(function (keys) {
     if (!localStorage.getItem(keys[0]) && localStorage.getItem(keys[1])) localStorage.setItem(keys[0], localStorage.getItem(keys[1]));
@@ -439,7 +441,7 @@
       ".gc-widget .template-toolbar{flex-wrap:wrap}.gc-trial-days{width:100%;height:34px;margin-top:6px;padding:6px;border:1px solid #b8c4ce}.gc-trial-date{display:block;margin-top:5px;color:#66788a}.gc-operation-toast{position:absolute;z-index:8;top:64px;right:12px;display:flex;align-items:center;gap:8px;width:min(420px,calc(100% - 24px));padding:11px 13px;border:1px solid #91b49a;background:#eff9f1;color:#315f3a;box-shadow:0 8px 24px rgba(22,42,58,.2);font:12px/1.4 Arial,sans-serif}.gc-operation-toast .spinner{width:14px;height:14px;flex:0 0 14px;margin:0}.gc-operation-toast.error{border-color:#d49b9b;background:#fff2f2;color:#9a3535}.layer[data-theme='dark'] .gc-operation-toast{color:#bde6c6;background:#173122;border-color:#315f3a}.layer[data-theme='dark'] .gc-operation-toast.error{color:#ffbaba;background:#3b2020;border-color:#884747}",
       ".code{width:100%;height:38px;padding:0 10px;border:1px solid #aab7c2;border-radius:3px;background:#fff;color:#17212b;text-align:center;text-transform:uppercase;font:600 15px/1 Arial,sans-serif;letter-spacing:.08em}.submit{width:100%;height:38px;margin-top:8px;border-color:var(--accent);background:var(--accent);color:#fff}.submit:hover{filter:brightness(.92)}.submit:disabled{opacity:.55;cursor:default}.submit.busy{display:flex;align-items:center;justify-content:center;gap:7px}.submit.busy:before{content:'';width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}",
       ".layer[data-theme='gray'] .outgoing .bubble{background:var(--outgoing-bg);border-color:var(--outgoing-border)}",
-      ".error{min-height:18px;margin-top:8px;color:#a23a3a;font-size:12px}.spinner{width:24px;height:24px;margin:0 auto 12px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}",
+      ".error{min-height:18px;margin-top:8px;color:#a23a3a;font-size:12px}.spinner{width:24px;height:24px;margin:0 auto 12px;border:2px solid #c9d3dc;border-top-color:var(--accent);border-radius:50%;animation:spin .75s linear infinite}.history-spinner{display:inline-block;width:13px;height:13px;margin:0 7px 0 0;vertical-align:-2px}",
       "@keyframes spin{to{transform:rotate(360deg)}}",
       "@media(max-width:900px){.drawer,.layer[data-drawer-size] .drawer{width:100%;border-left:0}.head{grid-template-columns:minmax(0,1fr) auto auto auto}.title{grid-column:1;grid-row:1}.gc-card-action{grid-column:2;grid-row:1}.drawer-settings{grid-column:3;grid-row:1}.close:not(.drawer-settings){grid-column:4;grid-row:1}.profile-links{grid-column:1/-1;grid-row:2}.drawer-send-all{grid-column:1;grid-row:3}.copy{grid-column:2/5;grid-row:3;max-width:none}.channels{grid-column:1/-1;grid-row:4;height:40px}}",
       "@media(prefers-reduced-motion:reduce){.backdrop,.drawer,.copy,.close,.submit,.channel,.tool,.send{transition:none}.spinner{animation:none}}"
@@ -508,13 +510,27 @@
     }).sort(function (a, b) { return a.delivery_rank - b.delivery_rank || a._source_order - b._source_order; });
   }
 
-  function loadChannelsForContext(source, token) {
-    var key = channelContextKey(source);
-    var cached = channelCache.get(key);
-    if (cached && Date.now() - cached.savedAt < CHANNEL_CACHE_TTL_MS) {
-      cached.data.channels = normalizeChannels(cached.data.channels);
-      return Promise.resolve(cached.data);
-    }
+  function readStoredChannelCache(key) {
+    try {
+      var stored = JSON.parse(localStorage.getItem(CHANNEL_STORAGE_KEY) || "{}");
+      var item = stored && stored[key];
+      if (!item || !item.data || Date.now() - Number(item.savedAt || 0) > CHANNEL_CACHE_STALE_MS) return null;
+      return item;
+    } catch (error) { return null; }
+  }
+
+  function writeStoredChannelCache(key, item) {
+    try {
+      var stored = JSON.parse(localStorage.getItem(CHANNEL_STORAGE_KEY) || "{}");
+      stored[key] = item;
+      Object.keys(stored).sort(function (a, b) {
+        return Number(stored[b].savedAt || 0) - Number(stored[a].savedAt || 0);
+      }).slice(12).forEach(function (oldKey) { delete stored[oldKey]; });
+      localStorage.setItem(CHANNEL_STORAGE_KEY, JSON.stringify(stored));
+    } catch (error) {}
+  }
+
+  function refreshChannelsForContext(key, source, token) {
     if (channelRequests.has(key)) return channelRequests.get(key);
     var pending = request("/channels", {
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
@@ -522,12 +538,30 @@
       timeoutMs: 8000
     }).then(function (data) {
       data.channels = normalizeChannels(data.channels);
-      channelCache.set(key, { data: data, savedAt: Date.now() });
+      var item = { data: data, savedAt: Date.now() };
+      channelCache.set(key, item);
+      writeStoredChannelCache(key, item);
       if (channelCache.size > 12) channelCache.delete(channelCache.keys().next().value);
       return data;
     }).finally(function () { channelRequests.delete(key); });
     channelRequests.set(key, pending);
     return pending;
+  }
+
+  function loadChannelsForContext(source, token) {
+    var key = channelContextKey(source);
+    var cached = channelCache.get(key) || readStoredChannelCache(key);
+    if (cached && !channelCache.has(key)) channelCache.set(key, cached);
+    if (cached && Date.now() - cached.savedAt < CHANNEL_CACHE_TTL_MS) {
+      cached.data.channels = normalizeChannels(cached.data.channels);
+      return Promise.resolve(cached.data);
+    }
+    if (cached) {
+      cached.data.channels = normalizeChannels(cached.data.channels);
+      refreshChannelsForContext(key, source, token).catch(function () {});
+      return Promise.resolve(cached.data);
+    }
+    return refreshChannelsForContext(key, source, token);
   }
 
   function prefetchCardChannels() {
@@ -1140,6 +1174,7 @@
       if (token) await request("/logout", { headers: { "Authorization": "Bearer " + token }, body: JSON.stringify(context()) });
     } catch (error) {}
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(CHANNEL_STORAGE_KEY);
     stopConversationPoll();
     if (inboxTimer) clearTimeout(inboxTimer);
     inboxTimer = null;
@@ -2445,6 +2480,12 @@
       else if (data.history_status === "not_found") note.textContent = "Wazzup не нашёл диалог этого номера в выбранном канале. Если клиент напишет или вы начнёте диалог, он привяжется автоматически.";
       else if (data.history_status === "not_started") note.textContent = "Истории с сообществом нет.";
       else note.textContent = "Проверяем существующую историю Wazzup. Новые сообщения и статусы появляются здесь автоматически.";
+      if (data.history_status === "syncing" || data.history_status === "loading") {
+        var historySpinner = document.createElement("span");
+        historySpinner.className = "spinner history-spinner";
+        historySpinner.setAttribute("aria-hidden", "true");
+        note.prepend(historySpinner);
+      }
       feed.appendChild(note);
     }
     if (!offset && !messages.length) {
@@ -2517,7 +2558,11 @@
     var attempts = retryOptions && retryOptions.autoRetry ? 2 : 1;
     for (var attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        var data = await request("/conversation", { headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token }, body: JSON.stringify(payload) });
+        var data = await request("/conversation", {
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+          body: JSON.stringify(payload),
+          timeoutMs: retryOptions && retryOptions.timeoutMs
+        });
         if (!offset && channel.provider === "email") channel.email_guidelines_required = data.email_guidelines_required !== false;
         if (!offset) rememberConversation(conversationKey(payload), data);
         renderMessageFeed(feed, data);
@@ -2557,14 +2602,13 @@
     d.subtitle.textContent = (ctx.phone || "Номер не найден") + " · " + String(channel.transport || "").toUpperCase();
     renderChannels(cardChannels, channel);
     var cached = conversationCache.get(key);
-    if (!cached) setState("Загружаем переписку", "Получаем сохранённые сообщения и статусы.", '<div class="spinner"></div>');
     try {
-      var initial = cached || await fetchConversation(channel, document.createElement("div"), false, 0, {
-        autoRetry: true,
-        onRetry: function (attempt, total) {
-          setState("Повторяем загрузку", "Сервер отвечает медленно. Попытка " + attempt + " из " + total + ".", '<div class="spinner"></div>');
-        }
-      });
+      var initial = cached || {
+        ok: true, messages: [], history_complete: false, history_status: "loading",
+        can_send: channel.can_send !== false, send_reason: channel.send_reason || "",
+        has_chat: !!channel.has_chat, requires_subject: channel.requires_subject,
+        email_guidelines_required: channel.email_guidelines_required
+      };
       if (!drawer || activeChannel !== channel || generation !== conversationGeneration) return;
       if (channel.provider === "email") channel.email_guidelines_required = initial.email_guidelines_required !== false;
       if (channel.provider === "email") channel.requires_subject = initial.requires_subject !== false;
@@ -2630,8 +2674,8 @@
           if (success) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
           conversationSignature = "";
           send.textContent = "Отправка…";
-          await fetchConversation(channel, feed, false);
           setComposeStatus(errorNode, result.status, success);
+          fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 }).catch(function () {});
         } catch (error) {
           setComposeStatus(errorNode, emailIsAmongSendTargets(targets) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Не удалось отправить сообщение"), false);
         } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
@@ -2652,8 +2696,15 @@
       };
       conversationSignature = "";
       renderMessageFeed(feed, initial);
-      scheduleConversationPoll(channel, feed);
-      if (cached) fetchConversation(channel, feed, true);
+      fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 }).then(function (fresh) {
+        if (!fresh || activeChannel !== channel || generation !== conversationGeneration) return;
+        if (channel.provider === "email") channel.email_guidelines_required = fresh.email_guidelines_required !== false;
+        if (channel.provider === "email") channel.requires_subject = fresh.requires_subject !== false;
+        if (channel.provider === "email") channel.has_chat = !!fresh.has_chat;
+        if (channel.provider === "email" && !subject.value && fresh.subject) subject.value = fresh.subject;
+      }).finally(function () {
+        if (activeChannel === channel && generation === conversationGeneration) scheduleConversationPoll(channel, feed);
+      });
       setTimeout(function () { input.focus(); }, 30);
     } catch (error) {
       var card = setState("Не удалось открыть переписку", error.message || "Повторите попытку позже.");

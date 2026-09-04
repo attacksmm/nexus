@@ -52,12 +52,14 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertEqual(result["phone"], "+79009992233")
         self.assertEqual(result["name"], "Никита Попов")
 
-    def test_widgets_auto_retry_initial_conversation_timeout(self):
+    def test_getcourse_widget_opens_composer_before_history_finishes(self):
         module_dir = Path(__file__).resolve().parents[1]
         widget = (module_dir / "static" / "widget.js").read_text(encoding="utf-8")
         amo = (module_dir / "static" / "amocrm.html").read_text(encoding="utf-8")
-        self.assertIn("autoRetry: true", widget)
-        self.assertIn("Повторяем загрузку", widget)
+        self.assertIn('history_status: "loading"', widget)
+        self.assertIn('fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 })', widget)
+        self.assertIn("CHANNEL_STORAGE_KEY", widget)
+        self.assertNotIn('setState("Повторяем загрузку"', widget)
         self.assertIn("requestWithRetry('/conversation'", amo)
         self.assertIn("Повторяем загрузку", amo)
 
