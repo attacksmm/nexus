@@ -542,6 +542,25 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertRegex(code, r"^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$")
         self.assertEqual(len(router._normalize_code(code)), 12)
 
+    def test_getcourse_origins_include_custom_and_account_domains(self):
+        env = {
+            "NEXUS_MESSENGER_WIDGET_GETCOURSE_ORIGIN": "https://club.sobakovod.pro/",
+            "GETCOURSE_ACCOUNT_NAME": "sobakovod",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(router._getcourse_origins(), {
+                "https://club.sobakovod.pro",
+                "https://sobakovod.getcourse.ru",
+            })
+
+    def test_getcourse_origin_rejects_unsafe_account_name(self):
+        env = {
+            "NEXUS_MESSENGER_WIDGET_GETCOURSE_ORIGIN": "https://club.sobakovod.pro",
+            "GETCOURSE_ACCOUNT_NAME": "sobakovod.example.com",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(router._getcourse_origins(), {"https://club.sobakovod.pro"})
+
     def test_utm_term_supports_platform_and_salebot_ids(self):
         self.assertEqual(router._graph.parse_utm_term("platform_id=abc-123"), [("vk_platform", "abc-123")])
         self.assertEqual(router._graph.parse_utm_term("salebot_id:998877"), [("salebot", "998877")])

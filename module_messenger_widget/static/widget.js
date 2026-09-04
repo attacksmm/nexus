@@ -616,7 +616,10 @@
         timeoutError.timeout = true;
         throw timeoutError;
       }
-      if (error instanceof TypeError) error.retryable = true;
+      if (error instanceof TypeError) {
+        error.retryable = true;
+        error.message = "Не удалось связаться с Nexus. Обновите страницу и повторите вход.";
+      }
       throw error;
     } finally {
       clearTimeout(timer);

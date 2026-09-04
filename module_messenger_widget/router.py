@@ -517,6 +517,20 @@ def _allowed_origin() -> str:
     return value.rstrip("/") or DEFAULT_ALLOWED_ORIGIN
 
 
+def _getcourse_origins() -> set[str]:
+    """Return the custom GetCourse domain and its official account-domain alias."""
+
+    origins = {_allowed_origin()}
+    values = _read_env_values()
+    account = _clean(
+        os.environ.get("GETCOURSE_ACCOUNT_NAME") or values.get("GETCOURSE_ACCOUNT_NAME"),
+        200,
+    ).strip().lower()
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", account):
+        origins.add(f"https://{account}.getcourse.ru")
+    return origins
+
+
 def _amo_origin() -> str:
     values = _read_env_values()
     value = _clean(os.environ.get(AMO_ORIGIN_ENV_KEY) or values.get(AMO_ORIGIN_ENV_KEY), 1000).rstrip("/")
@@ -527,7 +541,7 @@ def _amo_origin() -> str:
 
 
 def _allowed_origins() -> set[str]:
-    return {value for value in (_allowed_origin(), _amo_origin()) if value}
+    return _getcourse_origins() | ({_amo_origin()} if _amo_origin() else set())
 
 
 def _customer_db_path() -> Path:
@@ -648,7 +662,7 @@ def _is_same_origin_test_request(request: Request) -> bool:
 
 async def _widget_request_mode(request: Request) -> str:
     origin = request.headers.get("origin", "").rstrip("/")
-    if origin == _allowed_origin():
+    if origin in _getcourse_origins():
         return "getcourse"
     if _amo_origin() and origin == _amo_origin():
         return "amocrm"
