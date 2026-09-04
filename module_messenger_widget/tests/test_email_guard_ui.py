@@ -47,6 +47,20 @@ class EmailGuardUiTests(unittest.TestCase):
             self.assertIn("Уберите изображение или отключите", source)
             self.assertIn("!result.failed.length", source)
 
+    def test_send_everywhere_always_confirms_email_and_avoids_duplicate_retry(self):
+        self.assertIn("sendEverywhere ? hasEmailSendTarget(targets) : emailIsAmongSendTargets(targets)", self.getcourse)
+        self.assertIn("sendEverywhere?hasEmailTarget(targets):emailNeedsRecommendations(targets)", self.amocrm)
+        self.assertIn("function sendResultAccepted(result)", self.getcourse)
+        self.assertIn("if (sendResultAccepted(result))", self.getcourse)
+        self.assertIn("accepted=Boolean(result.sent.length||result.queued.length)", self.amocrm)
+        for source in (self.getcourse, self.amocrm):
+            self.assertIn("Не отправлено:", source)
+
+    def test_delivery_failure_reason_is_visible_and_refreshes(self):
+        for source in (self.getcourse, self.amocrm):
+            self.assertIn("delivery-error", source)
+            self.assertIn("error_message", source)
+
     def test_send_controls_have_spinner_and_errors_are_live(self):
         self.assertIn(".send.busy:before", self.getcourse)
         self.assertIn(".send.busy::before", self.amocrm)
@@ -120,7 +134,7 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertNotIn("request('/inbox'", script)
         self.assertNotIn("request('/inbox/read'", script)
         self.assertIn("request('/mobile-context'", script)
-        self.assertIn("FRAME+'?standalone=1&v=5209'", script)
+        self.assertIn("FRAME+'?standalone=1&v=5210'", script)
         self.assertNotIn('id="appearanceButton"', page)
         self.assertNotIn('id="appearanceClose"', page)
         self.assertNotIn('id="refreshInbox"', page)

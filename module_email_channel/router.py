@@ -453,12 +453,104 @@ def _suppression_error(reason: Any) -> EmailGuardError:
             "Клиент пожаловался на спам. Повторная отправка на этот адрес запрещена.",
             status_code=403,
         )
+    if clean_reason == "hard":
+        return EmailGuardError(
+            "email_address_unavailable",
+            "Адрес не существует или не принимает почту. Повторная отправка запрещена — уточните email клиента.",
+            status_code=403,
+        )
     return EmailGuardError(
         "email_recipient_suppressed",
         "Отправка на этот адрес запрещена после ошибки доставки.",
         status_code=403,
         details={"reason": clean_reason or "suppressed"},
     )
+
+
+def _friendly_delivery_error(error: Any, status: Any = "") -> str:
+    """Turn provider/SMTP diagnostics into one short instruction for staff."""
+    raw = _clean(error, 3000)
+    state = _clean(status, 40).casefold()
+    value = raw.casefold()
+    code_match = re.search(r"dashamail(?: api)? (?:error|code)\s*[:#]?\s*(\d+)", value)
+    provider_code = int(code_match.group(1)) if code_match else 0
+    code_messages = {
+        3: "Не удалось подготовить письмо. Сообщите техподдержке.",
+        26: "Вложение слишком большое.",
+        29: "Одноразовый email не поддерживается. Уточните постоянный адрес.",
+        30: "Email-отправка заблокирована DashaMail. Сообщите техподдержке.",
+        33: "Формат вложения не поддерживается.",
+        34: "Не настроен домен отправки. Сообщите техподдержке.",
+        35: "Email-канал временно недоступен. Сообщите техподдержке.",
+        40: "Не удалось подготовить письмо. Сообщите техподдержке.",
+        43: "Клиент отписался. Email-отправка ему отключена.",
+        44: "Клиент пожаловался на спам. Email-отправка ему отключена.",
+        45: "Этот email находится в стоп-листе. Используйте другой канал.",
+        46: "Этот email ранее не принимал письма. Уточните адрес или используйте другой канал.",
+        47: "Сервер отправки не разрешён DashaMail. Сообщите техподдержке.",
+        51: "Адрес отправителя не подтверждён. Сообщите техподдержке.",
+        52: "Адрес отправителя не подтверждён. Сообщите техподдержке.",
+        101: "DashaMail не принял письмо. Сообщите техподдержке.",
+    }
+    if not raw:
+        return "Не удалось доставить письмо. Проверьте email клиента." if state == "failed" else ""
+    if "неизвестен результат отправки" in value or state == "unknown":
+        return "Статус письма уточняется. Не отправляйте повторно."
+    if INVALID_RECIPIENT_RE.search(raw) or any(marker in value for marker in (
+        "invalid mailbox", "mailbox unavailable: user not found", "recipient not found",
+    )):
+        return "Email клиента не существует. Уточните адрес."
+    if provider_code == 6 and any(marker in value for marker in ("recipient", "получател", " to ")):
+        return "Проверьте email клиента — адрес указан неверно."
+    if provider_code in {1, 2}:
+        return "Email-канал потерял доступ к DashaMail. Сообщите техподдержке."
+    if provider_code in {36, 58}:
+        return "DashaMail временно перегружен. Отправим автоматически."
+    if provider_code in code_messages:
+        return code_messages[provider_code]
+    if any(marker in value for marker in (
+        "invalid email", "invalid address", "malformed address", "bad address syntax",
+        "incorrect email", "некорректный email",
+    )):
+        return "Email указан неверно. Проверьте адрес."
+    if any(marker in value for marker in (
+        "domain not found", "no mx", "mx record", "host not found", "unknown host",
+        "unrouteable address", "unroutable address", "domain does not exist",
+    )):
+        return "Домен email не принимает почту. Уточните адрес."
+    if any(marker in value for marker in (
+        "mailbox full", "quota exceeded", "over quota", "insufficient storage", "5.2.2",
+    )):
+        return "Почтовый ящик клиента переполнен. Попробуйте позже."
+    if any(marker in value for marker in (
+        "message too large", "size limit", "too big", "5.3.4", "552 5.2.3",
+    )):
+        return "Письмо слишком большое. Сократите текст."
+    if "отписал" in value or "unsubscribe" in value:
+        return "Клиент отписался. Отправка запрещена."
+    if "пожаловал" in value or "complain" in value:
+        return "Клиент пожаловался на спам. Отправка запрещена."
+    if any(marker in value for marker in (
+        "spamhaus", "blacklist", "black list", "blocklist", "spam blocked", "spam_blocked",
+        "blocked by policy", "access denied", "reputation", "5.7.1", "5.7.0",
+    )):
+        return "Письмо отклонено защитой от спама. Используйте другой канал."
+    if any(marker in value for marker in (
+        "api-ключ", "api key", "unauthorized", "authentication", "forbidden",
+        "sender not verified", "from address", "permission denied",
+    )):
+        return "Email-канал временно недоступен. Сообщите техподдержке."
+    if "rate limit" in value or "too many requests" in value or state == "retry":
+        return "Email временно в очереди. Nexus повторит отправку."
+    if any(marker in value for marker in (
+        "temporar", "try again", "timeout", "timed out", "connect", "connection",
+        "service unavailable", "4.2.", "4.3.", "4.4.", "4.5.",
+    )):
+        return ("Почтовый сервер временно недоступен. Nexus повторит отправку."
+                if state == "retry" else "Временная ошибка почтового сервера клиента. Попробуйте позже.")
+    if any(marker in value for marker in ("rejected", "bounced", "dropped", "delivery failed")):
+        return "Сервер клиента отклонил письмо. Проверьте email или используйте другой канал."
+    return "Не удалось доставить письмо. Проверьте email или используйте другой канал."
 
 
 async def _active_suppression(address: str) -> str:
@@ -485,6 +577,29 @@ async def _cancel_queued_for_suppression(db: aiosqlite.Connection, address: str,
            WHERE to_email=? AND status IN ('queued','pending','processing','retry')""",
         (error, now, address),
     )
+
+
+async def _suppress_hard_recipient(address: Any, diagnostic: Any) -> None:
+    recipient = _email(address)
+    if not recipient:
+        return
+    now = _iso()
+    source_hash = hashlib.sha256(
+        f"provider-api|{recipient}|{_clean(diagnostic, 2000)}".encode(),
+    ).hexdigest()
+    db = await _connect()
+    try:
+        await db.execute(
+            """INSERT INTO suppressions(email,reason,source_event_hash,active,created_at,updated_at)
+               VALUES(?,'hard',?,1,?,?)
+               ON CONFLICT(email) DO UPDATE SET reason='hard',source_event_hash=excluded.source_event_hash,
+                 active=1,updated_at=excluded.updated_at""",
+            (recipient, source_hash, now, now),
+        )
+        await _cancel_queued_for_suppression(db, recipient, "hard", now)
+        await db.commit()
+    finally:
+        await db.close()
 
 
 async def _init_db() -> None:
@@ -996,6 +1111,8 @@ async def service_conversation(*, context: dict[str, Any], offset: int = 0, limi
     for message in messages:
         if message["opened"]:
             message["status"] = "opened"
+        raw_error = message.pop("error", "")
+        message["error_message"] = _friendly_delivery_error(raw_error, message["status"])
     return {"ok": True, "channel": channel, "thread_id": thread["public_token"], "chat_id": thread["public_token"],
             "subject": thread["subject"], "messages": messages, "has_chat": bool(messages), "ambiguous": False,
             "confirmed_chat": bool(state["confirmed_chat"]),
@@ -1140,6 +1257,53 @@ class _Retryable(Exception):
 
 class _Ambiguous(Exception):
     pass
+
+
+def _provider_error_details(data: Any) -> tuple[int, str]:
+    """Read both legacy and REST DashaMail error envelopes without exposing them to staff."""
+    if not isinstance(data, dict):
+        return 0, _clean(data, 1000)
+    response = data.get("response") if isinstance(data.get("response"), dict) else {}
+    legacy = response.get("msg") if isinstance(response.get("msg"), dict) else {}
+    modern = data.get("error") if isinstance(data.get("error"), dict) else {}
+    raw_code = (
+        legacy.get("err_code") if legacy.get("err_code") not in (None, "")
+        else modern.get("code") if modern.get("code") not in (None, "")
+        else data.get("code")
+    )
+    try:
+        code = int(raw_code or 0)
+    except (TypeError, ValueError):
+        code = 0
+    message = _clean(
+        legacy.get("text") or modern.get("message") or modern.get("text")
+        or (data.get("error") if isinstance(data.get("error"), str) else "")
+        or data.get("message") or data.get("raw"),
+        1000,
+    )
+    return code, message
+
+
+def _provider_failure(code: int, message: str, http_status: int) -> Exception | None:
+    if code in {36, 58}:
+        return _Retryable(f"DashaMail code {code}: {message or 'temporary failure'}", 60)
+    if code:
+        return ValueError(f"DashaMail code {code}: {message or 'request rejected'}")
+    if http_status == 429:
+        return _Retryable("DashaMail rate limit", 60)
+    if http_status >= 500:
+        return _Ambiguous(f"DashaMail HTTP {http_status}")
+    if http_status >= 400:
+        return ValueError(message or f"DashaMail HTTP {http_status}")
+    return None
+
+
+def _is_hard_recipient_failure(error: Any) -> bool:
+    raw = _clean(error, 3000)
+    value = raw.casefold()
+    return bool(INVALID_RECIPIENT_RE.search(raw) or any(marker in value for marker in (
+        "invalid mailbox", "mailbox unavailable: user not found", "recipient not found",
+    )))
 
 
 async def _claim_job() -> dict[str, Any] | None:
@@ -1316,21 +1480,18 @@ async def _submit(job: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         data = response.json()
     except ValueError:
         data = {"raw": _clean(response.text, 2000)}
+    error_code, error_message = _provider_error_details(data)
     if response.status_code == 429:
         retry = response.headers.get("Retry-After", "")
-        raise _Retryable("DashaMail rate limit", int(retry) if retry.isdigit() else 60)
-    if response.status_code >= 500:
-        raise _Ambiguous(f"DashaMail HTTP {response.status_code}")
-    if response.status_code >= 400:
-        raise ValueError(_clean(data.get("error") if isinstance(data, dict) else data, 1000) or f"DashaMail HTTP {response.status_code}")
+        raise _Retryable(
+            f"DashaMail code {error_code}: {error_message}" if error_code else "DashaMail rate limit",
+            int(retry) if retry.isdigit() else 60,
+        )
+    if failure := _provider_failure(error_code, error_message, response.status_code):
+        raise failure
     transaction_id = _clean(data.get("transaction_id") if isinstance(data, dict) else "", 300)
     if not transaction_id and isinstance(data, dict):
         transaction_id = _clean(((data.get("response") or {}).get("data") or {}).get("transaction_id"), 300)
-    response_block = data.get("response") if isinstance(data, dict) else None
-    response_message = response_block.get("msg") if isinstance(response_block, dict) else None
-    error_code = response_message.get("err_code") if isinstance(response_message, dict) else None
-    if error_code not in (None, 0, "0"):
-        raise ValueError(_clean(response_message.get("text"), 1000) or f"DashaMail API error {error_code}")
     if not transaction_id:
         raise ValueError("DashaMail не вернул идентификатор отправки")
     return transaction_id, data if isinstance(data, dict) else {"response": data}
@@ -1376,7 +1537,10 @@ async def _process_job(job: dict[str, Any]) -> None:
         # can duplicate a client letter, therefore this state requires reconcile.
         await _finish_job(job, "unknown", error=f"Неизвестен результат отправки: {_clean(exc, 800)}")
     except Exception as exc:
-        await _finish_job(job, "failed", error=_clean(exc, 1000))
+        diagnostic = _clean(exc, 1000)
+        await _finish_job(job, "failed", error=diagnostic)
+        if _is_hard_recipient_failure(diagnostic):
+            await _suppress_hard_recipient(job.get("to_email"), diagnostic)
     else:
         await _finish_job(job, "accepted", provider_id=transaction_id, response=response)
 
@@ -1431,7 +1595,7 @@ def _provider_suppression_reason(event: str, fields: dict[str, str]) -> str:
         _clean(fields.get("reason"), 2000),
         _clean(fields.get("description"), 2000),
         _clean(fields.get("bounce_reason"), 2000),
-        _clean(fields.get("bounce_code"), 200),
+        _clean(fields.get("bounce_code") or fields.get("code"), 200),
     ))
     if value in {"bounced", "dropped"} and (
         detail.strip().casefold() == "hard" or INVALID_RECIPIENT_RE.search(detail)
@@ -1445,6 +1609,14 @@ async def _store_provider_event(fields: dict[str, str]) -> bool:
     nexus_id, provider_id = _clean(fields.get("message_id"), 300), _clean(fields.get("transaction_id"), 300)
     address = _email(fields.get("email"))
     canonical = json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    delivery_diagnostic = " · ".join(filter(None, (
+        _clean(fields.get("code") or fields.get("bounce_code"), 200),
+        _clean(
+            fields.get("reason") or fields.get("description") or fields.get("error")
+            or fields.get("bounce_reason"),
+            1000,
+        ),
+    )))
     # Signatures and delivery timestamps may change on a provider retry. The
     # stable business identity keeps the webhook idempotent across retries.
     stable_event = {
@@ -1480,10 +1652,10 @@ async def _store_provider_event(fields: dict[str, str]) -> bool:
                        delivered_at=CASE WHEN ?='delivered' AND delivered_at='' THEN ? ELSE delivered_at END,
                        error=CASE WHEN ?='failed' THEN ? ELSE error END,updated_at=? WHERE id=?""",
                     (next_status, int(opened), int(opened), now, next_status, now, next_status,
-                     _clean(fields.get("reason") or fields.get("description"), 1000), now, row["id"]),
+                     delivery_diagnostic, now, row["id"]),
                 )
                 if next_status == "failed":
-                    reason = _clean(fields.get("reason") or fields.get("description"), 1000)
+                    reason = delivery_diagnostic
                     await db.execute(
                         """UPDATE outbound_jobs SET status='failed',next_attempt_at='',error=?,updated_at=?
                            WHERE message_id=? AND status NOT IN ('failed','cancelled')""",

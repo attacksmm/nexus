@@ -530,6 +530,70 @@ def test_delivery_status_never_moves_backwards(ready):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(("diagnostic", "status", "expected"), [
+    ("Mailbox unavailable: user not found", "failed", "Email клиента не существует. Уточните адрес."),
+    ("552 5.2.2 mailbox full", "failed", "Почтовый ящик клиента переполнен. Попробуйте позже."),
+    ("550 5.7.1 listed by Spamhaus", "failed", "Письмо отклонено защитой от спама. Используйте другой канал."),
+    ("DashaMail code 43: unsubscribed", "failed", "Клиент отписался. Email-отправка ему отключена."),
+    ("DashaMail code 36: temporary", "retry", "DashaMail временно перегружен. Отправим автоматически."),
+    ("Неизвестен результат отправки: timeout", "unknown", "Статус письма уточняется. Не отправляйте повторно."),
+])
+def test_delivery_errors_are_short_and_actionable(diagnostic, status, expected):
+    assert mod._friendly_delivery_error(diagnostic, status) == expected
+
+
+def test_provider_error_envelopes_and_retry_codes_are_parsed():
+    assert mod._provider_error_details({
+        "response": {"msg": {"err_code": 34, "text": "domain is not configured"}},
+    }) == (34, "domain is not configured")
+    assert mod._provider_error_details({
+        "error": {"code": 36, "message": "temporary failure"},
+    }) == (36, "temporary failure")
+    assert isinstance(mod._provider_failure(36, "temporary failure", 503), mod._Retryable)
+    assert isinstance(mod._provider_failure(34, "domain is not configured", 503), ValueError)
+
+
+def test_immediate_invalid_mailbox_is_suppressed_and_explained(ready, monkeypatch):
+    class FakeResponse:
+        status_code = 400
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"error": {"code": 6, "message": "Mailbox unavailable: user not found"}}
+
+    class FakeClient:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def post(self, _url, json): return FakeResponse()
+
+    monkeypatch.setattr(ready.httpx, "AsyncClient", FakeClient)
+
+    async def run():
+        context = {
+            "platform": "amocrm", "entity_type": "lead", "entity_id": "invalid-mailbox",
+            "email": "missing@example.com",
+        }
+        await _confirmed_send(
+            ready, context=context, text="Здравствуйте", subject="Ваша заявка",
+            idempotency_key="invalid-mailbox",
+        )
+        job = await ready._claim_job()
+        await ready._process_job(job)
+        conversation = await ready.service_conversation(context=context)
+        assert conversation["messages"][-1]["status"] == "failed"
+        assert conversation["messages"][-1]["error_message"] == "Email клиента не существует. Уточните адрес."
+        assert "error" not in conversation["messages"][-1]
+        db = await ready._connect()
+        suppression = await (await db.execute(
+            "SELECT reason FROM suppressions WHERE email='missing@example.com' AND active=1",
+        )).fetchone()
+        await db.close()
+        assert suppression["reason"] == "hard"
+    asyncio.run(run())
+
+
 def _request(method="GET", query="", body=b""):
     sent = False
 
