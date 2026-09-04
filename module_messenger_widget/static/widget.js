@@ -1905,9 +1905,12 @@
         var success = sendResultSucceeded(result);
         if (success) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
         conversationSignature = "";
-        send.textContent = "Отправка…";
-        await Promise.all([loadInboxConversation(false), loadInbox(true, true)]);
         setComposeStatus(errorNode, result.status, success);
+        // The send result is final for this click. Inbox/history refreshes are
+        // secondary and can legitimately be slow on a large database; never
+        // turn their timeout into a false red "send failed" message or invite
+        // a duplicate retry after the outbound job is already queued.
+        void Promise.allSettled([loadInboxConversation(false), loadInbox(true, true)]);
       } catch (error) {
         setComposeStatus(errorNode, emailIsAmongSendTargets([channel]) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Ошибка отправки"), false);
       } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }

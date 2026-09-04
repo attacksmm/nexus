@@ -1012,6 +1012,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("function loadChannelsForContext(source, token)", widget)
         self.assertIn("window.requestIdleCallback(prefetchCardChannels", widget)
         self.assertIn("function deliveryStatus(status)", widget)
+        self.assertIn("void Promise.allSettled([loadInboxConversation(false), loadInbox(true, true)]);", widget)
+        self.assertNotIn("await Promise.all([loadInboxConversation(false), loadInbox(true, true)]);", widget)
         self.assertIn('label: "Прочитано"', widget)
         self.assertIn("appendMessageMeta(meta, message)", widget)
         self.assertNotIn("message.status || \"\"].filter(Boolean).join", widget)
