@@ -1,5 +1,13 @@
 # Messenger Widget
 
+## 5.20.19 — indexed card reads under production load
+
+- Channel presence uses separate phone/exact-route indexed reads, never an unindexed OR across all chats.
+- Owner assignment and saved provider names use exact channel/type/client keys; unchanged owners are not rewritten.
+- Conversation lookup unions indexed phone and exact-chat matches while retaining history and deduplication.
+- Automatic VK polling no longer runs a historical placeholder-name repair every five minutes. Explicit full sync retains this maintenance action.
+- No schema migration or changes to provider delivery and authentication contracts.
+
 ## 5.20.18 — быстрые каналы, точные статусы и полная видеоинструкция
 
 - amoCRM открывает Telegram Personal без долгого синхронного перебора диалогов; проверка нового получателя выполняется при отправке с ограниченными таймаутами.

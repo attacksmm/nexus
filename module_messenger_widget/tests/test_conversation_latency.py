@@ -96,6 +96,7 @@ class ConversationLatencyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(router, "_all_channels", AsyncMock(return_value=[channel])) as catalogue,
             patch.object(router, "_conversation_rows", AsyncMock(return_value=("700", True, [{"text": "История"}]))),
             patch.object(router, "_history_sync_info", AsyncMock(return_value={"status": "imported", "complete": True})),
+            patch.object(router, "_recipient_unavailable_reason", AsyncMock(return_value="")),
             patch.object(router, "_resolved_client_identity", AsyncMock(side_effect=AssertionError("unnecessary identity lookup"))) as identity,
             patch.object(router, "_mark_thread_read", AsyncMock()),
             patch.object(router, "_responsible_admin_id", AsyncMock(return_value=None)),

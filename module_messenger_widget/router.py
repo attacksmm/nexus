@@ -1931,7 +1931,9 @@ async def _sync_vk_conversations(*, full: bool = False) -> dict[str, int]:
     if not _vk_token() or not _vk_group_id():
         return {"conversations": 0, "messages": 0, "names": 0}
     try:
-        names = await _refresh_vk_placeholder_names()
+        # The normal five-minute poll already receives provider profile names.
+        # Historical name repair is an explicit full-sync maintenance action.
+        names = await _refresh_vk_placeholder_names() if full else 0
     except Exception:
         names = 0
         _log("warning", "VK profile refresh failed")
@@ -7222,6 +7224,25 @@ async def _responsible_admin_id(
     return int(device["admin_id"]) if _clean(device.get("admin_role"), 20) == "employee" else None
 
 
+def _direct_provider_routes(provider: str) -> list[tuple[str, str]]:
+    """Known exact routes, without provider calls or chat-table discovery."""
+    routes = {
+        (row["channel_id"], row["transport"])
+        for row in _all_channels_cache[1]
+        if row.get("provider") == provider and row.get("channel_id") and row.get("transport")
+    }
+    if provider == "vk" and _vk_channel_id():
+        routes.add((_vk_channel_id(), "vk"))
+    elif provider == SALEBOT_PROVIDER:
+        routes.add(("salebot:project", "salebot"))
+    elif provider == TELEGRAM_PROVIDER:
+        state = _telegram_state_cache[1] or {}
+        account = state.get("account") or {}
+        if account.get("id"):
+            routes.add(("telegram-personal:" + str(account["id"]), "telegram"))
+    return sorted(routes)
+
+
 async def _assign_client_threads(
     admin_id: int | None,
     *,
@@ -7241,23 +7262,20 @@ async def _assign_client_threads(
     try:
         if phone_hash:
             await db.execute(
-                "UPDATE client_links SET responsible_admin_id=? WHERE phone_hash=?",
-                (admin_id, phone_hash),
+                "UPDATE client_links SET responsible_admin_id=? WHERE phone_hash=? AND responsible_admin_id IS NOT ?",
+                (admin_id, phone_hash, admin_id),
             )
             await db.execute(
-                "UPDATE wazzup_chats SET responsible_admin_id=? WHERE phone_hash=?",
-                (admin_id, phone_hash),
+                "UPDATE wazzup_chats SET responsible_admin_id=? WHERE phone_hash=? AND responsible_admin_id IS NOT ?",
+                (admin_id, phone_hash, admin_id),
             )
         for provider, peer_id in direct_links:
-            channel_prefix = (
-                "vk:" if provider == "vk"
-                else "salebot:" if provider == SALEBOT_PROVIDER
-                else "telegram-personal:"
-            )
-            await db.execute(
-                "UPDATE wazzup_chats SET responsible_admin_id=? WHERE channel_id LIKE ? AND chat_id=?",
-                (admin_id, channel_prefix + "%", _clean(peer_id, 250)),
-            )
+            for channel_id, transport in _direct_provider_routes(provider):
+                await db.execute(
+                    "UPDATE wazzup_chats SET responsible_admin_id=? "
+                    "WHERE channel_id=? AND chat_type=? AND chat_id=? AND responsible_admin_id IS NOT ?",
+                    (admin_id, channel_id, transport, _clean(peer_id, 250), admin_id),
+                )
         await db.commit()
     finally:
         if owns_db:
@@ -7552,43 +7570,41 @@ async def _provider_profile_name(
     external_id = _clean(external_id, 300)
     if not external_id:
         return ""
-    if provider == "vk":
-        name = await _streams_vk_profile_name(external_id)
-        if name:
-            return name
-    source = "telegram_personal" if provider == TELEGRAM_PROVIDER else provider
-    chat = message = event = None
+    chat = message = None
     owns_db = db is None
     try:
         if db is None:
             db = await _connect()
-        chat_type = "telegram" if provider == TELEGRAM_PROVIDER else provider
-        chat = await (await db.execute(
-            """SELECT contact_name FROM wazzup_chats
-               WHERE chat_type=? AND chat_id=? AND contact_name<>''
-               ORDER BY updated_at DESC LIMIT 1""",
-            (chat_type, external_id),
-        )).fetchone()
-        message = await (await db.execute(
-            """SELECT author_name FROM wazzup_messages
-               WHERE chat_type=? AND chat_id=? AND direction='incoming' AND author_name<>''
-               ORDER BY sent_at DESC,id DESC LIMIT 1""",
-            (chat_type, external_id),
-        )).fetchone()
-        event = await (await db.execute(
-            """SELECT client_name FROM notification_events
-               WHERE source=? AND chat_id=? AND client_name<>''
-               ORDER BY sent_at DESC,created_at DESC LIMIT 1""",
-            (source, external_id),
-        )).fetchone()
+        for channel_id, chat_type in _direct_provider_routes(provider):
+            chat = await (await db.execute(
+                "SELECT contact_name FROM wazzup_chats "
+                "WHERE channel_id=? AND chat_type=? AND chat_id=? AND contact_name<>'' LIMIT 1",
+                (channel_id, chat_type, external_id),
+            )).fetchone()
+            if chat:
+                break
+            message = await (await db.execute(
+                "SELECT author_name FROM wazzup_messages "
+                "WHERE channel_id=? AND chat_type=? AND chat_id=? "
+                "AND direction='incoming' AND author_name<>'' ORDER BY sent_at DESC,id DESC LIMIT 1",
+                (channel_id, chat_type, external_id),
+            )).fetchone()
+            if message:
+                break
     except (RuntimeError, aiosqlite.Error):
         pass
     finally:
         if owns_db and db is not None:
             await db.close()
-    for row, field in ((chat, "contact_name"), (message, "author_name"), (event, "client_name")):
+    for row, field in ((chat, "contact_name"), (message, "author_name")):
         if row and _clean(row[field], 200):
             return _clean(row[field], 200)
+    # Card channel rendering supplies a connection: use saved names only there.
+    # Independent profile enrichment may resolve a missing VK name remotely.
+    if provider == "vk" and owns_db:
+        name = await _streams_vk_profile_name(external_id)
+        if name:
+            return name
     if provider == SALEBOT_PROVIDER:
         cached = _salebot_history_cache.get(external_id)
         if cached:
@@ -12946,9 +12962,14 @@ async def _conversation_rows(
         else:
             chat = await (
                 await db.execute(
-                    """SELECT chat_id FROM wazzup_chats WHERE channel_id=? AND chat_type=?
-                       AND (phone_hash=? OR chat_id=?) ORDER BY updated_at DESC,id DESC LIMIT 1""",
-                    (channel_id, transport, phone_hash, digits),
+                    """SELECT chat_id FROM (
+                       SELECT chat_id,updated_at,id FROM wazzup_chats INDEXED BY ix_gcw_chats_phone
+                       WHERE phone_hash=? AND phone_hash<>'' AND channel_id=? AND chat_type=?
+                       UNION
+                       SELECT chat_id,updated_at,id FROM wazzup_chats
+                       WHERE channel_id=? AND chat_type=? AND chat_id=? AND chat_id<>''
+                       ) ORDER BY updated_at DESC,id DESC LIMIT 1""",
+                    (phone_hash, channel_id, transport, channel_id, transport, digits),
                 )
             ).fetchone()
         chat_id = _clean(chat["chat_id"], 250) if chat else ""
@@ -12962,8 +12983,11 @@ async def _conversation_rows(
         elif chat_id:
             rows = await (
                 await db.execute(
-                    _conversation_message_query("channel_id=? AND chat_type=? AND (chat_id=? OR phone_hash=?)"),
-                    (channel_id, transport, chat_id, phone_hash, limit, offset),
+                    _conversation_message_query("id IN ("
+                        "SELECT id FROM wazzup_messages WHERE channel_id=? AND chat_type=? AND chat_id=? "
+                        "UNION SELECT id FROM wazzup_messages INDEXED BY ix_gcw_messages_phone "
+                        "WHERE phone_hash=? AND phone_hash<>'' AND channel_id=? AND chat_type=?)"),
+                    (channel_id, transport, chat_id, phone_hash, channel_id, transport, limit, offset),
                 )
             ).fetchall()
         else:
@@ -13014,11 +13038,21 @@ async def _conversation_presence(
     if db is None:
         db = await _connect()
     try:
-        rows = await (await db.execute(
-            """SELECT channel_id,chat_type FROM wazzup_chats
-               WHERE phone_hash=? OR chat_id=?""",
-            (phone_hash, digits),
-        )).fetchall()
+        # An indexed phone OR an unindexed chat_id scans the entire chat table.
+        # Cancellation of an aiosqlite await does not interrupt that scan.
+        rows = []
+        if phone_hash:
+            rows.extend(await (await db.execute(
+                "SELECT channel_id,chat_type FROM wazzup_chats WHERE phone_hash=?",
+                (phone_hash,),
+            )).fetchall())
+        if digits:
+            for channel_id, transport in pairs:
+                rows.extend(await (await db.execute(
+                    "SELECT channel_id,chat_type FROM wazzup_chats "
+                    "WHERE channel_id=? AND chat_type=? AND chat_id=? LIMIT 1",
+                    (channel_id, transport, digits),
+                )).fetchall())
     finally:
         if owns_db:
             await db.close()

@@ -78,6 +78,10 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
 
     async def asyncTearDown(self):
+        tasks = list(router._widget_housekeeping_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.tmp.cleanup()
 
     async def _code(self) -> str:
@@ -1646,6 +1650,9 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         }])
 
     async def test_direct_channel_names_come_from_the_exact_provider_chat(self):
+        router._telegram_state_cache = (time.monotonic() + 3600, {
+            "authorized": True, "account": {"id": "5601500901"},
+        })
         now = router._iso()
         async with aiosqlite.connect(router._must_db()) as db:
             await db.executemany(

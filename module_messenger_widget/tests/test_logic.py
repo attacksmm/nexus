@@ -1331,7 +1331,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
 
             async def slow_check(_data, _mode, _device, provider, **kwargs):
                 self.assertEqual(provider, router.TELEGRAM_PROVIDER)
-                self.assertEqual(kwargs.get("resolution_timeout"), 30)
+                self.assertEqual(kwargs.get("resolution_timeout"), 4)
                 await gate.wait()
                 router._remember_card_link(cache_key, {})
                 return {}
@@ -1467,7 +1467,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertNotIn("Короткая памятка", guide)
         self.assertIn('id="articleSearchInput"', guide)
         self.assertIn('id="articleSearchResults"', guide)
-        self.assertIn('<script src="../static/guide.js?v=5927"></script>', guide)
+        self.assertIn('<script src="../static/guide.js?v=52018"></script>', guide)
         self.assertNotIn('<script>', guide)
         self.assertIn('main section[id]', guide_js)
         self.assertIn('history.pushState(null,"","#"+article.id)', guide_js)
@@ -1589,8 +1589,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("Показываем сохранённые данные · обновляем…", amo)
         self.assertIn('id="refreshState" class="cache-refresh" hidden', amo)
         self.assertIn("localStorage.removeItem(cardCacheStoreKey())", amo)
-        self.assertNotIn("channelRefreshAttempts>=3", amo)
-        self.assertIn("while(expectedGeneration===bootGeneration&&token&&widgetVisible)", amo)
+        self.assertIn("channelRefreshAttempts>=3", amo)
+        self.assertIn("while(expectedGeneration===bootGeneration&&token&&widgetVisible&&attempt<2)", amo)
         self.assertIn("Каналы отвечают дольше обычного · попытка ${attempt}", amo)
         self.assertIn("Nexus продолжает загрузку", amo)
         self.assertNotIn("Профили загрузятся после повторной попытки", amo)
@@ -1605,7 +1605,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("Загружаем историю переписки…", amo)
         self.assertIn("data.history_status!=='syncing'", amo)
         self.assertIn("function deliveryStatus(status)", amo)
-        self.assertIn("label:'Отправлено'", amo)
+        self.assertIn("label:'Отправлено · доставка ещё не подтверждена'", amo)
         self.assertIn("label:'Ошибка доставки'", amo)
         self.assertIn("label:'Прочитано'", amo)
         self.assertIn("appendMessageMeta(meta,row)", amo)
