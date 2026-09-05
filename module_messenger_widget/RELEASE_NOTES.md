@@ -1,4 +1,13 @@
-# Messenger Widget 5.19.3
+# Messenger Widget
+
+## 5.20.15 — responsive conversations and safe asynchronous updates
+
+- Saved VK messages render before provider refresh; concurrent history readers share one cancellable-by-lifecycle provider task.
+- Conversation/send reuse one channel catalogue; saved Wazzup history avoids unnecessary identity resolution.
+- amoCRM send results no longer wait for history refresh. Confirmation locks, captured context/subject and stale-response guards protect channel changes and newer drafts.
+- GC preserves per-conversation drafts, joins first-page requests, shows retry states and releases its invisible overlay on close.
+- Background polling preserves older-history reading and cannot re-enable a busy send button.
+- Validated with 189 Python tests, eight asynchronous UI tests and desktop/mobile browser fixtures. Live customer delivery was not exercised.
 
 Release candidate for the week-long production observation period.
 

@@ -1265,8 +1265,8 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("['pending','unverified'].includes(row.verification)", amo)
         self.assertIn("profileRefreshTimer=setTimeout(()=>loadProfileLinks(expectedGeneration,true),2000)", amo)
         self.assertNotIn("aria-label','Уточняем остальные профили'", amo)
-        self.assertIn("if(result.sent.length){await refreshActive(true);loadProfileLinks(bootGeneration,true)}", amo)
-        self.assertIn("else if(result.queued.length)setTimeout(()=>refreshActive(true),2500)", amo)
+        self.assertIn("if(result.sent.length){void refreshActive(true);if(!STANDALONE)void loadProfileLinks(bootGeneration,true)}", amo)
+        self.assertIn("else if(result.queued.length)setTimeout(()=>{if(sameConversation())void refreshActive(true)},2500)", amo)
 
     def test_amocrm_telegram_profile_reuses_an_exact_verified_card_link(self):
         class Index:
@@ -1552,7 +1552,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn(".profile-link.unverified::before{display:none}", amo)
         profile_header = amo.split('id="profileLinks" class="profile-links">', 1)[1].split('</div>', 1)[0]
         self.assertNotIn("spinner", profile_header)
-        self.assertIn("async function sendText(raw,rows,attachment)", amo)
+        self.assertIn("async function sendText(raw,rows,attachment,subject=", amo)
         self.assertNotIn("const preview=raw?await request('/template-preview'", amo)
         self.assertIn("text:raw,subject:row.provider==='email'", amo)
         self.assertIn("Promise.all(targets.map", amo)
@@ -1658,7 +1658,7 @@ class GetCourseWazzupLogicTests(unittest.TestCase):
         self.assertIn("function sizeMessageInput()", amo)
         self.assertIn("$('message').addEventListener('input',sizeMessageInput)", amo)
         self.assertIn("input.value=optimistic;sizeMessageInput()", amo)
-        self.assertIn("$('message').value='';sizeMessageInput()", amo)
+        self.assertIn("input.value='';sizeMessageInput()", amo)
         self.assertIn("$('send').classList.add('busy')", amo)
         self.assertIn("max-height:min(45vh,360px)", widget)
         self.assertIn("scrollbar-width:thin", amo)

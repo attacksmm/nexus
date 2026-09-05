@@ -22,7 +22,7 @@ class EmailGuardUiTests(unittest.TestCase):
             self.assertIn(">Нет, отменить</button>", source)
 
     def test_confirmation_covers_every_email_send_surface(self):
-        self.assertEqual(self.getcourse.count("!await confirmEmailRecommendations("), 2)
+        self.assertEqual(self.getcourse.count("await confirmEmailRecommendations("), 2)
         self.assertEqual(self.amocrm.count("!await confirmEmailRecommendations("), 1)
         self.assertIn("emailIsAmongSendTargets([channel])", self.getcourse)
         self.assertIn("emailIsAmongSendTargets(targets)", self.getcourse)
@@ -134,7 +134,7 @@ class EmailGuardUiTests(unittest.TestCase):
         self.assertNotIn("request('/inbox'", script)
         self.assertNotIn("request('/inbox/read'", script)
         self.assertIn("request('/mobile-context'", script)
-        self.assertIn("FRAME+'?standalone=1&v=5210'", script)
+        self.assertIn("FRAME+'?standalone=1&v=5215'", script)
         self.assertNotIn('id="appearanceButton"', page)
         self.assertNotIn('id="appearanceClose"', page)
         self.assertNotIn('id="refreshInbox"', page)

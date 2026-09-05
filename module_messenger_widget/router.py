@@ -238,6 +238,7 @@ _all_channels_cache: tuple[float, list[dict[str, str]]] = (0.0, [])
 _all_channels_inflight: asyncio.Task[Any] | None = None
 _all_channels_cache_owner: str = ""
 _vk_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
+_vk_history_inflight: dict[tuple[str, int], asyncio.Task[tuple[int, bool]]] = {}
 _telegram_history_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 _salebot_history_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _telegram_history_inflight: set[tuple[str, int]] = set()
@@ -1981,16 +1982,57 @@ async def _load_vk_history(peer_id: str, *, offset: int = 0, identity: dict[str,
         return 0, cached[1]
     if cached:
         _vk_history_cache.pop(cache_key, None)
-    link = await _external_link(peer_id=peer_id) or identity
-    if not link:
-        raise HTTPException(404, "Диалог не связан с GetCourse")
-    response = await _vk_request("messages.getHistory", {"group_id": _vk_group_id(), "peer_id": peer_id, "count": VK_HISTORY_PAGE_SIZE, "offset": max(0, offset)})
-    rows = response.get("items") if isinstance(response, dict) and isinstance(response.get("items"), list) else []
-    await _store_vk_messages(peer_id, rows, link)
-    total = int(response.get("count") or 0) if isinstance(response, dict) else 0
-    has_more = offset + len(rows) < total
-    _remember_direct_history(_vk_history_cache, cache_key, has_more, 60)
-    return len(rows), has_more
+    task = _vk_history_inflight.get(cache_key)
+    if task is None:
+        async def load() -> tuple[int, bool]:
+            link = await _external_link(peer_id=peer_id) or identity
+            if not link:
+                raise HTTPException(404, "Диалог не связан с GetCourse")
+            response = await _vk_request("messages.getHistory", {"group_id": _vk_group_id(), "peer_id": peer_id, "count": VK_HISTORY_PAGE_SIZE, "offset": max(0, offset)})
+            rows = response.get("items") if isinstance(response, dict) and isinstance(response.get("items"), list) else []
+            await _store_vk_messages(peer_id, rows, link)
+            total = int(response.get("count") or 0) if isinstance(response, dict) else 0
+            has_more = offset + len(rows) < total
+            _remember_direct_history(_vk_history_cache, cache_key, has_more, 60)
+            return len(rows), has_more
+
+        task = (
+            _module_lifecycle.create_task(load(), name="messenger-widget-vk-history")
+            if _module_lifecycle is not None else asyncio.create_task(load())
+        )
+        _vk_history_inflight[cache_key] = task
+
+        def completed(done: asyncio.Task[tuple[int, bool]]) -> None:
+            if _vk_history_inflight.get(cache_key) is done:
+                _vk_history_inflight.pop(cache_key, None)
+            if not done.cancelled():
+                done.exception()  # Retrieve errors even if every waiting request disconnected.
+
+        task.add_done_callback(completed)
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _vk_history_inflight.get(cache_key) is task:
+            _vk_history_inflight.pop(cache_key, None)
+
+
+def _schedule_vk_history(peer_id: str, identity: dict[str, Any]) -> None:
+    cached = _vk_history_cache.get((peer_id, 0))
+    if cached and cached[0] > time.monotonic():
+        return
+
+    async def refresh() -> None:
+        try:
+            await _load_vk_history(peer_id, identity=identity)
+        except Exception:
+            _log("warning", "VK history refresh failed peer=%s", peer_id)
+
+    # Stored messages remain readable if VK is slow or unavailable. Concurrent
+    # cards join the same remote request inside _load_vk_history.
+    if _module_lifecycle is not None:
+        _module_lifecycle.create_task(refresh(), name="messenger-widget-vk-history-refresh")
+    else:
+        asyncio.create_task(refresh())
 
 
 async def vk_background_loop() -> None:
@@ -12173,8 +12215,12 @@ async def widget_channels(request: Request) -> JSONResponse:
             await channel_db.close()
 
 
-async def _requested_channel(channel_id: str, transport: str, provider: str = "wazzup") -> dict[str, str]:
-    channels = await _all_channels()
+async def _requested_channel(
+    channel_id: str, transport: str, provider: str = "wazzup", *,
+    channels: list[dict[str, str]] | None = None,
+) -> dict[str, str]:
+    if channels is None:
+        channels = await _all_channels()
     for channel in channels:
         if channel["channel_id"] == channel_id and channel["transport"] == transport and channel.get("provider", "wazzup") == provider:
             return channel
@@ -13238,7 +13284,7 @@ async def widget_conversation(request: Request) -> JSONResponse:
             thread = await _inbox_thread_context(*thread_fields, active_channels, device)
         offset = max(0, min(int(data.get("offset") or 0), 100_000))
         if provider == EMAIL_PROVIDER:
-            await _requested_channel(channel_id, transport, provider)
+            await _requested_channel(channel_id, transport, provider, channels=active_channels)
             email_service = _module_service("email-channel", "service_conversation")
             context = await _resolve_widget_context(data, mode, device)
             result = await email_service(context=context, offset=offset, limit=CONVERSATION_PAGE_SIZE)
@@ -13246,7 +13292,7 @@ async def widget_conversation(request: Request) -> JSONResponse:
             result["offset"] = offset
             return _widget_response(request, result)
         if provider == SALEBOT_PROVIDER:
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             link = await _provider_card_link(data, mode, device, provider)
             client_id = _clean(link.get("external_user_id"), 200)
             if not client_id:
@@ -13264,7 +13310,7 @@ async def widget_conversation(request: Request) -> JSONResponse:
                 "offset": offset, "next_offset": offset + len(messages), "has_more": has_more,
             })
         if provider == "vk":
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             same_provider = bool(thread and thread["channel_id"].startswith("vk:"))
             peer_id = _clean((thread or {}).get("chat_id"), 200) if same_provider else ""
             card_link: dict[str, Any] = {}
@@ -13279,10 +13325,18 @@ async def widget_conversation(request: Request) -> JSONResponse:
             link = await _external_link(peer_id=peer_id) or card_link
             if not peer_id or not link:
                 raise HTTPException(404, "Диалог VK не найден")
-            _, has_more = await _load_vk_history(peer_id, offset=offset, identity=link)
             chat_id, has_chat, messages = await _conversation_rows(
                 channel_id, "vk", "", CONVERSATION_PAGE_SIZE, exact_chat_id=peer_id, offset=offset,
             )
+            if not offset and messages:
+                cached_history = _vk_history_cache.get((peer_id, 0))
+                has_more = cached_history[1] if cached_history else len(messages) >= CONVERSATION_PAGE_SIZE
+                _schedule_vk_history(peer_id, link)
+            else:
+                _, has_more = await _load_vk_history(peer_id, offset=offset, identity=link)
+                chat_id, has_chat, messages = await _conversation_rows(
+                    channel_id, "vk", "", CONVERSATION_PAGE_SIZE, exact_chat_id=peer_id, offset=offset,
+                )
             if has_chat:
                 await _mark_thread_read(int(device["id"]), channel_id, "vk", peer_id)
             return _widget_response(request, {
@@ -13296,7 +13350,7 @@ async def widget_conversation(request: Request) -> JSONResponse:
                 "next_offset": offset + (len(messages) or (CONVERSATION_PAGE_SIZE if has_more else 0)), "has_more": has_more,
             })
         if provider == TELEGRAM_PROVIDER:
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             same_provider = bool(thread and thread["channel_id"].startswith("telegram-personal:"))
             peer_id = _clean((thread or {}).get("chat_id"), 200) if same_provider else ""
             card_link: dict[str, Any] = {}
@@ -13347,7 +13401,7 @@ async def widget_conversation(request: Request) -> JSONResponse:
         phone = thread["phone"] if thread else _normalize_phone(data.get("phone"))
         if not phone and not thread:
             raise HTTPException(400, "Телефон не указан")
-        channel = await _requested_channel(channel_id, transport, provider)
+        channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
         exact_thread = bool(
             thread
             and thread["channel_id"] == channel_id
@@ -13374,13 +13428,13 @@ async def widget_conversation(request: Request) -> JSONResponse:
         else:
             if not phone:
                 raise HTTPException(409, "Для этого канала нужен телефон клиента")
-            identity = await _resolved_client_identity(data, phone)
             chat_id, has_chat, messages = await _conversation_rows(
                 channel_id, transport, phone, CONVERSATION_PAGE_SIZE, offset=offset,
             )
             history = await _history_sync_info(channel_id, phone)
             should_import = not messages and (offset > 0 or await _history_sync_due(channel_id, phone))
             if should_import:
+                identity = await _resolved_client_identity(data, phone)
                 _schedule_wazzup_history(
                     device,
                     channel,
@@ -13554,7 +13608,7 @@ async def widget_send(request: Request) -> JSONResponse:
             ) else {}
 
         if provider == SALEBOT_PROVIDER:
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             link = await trusted_provider_link(provider)
             if not link:
                 link = await _provider_card_link(data, mode, device, provider)
@@ -13573,7 +13627,7 @@ async def widget_send(request: Request) -> JSONResponse:
                 phone=_clean(link.get("phone") or data.get("phone"), 40), entity_id=client_id,
             )
         if provider == "vk":
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             page_kind, entity_id = _page_context(source_url) if not thread else ("inbox", thread["chat_id"])
             peer_id = _clean((thread or {}).get("chat_id"), 200)
             card_link: dict[str, Any] = await trusted_provider_link("vk") if not thread else {}
@@ -13599,7 +13653,7 @@ async def widget_send(request: Request) -> JSONResponse:
                 page_kind=page_kind, entity_id=entity_id,
             )
         if provider == TELEGRAM_PROVIDER:
-            channel = await _requested_channel(channel_id, transport, provider)
+            channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
             page_kind, entity_id = _page_context(source_url) if not thread else ("inbox", thread["chat_id"])
             peer_id = _clean((thread or {}).get("chat_id"), 200)
             card_link: dict[str, Any] = await trusted_provider_link(TELEGRAM_PROVIDER) if not thread else {}
@@ -13645,7 +13699,7 @@ async def widget_send(request: Request) -> JSONResponse:
                 raise HTTPException(400, "Телефон не указан")
             if mode != "amocrm" and (not page_kind or not source_url.startswith(_allowed_origin() + "/")):
                 raise HTTPException(400, "Откройте карточку GetCourse с заполненным телефоном")
-        channel = await _requested_channel(channel_id, transport, provider)
+        channel = await _requested_channel(channel_id, transport, provider, channels=active_channels)
         exact_thread = bool(
             thread
             and thread["channel_id"] == channel_id

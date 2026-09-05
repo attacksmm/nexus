@@ -416,7 +416,7 @@
       ".layer [hidden]{display:none!important}",
       ".backdrop{position:absolute;inset:0;background:rgba(10,16,24,.38);opacity:0;transition:opacity .16s;pointer-events:auto}",
       ".drawer{position:absolute;top:0;right:0;width:62vw;height:100dvh;background:#fff;border-left:1px solid #bac4ce;box-shadow:-18px 0 55px rgba(15,23,42,.2);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);transform:translateX(100%);transition:transform .18s ease,width .16s;pointer-events:auto}.layer[data-drawer-size='small'] .drawer{width:44vw}.layer[data-drawer-size='large'] .drawer{width:84vw}",
-      ".layer.open .backdrop{opacity:1}.layer.open .drawer{transform:none}",
+      ".layer:not(.open) .backdrop,.layer:not(.open) .drawer{pointer-events:none;visibility:hidden}.layer.open .backdrop{opacity:1}.layer.open .drawer{transform:none}",
       ".head{min-height:56px;display:grid;grid-template-columns:minmax(130px,.45fr) minmax(120px,1fr) auto auto auto auto auto;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #d9e0e7;background:#f6f8fa}",
       ".title{min-width:0;grid-column:1;grid-row:1}.profile-links{min-width:0;grid-column:2;grid-row:1;display:flex;align-items:center;gap:5px;overflow-x:auto;scrollbar-width:none}.profile-links::-webkit-scrollbar{display:none}.drawer-send-all{grid-column:3;grid-row:1}.copy{grid-column:4;grid-row:1}.gc-card-action{grid-column:5;grid-row:1}.drawer-settings{grid-column:6;grid-row:1}.close:not(.drawer-settings){grid-column:7;grid-row:1}.title b{display:block;font-size:14px;line-height:1.25}.title span{display:block;margin-top:2px;color:#66788a;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
       ".profile-link,.profile-loading,.profile-retry,.gc-card-action{flex:0 0 auto;height:32px;display:inline-flex;align-items:center;gap:6px;padding:0 9px;border:1px solid #b8c4ce;border-radius:3px;background:#fff;color:#263746;font:600 12px Arial,sans-serif;text-decoration:none;white-space:nowrap}.profile-link:hover,.profile-retry:hover,.gc-card-action:hover{background:var(--accent-soft)}.profile-loading{border-color:transparent;background:transparent;color:#66788a}.profile-loading .spinner,.gc-card-action.busy:before{width:12px;height:12px;flex:0 0 12px;margin:0}.profile-retry,.gc-card-action{cursor:pointer}.gc-card-action:disabled{color:#788895;cursor:wait}",
@@ -458,6 +458,7 @@
   var channelRetryTimer = null;
   var conversationSignature = "";
   var conversationCache = new Map();
+  var composerDrafts = new Map();
   var channelCache = new Map();
   var channelRequests = new Map();
   var conversationGeneration = 0;
@@ -478,7 +479,7 @@
   function conversationKey(payload) {
     return [
       payload.thread_channel_id, payload.thread_chat_type, payload.thread_chat_id,
-      payload.entity_type, payload.entity_id, payload.phone,
+      payload.platform, payload.entity_type, payload.entity_id, payload.phone, payload.email,
       payload.channel_id, payload.transport, payload.provider
     ].map(function (value) { return String(value || ""); }).join("|");
   }
@@ -572,6 +573,7 @@
   }
 
   function stopConversationPoll() {
+    saveComposerDraft();
     if (conversationTimer) clearTimeout(conversationTimer);
     conversationTimer = null;
     conversationGeneration += 1;
@@ -579,9 +581,22 @@
   }
 
   function pauseConversationPoll() {
+    saveComposerDraft();
     if (conversationTimer) clearTimeout(conversationTimer);
     conversationTimer = null;
     conversationGeneration += 1;
+  }
+
+  function saveComposerDraft() {
+    var composer = drawer && drawer.body.querySelector('.composer');
+    if (!composer || !composer._draftKey) return;
+    var input = composer.querySelector('textarea'), subject = composer.querySelector('input[type="text"]');
+    composerDrafts.delete(composer._draftKey);
+    composerDrafts.set(composer._draftKey, {
+      text: input.value, subject: subject ? subject.value : '',
+      sendAll: drawer.sendAll.querySelector('input').checked
+    });
+    if (composerDrafts.size > 12) composerDrafts.delete(composerDrafts.keys().next().value);
   }
 
   function ensureDrawer() {
@@ -1184,6 +1199,7 @@
     if (inboxTimer) clearTimeout(inboxTimer);
     inboxTimer = null;
     conversationCache.clear();
+    composerDrafts.clear();
     channelCache.clear();
     channelRequests.clear();
     if (inbox) inbox.wrap.classList.remove("open");
@@ -2492,12 +2508,14 @@
       feed._nextHistoryOffset = 0;
       feed._historyComplete = true;
     }
-    var signature = JSON.stringify([data.history_status, data.can_send, data.send_reason, messages.map(function (item) { return [item.external_id, item.status, item.text, item.sent_at, item.error_message]; })]);
+    var signature = JSON.stringify([data.history_status, data.can_send, data.send_reason, messages.map(function (item) { return [item.external_id, item.status, item.text, item.sent_at, item.error_message, item.content_uri, item.attachments]; })]);
     if (!offset && signature === feed._conversationSignature) return;
     if (!offset) feed._conversationSignature = signature;
     var pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+    var previousTop = feed.scrollTop;
     var existing = null;
     if (offset) {
+      feed._olderPagesLoaded = true;
       existing = document.createDocumentFragment();
       while (feed.firstChild) existing.appendChild(feed.firstChild);
     }
@@ -2505,7 +2523,8 @@
     if (!offset && !data.history_complete) {
       var note = document.createElement("div");
       note.className = "history-note";
-      if (data.history_status === "syncing") note.textContent = "Загружаем последние сообщения. Можно писать сразу.";
+      if (data.history_status === "loading") note.textContent = "Загружаем переписку…";
+      else if (data.history_status === "syncing") note.textContent = "Загружаем последние сообщения. Можно писать сразу.";
       else if (data.history_status === "no_access") note.textContent = "Нет доступа к чатам Wazzup. Назначьте сотруднику роль «Руководитель».";
       else if (data.history_status === "error") note.textContent = "Wazzup временно не отдал старую историю. Новые сообщения продолжат поступать через webhook; при следующем открытии интеграция попробует снова.";
       else if (data.history_status === "not_found") note.textContent = "Wazzup не нашёл диалог этого номера в выбранном канале. Если клиент напишет или вы начнёте диалог, он привяжется автоматически.";
@@ -2519,7 +2538,7 @@
       }
       feed.appendChild(note);
     }
-    if (!offset && !messages.length) {
+    if (!offset && !messages.length && data.history_status !== 'loading' && data.history_status !== 'syncing') {
       var empty = document.createElement("div");
       empty.className = "empty-chat";
       empty.textContent = "Сообщений по этому каналу пока нет. Можно начать диалог ниже.";
@@ -2587,11 +2606,20 @@
     });
     if (existing) feed.appendChild(existing);
     if (!offset && (pinned || !messages.length)) feed.scrollTop = feed.scrollHeight;
+    else if (!offset) feed.scrollTop = previousTop;
   }
 
   async function fetchConversation(channel, feed, silent, offset, retryOptions) {
+    if (!offset && feed._conversationRequest) return feed._conversationRequest;
+    var pending = loadConversationResponse(channel, feed, silent, offset, retryOptions);
+    if (!offset) feed._conversationRequest = pending;
+    try { return await pending; }
+    finally { if (feed._conversationRequest === pending) feed._conversationRequest = null; }
+  }
+
+  async function loadConversationResponse(channel, feed, silent, offset, retryOptions) {
     var token = localStorage.getItem(STORAGE_KEY) || "";
-    var payload = conversationPayload(channel, offset);
+    var payload = Object.assign({}, feed._contextPayload || conversationPayload(channel), { offset: Number(offset) || 0 });
     var attempts = retryOptions && retryOptions.autoRetry ? 2 : 1;
     for (var attempt = 0; attempt < attempts; attempt += 1) {
       try {
@@ -2602,7 +2630,18 @@
         });
         if (!offset && channel.provider === "email") channel.email_guidelines_required = data.email_guidelines_required !== false;
         if (!offset) rememberConversation(conversationKey(payload), data);
+        if (feed._contextPayload && (!drawer || drawer.body.querySelector('.message-feed') !== feed || activeChannel !== channel)) return data;
+        var oldError = feed.querySelector('.conversation-error');
+        if (oldError) oldError.remove();
         renderMessageFeed(feed, data);
+        feed._hasResponse = true;
+        if (!offset && feed._contextPayload && drawer && drawer.body.querySelector('.message-feed') === feed) {
+          var composeInput = drawer.body.querySelector('textarea'), composeSend = drawer.body.querySelector('.send');
+          if (composeInput && composeSend) {
+            composeInput.disabled = data.can_send === false || !!feed._contextPayload.read_only;
+            composeSend.disabled = composeInput.disabled || !!composeSend._pending || !!composeInput.dataset.attachmentUploading;
+          }
+        }
         return data;
       } catch (error) {
         if (attempt + 1 < attempts && error && error.retryable) {
@@ -2611,6 +2650,29 @@
           continue;
         }
         if (!silent) throw error;
+        if (drawer && drawer.body.querySelector('.message-feed') === feed && activeChannel === channel) {
+          if (!feed._hasResponse) feed.replaceChildren();
+          var notice = feed.querySelector('.conversation-error');
+          if (!notice) {
+            notice = document.createElement('div');
+            notice.className = 'history-note conversation-error';
+            notice.setAttribute('role', 'status');
+            feed.prepend(notice);
+          }
+          notice.textContent = error.reauth ? 'Срок входа закончился. Откройте настройки и войдите снова.' :
+            (feed._hasResponse ? 'Не удалось обновить сообщения. Повторяем автоматически.' : 'Не удалось загрузить сообщения. Повторяем автоматически.');
+          var retry = document.createElement('button');
+          retry.type = 'button'; retry.className = 'tool'; retry.textContent = 'Повторить';
+          retry.onclick = async function () {
+            retry.disabled = true;
+            retry.classList.add('busy');
+            retry.replaceChildren();
+            var spinner = document.createElement('span'); spinner.className = 'spinner';
+            retry.append(spinner, document.createTextNode('Загружаем сообщения…'));
+            await fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 });
+          };
+          notice.append(document.createElement('br'), retry);
+        }
         return null;
       }
     }
@@ -2622,8 +2684,9 @@
     if (conversationTimer) clearTimeout(conversationTimer);
     conversationTimer = setTimeout(async function poll() {
       if (!drawer || !drawer.layer.classList.contains("open") || activeChannel !== channel) return;
-      if (!document.hidden) await fetchConversation(channel, feed, true);
-      scheduleConversationPoll(channel, feed);
+      var readingOlder = feed._olderPagesLoaded && feed.scrollHeight - feed.scrollTop - feed.clientHeight > 80;
+      if (!document.hidden && !readingOlder && !feed._historyLoading) await fetchConversation(channel, feed, true);
+      if (drawer && drawer.layer.classList.contains('open') && activeChannel === channel && drawer.body.querySelector('.message-feed') === feed) scheduleConversationPoll(channel, feed);
     }, 5000);
   }
 
@@ -2659,6 +2722,10 @@
       enableHistoryScroll(feed, function (offset) { return fetchConversation(channel, feed, false, offset); });
       var composer = document.createElement("div");
       composer.className = "composer";
+      composer._draftKey = key;
+      feed._contextPayload = conversationPayload(channel);
+      feed._hasResponse = Boolean(cached);
+      var draft = composerDrafts.get(key);
       var subject = document.createElement("input");
       subject.type = "text";
       subject.maxLength = 300;
@@ -2669,6 +2736,11 @@
       var input = document.createElement("textarea");
       input.maxLength = 4000;
       input.placeholder = "Введите сообщение…";
+      if (draft) {
+        input.value = draft.text || '';
+        subject.value = draft.subject || subject.value;
+        d.sendAll.querySelector('input').checked = !!draft.sendAll;
+      }
       var send = document.createElement("button");
       send.className = "send";
       send.type = "button";
@@ -2683,6 +2755,7 @@
         setComposeStatus(errorNode, context().read_only ? "Откройте карточку клиента, чтобы ответить." : (initial.send_reason || "Канал недоступен для нового диалога."), false);
       }
       send.addEventListener("click", async function () {
+        if (send._pending || send.disabled) return;
         var text = input.value.trim();
         var attachment = { attachment_url: input.dataset.attachmentUrl || "", attachment_type: input.dataset.attachmentType || "" };
         if (input.dataset.attachmentUploading) { setComposeStatus(errorNode, "Дождитесь загрузки изображения", false); return; }
@@ -2700,23 +2773,37 @@
           setComposeStatus(errorNode, "Email нельзя отправлять с вложением. Уберите изображение или отключите «Отправить везде».", false);
           return;
         }
-        if ((sendEverywhere ? hasEmailSendTarget(targets) : emailIsAmongSendTargets(targets)) && !await confirmEmailRecommendations(d.root)) return;
+        var sendContext = context(), sendSubject = subject.value;
+        var payloadForSend = function (target) { return Object.assign({}, sendContext, {
+          channel_id: target.channel_id, transport: target.transport, provider: target.provider || 'wazzup', offset: 0
+        }); };
+        send._pending = true;
+        send.disabled = true;
+        if (sendEverywhere ? hasEmailSendTarget(targets) : emailIsAmongSendTargets(targets)) {
+          var confirmed = await confirmEmailRecommendations(d.root);
+          if (!confirmed || !input.isConnected || !d.layer.classList.contains('open') || channelContextKey(context()) !== channelContextKey(sendContext)) {
+            send._pending = false; send.disabled = input.disabled; return;
+          }
+        }
         send.disabled = true;
         send.classList.add("busy");
         send.textContent = "Отправляем…";
         setComposeStatus(errorNode, "", false);
         try {
           var token = localStorage.getItem(STORAGE_KEY) || "";
-          var result = await sendComposerText(text, targets, conversationPayload, token, attachment, subject.value);
+          var result = await sendComposerText(text, targets, payloadForSend, token, attachment, sendSubject);
           var success = sendResultSucceeded(result);
-          if (sendResultAccepted(result)) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
+          if (sendResultAccepted(result) && input.value.trim() === text) { input.value = ""; resizeComposerTextarea(input); if (input.nexusClearAttachment) input.nexusClearAttachment(); }
+          var savedDraft = composerDrafts.get(key);
+          if (sendResultAccepted(result) && savedDraft && String(savedDraft.text || '').trim() === text) savedDraft.text = '';
+          if (input.isConnected) saveComposerDraft();
           conversationSignature = "";
           send.textContent = "Отправка…";
           setComposeStatus(errorNode, result.status, success);
           fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 }).catch(function () {});
         } catch (error) {
           setComposeStatus(errorNode, emailIsAmongSendTargets(targets) ? "Отправка остановлена: " + (error.message || "Не удалось отправить письмо") : (error.message || "Не удалось отправить сообщение"), false);
-        } finally { send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = false; }
+        } finally { send._pending = false; send.classList.remove("busy"); send.textContent = "Отправить"; send.disabled = input.disabled; }
       });
       composer.appendChild(subject);
       composer.appendChild(input);
@@ -2735,6 +2822,7 @@
       sendAllInput.onchange();
       conversationSignature = "";
       renderMessageFeed(feed, initial);
+      resizeComposerTextarea(input);
       fetchConversation(channel, feed, true, 0, { timeoutMs: 8000 }).then(function (fresh) {
         if (!fresh || activeChannel !== channel || generation !== conversationGeneration) return;
         if (channel.provider === "email") channel.email_guidelines_required = fresh.email_guidelines_required !== false;
