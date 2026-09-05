@@ -4245,10 +4245,14 @@ def _recipient_unavailable_key(channel_id: str, transport: str, phone_hash: str)
     return "recipient-unavailable:" + hashlib.sha256(f"{channel_id}|{transport}|{phone_hash}".encode()).hexdigest()
 
 
-async def _recipient_unavailable_reason(channel_id: str, transport: str, phone: str) -> str:
+async def _recipient_unavailable_reason(channel_id: str, transport: str, phone: str, *, db: Any = None) -> str:
     if not _normalize_phone(phone):
         return ""
-    return await _setting(_recipient_unavailable_key(channel_id, transport, _phone_hash(phone)))
+    key = _recipient_unavailable_key(channel_id, transport, _phone_hash(phone))
+    if db is not None:
+        row = await (await db.execute("SELECT value FROM module_settings WHERE key=?", (key,))).fetchone()
+        return _clean(row["value"], 1000) if row else ""
+    return await _setting(key)
 
 
 async def _store_recipient_state(db: Any, channel_id: str, transport: str, phone_hash: str, reason: str) -> None:
@@ -6648,6 +6652,10 @@ async def _all_channels(*, refresh: bool = False) -> list[dict[str, str]]:
 
         task = asyncio.create_task(load())
         _all_channels_inflight = task
+    if cached and not refresh:
+        # The refresh is already shared and running. Known configured channels
+        # need not wait another 700 ms whenever their catalogue expires.
+        return [dict(row) for row in cached]
     try:
         return [dict(row) for row in await asyncio.wait_for(asyncio.shield(task), timeout=0.7)]
     except TimeoutError:
@@ -8157,11 +8165,24 @@ async def _widget_getcourse_card_data(
         if callable(resolver):
             gc_id = re.sub(r"\D+", "", await _run_identity_lookup(resolver, "getcourse", context))
     service = _module_service("student-transfer", "service_widget_student")
-    return await service(
+    result = await service(
         gc_user_id=gc_id, email=context.get("email") or "", phone=context.get("phone") or "",
         name=context.get("name") or "",
         include_access=include_access, summary_only=summary_only,
     )
+    item = result.get("item") or {}
+    if result.get("found") and not result.get("paid_access") and item.get("enrollment_id"):
+        try:
+            trial_service = _module_service("student-transfer", "service_widget_test_period")
+            trial = await asyncio.wait_for(trial_service(
+                enrollment_id=item["enrollment_id"], action="status",
+            ), timeout=1)
+            result["test_period"] = trial
+            if trial.get("status") in {"active", "active_external"}:
+                result["item"] = {**item, "course_display": "Тестовый доступ (не покупка)"}
+        except Exception:
+            result["test_period_pending"] = True
+    return result
 
 
 async def service_transfer_recipients(
@@ -12416,7 +12437,7 @@ async def widget_channels(request: Request) -> JSONResponse:
                         _card_link_cache_key(context, device, TELEGRAM_PROVIDER, "")
                     ) if attemptable and not peer_id else "verified"
                     verification_pending = bool(
-                        attemptable and not peer_id and state in {"unknown", "pending"}
+                        attemptable and not peer_id and state == "pending"
                     )
                     can_send = bool(peer_id or attemptable)
                     if peer_id:
@@ -12430,7 +12451,7 @@ async def widget_channels(request: Request) -> JSONResponse:
                     else:
                         reason = "Пользователь Telegram не найден" if phone else "Телефон клиента не найден"
             if provider == TELEGRAM_PROVIDER or channel.get("transport") in {"telegram", "max"}:
-                unavailable = await _recipient_unavailable_reason(channel["channel_id"], channel["transport"], phone)
+                unavailable = await _recipient_unavailable_reason(channel["channel_id"], channel["transport"], phone, db=channel_db)
                 if unavailable:
                     can_send, reason, verification_pending = False, unavailable, False
             return ({

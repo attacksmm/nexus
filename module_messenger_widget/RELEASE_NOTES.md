@@ -1,5 +1,12 @@
 # Messenger Widget
 
+## 5.20.20 — channel readiness and trial summaries
+
+- Expired known channel catalogues render immediately while the shared refresh runs.
+- Telegram shows an explicit phone lookup action when no lookup is running, not a misleading pending spinner.
+- MAX/Telegram recipient restrictions reuse the card database connection.
+- Unpaid GC summaries identify an active recorded trial separately from purchased access; status lookup is bounded to one second and never grants/revokes access.
+
 ## 5.20.19 — indexed card reads under production load
 
 - Channel presence uses separate phone/exact-route indexed reads, never an unindexed OR across all chats.

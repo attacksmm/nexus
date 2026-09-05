@@ -879,8 +879,8 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(views[0]["can_send"])
         self.assertNotIn("pending", views[0])
         self.assertTrue(views[1]["can_send"])
-        self.assertTrue(views[1]["pending"])
-        self.assertEqual(views[1]["label"], "TG Personal")
+        self.assertNotIn("pending", views[1])
+        self.assertEqual(views[1]["label"], "TG Personal · найти по номеру")
         self.assertEqual(views[1]["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
         self.assertTrue(json.loads(repeated.body)["channels"][1]["can_send"])
 
@@ -1713,8 +1713,8 @@ class GetCourseWazzupWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ))
         view = json.loads(response.body)["channels"][0]
         self.assertTrue(view["can_send"])
-        self.assertTrue(view["pending"])
-        self.assertEqual(view["label"], "TG Personal")
+        self.assertNotIn("pending", view)
+        self.assertEqual(view["label"], "TG Personal · найти по номеру")
         self.assertEqual(view["send_reason"], "Нажмите — Nexus попробует найти пользователя Telegram")
         resolver.assert_not_awaited()
 

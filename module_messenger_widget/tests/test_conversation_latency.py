@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -8,6 +9,40 @@ from test_workflow import request_for
 
 
 class ConversationLatencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_catalogue_renders_without_waiting_for_provider(self):
+        rows = [{"channel_id": "email", "transport": "email", "provider": "email"}]
+        gate = asyncio.Event()
+        async def slow(**kwargs):
+            await gate.wait()
+            return []
+        with patch.object(router, '_all_channels_cache_owner', str(router._db_path or '')), \
+                patch.object(router, '_all_channels_cache', (time.monotonic()-1, rows)), \
+                patch.object(router, '_all_channels_inflight', None), \
+                patch.object(router, '_cached_active_channels', side_effect=slow), \
+                patch.object(router, '_vk_channel', AsyncMock(return_value=None)), \
+                patch.object(router, '_telegram_channel', AsyncMock(return_value=None)), \
+                patch.object(router, '_email_channel', AsyncMock(return_value=None)):
+            result = await asyncio.wait_for(router._all_channels(), timeout=0.1)
+            self.assertEqual(result, rows)
+            self.assertFalse(gate.is_set())
+            task = router._all_channels_inflight
+            gate.set()
+            await task
+
+    async def test_active_trial_is_distinguished_from_paid_course(self):
+        student = AsyncMock(return_value={'found': True, 'paid_access': False,
+            'item': {'enrollment_id': 'gc:7', 'course_display': 'Доступ ещё не куплен'}})
+        trial = AsyncMock(return_value={'status': 'active', 'expires_at': '2026-09-10T00:00:00Z'})
+        def service(module, name):
+            return trial if name == 'service_widget_test_period' else student
+        with patch.object(router, '_identity_index', None), \
+                patch.object(router, '_apply_identity_rules', AsyncMock()), \
+                patch.object(router, '_module_service', side_effect=service):
+            result = await router._widget_getcourse_card_data(
+                {'entity_type': 'lead', 'entity_id': '7'}, 'amocrm', {}, summary_only=True)
+        self.assertEqual(result['item']['course_display'], 'Тестовый доступ (не покупка)')
+        self.assertFalse(result['paid_access'])
+
     async def asyncSetUp(self):
         router._vk_history_cache.clear()
         router._vk_history_inflight.clear()
