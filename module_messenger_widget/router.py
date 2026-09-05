@@ -322,6 +322,8 @@ def _card_link_state(key: tuple[str, ...]) -> str:
     if not cached or cached[0] <= time.monotonic():
         return "unknown"
     link = cached[1]
+    if link.get("retryable"):
+        return "unavailable"
     if link.get("pending"):
         return "pending"
     return "verified" if _clean(link.get("external_user_id"), 250) else "missing"
@@ -401,13 +403,13 @@ async def _amocrm_telegram_profile_link(
         try:
             result = await _provider_card_link(
                 data, mode, device, TELEGRAM_PROVIDER,
-                allow_phone_import=False, resolution_timeout=30,
+                allow_phone_import=False, resolution_timeout=4,
             )
             if result.get("pending"):
-                _remember_card_link(cache_key, {"pending": "1"})
+                _remember_card_link(cache_key, {"retryable": "1"})
         except Exception as exc:
             _log("warning", "Telegram profile verification deferred: %s", type(exc).__name__)
-            _remember_card_link(cache_key, {"pending": "1"})
+            _remember_card_link(cache_key, {"retryable": "1"})
         finally:
             _telegram_profile_inflight.pop(cache_key, None)
 
@@ -4186,6 +4188,7 @@ async def amo_task_delivery_loop() -> None:
 
 
 def _delivery_retry_delay(error: Any, attempts: int) -> int:
+    error = getattr(error, "provider_error", error)
     text_value = _clean(getattr(error, "detail", error), 1000)
     match = re.search(r"(?:FLOOD_WAIT_|wait of\s+)(\d+)", text_value, re.I)
     if match:
@@ -4197,12 +4200,77 @@ def _delivery_retry_delay(error: Any, attempts: int) -> int:
     return OUTBOUND_RETRY_SECONDS[min(max(0, attempts - 1), len(OUTBOUND_RETRY_SECONDS) - 1)]
 
 
+def _recipient_failure_reason(error: Any, transport: str = "") -> str:
+    error = getattr(error, "provider_error", error)
+    value = (type(error).__name__ + " " + _clean(getattr(error, "detail", error), 2000)).casefold()
+    label = {"max": "MAX", "telegram": "Telegram", "tgapi": "Telegram"}.get(transport, "этом мессенджере")
+    if any(code in value for code in ("phone_not_occupied", "username_not_occupied", "phonenotoccupied", "usernamenotoccupied")):
+        return f"Получатель в {label} не найден по указанным данным. Проверьте номер или попросите клиента написать первым."
+    if any(code in value for code in ("input_user_deactivated", "user_deactivated", "target_user_is_blocked", "chat_is_blocked", "user_is_blocked", "youblockeduser", "userblockederror", "inputuserdeactivated", "userdeactivated")):
+        return f"Отправка этому получателю в {label} недоступна: аккаунт удалён или переписка заблокирована. Выберите другой канал."
+    if any(code in value for code in ("privacy_premium_required", "privacypremiumrequired", "userprivacyrestricted")):
+        return "Настройки клиента не разрешают отправку в Telegram с этого аккаунта. Выберите другой канал или попросите клиента написать первым."
+    if "allow_payment_required" in value:
+        return "Клиент принимает сообщения в Telegram только за платные звёзды. Выберите другой канал."
+    return ""
+
+
+def _delivery_error_notice(error: Any, transport: str = "") -> str:
+    error = getattr(error, "provider_error", error)
+    reason = _recipient_failure_reason(error, transport)
+    if reason:
+        return reason
+    value = (type(error).__name__ + " " + _clean(getattr(error, "detail", error), 2000)).casefold()
+    rules = (
+        (("privacy_premium_required", "privacypremiumrequired", "userprivacyrestricted"), "Клиент принимает сообщения только от Telegram Premium. Выберите другой канал."),
+        (("allow_payment_required",), "Клиент принимает сообщения за платные звёзды Telegram. Выберите другой канал."),
+        (("session_revoked", "sessionrevoked", "authkey", "unauthorized", "не авторизован", "http 401", "api key"), "Канал потерял авторизацию. Попросите администратора переподключить его."),
+        (("channel_no_money", "not_enough_money"), "Канал не оплачен. Сообщите администратору и выберите другой канал."),
+        (("is_spam", "peer_flood", "peerflood"), "Мессенджер ограничил отправку из-за подозрения на спам. Сообщите администратору."),
+        (("bad_content", "can_not_get_content", "file_part_missing"), "Не удалось отправить вложение. Проверьте размер и формат файла и загрузите его заново."),
+        (("too many requests", "to_many_requests", "flood_wait", "floodwait", "http 429"), "Мессенджер ограничил частоту отправки. Повторная попытка возможна после паузы."),
+        (("timeout", "timed out", "connection", "network_error", "недоступен", "message_channel_unavailable"), "Мессенджер временно не отвечает. Доставка пока не подтверждена; не отправляйте копию сообщения."),
+        (("vk 901", "without permission", "no_user_permissions", "messages_not_text_first"), "Мессенджер запрещает писать этому клиенту первым. Попросите его написать вам или выберите другой канал."),
+        (("text_length", "message_empty", "validation_error", "bad_required_parameter"), "Мессенджер не принял содержимое сообщения. Проверьте текст, длину и вложения."),
+    )
+    for codes, notice in rules:
+        if any(code in value for code in codes):
+            return notice
+    return "Не удалось отправить сообщение. Выберите другой канал или передайте ошибку администратору."
+
+
+def _recipient_unavailable_key(channel_id: str, transport: str, phone_hash: str) -> str:
+    return "recipient-unavailable:" + hashlib.sha256(f"{channel_id}|{transport}|{phone_hash}".encode()).hexdigest()
+
+
+async def _recipient_unavailable_reason(channel_id: str, transport: str, phone: str) -> str:
+    if not _normalize_phone(phone):
+        return ""
+    return await _setting(_recipient_unavailable_key(channel_id, transport, _phone_hash(phone)))
+
+
+async def _store_recipient_state(db: Any, channel_id: str, transport: str, phone_hash: str, reason: str) -> None:
+    if not phone_hash:
+        return
+    key = _recipient_unavailable_key(channel_id, transport, phone_hash)
+    if not reason:
+        await db.execute("DELETE FROM module_settings WHERE key=?", (key,))
+    else:
+        await db.execute(
+            "INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (key, reason, _iso()),
+        )
+
+
 def _delivery_error_is_transient(error: Any) -> bool:
+    error = getattr(error, "provider_error", error)
+    if _recipient_failure_reason(error):
+        return False
     if isinstance(error, (TimeoutError, httpx.TimeoutException, ConnectionError)):
         return True
     response = getattr(error, "response", None)
     status_code = int(getattr(error, "status_code", 0) or getattr(response, "status_code", 0) or 0)
-    text_value = _clean(getattr(error, "detail", error), 1000).casefold()
+    text_value = (type(error).__name__ + " " + _clean(getattr(error, "detail", error), 1000)).casefold()
     if any(token in text_value for token in (
         "vk 901", "without permission", "не найден max", "не найден telegram",
         "не найден salebot", "диалог vk не найден", "диалог telegram не найден",
@@ -4210,8 +4278,13 @@ def _delivery_error_is_transient(error: Any) -> bool:
         "channel_max_phone_not_occupied",
     )):
         return False
+    provider_http = re.search(r"wazzup http (\d{3})", text_value)
+    if provider_http:
+        status_code = int(provider_http.group(1))
+    if any(code in text_value for code in ("is_spam", "privacy_premium_required", "allow_payment_required", "session_revoked", "channel_no_money", "no_user_permissions", "validation_error")):
+        return False
     return status_code in {408, 425, 429, 500, 502, 503, 504} or any(token in text_value for token in (
-        "too many requests", "flood_wait", "wait of", "timeout", "timed out",
+        "too many requests", "flood_wait", "floodwait", "wait of", "timeout", "timed out",
         "временно", "недоступен", "connection", "transport", "http 429",
         "http 500", "http 502", "http 503", "http 504", "500 server error",
         "502 bad gateway", "503 service unavailable", "504 gateway timeout",
@@ -4313,8 +4386,10 @@ def _outbound_duplicate_payload(job: dict[str, Any]) -> dict[str, Any] | None:
     if status in {"pending", "processing", "retry"}:
         return {
             "ok": True, "sent": False, "queued": True, "duplicate": True,
-            "notice": "Сообщение уже в очереди. Nexus доставит его автоматически.",
+            "notice": "Сообщение уже в очереди. Доставка пока не подтверждена; результат появится в переписке.",
         }
+    if status == "failed":
+        return {"ok": False, "sent": False, "duplicate": True, "error": _clean(job.get("error"), 1000) or "Сообщение не отправлено. Проверьте причину ошибки перед повтором.", "retryable": False}
     return None
 
 
@@ -4336,7 +4411,7 @@ async def _queued_outbound_response(
         _log("exception", "Outbound acceptance audit failed")
     return _widget_response(request, {
         "ok": True, "sent": False, "queued": True, "channel": channel,
-        "notice": "Сообщение принято. Nexus доставит его в фоне и покажет результат в «Операциях».",
+        "notice": "Сообщение в очереди. Результат отправки появится в переписке и «Операциях». Доставка пока не подтверждена.",
         "message": {
             "external_id": f"queued:{job['request_key']}", "direction": "outgoing",
             "status": "queued", "text": _clean(job.get("text"), 4000),
@@ -4358,7 +4433,8 @@ async def _finish_outbound_job(
     db = await _connect()
     try:
         await db.execute(
-            """UPDATE outbound_jobs SET status=?,next_attempt_at='',external_id=?,error=?,
+            """UPDATE outbound_jobs SET status=CASE WHEN status='failed' THEN status ELSE ? END,
+               next_attempt_at='',external_id=?,error=CASE WHEN status='failed' THEN error ELSE ? END,
                sent_at=?,latency_ms=?,updated_at=? WHERE id=?""",
             (status, external_id, _clean(error, 1000), now if status == "sent" else "", latency_ms, now, job["id"]),
         )
@@ -4397,7 +4473,7 @@ async def _finish_outbound_job(
         dedupe_key=f"outbound:{job['request_key']}", external_id=external_id,
         provider=job["provider"], channel_id=job["channel_id"], chat_type=job["chat_type"],
         chat_id=_clean(message.get("chat_id") or job.get("chat_id"), 250),
-        direction="outgoing", status=status, text=job["text"], sent_at=message.get("sent_at") or now,
+        direction="outgoing", status=(message.get("status") or status) if status == "sent" else status, text=job["text"], sent_at=message.get("sent_at") or now,
         client_name=job.get("client_name", ""), phone_hash=_phone_hash(job.get("phone")),
         admin_id=int(job["admin_id"]), manager_name=manager_name,
         transport_author=_clean(message.get("author_name"), 200),
@@ -4409,19 +4485,47 @@ async def _finish_outbound_job(
         },
     )
 
+    if job.get("provider") == "wazzup":
+        db = await _connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            latest = await (await db.execute(
+                "SELECT status,error,external_id FROM outbound_jobs WHERE id=?", (job["id"],),
+            )).fetchone()
+            if latest and latest["status"] == "failed":
+                await db.execute(
+                    "UPDATE communication_messages SET status='failed',error=?,updated_at=? WHERE dedupe_key=?",
+                    (latest["error"], _iso(), "outbound:" + job["request_key"]),
+                )
+            elif latest and latest["external_id"]:
+                stored = await (await db.execute(
+                    "SELECT raw_json FROM wazzup_messages WHERE external_id=?", (latest["external_id"],),
+                )).fetchone()
+                raw = json.loads(stored["raw_json"] or "{}") if stored else {}
+                if isinstance(raw.get("delivery_status"), dict):
+                    await _apply_wazzup_status(db, raw["delivery_status"], _iso())
+            await db.commit()
+        finally:
+            await db.close()
+
 
 async def _fail_or_retry_outbound_job(job: dict[str, Any], error: Any) -> bool:
     attempts = int(job.get("attempts") or 1)
     retry = _delivery_error_is_transient(error) and attempts < OUTBOUND_MAX_ATTEMPTS
     delay = _delivery_retry_delay(error, attempts)
     next_at = _iso(_now_dt() + timedelta(seconds=delay)) if retry else ""
-    detail = _clean(getattr(error, "detail", error), 1000) or type(error).__name__
+    raw_detail = _clean(getattr(error, "detail", error), 700) or type(error).__name__
+    detail = _delivery_error_notice(error, job.get("chat_type", ""))
+    _log("warning", "Outbound delivery failed provider=%s kind=%s", job.get("provider"), type(error).__name__)
     db = await _connect()
     try:
         await db.execute(
             "UPDATE outbound_jobs SET status=?,next_attempt_at=?,error=?,updated_at=? WHERE id=?",
             ("retry" if retry else "failed", next_at, detail, _iso(), job["id"]),
         )
+        reason = _recipient_failure_reason(error, job.get("chat_type", ""))
+        if reason:
+            await _store_recipient_state(db, job["channel_id"], job["chat_type"], _phone_hash(job.get("phone")), reason)
         await db.commit()
     finally:
         await db.close()
@@ -5834,20 +5938,30 @@ def _telegram_client() -> Any:
 
 
 async def _telegram_run(callback: Any) -> Any:
-    async with _telegram_lock:
+    acquired = False
+    try:
+        await asyncio.wait_for(_telegram_lock.acquire(), timeout=8)
+        acquired = True
         client = _telegram_client()
         try:
-            await asyncio.wait_for(client.connect(), timeout=40)
-            return await callback(client)
+            await asyncio.wait_for(client.connect(), timeout=8)
+            return await asyncio.wait_for(callback(client), timeout=15)
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(502, f"Telegram: {_clean(exc, 300)}") from exc
+            # Preserve provider classification; a revoked account is not a network 502.
+            wrapped = HTTPException(503 if _delivery_error_is_transient(exc) else 409, _delivery_error_notice(exc, "telegram"))
+            wrapped.provider_error = exc
+            wrapped.recipient_unavailable = bool(_recipient_failure_reason(exc, "telegram"))
+            raise wrapped from exc
         finally:
             try:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=2)
             except Exception:
                 pass
+    finally:
+        if acquired:
+            _telegram_lock.release()
 
 
 def _telegram_user_view(entity: Any) -> dict[str, str]:
@@ -5919,7 +6033,7 @@ async def _telegram_channel(*, refresh: bool = False) -> dict[str, str] | None:
     }
 
 
-async def _telegram_entity(client: Any, identity: dict[str, Any]) -> Any | None:
+async def _telegram_entity(client: Any, identity: dict[str, Any], *, scan_dialogs: bool = True) -> Any | None:
     if _telegram_dialog_hidden(identity):
         return None
     peer_id = _clean(identity.get("telegram_id"), 200)
@@ -5936,8 +6050,9 @@ async def _telegram_entity(client: Any, identity: dict[str, Any]) -> Any | None:
                 and not _telegram_dialog_hidden(_telegram_user_view(entity))
             ):
                 return entity
-        except Exception:
-            pass
+        except Exception as exc:
+            if not isinstance(exc, ValueError) and not _recipient_failure_reason(exc, "telegram"):
+                raise
     if phone:
         try:
             from telethon.tl.functions.contacts import ResolvePhoneRequest
@@ -5952,6 +6067,10 @@ async def _telegram_entity(client: Any, identity: dict[str, Any]) -> Any | None:
                     return entity
         except Exception as exc:
             _log("warning", "Telegram phone resolve failed: %s", type(exc).__name__)
+            if not isinstance(exc, ValueError) and not _recipient_failure_reason(exc, "telegram"):
+                raise
+    if not scan_dialogs:
+        return None
     async for dialog in client.iter_dialogs(limit=TELEGRAM_DIALOG_LIMIT):
         entity = getattr(dialog, "entity", None)
         if not _telegram_is_user(entity):
@@ -5986,7 +6105,9 @@ async def _telegram_import_phone(client: Any, identity: dict[str, Any]) -> Any |
         )]))
     except Exception as exc:
         _log("warning", "Telegram phone import failed: %s", type(exc).__name__)
-        return None
+        raise
+    if getattr(result, "retry_contacts", None):
+        raise HTTPException(503, "Telegram временно отложил поиск контакта. Повторите позже.")
     for entity in getattr(result, "users", []) or []:
         if (
             _telegram_is_user(entity)
@@ -6074,7 +6195,7 @@ async def _telegram_store_messages(
             cursor = await db.execute(
                 """INSERT INTO wazzup_messages(
                    external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
-                   ) VALUES(?,?,?,?,?,?,'delivered',?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(external_id) DO UPDATE SET
                    text=CASE
                      WHEN excluded.text LIKE '[Вложение:%' AND wazzup_messages.content_uri<>''
                      THEN wazzup_messages.text ELSE excluded.text END,
@@ -6085,7 +6206,7 @@ async def _telegram_store_messages(
                      THEN wazzup_messages.author_name ELSE excluded.author_name END,
                    sent_at=excluded.sent_at,raw_json=excluded.raw_json""",
                 (record["external_id"], channel["channel_id"], "telegram", peer_id, phone_hash,
-                 record["direction"], record["text"], record["content_uri"], record["author_name"],
+                 record["direction"], "sent" if record["direction"] == "outgoing" else "delivered", record["text"], record["content_uri"], record["author_name"],
                  record["sent_at"], record["raw_json"], now),
             )
             inserted += max(0, cursor.rowcount)
@@ -6100,6 +6221,12 @@ async def _telegram_store_messages(
             (channel["channel_id"], "telegram", peer_id, phone_hash, name,
              latest["sent_at"] if latest else "", latest["text"][:500] if latest else "", now, now),
         )
+        incoming_times = [record["sent_at"] for record in records if record["direction"] == "incoming"]
+        if notify_incoming and incoming_times and phone_hash:
+            # Importing an old history page is not evidence that a later block was lifted.
+            await db.execute("DELETE FROM module_settings WHERE key=? AND updated_at<=?", (
+                _recipient_unavailable_key(channel["channel_id"], "telegram", phone_hash), max(incoming_times),
+            ))
         await db.commit()
     finally:
         await db.close()
@@ -6228,7 +6355,9 @@ async def _telegram_send_text(
         try:
             entity = await client.get_entity(int(peer_id))
         except Exception as exc:
-            raise HTTPException(404, "Диалог Telegram не найден") from exc
+            if _delivery_error_is_transient(exc) or _recipient_failure_reason(exc, "telegram"):
+                raise
+            raise HTTPException(409, "Не удалось определить получателя Telegram. Проверьте данные клиента.") from exc
         if attachment_url:
             path, _ = await _widget_media_path(attachment_url)
             message = await client.send_file(entity, str(path), caption=text or None)
@@ -6242,7 +6371,7 @@ async def _telegram_send_text(
         return {
             "external_id": f"{channel['channel_id']}:{peer_id}:{_clean(getattr(message, 'id', ''), 200)}",
             "direction": "outgoing",
-            "status": "delivered",
+            "status": "sent",
             "text": text,
             "content_uri": attachment_url,
             "author_name": _clean(author_name, 200) or "Telegram",
@@ -6649,6 +6778,8 @@ def _message_view(row: Any) -> dict[str, Any]:
     ):
         content["content_type"] = "image"
     item.update(content)
+    if isinstance(raw, dict) and raw.get("error"):
+        item["error_message"] = _delivery_error_notice(raw["error"], item.get("chat_type", ""))
     attachments = raw.get("nexus_attachments") if isinstance(raw, dict) else []
     item["attachments"] = [
         {
@@ -6747,6 +6878,110 @@ async def _remember_client_links(items: list[dict[str, str]]) -> None:
         await db.close()
 
 
+# Early provider callbacks are held until the HTTP send response is stored.
+# The bounded memory cache is backed by module_settings so a process restart in
+# that short window cannot lose a terminal provider status.
+_early_wazzup_statuses: dict[str, tuple[float, dict[str, Any]]] = {}
+EARLY_WAZZUP_STATUS_TTL_SECONDS = 300
+
+
+def _early_wazzup_status_key(external_id: str) -> str:
+    return "early-wazzup-status:" + _hash(external_id)
+
+
+async def _remember_early_wazzup_status(db: Any, external_id: str, row: dict[str, Any]) -> None:
+    now = time.monotonic()
+    for key, (expires, _) in list(_early_wazzup_statuses.items()):
+        if expires <= now:
+            _early_wazzup_statuses.pop(key, None)
+    previous = _early_wazzup_statuses.get(external_id)
+    ranks = {"accepted": 0, "sent": 1, "failed": 2, "error": 2, "delivered": 3, "read": 4}
+    if previous and ranks.get(row.get("status"), -1) < ranks.get(previous[1].get("status"), -1):
+        return
+    if external_id not in _early_wazzup_statuses and len(_early_wazzup_statuses) >= 2048:
+        _early_wazzup_statuses.pop(next(iter(_early_wazzup_statuses)))
+    _early_wazzup_statuses[external_id] = (now + EARLY_WAZZUP_STATUS_TTL_SECONDS, dict(row))
+    durable = {
+        "external_id": external_id,
+        "expires_at": time.time() + EARLY_WAZZUP_STATUS_TTL_SECONDS,
+        "row": row,
+    }
+    await db.execute(
+        "INSERT INTO module_settings(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (_early_wazzup_status_key(external_id), json.dumps(durable, ensure_ascii=False), _iso()),
+    )
+
+
+async def _apply_wazzup_status(db: Any, row: dict[str, Any], now: str) -> int:
+    external_id = _clean(row.get("messageId") or row.get("id"), 250)
+    status = _clean(row.get("status"), 80)
+    if not external_id or not status:
+        return 0
+    existing = await (await db.execute("SELECT * FROM wazzup_messages WHERE external_id=?", (external_id,))).fetchone()
+    if not existing:
+        await _remember_early_wazzup_status(db, external_id, row)
+        return 0
+    current = dict(existing)
+    ranks = {"accepted": 0, "sent": 1, "failed": 2, "error": 2, "delivered": 3, "read": 4}
+    if ranks.get(status, -1) < ranks.get(current["status"], -1):
+        return 0
+    try:
+        raw = json.loads(current.get("raw_json") or "{}")
+    except (ValueError, TypeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    detail = row.get("error") or row.get("reason") or row.get("errorCode") or ""
+    if isinstance(detail, dict):
+        detail = detail.get("code") or detail.get("description") or ""
+    raw["delivery_status"] = row
+    if status in {"failed", "error"}:
+        raw["error"] = _clean(detail, 1000) or "unknown_error"
+    else:
+        raw.pop("error", None)
+    cursor = await db.execute("UPDATE wazzup_messages SET status=?,raw_json=? WHERE external_id=?", (status, json.dumps(raw, ensure_ascii=False), external_id))
+    reason = _recipient_failure_reason(detail, current["chat_type"])
+    if status in {"failed", "error"} and reason:
+        await _store_recipient_state(db, current["channel_id"], current["chat_type"], current["phone_hash"], reason)
+    elif status in {"delivered", "read"}:
+        await _store_recipient_state(db, current["channel_id"], current["chat_type"], current["phone_hash"], "")
+    request_key = _clean(raw.get("nexus_request_key"), 300)
+    if request_key:
+        notice = _delivery_error_notice(detail, current["chat_type"]) if status in {"failed", "error"} else ""
+        # A separate attachment in this job may already have failed.
+        await db.execute("UPDATE communication_messages SET status=?,error=?,updated_at=? WHERE dedupe_key=? AND (status NOT IN ('failed','error') OR ? IN ('failed','error'))", (status, notice, now, "outbound:" + request_key, status))
+        if status in {"failed", "error"}:
+            await db.execute("UPDATE outbound_jobs SET status='failed',error=?,updated_at=? WHERE request_key=?", (notice, now, request_key))
+    return max(0, cursor.rowcount)
+
+
+async def _replay_early_wazzup_status(db: Any, external_id: str, now: str) -> None:
+    cached = _early_wazzup_statuses.pop(external_id, None)
+    durable_row = await (await db.execute(
+        "SELECT value FROM module_settings WHERE key=?", (_early_wazzup_status_key(external_id),),
+    )).fetchone()
+    await db.execute("DELETE FROM module_settings WHERE key=?", (_early_wazzup_status_key(external_id),))
+    candidates: list[dict[str, Any]] = []
+    if cached and cached[0] > time.monotonic():
+        candidates.append(cached[1])
+    if durable_row:
+        try:
+            durable = json.loads(durable_row["value"] or "{}")
+        except (ValueError, TypeError):
+            durable = {}
+        if (
+            durable.get("external_id") == external_id
+            and float(durable.get("expires_at") or 0) > time.time()
+            and isinstance(durable.get("row"), dict)
+        ):
+            candidates.append(durable["row"])
+    ranks = {"accepted": 0, "sent": 1, "failed": 2, "error": 2, "delivered": 3, "read": 4}
+    if candidates:
+        strongest = max(candidates, key=lambda item: ranks.get(_clean(item.get("status"), 80), -1))
+        await _apply_wazzup_status(db, strongest, now)
+
+
 async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
     messages, statuses = _webhook_messages(payload)
     now = _iso()
@@ -6783,6 +7018,8 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
             author_name = _clean(row.get("authorName") or row.get("contactName") or contact.get("name"), 200)
             contact_phone = _message_contact_phone(row, chat_type, chat_id)
             phone_hash = _phone_hash(contact_phone)
+            if direction == "incoming":
+                await _store_recipient_state(db, channel_id, chat_type, phone_hash, "")
             if contact_phone and direction == "incoming":
                 link_candidates.setdefault(contact_phone, author_name)
             raw = json.dumps(row, ensure_ascii=False, separators=(",", ":"))[:50_000]
@@ -6793,6 +7030,7 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
                 (external_id, channel_id, chat_type, chat_id, phone_hash, direction, _clean(row.get("status"), 80), message_text, content_uri, author_name, sent_at, raw, now),
             )
             inserted += max(0, cursor.rowcount)
+            await _replay_early_wazzup_status(db, external_id, now)
             if direction == "incoming" and not _messenger_button_event(row):
                 notification_records.append({
                     "external_id": external_id, "channel_id": channel_id,
@@ -6817,11 +7055,7 @@ async def _ingest_webhook(payload: dict[str, Any]) -> dict[str, int]:
                     (phone_hash, channel_id, chat_type, chat_id),
                 )
         for row in statuses:
-            external_id = _clean(row.get("messageId") or row.get("id"), 250)
-            status = _clean(row.get("status"), 80)
-            if external_id and status:
-                cursor = await db.execute("UPDATE wazzup_messages SET status=? WHERE external_id=?", (status, external_id))
-                updated += max(0, cursor.rowcount)
+            updated += await _apply_wazzup_status(db, row, now)
         await db.commit()
     finally:
         await db.close()
@@ -6861,17 +7095,22 @@ async def _device(request: Request) -> dict[str, Any] | None:
         result = dict(row)
         last_used = _parse_iso(row["last_used_at"])
         if not last_used or last_used <= _now_dt() - timedelta(seconds=DEVICE_TOUCH_INTERVAL_SECONDS):
-            try:
-                await db.execute(
-                    "UPDATE devices SET last_used_at=?,expires_at=? WHERE id=?",
-                    (now, expires, row["id"]),
-                )
-                await db.commit()
-                result.update({"last_used_at": now, "expires_at": expires})
-            except sqlite3.OperationalError as exc:
-                await db.rollback()
-                if "locked" not in str(exc).casefold():
-                    raise
+            async def touch_device() -> None:
+                touch_db = await _connect()
+                try:
+                    await touch_db.execute("PRAGMA busy_timeout=50")
+                    await touch_db.execute(
+                        "UPDATE devices SET last_used_at=?,expires_at=? WHERE id=? AND revoked_at='' AND expires_at>?",
+                        (now, expires, result["id"], now),
+                    )
+                    await touch_db.commit()
+                except sqlite3.OperationalError as exc:
+                    await touch_db.rollback()
+                    if "locked" not in str(exc).casefold():
+                        raise
+                finally:
+                    await touch_db.close()
+            _schedule_widget_housekeeping(("device-touch", str(result["id"])), touch_device)
         return result
     finally:
         await db.close()
@@ -8640,18 +8879,27 @@ async def service_streams_send(
                 await db.execute(
                     """INSERT OR IGNORE INTO wazzup_messages(
                        external_id,channel_id,chat_type,chat_id,phone_hash,direction,status,text,content_uri,author_name,sent_at,raw_json,created_at
-                       ) VALUES(?,?,?,?,?,'outgoing','accepted',?,?,?,?,?,?)""",
+                       ) VALUES(?,?,?,?,?,'outgoing','accepted',?,?,?,?,?,?)
+                       ON CONFLICT(external_id) DO UPDATE SET
+                       phone_hash=CASE WHEN excluded.phone_hash<>'' THEN excluded.phone_hash ELSE wazzup_messages.phone_hash END,
+                       raw_json=json_set(CASE WHEN json_valid(wazzup_messages.raw_json) THEN wazzup_messages.raw_json ELSE '{}' END,
+                           '$.nexus_request_key',json_extract(excluded.raw_json,'$.nexus_request_key'))""",
                     (
                         delivery_id, channel_id, transport, delivery_chat_id, _phone_hash(normalized_phone),
-                        message_text if not content_uri else "", content_uri, admin["name"], now, "", now,
+                        message_text if not content_uri else "", content_uri, admin["name"], now, json.dumps({"nexus_request_key": idempotency_key}), now,
                     ),
                 )
+                await _replay_early_wazzup_status(db, delivery_id, now)
+                stored = await (await db.execute("SELECT raw_json FROM wazzup_messages WHERE external_id=?", (delivery_id,))).fetchone()
+                stored_raw = json.loads(stored["raw_json"] or "{}") if stored else {}
+                if isinstance(stored_raw.get("delivery_status"), dict):
+                    await _apply_wazzup_status(db, stored_raw["delivery_status"], now)
             await db.commit()
         finally:
             await db.close()
         message = {
             "external_id": external_id, "chat_id": response_chat_id, "direction": "outgoing",
-            "status": "sent", "text": message_text, "content_uri": attachment_url,
+            "status": "accepted", "text": message_text, "content_uri": attachment_url,
             "content_type": attachment_type, "author_name": admin["name"], "sent_at": now,
         }
     if record_communication and _db_path is not None:
@@ -8729,7 +8977,12 @@ async def _provider_card_link(
     }):
         return {}
     exact_provider = "telegram" if provider == TELEGRAM_PROVIDER else provider
-    exact_reference = await _exact_provider_identity(exact_provider, context)
+    early_key = _card_link_cache_key(context, device, provider, "")
+    early_cached = _card_link_cache.get(early_key)
+    if provider == TELEGRAM_PROVIDER and context.get("platform") == "amocrm" and early_cached and early_cached[0] > time.monotonic():
+        if not allow_phone_import or early_cached[1].get("external_user_id"):
+            return dict(early_cached[1])
+    exact_reference = "" if provider == TELEGRAM_PROVIDER and context.get("platform") == "amocrm" else await _exact_provider_identity(exact_provider, context)
     existing = await _entity_external_link(
         context["platform"], context["entity_type"], context["entity_id"], provider,
     )
@@ -8832,13 +9085,13 @@ async def _provider_card_link(
             context, device, provider, identity["telegram_id"] or identity["telegram_username"],
         )
         cached = _card_link_cache.get(cache_key)
-        if cached and cached[0] > time.monotonic():
+        if cached and cached[0] > time.monotonic() and (not allow_phone_import or cached[1].get("external_user_id")):
             return dict(cached[1])
 
         async def resolve_telegram(client: Any) -> str:
             if not await client.is_user_authorized():
-                return ""
-            entity = await _telegram_entity(client, identity)
+                raise HTTPException(409, "Telegram не авторизован. Попросите администратора переподключить канал.")
+            entity = await _telegram_entity(client, identity, scan_dialogs=False)
             if not entity and allow_phone_import:
                 entity = await _telegram_import_phone(client, identity)
             return _telegram_user_view(entity)["id"] if entity else ""
@@ -8848,7 +9101,9 @@ async def _provider_card_link(
                 _telegram_run(resolve_telegram), timeout=max(1.0, float(resolution_timeout)),
             )
         except TimeoutError:
-            return {"pending": "1"}
+            if not allow_phone_import:
+                _remember_card_link(cache_key, {"retryable": "1"})
+            return {"pending": "1"} if allow_phone_import else {"retryable": "1"}
         if not peer_id:
             _remember_card_link(cache_key, {})
             return {}
@@ -9597,7 +9852,7 @@ async def user_guide() -> HTMLResponse:
         path.read_text(encoding="utf-8"),
         headers={
             "Cache-Control": "no-cache, must-revalidate",
-            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; frame-ancestors 'self'",
+            "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; frame-ancestors 'self'",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
         },
@@ -11916,6 +12171,27 @@ async def widget_iframe_link(request: Request) -> JSONResponse:
         return _widget_response(request, {"ok": False, "error": "Не удалось открыть Wazzup"}, 500)
 
 
+_widget_housekeeping_tasks: dict[tuple[str, ...], asyncio.Task[Any]] = {}
+
+
+def _schedule_widget_housekeeping(key: tuple[str, ...], callback: Any) -> None:
+    existing = _widget_housekeeping_tasks.get(key)
+    if existing and not existing.done():
+        return
+    if len(_widget_housekeeping_tasks) >= 100:
+        return
+
+    async def run() -> None:
+        try:
+            await asyncio.wait_for(callback(), timeout=5)
+        except Exception as exc:
+            _log("warning", "Widget housekeeping deferred: %s", type(exc).__name__)
+        finally:
+            _widget_housekeeping_tasks.pop(key, None)
+
+    _widget_housekeeping_tasks[key] = (_module_lifecycle.create_task(run(), name="messenger-widget-housekeeping") if _module_lifecycle is not None else asyncio.create_task(run()))
+
+
 @router.post("/widget/channels")
 async def widget_channels(request: Request) -> JSONResponse:
     mode = await _widget_request_mode(request)
@@ -12137,6 +12413,10 @@ async def widget_channels(request: Request) -> JSONResponse:
                         reason = "Нажмите — Nexus попробует найти пользователя Telegram"
                     else:
                         reason = "Пользователь Telegram не найден" if phone else "Телефон клиента не найден"
+            if provider == TELEGRAM_PROVIDER or channel.get("transport") in {"telegram", "max"}:
+                unavailable = await _recipient_unavailable_reason(channel["channel_id"], channel["transport"], phone)
+                if unavailable:
+                    can_send, reason, verification_pending = False, unavailable, False
             return ({
                 **channel,
                 **({"label": direct_label} if direct_label else
@@ -12200,9 +12480,12 @@ async def widget_channels(request: Request) -> JSONResponse:
         views = _prioritize_channels([view for view, _ in resolved_channels])
         direct_links = [link for _, link in resolved_channels if link]
         if not thread:
-            owner_id = await _responsible_admin_id(data, mode, device, db=channel_db)
-            await _assign_client_threads(
-                owner_id, phone=phone, direct_links=direct_links, db=channel_db,
+            async def assign_owner() -> None:
+                owner_id = await _responsible_admin_id(data, mode, device)
+                await _assign_client_threads(owner_id, phone=phone, direct_links=direct_links)
+            _schedule_widget_housekeeping(
+                ("owners", str(device["id"]), card_context["platform"], card_context["entity_id"], phone),
+                assign_owner,
             )
         return _widget_response(request, {"ok": True, "channels": views})
     except HTTPException as exc:
@@ -13360,10 +13643,23 @@ async def widget_conversation(request: Request) -> JSONResponse:
                     TELEGRAM_PROVIDER, phone=thread.get("phone", ""), gc_id=thread.get("getcourse_user_id", ""),
                 )).get("external_user_id"), 200)
             if not peer_id and not thread:
-                card_link = await _provider_card_link(data, mode, device, TELEGRAM_PROVIDER, allow_phone_import=True)
+                context = _widget_context(data, mode, device)
+                card_link = await _entity_external_link(context["platform"], context["entity_type"], context["entity_id"], TELEGRAM_PROVIDER)
+                if card_link and not _card_link_matches_context(card_link, context, ""):
+                    card_link = {}
+                if not card_link:
+                    card_link = await _amocrm_telegram_profile_link(data, mode, device, context)
                 peer_id = _clean(card_link.get("external_user_id"), 200)
-            if card_link.get("pending"):
-                raise HTTPException(504, "Telegram не ответил. Повторите.")
+                if not peer_id and _normalize_phone(data.get("phone")) and not _telegram_dialog_hidden(context):
+                    phone = _normalize_phone(data.get("phone"))
+                    unavailable = await _recipient_unavailable_reason(channel_id, transport, phone)
+                    return _widget_response(request, {
+                        "ok": True, "channel": channel, "chat_id": "", "has_chat": False,
+                        "phone": phone, "messages": [], "history_complete": True,
+                        "history_status": "unverified", "can_send": not bool(unavailable),
+                        "send_reason": unavailable or "Проверим доступность Telegram при отправке сообщения.",
+                        "provider": TELEGRAM_PROVIDER, "offset": offset, "next_offset": offset, "has_more": False,
+                    })
             link = await _external_link(peer_id=peer_id, provider=TELEGRAM_PROVIDER) or card_link
             if (
                 not peer_id
@@ -13388,12 +13684,13 @@ async def widget_conversation(request: Request) -> JSONResponse:
                 channel_id, "telegram", "", CONVERSATION_PAGE_SIZE, exact_chat_id=peer_id, offset=offset,
             )
             if has_chat:
-                await _mark_thread_read(int(device["id"]), channel_id, "telegram", peer_id)
+                _schedule_widget_housekeeping(("read", str(device["id"]), channel_id, peer_id), lambda: _mark_thread_read(int(device["id"]), channel_id, "telegram", peer_id))
+            unavailable = await _recipient_unavailable_reason(channel_id, transport, link.get("phone") or data.get("phone"))
             return _widget_response(request, {
                 "ok": True, "channel": channel, "chat_id": chat_id, "has_chat": has_chat,
                 "phone": _normalize_phone(link.get("phone")), "messages": messages,
                 "history_complete": not has_more and history_status != "syncing", "history_status": history_status,
-                "can_send": True, "send_reason": "",
+                "can_send": not bool(unavailable), "send_reason": unavailable, "recipient_unavailable": bool(unavailable),
                 "getcourse_user_id": _clean(link.get("getcourse_user_id"), 200),
                 "provider": TELEGRAM_PROVIDER,
                 "offset": offset, "next_offset": offset + (len(messages) or (CONVERSATION_PAGE_SIZE if has_more else 0)), "has_more": has_more,
@@ -13446,14 +13743,17 @@ async def widget_conversation(request: Request) -> JSONResponse:
                 )
                 history = {"status": "syncing", "imported": 0, "complete": False}
         if has_chat:
-            await _mark_thread_read(int(device["id"]), channel_id, transport, chat_id)
-            owner_id = await _responsible_admin_id(data, mode, device) if not thread else None
-            await _assign_client_threads(owner_id, phone=phone)
-            if not thread and _notification_source(channel_id, transport, provider) == "max":
-                await _remember_notification_context(
-                    _widget_context(data, mode, device), "max", chat_id, owner_id,
-                )
+            async def remember_opened_thread() -> None:
+                await _mark_thread_read(int(device["id"]), channel_id, transport, chat_id)
+                owner_id = await _responsible_admin_id(data, mode, device) if not thread else None
+                await _assign_client_threads(owner_id, phone=phone)
+                if not thread and _notification_source(channel_id, transport, provider) == "max":
+                    await _remember_notification_context(_widget_context(data, mode, device), "max", chat_id, owner_id)
+            _schedule_widget_housekeeping(("opened", str(device["id"]), channel_id, chat_id), remember_opened_thread)
         can_send, send_reason = _channel_send_state(channel, has_chat)
+        unavailable = await _recipient_unavailable_reason(channel_id, transport, phone)
+        if unavailable:
+            can_send, send_reason = False, unavailable
         has_more = len(messages) >= CONVERSATION_PAGE_SIZE or not bool(history.get("complete", True))
         return _widget_response(
             request,
@@ -13564,6 +13864,11 @@ async def widget_send(request: Request) -> JSONResponse:
 
         async def start_delivery_job(chat_id: str, client_phone: str, client_name: str) -> dict[str, Any] | None:
             nonlocal outbound_job
+            inactive_reason = await _recipient_unavailable_reason(channel_id, transport, client_phone)
+            if inactive_reason:
+                unavailable = HTTPException(409, inactive_reason)
+                unavailable.recipient_unavailable = True
+                raise unavailable
             context = await _widget_delivery_context(
                 data, mode, device, provider, chat_id, channel_id, transport,
             )
@@ -13674,10 +13979,16 @@ async def widget_send(request: Request) -> JSONResponse:
                     username=data.get("telegram_username"),
                 )
             ):
-                raise HTTPException(
-                    404,
-                    "Telegram не нашёл аккаунт по этому номеру. Клиент мог запретить поиск по телефону; попросите его прислать @username.",
-                )
+                reason = "Telegram не нашёл доступного получателя по этому номеру. Возможно, поиск запрещён настройками клиента. Попросите его написать первым или уточните номер."
+                recipient_db = await _connect()
+                try:
+                    await _store_recipient_state(recipient_db, channel_id, transport, _phone_hash(data.get("phone")), reason)
+                    await recipient_db.commit()
+                finally:
+                    await recipient_db.close()
+                unavailable = HTTPException(404, reason)
+                unavailable.recipient_unavailable = True
+                raise unavailable
             duplicate = await start_delivery_job(
                 peer_id, _clean(link.get("phone") or data.get("phone"), 40),
                 _clean(link.get("name") or data.get("name"), 200),
@@ -13729,7 +14040,12 @@ async def widget_send(request: Request) -> JSONResponse:
                 "send_message", "error", admin_id=device["admin_id"], device_id=device["id"],
                 phone=phone, page_kind=page_kind, entity_id=entity_id, error=str(exc.detail),
             )
-        return _widget_response(request, {"ok": False, "error": str(exc.detail)}, exc.status_code)
+        return _widget_response(request, {
+            "ok": False, "error": str(exc.detail),
+            "recipient_unavailable": bool(getattr(exc, "recipient_unavailable", False)),
+            "error_code": "recipient_unavailable" if getattr(exc, "recipient_unavailable", False) else "send_rejected",
+            "retryable": _delivery_error_is_transient(exc),
+        }, exc.status_code)
     except Exception:
         _log("exception", "GetCourse Wazzup send failed")
         if device:
