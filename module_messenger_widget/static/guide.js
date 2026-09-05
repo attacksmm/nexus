@@ -22,3 +22,39 @@
   form.addEventListener("submit",event=>{event.preventDefault();if(matches.length)goTo(matches[Math.max(selected,0)])});
   document.addEventListener("pointerdown",event=>{if(!form.contains(event.target))close()});
 })();
+
+
+(()=>{
+  const mediaBase='../static/guide-media/';
+  document.querySelectorAll('.guide-recording[data-recording]').forEach(figure=>{
+    const name=figure.dataset.recording,title=figure.dataset.title||'Учебный пример',summary=figure.dataset.summary||'';
+    const caption=document.createElement('figcaption'),heading=document.createElement('h3'),kind=document.createElement('p');
+    heading.textContent=title;kind.textContent='Запись настоящего виджета · учебные данные';caption.append(heading,kind);
+    const frame=document.createElement('div');frame.className='recording-frame';
+    const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='none';video.poster=mediaBase+name+'-poster.png';video.width=920;video.height=560;video.setAttribute('aria-label',title);
+    const source=document.createElement('source');source.src=mediaBase+name+'.webm';source.type='video/webm';
+    const track=document.createElement('track');track.kind='captions';track.src=mediaBase+name+'.vtt';track.srclang='ru';track.label='Шаги';
+    video.append(source,track,document.createTextNode('Ваш браузер не воспроизводит видео. '));
+    const fallback=document.createElement('a');fallback.href=source.src;fallback.textContent='Скачать запись';video.append(fallback);
+    const overlay=document.createElement('div');overlay.className='recording-loading';overlay.hidden=true;overlay.setAttribute('role','status');
+    const spinner=document.createElement('span');spinner.className='recording-spinner';spinner.setAttribute('aria-hidden','true');overlay.append(spinner,document.createTextNode('Загружаем видео…'));
+    frame.append(video,overlay);figure.append(caption,frame);
+    const copy=document.createElement('p');copy.className='recording-summary';copy.textContent=summary;figure.append(copy);
+    const hint=document.createElement('p');hint.className='recording-hint';hint.textContent='Нажмите ▶. Курсор, клики и ввод показаны плавно; реальные действия с клиентами не выполняются.';figure.append(hint);
+  });
+  document.querySelectorAll('.guide-recording video').forEach(video=>{
+    const frame=video.parentElement,overlay=frame&&frame.querySelector('.recording-loading'),source=video.querySelector('source');
+    if(!overlay||!source)return;
+    let requested=false,errorShown=false;
+    const resetOverlay=()=>{if(!errorShown)overlay.replaceChildren(Object.assign(document.createElement('span'),{className:'recording-spinner'}),document.createTextNode('Загружаем видео…'))};
+    const show=()=>{if(requested&&!errorShown)overlay.hidden=false};
+    const hide=()=>{if(!errorShown)overlay.hidden=true};
+    video.addEventListener('play',()=>{requested=true;resetOverlay();if(video.readyState<3)show()});
+    video.addEventListener('waiting',show);video.addEventListener('playing',hide);video.addEventListener('canplay',hide);video.addEventListener('pause',hide);video.addEventListener('ended',hide);
+    video.addEventListener('error',()=>{
+      errorShown=true;overlay.hidden=false;overlay.replaceChildren(document.createTextNode('Видео не загрузилось. '));
+      const retry=document.createElement('button');retry.type='button';retry.textContent='Повторить';retry.addEventListener('click',()=>{errorShown=false;requested=true;resetOverlay();overlay.hidden=false;video.load();video.play().catch(()=>{})},{once:true});overlay.append(retry);
+      const figure=video.closest('figure');if(figure&&!figure.querySelector('.recording-download')){const link=document.createElement('a');link.className='recording-download';link.href=source.src;link.textContent='Скачать видео';figure.append(link)}
+    });
+  });
+})();
